@@ -1,0 +1,4 @@
+[
+  {"kind": "http_request", "source_ip": "192.0.2.1", "fields": {"method": "GET", "path": "/valid",    "status": "200", "bytes": "100", "ua": "Mozilla/5.0"}},
+  {"kind": "http_request", "source_ip": "192.0.2.2", "fields": {"method": "PUT", "path": "/api/item", "status": "204", "bytes": "0",   "ua": "curl/7.68.0"}}
+]

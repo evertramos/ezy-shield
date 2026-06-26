@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/evertramos/ezy-shield/docs/schemas/config/config.schema.json",
+  "title": "EzyShield config.yaml",
+  "description": "Main runtime configuration. No secrets may appear here; use env:VARNAME references for any credential field.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "data_dir": {
+      "type": "string",
+      "description": "Directory for runtime state (SQLite database, unix socket)."
+    },
+    "socket_path": {
+      "type": "string",
+      "description": "Control unix socket path; CLI commands connect here."
+    },
+    "log": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Structured logging settings.",
+      "properties": {
+        "level": {
+          "type": "string",
+          "enum": ["debug", "info", "warn", "error"],
+          "description": "Minimum log level."
+        }
+      }
+    },
+    "collectors": {
+      "type": "array",
+      "description": "Log collectors — added after running 'ezyshield init && ezyshield scan'.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind"],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": ["file", "journald"],
+            "description": "Collector type."
+          },
+          "path": {
+            "type": "string",
+            "description": "Log file path. Required when kind is 'file'."
+          },
+          "unit": {
+            "type": "string",
+            "description": "Systemd unit name. Required when kind is 'journald'."
+          }
+        }
+      }
+    },
+    "enforce": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Local enforcement backend settings.",
+      "properties": {
+        "nftables": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "nftables enforcer settings.",
+          "required": ["table", "set"],
+          "properties": {
+            "table": {
+              "type": "string",
+              "description": "nftables table name (e.g. 'inet ezyshield')."
+            },
+            "set": {
+              "type": "string",
+              "description": "nftables set name (e.g. 'blocked')."
+            }
+          }
+        }
+      }
+    },
+    "ai": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "AI provider settings. Disabled by default.",
+      "required": ["provider"],
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": ["anthropic", "ollama"],
+          "description": "AI provider name."
+        },
+        "api_key": {
+          "type": "string",
+          "pattern": "^(env:[A-Z_][A-Z0-9_]*)?$",
+          "description": "API key reference. Must be 'env:VARNAME' — inline secrets are forbidden."
+        },
+        "ambiguous_band": {
+          "type": "array",
+          "items": {"type": "integer", "minimum": 0, "maximum": 100},
+          "minItems": 2,
+          "maxItems": 2,
+          "description": "Score range [low, high] sent to AI; outside this range the rule engine decides."
+        },
+        "token_budget_daily": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum tokens to spend per calendar day."
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,72 @@
+# EzyShield main configuration — example/template
+# Secrets must never appear here. Use env: references or systemd LoadCredential=.
+# See docs/schemas/config/ for the full JSON schema (populated by issue #3).
+
+# Directory for runtime state (SQLite, socket)
+data_dir: /var/lib/ezyshield
+
+# Control socket path (unix); CLI commands connect here
+socket_path: /run/ezyshield/ezyshield.sock
+
+# Structured logging
+log:
+  level: info   # debug | info | warn | error
+
+# Log collectors — add sources after running 'ezyshield init && ezyshield scan'
+collectors: []
+
+# Example (uncomment after nftables enforcer is set up — issue #9):
+# enforce:
+#   nftables:
+#     table: inet ezyshield
+#     set:   blocked
+#
+#   # Cloudflare edge enforcer — blocks IPs at the CF edge (issue #45, #88).
+#   # Two modes are supported; pick one.
+#   # cloudflare:
+#     # api_token: env:EZYSHIELD_CF_TOKEN  # must be "env:VARNAME"; inline values rejected
+#     # action: block                      # block | challenge | js_challenge (default: block)
+#     #
+#     # Mode "lists" (default, recommended; works on the free plan).
+#     # One Custom IP List at the account level — a single API call propagates
+#     # to every zone that references the list via a WAF Custom Rule (you
+#     # create that rule once per zone in the Cloudflare dashboard).
+#     # Token scope: Account → Account Filter Lists → Edit.
+#     # mode: lists
+#     # account_id: 0123456789abcdef0123456789abcdef
+#     # list_name: ezyshield_blocked      # default; auto-created if missing
+#     #
+#     # Mode "rulesets" (legacy; one WAF rule per zone, ~200 IP cap auto-split).
+#     # Token scope: Zone → Firewall → Edit on each listed zone.
+#     # mode: rulesets
+#     # zone_ids:
+#     #   - abc123def456                  # Cloudflare zone ID (Dashboard → Overview)
+
+# AI analysis (issue #12) — disabled by default
+# ai:
+#   provider: anthropic
+#   ambiguous_band: [30, 75]
+#   token_budget_daily: 500000
+
+# Notifications — configure channels and test with 'ezyshield test-notify <channel>'
+# Secrets must use env: references; inline values are rejected at load time.
+# notify:
+#   rate_limit_per_minute: 5   # max notifications per channel per minute (default 5)
+#   dedup_window_sec: 600      # suppress repeat IP+reason pairs for 10 min (default 600)
+#
+#   telegram:
+#     bot_token: env:EZYSHIELD_TELEGRAM_BOT_TOKEN
+#     chat_ids:
+#       - "-1001234567890"     # channel or group chat ID (use @username or numeric ID)
+#     severity: []             # empty = all severities; or: [warn, critical]
+#
+#   email:
+#     from: ezyshield@example.com
+#     to:
+#       - admin@example.com
+#     host: smtp.example.com
+#     port: 587                # 587 = STARTTLS (default), 465 = implicit TLS
+#     username: ezyshield@example.com
+#     password: env:EZYSHIELD_SMTP_PASSWORD
+#     tls: starttls            # starttls | tls | none
+#     severity: []             # empty = all severities; or: [critical]

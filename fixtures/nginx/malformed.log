@@ -1,0 +1,7 @@
+THIS IS NOT A VALID LOG LINE
+incomplete without timestamp
+not-an-ip-at-all - - [01/Jan/2025:00:00:01 +0000] "GET / HTTP/1.1" 200 100 "-" "test"
+{"malformed_json": true}
+192.0.2.1 - - [01/Jan/2025:00:00:01 +0000] "GET /valid HTTP/1.1" 200 100 "-" "Mozilla/5.0"
+{"no_remote_addr": "missing", "request": "GET / HTTP/1.1"}
+192.0.2.2 - - [01/Jan/2025:00:00:02 +0000] "PUT /api/item HTTP/1.1" 204 0 "-" "curl/7.68.0"

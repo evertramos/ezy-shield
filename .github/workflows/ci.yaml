@@ -1,0 +1,176 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.24"
+
+jobs:
+  # Skips gracefully until issue #1 lands go.mod, then becomes mandatory.
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      has_go: ${{ steps.check.outputs.has_go }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        run: |
+          if [ -f go.mod ]; then echo "has_go=true" >> "$GITHUB_OUTPUT";
+          else echo "has_go=false" >> "$GITHUB_OUTPUT"; echo "::notice::no go.mod yet — Go jobs skipped"; fi
+
+  lint:
+    needs: detect
+    if: needs.detect.outputs.has_go == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then echo "gofmt needed on:"; echo "$out"; exit 1; fi
+      - name: go vet
+        run: go vet ./...
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: "v2.1"
+
+  test:
+    needs: detect
+    if: needs.detect.outputs.has_go == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Unit tests (race + coverage)
+        run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
+      - name: Coverage summary
+        run: go tool cover -func=coverage.out | tail -1
+
+  build:
+    needs: detect
+    if: needs.detect.outputs.has_go == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Build (static, CGO off)
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+        run: go build -trimpath ./...
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Required docs present
+        run: |
+          for f in SECURITY.md LICENSE docs/SECURITY-REVIEW.md; do
+            [ -f "$f" ] || { echo "missing $f"; exit 1; }
+          done
+      - name: Shell scripts pass shellcheck
+        run: |
+          sudo apt-get -yqq install shellcheck >/dev/null
+          find scripts -name '*.sh' -exec shellcheck {} +
+      - name: Validate example configs against JSON schemas
+        run: |
+          pip install check-jsonschema --quiet
+          check-jsonschema --schemafile docs/schemas/config/config.schema.json configs/config.yaml
+          check-jsonschema --schemafile docs/schemas/config/policy.schema.json configs/policy.yaml
+
+  fuzz:
+    needs: detect
+    if: needs.detect.outputs.has_go == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Fuzz SSH parser (10s)
+        run: go test -fuzz=FuzzSSHParser -fuzztime=10s ./internal/parser/
+      - name: Fuzz Nginx parser (10s)
+        run: go test -fuzz=FuzzNginxParser -fuzztime=10s ./internal/parser/
+
+  govulncheck:
+    needs: detect
+    if: needs.detect.outputs.has_go == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - name: Check for known vulnerabilities
+        run: |
+          govulncheck ./... 2>&1 | tee /tmp/vulncheck.out
+          # Fail only on vulnerabilities in our own code or direct deps (not stdlib-only)
+          if grep -q "Your code is affected" /tmp/vulncheck.out; then
+            echo "::warning::govulncheck found vulnerabilities — review output above"
+            # Allow stdlib-only vulns (fixed in newer Go) to pass; fail on third-party
+            if grep -q "Found in:.*go1\." /tmp/vulncheck.out && ! grep -qE "Found in:.*(modernc|github)" /tmp/vulncheck.out; then
+              echo "::notice::All vulnerabilities are in Go stdlib — upgrade Go when fix is available"
+              exit 0
+            fi
+            exit 1
+          fi
+
+  security-review-gate:
+    # Reminds/enforces the security review on PRs that touch critical (🔴) paths.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check critical paths require a filled security review
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          base="origin/${{ github.base_ref }}"
+          git fetch -q origin "${{ github.base_ref }}"
+          changed=$(git diff --name-only "$base"...HEAD)
+          echo "Changed files:"; echo "$changed"
+          # critical areas mapped to SECURITY-REVIEW.md red sections
+          if echo "$changed" | grep -Eq '^internal/(parser|rules|decision|enforce|ai|plugin)/|^cmd/ezyshield-enforcer/'; then
+            echo "::notice::PR touches a 🔴 critical area — security review required."
+            # crude but effective: the template's section markers must be present and not all empty
+            if ! echo "$BODY" | grep -q 'Security review (per docs/SECURITY-REVIEW.md)'; then
+              echo "::error::PR touches a critical area but the security-review section is missing from the description. See docs/SECURITY-REVIEW.md."
+              exit 1
+            fi
+            # require at least one section line to be filled beyond the label
+            filled=$(echo "$BODY" | grep -E '^- §[0-9]+ .*: .+' | grep -vEi ': *(TODO|TBD)? *$' | wc -l)
+            if [ "$filled" -lt 1 ]; then
+              echo "::error::Security-review section is present but empty. Fill in FINDING/OK/N/A per section (docs/SECURITY-REVIEW.md)."
+              exit 1
+            fi
+            echo "Security review section present and filled."
+          else
+            echo "No 🔴 critical paths touched; security-review gate is advisory."
+          fi

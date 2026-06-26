@@ -1,0 +1,5 @@
+2001:db8::1 - - [15/Jan/2025:10:00:01 +0000] "GET /index.html HTTP/1.1" 200 1234 "-" "Mozilla/5.0"
+2001:db8::2 - - [15/Jan/2025:10:00:02 +0000] "GET /wp-login.php HTTP/1.1" 404 0 "-" "python-requests/2.27.1"
+::1 - - [15/Jan/2025:10:00:03 +0000] "GET /health HTTP/1.1" 200 2 "-" "curl/7.68.0"
+2001:db8::3 - - [15/Jan/2025:10:00:04 +0000] "POST /api/login HTTP/2.0" 401 89 "-" "CustomBot/1.0"
+2001:db8:cafe::1 - - [15/Jan/2025:10:00:05 +0000] "GET /.env HTTP/1.1" 404 0 "-" "masscan/1.0"

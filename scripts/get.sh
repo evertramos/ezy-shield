@@ -1,0 +1,71 @@
+#!/bin/sh
+# get.ezyshield.com — EzyShield installer
+# Usage: curl -sfL https://get.ezyshield.com | sh
+set -eu
+
+REPO="evertramos/ezy-shield"
+INSTALL_DIR="/usr/local/bin"
+
+# Detect architecture
+ARCH=$(uname -m)
+case "$ARCH" in
+  x86_64|amd64) ARCH="amd64" ;;
+  aarch64|arm64) ARCH="arm64" ;;
+  *) echo "Error: unsupported architecture: $ARCH"; exit 1 ;;
+esac
+
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+if [ "$OS" != "linux" ]; then
+  echo "Error: EzyShield only supports Linux (got: $OS)"
+  exit 1
+fi
+
+SUFFIX="${OS}-${ARCH}"
+
+# Get latest version
+echo "Fetching latest release..."
+VERSION=$(curl -sfL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed 's/.*"tag_name": *"//;s/".*//')
+
+if [ -z "$VERSION" ]; then
+  echo "Error: could not determine latest version"
+  exit 1
+fi
+
+echo "Installing EzyShield ${VERSION} (${SUFFIX})..."
+
+BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
+
+# Download binaries
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+
+curl -sfL "${BASE_URL}/ezyshield-${SUFFIX}" -o "${TMP}/ezyshield"
+curl -sfL "${BASE_URL}/ezyshield-enforcer-${SUFFIX}" -o "${TMP}/ezyshield-enforcer"
+curl -sfL "${BASE_URL}/checksums.txt" -o "${TMP}/checksums.txt"
+
+# Verify checksums
+cd "$TMP"
+EXPECTED_MAIN=$(grep "ezyshield-${SUFFIX}$" checksums.txt | awk '{print $1}')
+EXPECTED_ENF=$(grep "ezyshield-enforcer-${SUFFIX}$" checksums.txt | awk '{print $1}')
+ACTUAL_MAIN=$(sha256sum ezyshield | awk '{print $1}')
+ACTUAL_ENF=$(sha256sum ezyshield-enforcer | awk '{print $1}')
+
+if [ "$EXPECTED_MAIN" != "$ACTUAL_MAIN" ]; then
+  echo "Error: checksum mismatch for ezyshield"
+  exit 1
+fi
+if [ "$EXPECTED_ENF" != "$ACTUAL_ENF" ]; then
+  echo "Error: checksum mismatch for ezyshield-enforcer"
+  exit 1
+fi
+
+# Install
+install -m 755 ezyshield "${INSTALL_DIR}/ezyshield"
+install -m 755 ezyshield-enforcer "${INSTALL_DIR}/ezyshield-enforcer"
+
+echo ""
+echo "✅ EzyShield ${VERSION} installed to ${INSTALL_DIR}/"
+echo ""
+echo "Next steps:"
+echo "  sudo ezyshield init    # interactive setup wizard"
+echo ""

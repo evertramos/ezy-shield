@@ -1,0 +1,10 @@
+Jan 15 10:00:01 webserver sshd[12345]: Failed password for root from 192.0.2.1 port 40122 ssh2
+Jan 15 10:00:02 webserver sshd[12346]: Invalid user admin from 192.0.2.2 port 41033
+Jan 15 10:00:03 webserver sshd[12347]: Accepted publickey for deploy from 192.0.2.3 port 52100 ssh2: RSA SHA256:AAAA
+Jan 15 10:00:04 webserver sshd[12348]: Failed password for invalid user testuser from 192.0.2.4 port 33901 ssh2
+Jan 15 10:00:05 webserver sshd[12349]: Failed password for root from 2001:db8::1 port 44210 ssh2
+Jan 15 10:00:06 webserver sshd[12350]: Invalid user operator from 2001:db8::2 port 45100
+Jan 15 10:00:07 webserver sshd[12351]: Accepted password for ubuntu from 192.0.2.5 port 53200 ssh2
+Jan 15 10:00:08 webserver sshd[12352]: Failed publickey for git from 2001:db8::3 port 34000 ssh2: RSA SHA256:BBBB
+THIS IS NOT A VALID LOG LINE - MUST BE SKIPPED
+Jan 15 10:00:09 webserver sshd[12353]: Invalid user admin from 2001:db8::4 port 46200

@@ -1,0 +1,40 @@
+[Unit]
+Description=EzyShield enforcer — privileged nftables helper
+Documentation=https://github.com/evertramos/ezy-shield
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/local/bin/ezyshield-enforcer --socket /run/ezyshield-enforcer/enforcer.sock
+Restart=on-failure
+RestartSec=3s
+
+# This service holds CAP_NET_ADMIN to modify nftables; nothing else.
+# No network listeners — control is via unix socket only (AGENTS.md §2).
+# AmbientCapabilities grants CAP_NET_ADMIN to the process without running as
+# root in the traditional sense; CapabilityBoundingSet prevents acquiring more.
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=no
+ProtectKernelModules=no
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+
+RuntimeDirectory=ezyshield-enforcer
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target

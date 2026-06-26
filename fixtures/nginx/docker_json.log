@@ -1,0 +1,5 @@
+{"log":"192.0.2.20 - - [15/Jan/2025:10:00:01 +0000] \"GET /index.html HTTP/1.1\" 200 1234 \"-\" \"Mozilla/5.0\"\n","stream":"stdout","time":"2025-01-15T10:00:01.123456789Z"}
+{"log":"198.51.100.9 - - [15/Jan/2025:10:00:02 +0000] \"GET /wp-login.php HTTP/1.1\" 404 0 \"-\" \"python-requests/2.27.1\"\n","stream":"stdout","time":"2025-01-15T10:00:02.234567890Z"}
+{"log":"2001:db8::2 - - [15/Jan/2025:10:00:03 +0000] \"POST /api/data HTTP/1.1\" 201 512 \"-\" \"curl/7.88.1\"\n","stream":"stdout","time":"2025-01-15T10:00:03.345678901Z"}
+not a docker json line at all — should be skipped
+{"log":"example.com 192.0.2.21 - - [15/Jan/2025:10:00:04 +0000] \"GET /vhost HTTP/1.1\" 200 0 \"-\" \"test-agent\"\n","stream":"stdout","time":"2025-01-15T10:00:04.456789012Z"}

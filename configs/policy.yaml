@@ -1,0 +1,28 @@
+# EzyShield policy configuration — example/template
+# IMPORTANT: 'armed: false' means dry-run mode (nothing is actually blocked).
+# Set 'armed: true' only after verifying the config with 'ezyshield doctor'.
+
+armed: false
+
+# Score thresholds (rule engine + AI produce a score 0-100)
+ban_threshold:     70   # score >= this triggers a strike
+observe_threshold: 40   # score 40-69 -> log/notify only (no ban)
+
+# Strike escalation: ban TTL per cumulative strike count
+# TTL of 0 means permanent ban.
+strikes:
+  - ttl: 5m     # strike 1
+  - ttl: 1h     # strike 2
+  - ttl: 24h    # strike 3
+  - ttl: 168h   # strike 4 (7 days)
+  - ttl: 0      # strike 5 - permanent
+
+# Global safety rate limit: max ban actions per minute.
+# Exceeding this pauses enforcement and sends a critical alert.
+max_bans_per_minute: 30
+
+# Allowlist — IPs/CIDRs that can NEVER be banned (allowlist wins over everything)
+allowlist: []
+
+# Admin CIDRs merged into the runtime allowlist at startup and before each ban
+admin_cidrs: []

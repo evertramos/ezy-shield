@@ -1,0 +1,9 @@
+[
+  {"kind": "http_request", "source_ip": "198.51.100.10", "fields": {"method": "GET",  "path": "/wp-login.php",       "status": "404", "bytes": "0",    "ua": "python-requests/2.27.1"}},
+  {"kind": "http_request", "source_ip": "198.51.100.10", "fields": {"method": "GET",  "path": "/.env",               "status": "404", "bytes": "0",    "ua": "python-requests/2.27.1"}},
+  {"kind": "http_request", "source_ip": "198.51.100.10", "fields": {"method": "GET",  "path": "/config.php",         "status": "404", "bytes": "0",    "ua": "python-requests/2.27.1"}},
+  {"kind": "http_request", "source_ip": "198.51.100.11", "fields": {"method": "GET",  "path": "/.git/config",        "status": "404", "bytes": "0",    "ua": "zgrab/0.x"}},
+  {"kind": "http_request", "source_ip": "198.51.100.12", "fields": {"method": "GET",  "path": "/admin/config",       "status": "403", "bytes": "89",   "ua": "masscan/1.0"}},
+  {"kind": "http_request", "source_ip": "198.51.100.10", "fields": {"method": "POST", "path": "/xmlrpc.php",         "status": "200", "bytes": "1024", "ua": "Go-http-client/1.1"}},
+  {"kind": "http_request", "source_ip": "198.51.100.10", "fields": {"method": "GET",  "path": "/phpmyadmin/index.php","status": "404", "bytes": "0",    "ua": "python-requests/2.27.1"}}
+]

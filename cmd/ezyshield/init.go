@@ -1,0 +1,893 @@
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"time"
+
+	"github.com/spf13/cobra"
+
+	"github.com/evertramos/ezy-shield/configs"
+	"github.com/evertramos/ezy-shield/internal/config"
+)
+
+const (
+	defaultConfigDir  = "/etc/ezyshield"
+	defaultSystemdDir = "/etc/systemd/system"
+	enforcerSockPath  = "/run/ezyshield-enforcer/enforcer.sock"
+	daemonSockPath    = "/run/ezyshield/ezyshield.sock"
+)
+
+func newInitCmd() *cobra.Command {
+	var (
+		configDir  string
+		yes        bool
+		skipSystem bool
+	)
+
+	cmd := &cobra.Command{
+		Use:   "init",
+		Short: "Interactive setup wizard",
+		Long: `Detect the environment, ask a few questions, write config files,
+install systemd units, and start EzyShield in dry-run mode.
+
+Pass --yes to accept all smart defaults without prompting.
+Pass --config-dir to write files elsewhere (skips systemd/service steps — useful for testing).`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if configDir != defaultConfigDir {
+				skipSystem = true
+			}
+			return runInitWizard(cmd, configDir, yes, skipSystem)
+		},
+	}
+
+	cmd.Flags().StringVar(&configDir, "config-dir", defaultConfigDir,
+		"directory to write configuration files")
+	cmd.Flags().BoolVar(&yes, "yes", false,
+		"accept all defaults without interactive prompts")
+
+	return cmd
+}
+
+// wPrinter wraps io.Writer and captures the first write error, preventing
+// subsequent calls once an error has occurred.
+type wPrinter struct {
+	w   io.Writer
+	err error
+}
+
+func (p *wPrinter) printf(format string, args ...any) {
+	if p.err != nil {
+		return
+	}
+	_, p.err = fmt.Fprintf(p.w, format, args...)
+}
+
+func (p *wPrinter) println(s string) {
+	if p.err != nil {
+		return
+	}
+	_, p.err = fmt.Fprintln(p.w, s)
+}
+
+// wizardState collects detected values and user answers.
+type wizardState struct {
+	osArch         string
+	nftPath        string
+	hasDocker      bool
+	proxyContainer string
+	allContainers  []dockerContainer
+	sshUnit        string
+	publicIP       string
+	sshSourceIP    string
+
+	hasWordPress bool
+	wpRulesPath  string
+
+	monitorContainers []string
+	monitorSSH        bool
+	adminIPs          []string
+	enableAI          bool
+	aiProvider        string
+	aiModel           string
+	aiKeyEnvVar       string
+	armed             bool
+}
+
+type dockerContainer struct {
+	name  string
+	image string
+	ports string
+}
+
+func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) error {
+	p := &wPrinter{w: cmd.OutOrStdout()}
+
+	p.println("")
+	p.println("EzyShield setup wizard")
+	p.println("======================")
+	if p.err != nil {
+		return fmt.Errorf("writing output: %w", p.err)
+	}
+
+	if !skipSystem && os.Getuid() != 0 {
+		return fmt.Errorf("init requires root — re-run with sudo or as root")
+	}
+
+	var sc *bufio.Scanner
+	if !yes {
+		sc = bufio.NewScanner(os.Stdin)
+	}
+
+	// ── 1. Detect environment ─────────────────────────────────────────────
+	p.println("\n[1/5] Detecting environment...")
+
+	state := &wizardState{}
+
+	state.osArch = runtime.GOOS + "/" + runtime.GOARCH
+	p.printf("  OS/arch:      %s\n", state.osArch)
+
+	state.nftPath = detectNFT()
+	if state.nftPath != "" {
+		p.printf("  nftables:     %s\n", state.nftPath)
+	} else {
+		p.println("  nftables:     not found")
+		if !skipSystem {
+			if p.err != nil {
+				return fmt.Errorf("writing output: %w", p.err)
+			}
+			state.nftPath = offerInstallNFT(sc, yes, p.w)
+			if state.nftPath != "" {
+				p.printf("  nftables:     %s (installed)\n", state.nftPath)
+			} else {
+				p.println("  nftables:     skipped — only dry-run and edge enforcement will work")
+			}
+		}
+	}
+
+	state.allContainers = detectDockerContainers()
+	state.hasDocker = len(state.allContainers) > 0
+	state.proxyContainer = pickProxyContainer(state.allContainers)
+	if state.proxyContainer != "" {
+		p.printf("  proxy container: %s\n", state.proxyContainer)
+	} else if state.hasDocker {
+		p.printf("  docker: %d container(s) found (no proxy auto-detected)\n", len(state.allContainers))
+	} else {
+		p.println("  docker:       not running / no containers")
+	}
+
+	state.hasWordPress = hasWordPressContainers(state.allContainers)
+	if state.hasWordPress {
+		state.wpRulesPath = filepath.Join(configDir, "rules.yaml")
+		p.printf("  WordPress detected — will write custom rules: %s\n", state.wpRulesPath)
+	}
+
+	state.sshUnit = detectSSHUnit()
+	p.printf("  SSH unit:     %s\n", state.sshUnit)
+
+	state.publicIP = fetchPublicIP()
+	if state.publicIP != "" {
+		p.printf("  public IP:    %s\n", state.publicIP)
+	} else {
+		p.println("  public IP:    unknown (ifconfig.me unreachable)")
+	}
+
+	state.sshSourceIP = sshSourceIP()
+	if state.sshSourceIP != "" {
+		p.printf("  SSH source:   %s\n", state.sshSourceIP)
+	}
+
+	if p.err != nil {
+		return fmt.Errorf("writing output: %w", p.err)
+	}
+
+	// ── 2. Ask questions ──────────────────────────────────────────────────
+	p.println("\n[2/5] Configuration")
+	if p.err != nil {
+		return fmt.Errorf("writing output: %w", p.err)
+	}
+
+	askQuestions(sc, state, yes)
+
+	// ── 3. Write config files ─────────────────────────────────────────────
+	p.println("\n[3/5] Writing configuration files...")
+	if p.err != nil {
+		return fmt.Errorf("writing output: %w", p.err)
+	}
+
+	if err := os.MkdirAll(configDir, 0o750); err != nil {
+		return fmt.Errorf("creating config dir %s: %w", configDir, err)
+	}
+
+	configPath := filepath.Join(configDir, "config.yaml")
+	policyPath := filepath.Join(configDir, "policy.yaml")
+	envPath := filepath.Join(configDir, "env")
+
+	if err := writeGeneratedConfig(configPath, state); err != nil {
+		return err
+	}
+	p.printf("  wrote %s\n", configPath)
+
+	if err := writeGeneratedPolicy(policyPath, state); err != nil {
+		return err
+	}
+	p.printf("  wrote %s\n", policyPath)
+
+	if state.enableAI && state.aiKeyEnvVar != "" {
+		if err := writeEnvFile(envPath, state.aiProvider, state.aiKeyEnvVar); err != nil {
+			return err
+		}
+		p.printf("  wrote %s (chmod 600)\n", envPath)
+	}
+
+	if state.hasWordPress {
+		if err := writeWordPressRules(state.wpRulesPath); err != nil {
+			return err
+		}
+		p.printf("  wrote %s\n", state.wpRulesPath)
+	}
+
+	if p.err != nil {
+		return fmt.Errorf("writing output: %w", p.err)
+	}
+
+	if skipSystem {
+		p.println("\nConfig files written. Skipping systemd/service steps (non-default --config-dir).")
+		return p.err
+	}
+
+	// ── 4. Install systemd units ──────────────────────────────────────────
+	p.println("\n[4/5] Installing systemd units...")
+	if p.err != nil {
+		return fmt.Errorf("writing output: %w", p.err)
+	}
+
+	if err := createEzyshieldUser(p.w); err != nil {
+		p.printf("  warning: could not create ezyshield user: %v\n", err)
+	}
+
+	if err := installSystemdUnits(p.w); err != nil {
+		return err
+	}
+
+	if err := runSysCmd("systemctl", "daemon-reload"); err != nil {
+		return fmt.Errorf("daemon-reload: %w", err)
+	}
+	p.println("  systemctl daemon-reload OK")
+
+	// ── 5. Start services and verify ──────────────────────────────────────
+	p.println("\n[5/5] Starting services...")
+	if p.err != nil {
+		return fmt.Errorf("writing output: %w", p.err)
+	}
+
+	if err := runSysCmd("systemctl", "enable", "--now", "ezyshield-enforcer"); err != nil {
+		return fmt.Errorf("starting ezyshield-enforcer: %w", err)
+	}
+	p.println("  ezyshield-enforcer: enabled and started")
+
+	if err := waitForSocket(enforcerSockPath, 10*time.Second); err != nil {
+		p.printf("  warning: enforcer socket not ready after 10s: %v\n", err)
+	} else {
+		p.printf("  enforcer socket ready: %s\n", enforcerSockPath)
+	}
+
+	if err := runSysCmd("systemctl", "enable", "--now", "ezyshield"); err != nil {
+		return fmt.Errorf("starting ezyshield: %w", err)
+	}
+	p.println("  ezyshield: enabled and started")
+	p.println("  waiting 15s for first detections...")
+	if p.err != nil {
+		return fmt.Errorf("writing output: %w", p.err)
+	}
+
+	time.Sleep(15 * time.Second)
+
+	detections := checkRecentDetections()
+
+	p.println("")
+	p.println("────────────────────────────────────────")
+	p.println("Setup complete!")
+	p.println("────────────────────────────────────────")
+	p.printf("  Config:   %s\n", configPath)
+	p.printf("  Policy:   %s  (armed=%v)\n", policyPath, state.armed)
+	p.printf("  Mode:     %s\n", modeLabel(state.armed))
+	if detections > 0 {
+		p.printf("  Events:   %d dry-ban(s) detected in first 15s\n", detections)
+	} else {
+		p.println("  Events:   none yet — check back in a few minutes")
+	}
+	p.println("")
+	p.println("Next steps:")
+	p.println("  ezyshield status        — live view of detections")
+	p.println("  ezyshield doctor        — verify configuration")
+	if !state.armed {
+		p.println("  ezyshield arm           — switch from dry-run to armed (after 24h+ validation)")
+	}
+
+	return p.err
+}
+
+// askQuestions fills state from interactive prompts or uses defaults.
+// sc is nil when yes=true; every prompt returns its default in that case.
+func askQuestions(sc *bufio.Scanner, state *wizardState, yes bool) {
+	ask := func(question, def string) string {
+		if yes {
+			return def
+		}
+		if def != "" {
+			fmt.Printf("  %s [%s]: ", question, def)
+		} else {
+			fmt.Printf("  %s: ", question)
+		}
+		if sc.Scan() {
+			if line := strings.TrimSpace(sc.Text()); line != "" {
+				return line
+			}
+		}
+		return def
+	}
+
+	askBool := func(question string, def bool) bool {
+		if yes {
+			return def
+		}
+		choices := "y/N"
+		if def {
+			choices = "Y/n"
+		}
+		fmt.Printf("  %s [%s]: ", question, choices)
+		if sc.Scan() {
+			lower := strings.ToLower(strings.TrimSpace(sc.Text()))
+			if lower != "" {
+				return lower == "y" || lower == "yes"
+			}
+		}
+		return def
+	}
+
+	// Container to monitor
+	if state.hasDocker {
+		ans := ask("Docker container to monitor (nginx/proxy)", state.proxyContainer)
+		if ans != "" {
+			state.monitorContainers = []string{ans}
+		}
+	}
+
+	// SSH monitoring
+	if state.sshUnit != "" {
+		state.monitorSSH = askBool(
+			fmt.Sprintf("Monitor SSH via journald (unit: %s)?", state.sshUnit), true)
+	}
+
+	// Admin IPs for allowlist
+	defaultAdmin := state.sshSourceIP
+	if defaultAdmin == "" {
+		defaultAdmin = state.publicIP
+	}
+	if rawAdmin := ask("Admin IP(s) to allowlist (space or comma separated)", defaultAdmin); rawAdmin != "" {
+		state.adminIPs = splitIPs(rawAdmin)
+	}
+
+	// AI
+	state.enableAI = askBool("Enable AI analysis?", false)
+	if state.enableAI {
+		state.aiProvider = ask("AI provider (anthropic/openai/ollama)", "anthropic")
+		switch state.aiProvider {
+		case "anthropic":
+			state.aiModel = ask("Model", "claude-haiku-4-5-20251001")
+			state.aiKeyEnvVar = ask("Env var holding API key", "ANTHROPIC_API_KEY")
+		case "openai":
+			state.aiModel = ask("Model", "gpt-4o-mini")
+			state.aiKeyEnvVar = ask("Env var holding API key", "OPENAI_API_KEY")
+		case "ollama":
+			state.aiModel = ask("Model", "llama3")
+		default:
+			state.aiKeyEnvVar = ask("Env var holding API key", "")
+		}
+	}
+
+	// Dry-run vs armed
+	state.armed = askBool("Start in armed mode? (no = dry-run, recommended for first run)", false)
+}
+
+// ── Config file generation ───────────────────────────────────────────────────
+
+// writeGeneratedConfig writes config.yaml using only valid Config struct fields.
+// Validates via LoadConfigReader before writing to disk.
+func writeGeneratedConfig(path string, state *wizardState) error {
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("%s already exists — delete it to regenerate", path)
+	}
+
+	var b strings.Builder
+	b.WriteString("# EzyShield config — generated by 'ezyshield init'\n")
+	b.WriteString("# Secrets must use 'env:VARNAME' references, never inline values.\n\n")
+	fmt.Fprintf(&b, "data_dir: /var/lib/ezyshield\n")
+	fmt.Fprintf(&b, "socket_path: %s\n", daemonSockPath)
+	if state.wpRulesPath != "" {
+		fmt.Fprintf(&b, "rules_path: %s\n", state.wpRulesPath)
+	}
+	b.WriteString("log:\n  level: info\n")
+
+	hasSSH := state.monitorSSH && state.sshUnit != ""
+	if !hasSSH && len(state.monitorContainers) == 0 {
+		b.WriteString("collectors: []\n")
+	} else {
+		b.WriteString("collectors:\n")
+		if hasSSH {
+			fmt.Fprintf(&b, "  - kind: journald\n    unit: %s\n", state.sshUnit)
+		}
+		for _, c := range state.monitorContainers {
+			fmt.Fprintf(&b, "  - kind: docker\n    container: %s\n    parser: nginx\n", c)
+		}
+	}
+
+	if state.nftPath != "" {
+		b.WriteString("enforce:\n  nftables:\n")
+		fmt.Fprintf(&b, "    socket: %s\n", enforcerSockPath)
+		b.WriteString("    table: inet ezyshield\n")
+		b.WriteString("    set: blocked\n")
+	}
+
+	if state.enableAI && state.aiProvider != "" {
+		b.WriteString("ai:\n")
+		fmt.Fprintf(&b, "  provider: %s\n", state.aiProvider)
+		if state.aiModel != "" {
+			fmt.Fprintf(&b, "  model: %s\n", state.aiModel)
+		}
+		if state.aiKeyEnvVar != "" {
+			fmt.Fprintf(&b, "  api_key: env:%s\n", state.aiKeyEnvVar)
+		}
+		b.WriteString("  ambiguous_band: [30, 75]\n")
+		b.WriteString("  token_budget_daily: 100000\n")
+	}
+
+	data := []byte(b.String())
+
+	// validate before writing — catches any field mismatch immediately
+	if _, err := config.LoadConfigReader(bytes.NewReader(data), "generated config"); err != nil {
+		return fmt.Errorf("generated config.yaml failed validation: %w", err)
+	}
+
+	//nolint:gosec // 0640: group-readable; no secrets here (SecretRef env: references only)
+	if err := os.WriteFile(path, data, 0o640); err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	return nil
+}
+
+// writeGeneratedPolicy writes policy.yaml using only valid Policy fields.
+// Validates via LoadPolicyReader before writing to disk.
+func writeGeneratedPolicy(path string, state *wizardState) error {
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("%s already exists — delete it to regenerate", path)
+	}
+
+	var b strings.Builder
+	b.WriteString("# EzyShield policy — generated by 'ezyshield init'\n\n")
+	fmt.Fprintf(&b, "armed: %v\n", state.armed)
+	b.WriteString("ban_threshold: 70\n")
+	b.WriteString("observe_threshold: 40\n")
+	b.WriteString("strikes:\n")
+	b.WriteString("  - ttl: 5m\n")
+	b.WriteString("  - ttl: 1h\n")
+	b.WriteString("  - ttl: 24h\n")
+	b.WriteString("  - ttl: 168h\n")
+	b.WriteString("  - ttl: 0\n")
+	b.WriteString("max_bans_per_minute: 30\n")
+
+	b.WriteString("allowlist:\n")
+	for _, ip := range buildAllowlist(state) {
+		fmt.Fprintf(&b, "  - %s\n", ip)
+	}
+
+	if len(state.adminIPs) > 0 {
+		b.WriteString("admin_cidrs:\n")
+		for _, ip := range state.adminIPs {
+			fmt.Fprintf(&b, "  - %s\n", normalizeToPrefix(ip))
+		}
+	} else {
+		b.WriteString("admin_cidrs: []\n")
+	}
+
+	data := []byte(b.String())
+
+	// validate before writing
+	if _, err := config.LoadPolicyReader(bytes.NewReader(data), "generated policy"); err != nil {
+		return fmt.Errorf("generated policy.yaml failed validation: %w", err)
+	}
+
+	//nolint:gosec // 0640: group-readable; no secrets in policy
+	if err := os.WriteFile(path, data, 0o640); err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	return nil
+}
+
+// writeEnvFile writes /etc/ezyshield/env with a placeholder for the AI API key (chmod 600).
+func writeEnvFile(path, provider, keyEnvVar string) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "# EzyShield environment — generated by 'ezyshield init'\n")
+	fmt.Fprintf(&b, "# Fill in the value below, then: systemctl restart ezyshield\n")
+	fmt.Fprintf(&b, "# Provider: %s\n", provider)
+	fmt.Fprintf(&b, "%s=YOUR_API_KEY_HERE\n", keyEnvVar)
+
+	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	return nil
+}
+
+// ── System installation helpers ──────────────────────────────────────────────
+
+func createEzyshieldUser(out io.Writer) error {
+	if runCmdSilent("id", "ezyshield") == nil {
+		if _, err := fmt.Fprintln(out, "  user ezyshield: already exists"); err != nil {
+			return fmt.Errorf("writing output: %w", err)
+		}
+		return nil
+	}
+	if err := runSysCmd("useradd", "-r", "-s", "/usr/sbin/nologin", "-d", "/var/lib/ezyshield", "-m", "ezyshield"); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(out, "  user ezyshield: created"); err != nil {
+		return fmt.Errorf("writing output: %w", err)
+	}
+	// best-effort: add to docker and systemd-journal groups for log access
+	_ = runCmdSilent("usermod", "-aG", "docker", "ezyshield")
+	_ = runCmdSilent("usermod", "-aG", "systemd-journal", "ezyshield")
+	return nil
+}
+
+func installSystemdUnits(out io.Writer) error {
+	for _, unit := range []string{"ezyshield.service", "ezyshield-enforcer.service"} {
+		data, err := configs.FS.ReadFile("systemd/" + unit)
+		if err != nil {
+			return fmt.Errorf("reading embedded %s: %w", unit, err)
+		}
+		dst := filepath.Join(defaultSystemdDir, unit)
+		if err := os.WriteFile(dst, data, 0o644); err != nil { //nolint:gosec // 0644 is standard for systemd units
+			return fmt.Errorf("installing %s: %w", dst, err)
+		}
+		if _, err := fmt.Fprintf(out, "  installed %s\n", dst); err != nil {
+			return fmt.Errorf("writing output: %w", err)
+		}
+	}
+	return nil
+}
+
+// waitForSocket polls for a unix socket to appear within timeout.
+func waitForSocket(path string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if fi, err := os.Stat(path); err == nil && fi.Mode()&os.ModeSocket != 0 {
+			return nil
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return fmt.Errorf("socket %s not ready after %s", path, timeout)
+}
+
+// checkRecentDetections counts dry_ban events in the last 30s of journal output.
+func checkRecentDetections() int {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	//nolint:gosec // fixed args, no user input
+	out, err := exec.CommandContext(ctx, "journalctl", "-u", "ezyshield",
+		"--since", "30 seconds ago", "--no-pager", "-q").Output()
+	if err != nil {
+		return 0
+	}
+	return strings.Count(string(out), "dry_ban")
+}
+
+// ── nftables install offer ───────────────────────────────────────────────────
+
+// detectPkgManager returns the first available package manager binary path,
+// checking apt-get, dnf, pacman, and zypper in that order.
+func detectPkgManager() string {
+	for _, pm := range []string{"apt-get", "dnf", "pacman", "zypper"} {
+		if p, err := exec.LookPath(pm); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
+// installNFTPackage runs the appropriate non-interactive install command for
+// the given package manager binary (full path or base name).
+func installNFTPackage(pm string) error {
+	base := filepath.Base(pm)
+	var args []string
+	switch base {
+	case "apt-get":
+		args = []string{"-y", "install", "nftables"}
+	case "dnf":
+		args = []string{"-y", "install", "nftables"}
+	case "pacman":
+		args = []string{"-S", "--noconfirm", "nftables"}
+	case "zypper":
+		args = []string{"--non-interactive", "install", "nftables"}
+	default:
+		return fmt.Errorf("unsupported package manager: %s", base)
+	}
+	return runSysCmd(pm, args...)
+}
+
+// offerInstallNFT prompts the user (or auto-accepts when yes=true) to install
+// nftables. Returns the detected nft binary path after a successful install,
+// or "" if the user declined or the install failed.
+func offerInstallNFT(sc *bufio.Scanner, yes bool, out io.Writer) string {
+	pm := detectPkgManager()
+	if pm == "" {
+		//nolint:errcheck // best-effort console output; write errors handled by caller's wPrinter
+		fmt.Fprintln(out, "\n  ⚠  nftables not found and no supported package manager detected (apt-get/dnf/pacman/zypper).")
+		//nolint:errcheck
+		fmt.Fprintln(out, "     Install nftables manually, then re-run init.")
+		return ""
+	}
+
+	doInstall := yes
+	if !yes {
+		//nolint:errcheck
+		fmt.Fprint(out, "\n  ⚠  nftables not found.\n")
+		//nolint:errcheck
+		fmt.Fprint(out, "  EzyShield requires nftables for local IP blocking.\n")
+		//nolint:errcheck
+		fmt.Fprintf(out, "  Install now via %s? [Y/n]: ", filepath.Base(pm))
+		if sc != nil && sc.Scan() {
+			lower := strings.ToLower(strings.TrimSpace(sc.Text()))
+			doInstall = lower == "" || lower == "y" || lower == "yes"
+		} else {
+			doInstall = true // EOF → default Y
+		}
+	}
+
+	if !doInstall {
+		return ""
+	}
+
+	//nolint:errcheck
+	fmt.Fprintf(out, "  Installing nftables via %s...\n", filepath.Base(pm))
+	if err := installNFTPackage(pm); err != nil {
+		//nolint:errcheck
+		fmt.Fprintf(out, "  ⚠  Install failed: %v\n", err)
+		return ""
+	}
+
+	if err := runSysCmd("systemctl", "enable", "--now", "nftables"); err != nil {
+		//nolint:errcheck
+		fmt.Fprintf(out, "  ⚠  Could not enable nftables.service: %v\n", err)
+	} else {
+		//nolint:errcheck
+		fmt.Fprintln(out, "  nftables.service: enabled and started")
+	}
+
+	return detectNFT()
+}
+
+// ── Environment detection ────────────────────────────────────────────────────
+
+func detectNFT() string {
+	if p, err := exec.LookPath("nft"); err == nil {
+		return p
+	}
+	if _, err := os.Stat("/usr/sbin/nft"); err == nil {
+		return "/usr/sbin/nft"
+	}
+	return ""
+}
+
+func detectDockerContainers() []dockerContainer {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	//nolint:gosec // fixed args
+	out, err := exec.CommandContext(ctx, "docker", "ps",
+		"--format", "{{.Names}}\t{{.Image}}\t{{.Ports}}").Output()
+	if err != nil {
+		return nil
+	}
+	var containers []dockerContainer
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 3)
+		c := dockerContainer{name: parts[0]}
+		if len(parts) > 1 {
+			c.image = parts[1]
+		}
+		if len(parts) > 2 {
+			c.ports = parts[2]
+		}
+		containers = append(containers, c)
+	}
+	return containers
+}
+
+// pickProxyContainer returns the most likely nginx/proxy container.
+// Preference order: proxy image + web ports → proxy image only → web ports only.
+func pickProxyContainer(containers []dockerContainer) string {
+	for _, c := range containers {
+		if isProxyImage(c.name, c.image) && hasWebPorts(c.ports) {
+			return c.name
+		}
+	}
+	for _, c := range containers {
+		if isProxyImage(c.name, c.image) {
+			return c.name
+		}
+	}
+	for _, c := range containers {
+		if hasWebPorts(c.ports) {
+			return c.name
+		}
+	}
+	return ""
+}
+
+func isProxyImage(name, image string) bool {
+	for _, kw := range []string{"nginx", "proxy", "traefik", "caddy", "haproxy"} {
+		if strings.Contains(strings.ToLower(name), kw) ||
+			strings.Contains(strings.ToLower(image), kw) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasWebPorts(ports string) bool {
+	return strings.Contains(ports, ":80->") || strings.Contains(ports, ":443->")
+}
+
+func detectSSHUnit() string {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	for _, unit := range []string{"ssh", "sshd"} {
+		//nolint:gosec // fixed args
+		out, err := exec.CommandContext(ctx, "systemctl", "is-active", unit).Output()
+		if err == nil && strings.TrimSpace(string(out)) == "active" {
+			return unit
+		}
+	}
+	return "ssh" // Debian/Ubuntu default
+}
+
+func fetchPublicIP() string {
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get("https://ifconfig.me") //nolint:noctx // client-level timeout is sufficient
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	buf := make([]byte, 64)
+	n, _ := resp.Body.Read(buf)
+	ip := strings.TrimSpace(string(buf[:n]))
+	if net.ParseIP(ip) == nil {
+		return ""
+	}
+	return ip
+}
+
+func sshSourceIP() string {
+	val := os.Getenv("SSH_CLIENT")
+	if val == "" {
+		return ""
+	}
+	parts := strings.Fields(val)
+	if len(parts) == 0 || net.ParseIP(parts[0]) == nil {
+		return ""
+	}
+	return parts[0]
+}
+
+// ── Policy helpers ───────────────────────────────────────────────────────────
+
+// buildAllowlist returns loopback + docker bridge range + server public IP.
+func buildAllowlist(state *wizardState) []string {
+	list := []string{
+		"127.0.0.1/32",
+		"::1/128",
+		"172.16.0.0/12",
+	}
+	if state.publicIP != "" {
+		list = append(list, state.publicIP+"/32")
+	}
+	return list
+}
+
+// normalizeToPrefix converts a bare IP into /32 (IPv4) or /128 (IPv6).
+// Inputs already containing "/" are returned unchanged.
+func normalizeToPrefix(ip string) string {
+	if strings.Contains(ip, "/") {
+		return ip
+	}
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return ip
+	}
+	if parsed.To4() != nil {
+		return ip + "/32"
+	}
+	return ip + "/128"
+}
+
+// splitIPs splits a space- or comma-separated string of IPs/CIDRs.
+func splitIPs(s string) []string {
+	s = strings.ReplaceAll(s, ",", " ")
+	fields := strings.Fields(s)
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if f = strings.TrimSpace(f); f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// ── Exec helpers ─────────────────────────────────────────────────────────────
+
+func runSysCmd(name string, args ...string) error {
+	//nolint:gosec // caller controls name+args; no user data reaches here
+	cmd := exec.CommandContext(context.Background(), name, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func runCmdSilent(name string, args ...string) error {
+	//nolint:gosec // caller controls name+args; no user data reaches here
+	return exec.CommandContext(context.Background(), name, args...).Run()
+}
+
+func modeLabel(armed bool) string {
+	if armed {
+		return "ARMED (live enforcement)"
+	}
+	return "DRY-RUN (logging only, nothing blocked)"
+}
+
+// hasWordPressContainers reports whether any running container looks like WordPress.
+func hasWordPressContainers(containers []dockerContainer) bool {
+	for _, c := range containers {
+		lName := strings.ToLower(c.name)
+		lImage := strings.ToLower(c.image)
+		if strings.Contains(lName, "wordpress") || strings.Contains(lName, "wp-") ||
+			strings.Contains(lImage, "wordpress") {
+			return true
+		}
+	}
+	return false
+}
+
+// writeWordPressRules writes the embedded rules.yaml to path so operators can
+// customize WordPress-specific detection (xmlrpc, wp-login, .env probing).
+// The on-disk file is identical to the embedded defaults; rules_path in
+// config.yaml activates it and allows site-specific edits without recompiling.
+func writeWordPressRules(path string) error {
+	data, err := configs.FS.ReadFile("rules.yaml")
+	if err != nil {
+		return fmt.Errorf("reading embedded rules.yaml: %w", err)
+	}
+	header := "# EzyShield rules — generated by 'ezyshield init' (WordPress mode)\n" +
+		"# WordPress containers detected; this file enables xmlrpc, wp-login, and\n" +
+		"# .env probing rules. Edit to add or tune rules without recompiling.\n\n"
+	content := append([]byte(header), data...)
+	//nolint:gosec // 0640: group-readable; rules contain no secrets
+	if err := os.WriteFile(path, content, 0o640); err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	return nil
+}

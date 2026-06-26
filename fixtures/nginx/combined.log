@@ -1,0 +1,8 @@
+192.0.2.1 - alice [01/Jan/2025:00:00:01 +0000] "GET /index.html HTTP/1.1" 200 1234 "-" "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+192.0.2.2 - - [01/Jan/2025:00:00:02 +0000] "POST /api/login HTTP/1.1" 401 89 "https://example.com/" "curl/7.68.0"
+192.0.2.3 - bob [01/Jan/2025:00:00:03 +0000] "GET /about HTTP/1.1" 200 567 "-" "Googlebot/2.1 (+http://www.google.com/bot.html)"
+198.51.100.1 - - [01/Jan/2025:00:00:04 +0000] "GET /wp-login.php HTTP/1.1" 404 0 "-" "python-requests/2.27.1"
+198.51.100.1 - - [01/Jan/2025:00:00:05 +0000] "GET /.env HTTP/1.1" 404 0 "-" "python-requests/2.27.1"
+THIS IS NOT A VALID LOG LINE — MUST BE SKIPPED
+198.51.100.2 - - [01/Jan/2025:00:00:06 +0000] "HEAD /config.php HTTP/1.1" 404 0 "-" "masscan/1.0"
+192.0.2.4 - - [01/Jan/2025:00:00:07 +0000] "DELETE /api/resource/42 HTTP/1.1" 204 0 "-" "axios/0.27.2"

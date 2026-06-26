@@ -1,0 +1,51 @@
+# EzyShield built-in detection rules.
+# To override, set rules_path in config.yaml; the custom file replaces these
+# defaults entirely — it is not merged.
+rules:
+  - name: ssh_bruteforce
+    description: "Repeated SSH authentication failures"
+    kinds: [ssh_fail, ssh_invalid_user]
+    window: 60s
+    threshold: 5
+    score: 85
+    category: bruteforce
+
+  - name: http_scanner
+    description: "High 404 response rate — directory/endpoint scanner"
+    kinds: [http_request]
+    field: status
+    value: "404"
+    window: 60s
+    threshold: 20
+    score: 70
+    category: scanner
+
+  - name: http_wp_probe
+    description: "WordPress login probe"
+    kinds: [http_request]
+    field: path
+    contains: wp-login
+    window: 60s
+    threshold: 3
+    score: 80
+    category: scanner
+
+  - name: http_xmlrpc_abuse
+    description: "XML-RPC brute force (pingback/auth abuse)"
+    kinds: [http_request]
+    field: path
+    contains: xmlrpc.php
+    window: 60s
+    threshold: 5
+    score: 80
+    category: bruteforce
+
+  - name: http_env_probe
+    description: "Sensitive file probing (.env, wp-config, etc)"
+    kinds: [http_request]
+    field: path
+    contains: .env
+    window: 60s
+    threshold: 1
+    score: 90
+    category: scanner

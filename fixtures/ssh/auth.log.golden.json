@@ -1,0 +1,11 @@
+[
+  {"kind": "ssh_fail",         "source_ip": "192.0.2.1",   "fields": {"username": "root",     "port": "40122"}},
+  {"kind": "ssh_invalid_user", "source_ip": "192.0.2.2",   "fields": {"username": "admin",    "port": "41033"}},
+  {"kind": "ssh_accept",       "source_ip": "192.0.2.3",   "fields": {"username": "deploy",   "port": "52100"}},
+  {"kind": "ssh_invalid_user", "source_ip": "192.0.2.4",   "fields": {"username": "testuser", "port": "33901"}},
+  {"kind": "ssh_fail",         "source_ip": "2001:db8::1", "fields": {"username": "root",     "port": "44210"}},
+  {"kind": "ssh_invalid_user", "source_ip": "2001:db8::2", "fields": {"username": "operator", "port": "45100"}},
+  {"kind": "ssh_accept",       "source_ip": "192.0.2.5",   "fields": {"username": "ubuntu",   "port": "53200"}},
+  {"kind": "ssh_fail",         "source_ip": "2001:db8::3", "fields": {"username": "git",      "port": "34000"}},
+  {"kind": "ssh_invalid_user", "source_ip": "2001:db8::4", "fields": {"username": "admin",    "port": "46200"}}
+]

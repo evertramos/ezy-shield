@@ -1,0 +1,7 @@
+198.51.100.10 - - [15/Jan/2025:10:00:01 +0000] "GET /wp-login.php HTTP/1.1" 404 0 "-" "python-requests/2.27.1"
+198.51.100.10 - - [15/Jan/2025:10:00:02 +0000] "GET /.env HTTP/1.1" 404 0 "-" "python-requests/2.27.1"
+198.51.100.10 - - [15/Jan/2025:10:00:03 +0000] "GET /config.php HTTP/1.1" 404 0 "-" "python-requests/2.27.1"
+198.51.100.11 - - [15/Jan/2025:10:00:04 +0000] "GET /.git/config HTTP/1.1" 404 0 "-" "zgrab/0.x"
+198.51.100.12 - - [15/Jan/2025:10:00:05 +0000] "GET /admin/config HTTP/1.1" 403 89 "-" "masscan/1.0"
+198.51.100.10 - - [15/Jan/2025:10:00:06 +0000] "POST /xmlrpc.php HTTP/1.1" 200 1024 "-" "Go-http-client/1.1"
+198.51.100.10 - - [15/Jan/2025:10:00:07 +0000] "GET /phpmyadmin/index.php HTTP/1.1" 404 0 "-" "python-requests/2.27.1"

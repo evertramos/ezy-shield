@@ -1,0 +1,41 @@
+[Unit]
+Description=EzyShield — adaptive IP ban daemon
+Documentation=https://github.com/evertramos/ezy-shield
+After=network.target ezyshield-enforcer.service
+Requires=ezyshield-enforcer.service
+
+[Service]
+Type=simple
+User=ezyshield
+Group=ezyshield
+ExecStart=/usr/local/bin/ezyshield watch
+Restart=on-failure
+RestartSec=5s
+
+# Hardening — the daemon is unprivileged; all firewall mutations go through
+# the ezyshield-enforcer helper (AGENTS.md §3 / SECURITY-REVIEW.md §3).
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+
+# State and socket directories
+RuntimeDirectory=ezyshield
+RuntimeDirectoryMode=0755
+StateDirectory=ezyshield
+StateDirectoryMode=0750
+LogsDirectory=ezyshield
+LogsDirectoryMode=0750
+
+[Install]
+WantedBy=multi-user.target

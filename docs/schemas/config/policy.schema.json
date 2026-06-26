@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/evertramos/ezy-shield/docs/schemas/config/policy.schema.json",
+  "title": "EzyShield policy.yaml",
+  "description": "Enforcement policy: thresholds, strike escalation, allowlists. 'armed: false' means dry-run mode — nothing is blocked.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "armed": {
+      "type": "boolean",
+      "description": "When false (default), the full pipeline runs but nothing is enforced (dry-run). Set true only after verifying with 'ezyshield doctor'."
+    },
+    "ban_threshold": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100,
+      "description": "Score >= this value triggers a strike. Default: 70."
+    },
+    "observe_threshold": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 99,
+      "description": "Score in [observe_threshold, ban_threshold) triggers log/notify only. Default: 40."
+    },
+    "strikes": {
+      "type": "array",
+      "description": "Strike escalation table. Omit to use the default: 5m, 1h, 24h, 168h, permanent.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ttl"],
+        "properties": {
+          "ttl": {
+            "oneOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$",
+                "description": "Ban duration as a Go duration string (e.g. '5m', '24h')."
+              },
+              {
+                "type": "integer",
+                "const": 0,
+                "description": "0 means permanent ban."
+              }
+            ]
+          }
+        }
+      }
+    },
+    "max_bans_per_minute": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Global safety rate limit. Exceeding it pauses enforcement and sends a critical alert. Default: 30."
+    },
+    "allowlist": {
+      "type": "array",
+      "description": "IPs and CIDRs that can never be banned. The allowlist wins over every other decision.",
+      "items": {
+        "type": "string",
+        "description": "IPv4/IPv6 address or CIDR prefix (e.g. '1.2.3.4', '10.0.0.0/8', '2001:db8::/32')."
+      }
+    },
+    "admin_cidrs": {
+      "type": "array",
+      "description": "CIDR ranges merged into the runtime allowlist at startup and before every ban.",
+      "items": {
+        "type": "string",
+        "description": "CIDR prefix in standard notation."
+      }
+    }
+  }
+}

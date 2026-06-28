@@ -110,6 +110,8 @@ func runWatch(configPath, policyPath, dbPath, socketPath string) error {
 	parsers := []sdk.Parser{
 		parser.NewSSHParser(logger),
 		parser.NewNginxParser(logger, parser.NginxConfig{}),
+		parser.NewCaddyParser(logger, parser.CaddyConfig{}),
+		parser.NewTraefikParser(logger, parser.TraefikConfig{}),
 	}
 
 	collectors := buildCollectors(cfg, logger)
@@ -128,16 +130,32 @@ func runWatch(configPath, policyPath, dbPath, socketPath string) error {
 		enf = enforce.New(sockPath, allowlist)
 	}
 
-	if cfg.Enforce != nil && cfg.Enforce.Cloudflare != nil {
-		cfEnf, cfErr := enforce.NewCloudflareEnforcer(ctx, cfg.Enforce.Cloudflare, parseAllowlist(policy))
-		if cfErr != nil {
-			slog.Warn("watch: cloudflare enforcer unavailable; continuing without it", "err", cfErr)
-		} else {
-			if enf != nil {
-				enf = enforce.NewMulti(enf, cfEnf)
-			} else {
-				enf = cfEnf
+	if cfg.Enforce != nil && len(cfg.Enforce.Cloudflare) > 0 {
+		cfEnforcers := make([]sdk.Enforcer, 0, len(cfg.Enforce.Cloudflare))
+		for i := range cfg.Enforce.Cloudflare {
+			cf := cfg.Enforce.Cloudflare[i]
+			cfEnf, cfErr := enforce.NewCloudflareEnforcer(ctx, &cf, parseAllowlist(policy))
+			if cfErr != nil {
+				// Per-account isolation: one bad token/account_id doesn't disable
+				// the rest. cfg.Name is operator-set and validated by config.
+				slog.Warn("watch: cloudflare enforcer unavailable; continuing without it",
+					"cloudflare_name", cf.Name, "err", cfErr)
+				continue
 			}
+			cfEnforcers = append(cfEnforcers, cfEnf)
+		}
+		all := make([]sdk.Enforcer, 0, len(cfEnforcers)+1)
+		if enf != nil {
+			all = append(all, enf)
+		}
+		all = append(all, cfEnforcers...)
+		switch len(all) {
+		case 0:
+			// nothing wired up
+		case 1:
+			enf = all[0]
+		default:
+			enf = enforce.NewMulti(all...)
 		}
 	}
 

@@ -1,0 +1,4 @@
+{"log":"203.0.113.50 - - [26/Jun/2026:12:00:01 +0000] \"GET /index.html HTTP/1.1\" 200 1234 \"-\" \"Mozilla/5.0\" 1 \"web-router@docker\" \"http://backend:80\" 5ms\n","stream":"stdout","time":"2026-06-26T12:00:01.123Z"}
+{"log":"198.51.100.99 - - [26/Jun/2026:12:00:02 +0000] \"GET /wp-login.php HTTP/1.1\" 404 0 \"-\" \"python-requests/2.27.1\" 2 \"wp-router@docker\" \"http://wordpress:80\" 12ms\n","stream":"stdout","time":"2026-06-26T12:00:02.234Z"}
+{"log":"{\"ClientAddr\":\"[2001:db8::200]:5050\",\"ClientHost\":\"2001:db8::200\",\"RequestMethod\":\"POST\",\"RequestPath\":\"/api/login\",\"DownstreamStatus\":401,\"DownstreamContentSize\":89,\"Duration\":7000000,\"RouterName\":\"api-router@docker\",\"ServiceName\":\"api@docker\",\"request_User-Agent\":\"curl/7.88.1\"}\n","stream":"stdout","time":"2026-06-26T12:00:03.345Z"}
+not a docker json wrapper — must be skipped

@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -205,5 +207,70 @@ func TestRunDoctor_JSONOutput(t *testing.T) {
 	// Minimal check: JSON output starts with '{'.
 	if got[0] != '{' {
 		t.Errorf("expected JSON object, got: %.40s", got)
+	}
+}
+
+// TestCheckEnforcerSocket_Missing returns FAIL when the socket path does not exist.
+func TestCheckEnforcerSocket_Missing(t *testing.T) {
+	t.Parallel()
+	r := checkEnforcerSocket(filepath.Join(t.TempDir(), "no-such.sock"))
+	if r.Status != statusFail {
+		t.Errorf("got %s, want %s", r.Status, statusFail)
+	}
+}
+
+// TestCheckEnforcerSocket_NotASocket returns FAIL when path is a regular file.
+func TestCheckEnforcerSocket_NotASocket(t *testing.T) {
+	t.Parallel()
+	p := filepath.Join(t.TempDir(), "regular")
+	if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := checkEnforcerSocket(p)
+	if r.Status != statusFail {
+		t.Errorf("got %s, want %s", r.Status, statusFail)
+	}
+}
+
+// TestCheckEnforcerSocket_PingOK verifies that a minimal mock enforcer
+// responding {"ok":true} produces PASS.
+func TestCheckEnforcerSocket_PingOK(t *testing.T) {
+	t.Parallel()
+	sockPath := filepath.Join(t.TempDir(), "fake-enforcer.sock")
+
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close() //nolint:errcheck
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close() //nolint:errcheck
+		// Drain the incoming ping (so the doctor's write completes before the
+		// server replies and the connection closes).
+		buf := make([]byte, 256)
+		_, _ = conn.Read(buf)
+		// Reply OK — the doctor only inspects resp.OK.
+		_, _ = conn.Write([]byte(`{"ok":true}` + "\n"))
+	}()
+
+	r := checkEnforcerSocket(sockPath)
+	if r.Status != statusPass {
+		t.Errorf("got %s, want %s (hint=%s)", r.Status, statusPass, r.Hint)
+	}
+}
+
+// TestCheckDockerSocket_Missing returns N/A when /var/run/docker.sock is absent.
+// On hosts where Docker IS installed this asserts PASS or FAIL — either way the
+// status must not be empty.
+func TestCheckDockerSocket_StatusNotEmpty(t *testing.T) {
+	t.Parallel()
+	r := checkDockerSocket()
+	if r.Status == "" {
+		t.Error("expected non-empty status")
 	}
 }

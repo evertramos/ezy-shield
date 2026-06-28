@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -27,11 +28,17 @@ const (
 	dockerBackoffMax  = 30 * time.Second
 )
 
-// DockerCollector resolves a container's log path dynamically via docker inspect
-// and tails it, handling container recreation by re-resolving on tail error.
+// DockerCollector streams a container's logs and emits one RawLine per line.
 //
-// For json-file drivers the Docker JSON wrapper is unwrapped before forwarding.
-// For journald drivers, journalctl is spawned with a CONTAINER_NAME= filter.
+// Primary path (issue #93): the Docker Engine API on a unix socket
+// (DockerSocketPath, default "/var/run/docker.sock"). This avoids reading
+// /var/lib/docker/containers/<id>/<id>-json.log directly, which requires +x on
+// every parent dir and is reset to 0710 by Docker package upgrades.
+//
+// Fallback: if the socket is unavailable (missing, not a socket, or unreachable),
+// the collector resolves the log path via `docker inspect` and tails the file.
+// For json-file drivers the Docker JSON wrapper is unwrapped; for journald
+// drivers, journalctl is spawned with a CONTAINER_NAME= filter.
 //
 // The emitted RawLine.Source is "<Parser>:<Container>" when Parser is set,
 // or "docker:<Container>" otherwise — so parser routing (Matches) works.
@@ -47,10 +54,19 @@ type DockerCollector struct {
 	// DockerCmd overrides the docker binary path. Empty means "docker".
 	// Set in tests to a mock script; never used to pass untrusted input.
 	DockerCmd string
+	// DockerSocketPath overrides /var/run/docker.sock. Empty means the
+	// default. Tests set this to a missing path to force the filesystem
+	// fallback without touching the host's real socket.
+	DockerSocketPath string
 }
 
-// Run starts the collector loop. It resolves the container log path on each
-// cycle, tails the log (or journald), and retries with backoff on errors.
+// defaultDockerSocketPath is the canonical Docker Engine API endpoint.
+const defaultDockerSocketPath = "/var/run/docker.sock"
+
+// Run starts the collector loop. It prefers the Docker Engine API; on
+// startup it checks whether the unix socket is reachable and, if so, streams
+// logs via GET /containers/<name>/logs (issue #93). When the socket is
+// missing or unreachable it falls back to docker inspect + filesystem tail.
 // Returns nil on clean shutdown (context cancelled).
 func (c *DockerCollector) Run(ctx context.Context, out chan<- sdk.RawLine) error {
 	logger := c.Logger
@@ -66,6 +82,22 @@ func (c *DockerCollector) Run(ctx context.Context, out chan<- sdk.RawLine) error
 	if c.Parser != "" {
 		source = c.Parser + ":" + c.Container
 	}
+
+	socketPath := c.DockerSocketPath
+	if socketPath == "" {
+		socketPath = defaultDockerSocketPath
+	}
+	if isUnixSocket(socketPath) {
+		logger.Info("docker: using Engine API",
+			slog.String("container", c.Container),
+			slog.String("socket", socketPath),
+		)
+		return c.runAPI(ctx, socketPath, source, out, logger)
+	}
+	logger.Warn("docker: engine socket unavailable, falling back to filesystem tail (see issue #93)",
+		slog.String("container", c.Container),
+		slog.String("socket", socketPath),
+	)
 
 	backoff := dockerBackoffBase
 
@@ -303,4 +335,15 @@ func redactPath(s string) string {
 		return s[:100] + "…"
 	}
 	return s
+}
+
+// isUnixSocket reports whether path exists and is a unix socket. Tests on
+// hosts that happen to have a real /var/run/docker.sock can override
+// DockerCollector.DockerSocketPath to a missing path to bypass the API path.
+func isUnixSocket(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeSocket != 0
 }

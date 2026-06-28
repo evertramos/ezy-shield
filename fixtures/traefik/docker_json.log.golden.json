@@ -1,0 +1,5 @@
+[
+  {"kind": "http_request", "source_ip": "203.0.113.50",  "fields": {"method": "GET",  "path": "/index.html",   "status": "200", "bytes": "1234", "ua": "Mozilla/5.0",            "router": "web-router@docker", "service": "http://backend:80",  "duration": "5ms"}},
+  {"kind": "http_request", "source_ip": "198.51.100.99", "fields": {"method": "GET",  "path": "/wp-login.php", "status": "404", "bytes": "0",    "ua": "python-requests/2.27.1", "router": "wp-router@docker",  "service": "http://wordpress:80","duration": "12ms"}},
+  {"kind": "http_request", "source_ip": "2001:db8::200", "fields": {"method": "POST", "path": "/api/login",    "status": "401", "bytes": "89",   "ua": "curl/7.88.1",            "router": "api-router@docker", "service": "api@docker",         "duration": "7000000"}}
+]

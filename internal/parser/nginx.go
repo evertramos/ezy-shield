@@ -58,7 +58,9 @@ type NginxConfig struct {
 // NginxParser parses nginx access log lines in "combined" format, JSON format,
 // or user-supplied custom formats (see NginxConfig). It implements sdk.Parser.
 //
-// Sources handled: "journald:nginx", any source path containing "/nginx/".
+// Sources handled: "journald:nginx", any source path containing "/nginx/",
+// any source prefixed with "nginx:" or "apache:" (Apache shares the combined
+// access log format).
 type NginxParser struct {
 	logger         *slog.Logger
 	trustedProxies []netip.Prefix
@@ -75,10 +77,13 @@ func NewNginxParser(logger *slog.Logger, cfg NginxConfig) *NginxParser {
 }
 
 // Matches reports whether this parser handles the given collector source ID.
+// Apache uses the same "combined" access log format as nginx, so collectors
+// with parser: apache (source prefix "apache:") are handled here as well.
 func (p *NginxParser) Matches(source string) bool {
 	return source == "journald:nginx" ||
 		strings.Contains(source, "/nginx/") ||
-		strings.HasPrefix(source, "nginx:")
+		strings.HasPrefix(source, "nginx:") ||
+		strings.HasPrefix(source, "apache:")
 }
 
 // Parse converts a single raw log line into zero or more http_request Events.

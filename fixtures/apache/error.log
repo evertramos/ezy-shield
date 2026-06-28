@@ -1,0 +1,8 @@
+[Fri Jun 26 19:00:00.123456 2026] [core:error] [pid 1234] [client 203.0.113.1:5678] AH00124: Request exceeded the limit of 10 internal redirects
+[Fri Jun 26 19:00:01.000000 2026] [proxy_fcgi:error] [pid 1235:tid 1236] [client 198.51.100.10:44321] AH01071: Got error 'PHP message: Login failed'
+[Fri Jun 26 19:00:02.500000 2026] [security2:error] [pid 1240] [client 203.0.113.55:12345] ModSecurity: Access denied with code 403 [file "/etc/modsecurity/rules.conf"] [line "42"]
+[Fri Jun 26 19:00:03.000000 2026] [mpm_event:notice] [pid 999] AH00489: Apache/2.4.58 (Debian) configured -- resuming normal operations
+[Fri Jun 26 19:00:04.111111 2026] [authz_core:error] [pid 1250] [client [2001:db8::1]:6543] AH01630: client denied by server configuration: /var/www/secret
+[Fri Jun 26 19:00:05.222222 2026] [core:error] [pid 1260] [client 198.51.100.42] AH00037: Symbolic link not allowed or link target not accessible
+[Fri Jun 26 19:00:06 2026] [error] [client 203.0.113.99] File does not exist: /var/www/html/wp-login.php
+THIS IS NOT A VALID APACHE ERROR LINE

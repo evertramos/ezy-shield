@@ -206,8 +206,23 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 		return fmt.Errorf("writing output: %w", p.err)
 	}
 
+	// Create the ezyshield user/group BEFORE writing configs so that
+	// applyDaemonOwnership can chown root:ezyshield (issue #91). In test mode
+	// (--config-dir), skipSystem is true and we don't touch system accounts.
+	if !skipSystem {
+		if err := createEzyshieldUser(p.w); err != nil {
+			p.printf("  warning: could not create ezyshield user: %v\n", err)
+		}
+	}
+
 	if err := os.MkdirAll(configDir, 0o750); err != nil {
 		return fmt.Errorf("creating config dir %s: %w", configDir, err)
+	}
+	// Chown the directory itself so the daemon (User=ezyshield) can traverse
+	// it. Without this, /etc/ezyshield ends up root:root 0750 and the daemon
+	// crashes on startup unable to open its config — see issue #91.
+	if err := applyDaemonOwnership(configDir, 0o750); err != nil {
+		return fmt.Errorf("set ownership on %s: %w", configDir, err)
 	}
 
 	configPath := filepath.Join(configDir, "config.yaml")
@@ -251,10 +266,6 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 	p.println("\n[4/5] Installing systemd units...")
 	if p.err != nil {
 		return fmt.Errorf("writing output: %w", p.err)
-	}
-
-	if err := createEzyshieldUser(p.w); err != nil {
-		p.printf("  warning: could not create ezyshield user: %v\n", err)
 	}
 
 	if err := installSystemdUnits(p.w); err != nil {
@@ -465,6 +476,9 @@ func writeGeneratedConfig(path string, state *wizardState) error {
 	if err := os.WriteFile(path, data, 0o640); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
+	if err := applyDaemonOwnership(path, 0o640); err != nil {
+		return fmt.Errorf("set ownership on %s: %w", path, err)
+	}
 	return nil
 }
 
@@ -513,6 +527,9 @@ func writeGeneratedPolicy(path string, state *wizardState) error {
 	if err := os.WriteFile(path, data, 0o640); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
+	if err := applyDaemonOwnership(path, 0o640); err != nil {
+		return fmt.Errorf("set ownership on %s: %w", path, err)
+	}
 	return nil
 }
 
@@ -526,6 +543,9 @@ func writeEnvFile(path, provider, keyEnvVar string) error {
 
 	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	if err := applyDaemonOwnership(path, 0o600); err != nil {
+		return fmt.Errorf("set ownership on %s: %w", path, err)
 	}
 	return nil
 }
@@ -888,6 +908,9 @@ func writeWordPressRules(path string) error {
 	//nolint:gosec // 0640: group-readable; rules contain no secrets
 	if err := os.WriteFile(path, content, 0o640); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	if err := applyDaemonOwnership(path, 0o640); err != nil {
+		return fmt.Errorf("set ownership on %s: %w", path, err)
 	}
 	return nil
 }

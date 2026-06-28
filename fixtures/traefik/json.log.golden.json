@@ -1,0 +1,7 @@
+[
+  {"kind": "http_request", "source_ip": "203.0.113.5",   "fields": {"method": "GET",  "path": "/index.html",   "status": "200", "bytes": "1234", "ua": "Mozilla/5.0",            "router": "web-router@docker",     "service": "backend@docker",   "duration": "5000000"}},
+  {"kind": "http_request", "source_ip": "198.51.100.20", "fields": {"method": "GET",  "path": "/wp-login.php", "status": "404", "bytes": "0",    "ua": "python-requests/2.27.1", "router": "wp-router@docker",      "service": "wordpress@docker", "duration": "12000000"}},
+  {"kind": "http_request", "source_ip": "2001:db8::100", "fields": {"method": "GET",  "path": "/.env",         "status": "404", "bytes": "0",    "ua": "masscan/1.0",            "router": "default-router@docker", "service": "app@docker",       "duration": "3000000"}},
+  {"kind": "http_request", "source_ip": "198.51.100.21", "fields": {"method": "POST", "path": "/xmlrpc.php",   "status": "200", "bytes": "1024", "ua": "Go-http-client/1.1",     "router": "wp-router@docker",      "service": "wordpress@docker", "duration": "8000000"}},
+  {"kind": "http_request", "source_ip": "192.0.2.30",    "fields": {"method": "HEAD", "path": "/.git/config",  "status": "404", "bytes": "0",    "ua": "zgrab/0.x",              "router": "default-router@docker", "service": "app@docker",       "duration": "2000000"}}
+]

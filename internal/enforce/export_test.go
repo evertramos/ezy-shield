@@ -75,3 +75,12 @@ func NewCFListsEnforcerWithDebounceAndCtx(ctx context.Context, token, baseURL, a
 	e.debounceInterval = debounce
 	return e
 }
+
+// NewCFListsEnforcerWithName constructs a CloudflareListsEnforcer with an
+// operator-style instance name, used to verify that Name() disambiguates
+// multi-account deployments (issue #90).
+func NewCFListsEnforcerWithName(name, token, baseURL, accountID, listName string) *CloudflareListsEnforcer {
+	e := newCFListsEnforcerForTest(token, baseURL, accountID, listName)
+	e.instanceName = name
+	return e
+}

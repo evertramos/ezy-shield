@@ -226,14 +226,15 @@ enforce:
     account_id: abc123
 `
 	cfg := mustLoadConfig(t, yaml)
-	if cfg.Enforce == nil || cfg.Enforce.Cloudflare == nil {
-		t.Fatal("expected Cloudflare config to be set")
+	if cfg.Enforce == nil || len(cfg.Enforce.Cloudflare) != 1 {
+		t.Fatalf("expected exactly 1 Cloudflare entry, got %d", len(cfg.Enforce.Cloudflare))
 	}
-	if cfg.Enforce.Cloudflare.Mode != "" {
-		t.Errorf("Mode = %q, want empty (so factory picks default 'lists')", cfg.Enforce.Cloudflare.Mode)
+	cf := cfg.Enforce.Cloudflare[0]
+	if cf.Mode != "" {
+		t.Errorf("Mode = %q, want empty (so factory picks default 'lists')", cf.Mode)
 	}
-	if cfg.Enforce.Cloudflare.AccountID != "abc123" {
-		t.Errorf("AccountID = %q, want abc123", cfg.Enforce.Cloudflare.AccountID)
+	if cf.AccountID != "abc123" {
+		t.Errorf("AccountID = %q, want abc123", cf.AccountID)
 	}
 }
 
@@ -287,12 +288,148 @@ enforce:
     action: challenge
 `
 	cfg := mustLoadConfig(t, yaml)
-	if cfg.Enforce.Cloudflare.Mode != "rulesets" {
-		t.Errorf("Mode = %q, want rulesets", cfg.Enforce.Cloudflare.Mode)
+	if len(cfg.Enforce.Cloudflare) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(cfg.Enforce.Cloudflare))
 	}
-	if len(cfg.Enforce.Cloudflare.ZoneIDs) != 1 {
-		t.Errorf("ZoneIDs length = %d, want 1", len(cfg.Enforce.Cloudflare.ZoneIDs))
+	cf := cfg.Enforce.Cloudflare[0]
+	if cf.Mode != "rulesets" {
+		t.Errorf("Mode = %q, want rulesets", cf.Mode)
 	}
+	if len(cf.ZoneIDs) != 1 {
+		t.Errorf("ZoneIDs length = %d, want 1", len(cf.ZoneIDs))
+	}
+}
+
+// ---- Multi-account Cloudflare (issue #90) ----------------------------------
+
+func TestLoadConfig_CloudflareArrayForm(t *testing.T) {
+	t.Parallel()
+	yaml := `
+enforce:
+  cloudflare:
+    - name: client_a
+      api_token: env:CF_TOKEN_A
+      account_id: aaa111
+    - name: client_b
+      api_token: env:CF_TOKEN_B
+      account_id: bbb222
+      list_name: alt_list
+`
+	cfg := mustLoadConfig(t, yaml)
+	if got := len(cfg.Enforce.Cloudflare); got != 2 {
+		t.Fatalf("expected 2 entries, got %d", got)
+	}
+	if cfg.Enforce.Cloudflare[0].Name != "client_a" {
+		t.Errorf("entry[0].Name = %q, want client_a", cfg.Enforce.Cloudflare[0].Name)
+	}
+	if cfg.Enforce.Cloudflare[1].AccountID != "bbb222" {
+		t.Errorf("entry[1].AccountID = %q, want bbb222", cfg.Enforce.Cloudflare[1].AccountID)
+	}
+	if cfg.Enforce.Cloudflare[1].ListName != "alt_list" {
+		t.Errorf("entry[1].ListName = %q, want alt_list", cfg.Enforce.Cloudflare[1].ListName)
+	}
+}
+
+func TestLoadConfig_CloudflareSingleObjectStillWorks(t *testing.T) {
+	t.Parallel()
+	// Single-mapping form (no name required) — backward compat for existing users.
+	yaml := `
+enforce:
+  cloudflare:
+    api_token: env:CF_TOKEN
+    account_id: abc123
+`
+	cfg := mustLoadConfig(t, yaml)
+	if len(cfg.Enforce.Cloudflare) != 1 {
+		t.Fatalf("single-object form should normalize to 1-element slice, got %d", len(cfg.Enforce.Cloudflare))
+	}
+	if cfg.Enforce.Cloudflare[0].Name != "" {
+		t.Errorf("Name should default to empty for the single-object form, got %q", cfg.Enforce.Cloudflare[0].Name)
+	}
+}
+
+func TestLoadConfig_CloudflareEmptyArrayRejected(t *testing.T) {
+	t.Parallel()
+	yaml := `
+enforce:
+  cloudflare: []
+`
+	_, err := LoadConfigReader(strings.NewReader(yaml), "test")
+	wantErr(t, err, "at least one entry is required")
+}
+
+func TestLoadConfig_CloudflareMultiRequiresName(t *testing.T) {
+	t.Parallel()
+	yaml := `
+enforce:
+  cloudflare:
+    - api_token: env:CF_TOKEN_A
+      account_id: aaa111
+    - api_token: env:CF_TOKEN_B
+      account_id: bbb222
+`
+	_, err := LoadConfigReader(strings.NewReader(yaml), "test")
+	wantErr(t, err, "'name' is required when more than one cloudflare account")
+}
+
+func TestLoadConfig_CloudflareDuplicateName(t *testing.T) {
+	t.Parallel()
+	yaml := `
+enforce:
+  cloudflare:
+    - name: same
+      api_token: env:CF_TOKEN_A
+      account_id: aaa111
+    - name: same
+      api_token: env:CF_TOKEN_B
+      account_id: bbb222
+`
+	_, err := LoadConfigReader(strings.NewReader(yaml), "test")
+	wantErr(t, err, "duplicate 'name'")
+}
+
+func TestLoadConfig_CloudflareInvalidName(t *testing.T) {
+	t.Parallel()
+	// Multi-account so Name is required; "bad name" has whitespace.
+	yaml := `
+enforce:
+  cloudflare:
+    - name: "bad name"
+      api_token: env:CF_TOKEN_A
+      account_id: aaa111
+    - name: ok
+      api_token: env:CF_TOKEN_B
+      account_id: bbb222
+`
+	_, err := LoadConfigReader(strings.NewReader(yaml), "test")
+	wantErr(t, err, "must match [A-Za-z0-9_-]+")
+}
+
+func TestLoadConfig_CloudflareMultiPerEntryValidationStillRuns(t *testing.T) {
+	t.Parallel()
+	// Second entry omits account_id (required for default mode "lists").
+	yaml := `
+enforce:
+  cloudflare:
+    - name: ok
+      api_token: env:CF_TOKEN_A
+      account_id: aaa111
+    - name: broken
+      api_token: env:CF_TOKEN_B
+`
+	_, err := LoadConfigReader(strings.NewReader(yaml), "test")
+	wantErr(t, err, "'account_id' is required")
+}
+
+func TestLoadConfig_CloudflareScalarRejected(t *testing.T) {
+	t.Parallel()
+	// A bare scalar is neither a mapping nor a sequence — must be rejected.
+	yaml := `
+enforce:
+  cloudflare: bogus
+`
+	_, err := LoadConfigReader(strings.NewReader(yaml), "test")
+	wantErr(t, err, "must be a mapping or a sequence")
 }
 
 func TestLoadConfig_CloudflareInvalidMode(t *testing.T) {

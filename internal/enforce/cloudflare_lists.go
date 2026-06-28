@@ -54,6 +54,7 @@ func newListState() *listState {
 type CloudflareListsEnforcer struct {
 	client           *http.Client
 	token            string // never logged or surfaced in errors
+	instanceName     string // operator label for multi-account deployments; "" when single
 	accountID        string
 	listName         string
 	baseURL          string
@@ -84,6 +85,7 @@ func NewCloudflareListsEnforcer(ctx context.Context, cfg *config.CloudflareCfg, 
 	return &CloudflareListsEnforcer{
 		client:           &http.Client{Timeout: 10 * time.Second},
 		token:            token,
+		instanceName:     cfg.Name,
 		accountID:        cfg.AccountID,
 		listName:         listName,
 		baseURL:          cfBaseURL,
@@ -118,8 +120,16 @@ func newCFListsEnforcerForTestWithCtx(ctx context.Context, token, baseURL, accou
 	}
 }
 
-// Name implements sdk.Enforcer.
-func (e *CloudflareListsEnforcer) Name() string { return "cloudflare" }
+// Name implements sdk.Enforcer. Returns "cloudflare" for the default
+// (unnamed/single-account) case to preserve backward compatibility, and
+// "cloudflare[<name>]" when an instance name is configured — used by
+// MultiEnforcer logging to disambiguate failures across accounts.
+func (e *CloudflareListsEnforcer) Name() string {
+	if e.instanceName == "" {
+		return "cloudflare"
+	}
+	return "cloudflare[" + e.instanceName + "]"
+}
 
 // Ban adds the target IP/CIDR to the desired set and pushes (immediate or
 // debounced). Refuses allowlisted targets without contacting the API.

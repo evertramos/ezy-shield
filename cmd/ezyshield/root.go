@@ -15,6 +15,9 @@ It detects malicious IPs from logs, escalates bans by strike count,
 and enforces blocks locally (nftables) and at the edge (Cloudflare/Bunny/AWS).
 
 Commands read as:  ezyshield <verb>   (equivalent to: ezy shield <verb>)`,
+		// Wires up `ezyshield --version` (used by the self-update verifier
+		// to confirm a freshly downloaded binary actually runs).
+		Version:       version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
@@ -26,6 +29,7 @@ Commands read as:  ezyshield <verb>   (equivalent to: ezy shield <verb>)`,
 		newInitCmd(),
 		newStatusCmd(),
 		newDoctorCmd(),
+		newValidateCmd(),
 		newCompletionCmd(root),
 		newTestNotifyCmd(),
 		newWatchCmd(),
@@ -34,6 +38,7 @@ Commands read as:  ezyshield <verb>   (equivalent to: ezy shield <verb>)`,
 		newListCmd(),
 		newAllowCmd(),
 		newScanCmd(),
+		newUpdateCmd(),
 	)
 
 	return root

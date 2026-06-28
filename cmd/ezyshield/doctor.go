@@ -2,14 +2,19 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
+
+	"github.com/evertramos/ezy-shield/internal/enforce"
 )
 
 const (
@@ -67,8 +72,13 @@ func runDoctor(cmd *cobra.Command, configDir string, jsonOut bool) error {
 		checkFileParses(filepath.Join(configDir, "policy.yaml"), "policy.yaml"),
 		checkFilePerms(filepath.Join(configDir, "config.yaml"), "config.yaml"),
 		checkFilePerms(filepath.Join(configDir, "policy.yaml"), "policy.yaml"),
+		checkConfigOwnership(configDir, "config-dir"),
+		checkConfigOwnership(filepath.Join(configDir, "config.yaml"), "config.yaml"),
+		checkConfigOwnership(filepath.Join(configDir, "policy.yaml"), "policy.yaml"),
 		checkNFTPresent(),
 		checkJournaldReadable(),
+		checkEnforcerSocket(enforcerSockPath),
+		checkDockerSocket(),
 	}
 
 	summary := DoctorSummary{Total: len(checks)}
@@ -191,6 +201,88 @@ func checkNFTPresent() CheckResult {
 		Status: statusPass,
 		Hint:   path,
 	}
+}
+
+// defaultDockerSocketPath is the canonical Docker engine API endpoint.
+// Doctor only ever checks this path — the daemon resolves its own socket via
+// config (collector.DockerSocketPath), but for doctor we report against the
+// well-known default.
+const defaultDockerSocketPath = "/var/run/docker.sock"
+
+// checkEnforcerSocket returns PASS when the enforcer socket exists, is a unix
+// socket, and the doctor process can complete a ping handshake. After
+// issue #92 the socket is root:ezyshield 0660 — connectivity here proves the
+// caller is at least in the ezyshield group (or root).
+func checkEnforcerSocket(path string) CheckResult {
+	name := "enforcer: socket connectivity"
+
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return CheckResult{Name: name, Status: statusFail,
+			Hint: fmt.Sprintf("%s missing -- is ezyshield-enforcer.service running? (systemctl status ezyshield-enforcer)", path)}
+	}
+	if err != nil {
+		return CheckResult{Name: name, Status: statusFail, Hint: err.Error()}
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		return CheckResult{Name: name, Status: statusFail,
+			Hint: fmt.Sprintf("%s exists but is not a unix socket", path)}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	conn, err := (&net.Dialer{Timeout: 2 * time.Second}).DialContext(ctx, "unix", path)
+	if err != nil {
+		return CheckResult{Name: name, Status: statusFail,
+			Hint: fmt.Sprintf("connect: %v -- ensure caller is in 'ezyshield' group (id; groups)", err)}
+	}
+	defer conn.Close() //nolint:errcheck
+
+	if err := json.NewEncoder(conn).Encode(enforce.Request{Verb: "ping"}); err != nil {
+		return CheckResult{Name: name, Status: statusFail, Hint: "send ping: " + err.Error()}
+	}
+	var resp enforce.Response
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		return CheckResult{Name: name, Status: statusFail, Hint: "read pong: " + err.Error()}
+	}
+	if !resp.OK {
+		return CheckResult{Name: name, Status: statusFail, Hint: "enforcer rejected ping: " + resp.Error}
+	}
+	return CheckResult{Name: name, Status: statusPass}
+}
+
+// checkDockerSocket returns PASS when /var/run/docker.sock exists, is a unix
+// socket, and the doctor process can read it (issue #93 — the collector now
+// uses the Docker Engine API by default, so the daemon needs r/w access).
+func checkDockerSocket() CheckResult {
+	name := "docker: socket access"
+	path := defaultDockerSocketPath
+
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return CheckResult{Name: name, Status: statusNA,
+			Hint: "/var/run/docker.sock not present -- Docker not installed (collector will be disabled)"}
+	}
+	if err != nil {
+		return CheckResult{Name: name, Status: statusFail, Hint: err.Error()}
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		return CheckResult{Name: name, Status: statusFail,
+			Hint: fmt.Sprintf("%s is not a unix socket", path)}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	conn, err := (&net.Dialer{Timeout: 2 * time.Second}).DialContext(ctx, "unix", path)
+	if err != nil {
+		return CheckResult{Name: name, Status: statusFail,
+			Hint: fmt.Sprintf("connect: %v -- add caller to 'docker' group (usermod -aG docker ezyshield)", err)}
+	}
+	defer conn.Close() //nolint:errcheck
+
+	return CheckResult{Name: name, Status: statusPass}
 }
 
 // checkJournaldReadable returns PASS when journalctl is present and responds.

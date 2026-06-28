@@ -1,0 +1,7 @@
+[
+  {"kind": "http_request", "source_ip": "203.0.113.1",   "fields": {"method": "GET",    "path": "/index.html",       "status": "200", "bytes": "1234", "ua": "Mozilla/5.0",            "host": "example.com",      "duration": "0.005"}},
+  {"kind": "http_request", "source_ip": "198.51.100.10", "fields": {"method": "GET",    "path": "/wp-login.php",     "status": "404", "bytes": "0",    "ua": "python-requests/2.27.1", "host": "blog.example.com", "duration": "0.012"}},
+  {"kind": "http_request", "source_ip": "198.51.100.11", "fields": {"method": "GET",    "path": "/.env",             "status": "404", "bytes": "0",    "ua": "masscan/1.0",            "host": "app.example.com",  "duration": "0.003"}},
+  {"kind": "http_request", "source_ip": "2001:db8::1",   "fields": {"method": "DELETE", "path": "/api/v1/resource",  "status": "204", "bytes": "0",    "ua": "axios/0.27.2",           "host": "api.example.com",  "duration": "1.234"}},
+  {"kind": "http_request", "source_ip": "192.0.2.4",     "fields": {"method": "HEAD",   "path": "/config.php",       "status": "404", "bytes": "0",    "ua": "zgrab/0.x",              "host": "app.example.com",  "duration": "0.002"}}
+]

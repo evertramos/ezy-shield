@@ -85,6 +85,7 @@ func newZoneState() *zoneState {
 type CloudflareEnforcer struct {
 	client           *http.Client
 	token            string // never logged or included in error messages
+	instanceName     string // operator label for multi-account deployments; "" when single
 	zoneIDs          []string
 	action           string
 	baseURL          string
@@ -133,6 +134,7 @@ func newCloudflareRulesetsEnforcer(ctx context.Context, cfg *config.CloudflareCf
 	return &CloudflareEnforcer{
 		client:           &http.Client{Timeout: 10 * time.Second},
 		token:            token,
+		instanceName:     cfg.Name,
 		zoneIDs:          cfg.ZoneIDs,
 		action:           action,
 		baseURL:          cfBaseURL,
@@ -166,8 +168,16 @@ func newCFEnforcerForTestWithCtx(ctx context.Context, token, baseURL string, zon
 	}
 }
 
-// Name implements sdk.Enforcer.
-func (e *CloudflareEnforcer) Name() string { return "cloudflare" }
+// Name implements sdk.Enforcer. Returns "cloudflare" for the default
+// (unnamed/single-account) case to preserve backward compatibility, and
+// "cloudflare[<name>]" when an instance name is configured — used by
+// MultiEnforcer logging to disambiguate failures across accounts.
+func (e *CloudflareEnforcer) Name() string {
+	if e.instanceName == "" {
+		return "cloudflare"
+	}
+	return "cloudflare[" + e.instanceName + "]"
+}
 
 // Ban adds the target IP/CIDR to every configured zone's ezyshield WAF rule.
 // Returns an error without touching the API if the target is allowlisted.

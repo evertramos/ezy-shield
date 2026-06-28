@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Config holds the main runtime configuration loaded from config.yaml.
@@ -121,14 +123,50 @@ type CollectorCfg struct {
 	Container string `yaml:"container"` // required for kind: docker (name, short ID, or full ID)
 	// Parser, when set, forces parser selection by prefixing the source ID
 	// (e.g. parser: nginx → source becomes "nginx:<path-or-container>").
-	// Accepted values: "nginx", "ssh".
+	// Accepted values: "nginx", "ssh", "caddy", "traefik", "apache" (alias of nginx combined),
+	// "apache-error" (Apache error log format).
 	Parser string `yaml:"parser"`
 }
 
 // EnforceCfg configures local and edge enforcement backends.
 type EnforceCfg struct {
 	NFTables   *NFTablesCfg   `yaml:"nftables"`
-	Cloudflare *CloudflareCfg `yaml:"cloudflare"`
+	Cloudflare CloudflareCfgs `yaml:"cloudflare"`
+}
+
+// CloudflareCfgs is a list of Cloudflare account configurations. The YAML form
+// accepts both the legacy single-object shape (one account) and the multi-object
+// array shape (one entry per account); both decode to []CloudflareCfg.
+type CloudflareCfgs []CloudflareCfg
+
+// UnmarshalYAML lets `enforce.cloudflare` be either a single mapping or a
+// sequence of mappings. The single-mapping form is kept for backward
+// compatibility with existing single-account configs.
+func (c *CloudflareCfgs) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Kind {
+	case yaml.SequenceNode:
+		// An explicit `cloudflare: []` is operator error — if the key is present
+		// the operator meant to configure something. Reject at parse so the
+		// failure is reported as a YAML problem with a line number.
+		if len(value.Content) == 0 {
+			return fmt.Errorf("line %d: at least one entry is required when 'cloudflare' is set", value.Line)
+		}
+		var arr []CloudflareCfg
+		if err := value.Decode(&arr); err != nil {
+			return err
+		}
+		*c = arr
+		return nil
+	case yaml.MappingNode:
+		var single CloudflareCfg
+		if err := value.Decode(&single); err != nil {
+			return err
+		}
+		*c = CloudflareCfgs{single}
+		return nil
+	default:
+		return fmt.Errorf("line %d: 'cloudflare' must be a mapping or a sequence of mappings", value.Line)
+	}
 }
 
 // NFTablesCfg holds nftables enforcer settings.
@@ -154,6 +192,11 @@ type NFTablesCfg struct {
 //   - lists mode: Account:Account Filter Lists:Edit on the chosen account.
 //   - rulesets mode: Zone:Firewall:Edit on each listed zone (least-privilege).
 type CloudflareCfg struct {
+	// Name is a short operator-chosen label used to disambiguate accounts in
+	// logs and error messages (e.g. "client_a", "main"). Optional when a single
+	// account is configured; required and must be unique when multiple accounts
+	// are configured. Must match [A-Za-z0-9_-]+ and be 1..32 characters.
+	Name     string    `yaml:"name"`
 	APIToken SecretRef `yaml:"api_token"`
 	// Mode selects the enforcement backend. Empty defaults to "lists".
 	Mode string `yaml:"mode"`
@@ -241,8 +284,8 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("enforce.nftables: %w", err)
 		}
 	}
-	if c.Enforce != nil && c.Enforce.Cloudflare != nil {
-		if err := validateCloudflare(*c.Enforce.Cloudflare); err != nil {
+	if c.Enforce != nil && len(c.Enforce.Cloudflare) > 0 {
+		if err := validateCloudflareList(c.Enforce.Cloudflare); err != nil {
 			return fmt.Errorf("enforce.cloudflare: %w", err)
 		}
 	}
@@ -293,8 +336,12 @@ func validateAI(ai *AICfg) error {
 }
 
 var validParserNames = map[string]bool{
-	"nginx": true,
-	"ssh":   true,
+	"nginx":        true,
+	"ssh":          true,
+	"apache":       true,
+	"apache-error": true,
+	"traefik":      true,
+	"caddy":        true,
 }
 
 func validateCollector(col CollectorCfg, idx int) error {
@@ -317,7 +364,7 @@ func validateCollector(col CollectorCfg, idx int) error {
 		return fmt.Errorf("collectors[%d]: invalid kind %q (must be file|journald|docker)", idx, col.Kind)
 	}
 	if col.Parser != "" && !validParserNames[col.Parser] {
-		return fmt.Errorf("collectors[%d]: invalid parser %q (must be nginx|ssh)", idx, col.Parser)
+		return fmt.Errorf("collectors[%d]: invalid parser %q (must be nginx|ssh|apache|apache-error|traefik|caddy)", idx, col.Parser)
 	}
 	return nil
 }
@@ -333,6 +380,57 @@ var validCFModes = map[string]bool{
 // cfListNameMaxLen mirrors the Cloudflare Custom IP List name constraint.
 // Names are restricted to [A-Za-z0-9_]+ and length 1..50.
 const cfListNameMaxLen = 50
+
+// cfInstanceNameMaxLen caps the operator-facing CloudflareCfg.Name field.
+const cfInstanceNameMaxLen = 32
+
+// validateCloudflareList enforces multi-account rules on top of per-entry
+// validation: when more than one account is configured, every entry must carry
+// a non-empty unique Name so logs and errors can identify which account a given
+// API failure came from.
+func validateCloudflareList(list CloudflareCfgs) error {
+	if len(list) == 0 {
+		return fmt.Errorf("at least one entry is required when 'cloudflare' is set")
+	}
+	requireNames := len(list) > 1
+	seen := make(map[string]int, len(list))
+	for i, cf := range list {
+		if err := validateCloudflare(cf); err != nil {
+			return fmt.Errorf("[%d]: %w", i, err)
+		}
+		if cf.Name != "" {
+			if err := validateCFInstanceName(cf.Name); err != nil {
+				return fmt.Errorf("[%d]: 'name': %w", i, err)
+			}
+			if prev, dup := seen[cf.Name]; dup {
+				return fmt.Errorf("[%d]: duplicate 'name' %q (also used by [%d])", i, cf.Name, prev)
+			}
+			seen[cf.Name] = i
+		} else if requireNames {
+			return fmt.Errorf("[%d]: 'name' is required when more than one cloudflare account is configured", i)
+		}
+	}
+	return nil
+}
+
+// validateCFInstanceName restricts the operator-chosen account label so it can
+// appear safely in logs and the enforcer's Name() output without escaping.
+func validateCFInstanceName(name string) error {
+	if len(name) == 0 || len(name) > cfInstanceNameMaxLen {
+		return fmt.Errorf("length must be 1..%d, got %d", cfInstanceNameMaxLen, len(name))
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '_', r == '-':
+		default:
+			return fmt.Errorf("must match [A-Za-z0-9_-]+")
+		}
+	}
+	return nil
+}
 
 func validateCloudflare(cf CloudflareCfg) error {
 	if !cf.APIToken.IsSet() {

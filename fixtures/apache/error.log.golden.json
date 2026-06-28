@@ -1,0 +1,8 @@
+[
+  {"kind": "http_error", "source_ip": "203.0.113.1",   "fields": {"module": "core",       "level": "error",  "code": "AH00124", "msg": "Request exceeded the limit of 10 internal redirects"}},
+  {"kind": "http_error", "source_ip": "198.51.100.10", "fields": {"module": "proxy_fcgi", "level": "error",  "code": "AH01071", "msg": "Got error 'PHP message: Login failed'"}},
+  {"kind": "http_error", "source_ip": "203.0.113.55",  "fields": {"module": "security2",  "level": "error",  "code": "",        "msg": "ModSecurity: Access denied with code 403 [file \"/etc/modsecurity/rules.conf\"] [line \"42\"]"}},
+  {"kind": "http_error", "source_ip": "2001:db8::1",   "fields": {"module": "authz_core", "level": "error",  "code": "AH01630", "msg": "client denied by server configuration: /var/www/secret"}},
+  {"kind": "http_error", "source_ip": "198.51.100.42", "fields": {"module": "core",       "level": "error",  "code": "AH00037", "msg": "Symbolic link not allowed or link target not accessible"}},
+  {"kind": "http_error", "source_ip": "203.0.113.99",  "fields": {"module": "",           "level": "error",  "code": "",        "msg": "File does not exist: /var/www/html/wp-login.php"}}
+]

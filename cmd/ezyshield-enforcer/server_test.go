@@ -419,6 +419,37 @@ func TestNftDel_OtherError_Propagated(t *testing.T) {
 	}
 }
 
+// ── socket permissions (issue #92) ──────────────────────────────────────────
+
+// TestListen_SocketPermissions verifies that after listen() the unix socket
+// is created with mode 0660 (owner rw, group rw, other none). Chown to the
+// ezyshield group is best-effort and not asserted here because CI test runners
+// rarely have the group present.
+func TestListen_SocketPermissions(t *testing.T) {
+	sockPath := t.TempDir() + "/enforcer.sock"
+
+	srv := newServer(sockPath, (&mockNftCalls{}).runner())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := srv.listen(ctx); err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer srv.ln.Close() //nolint:errcheck
+
+	info, err := os.Stat(sockPath)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		t.Errorf("path is not a unix socket: mode=%v", info.Mode())
+	}
+	gotPerm := info.Mode().Perm()
+	const wantPerm = os.FileMode(0o660)
+	if gotPerm != wantPerm {
+		t.Errorf("socket perms: got %04o, want %04o", gotPerm, wantPerm)
+	}
+}
+
 // ── integration: skip if no root/nft ─────────────────────────────────────────
 
 func TestIntegration_BanUnban(t *testing.T) {

@@ -1,0 +1,5 @@
+[
+  {"kind": "http_request", "source_ip": "203.0.113.50",  "fields": {"method": "GET",  "path": "/index.html",   "status": "200", "bytes": "1234", "ua": "",            "host": "",                "duration": ""}},
+  {"kind": "http_request", "source_ip": "198.51.100.99", "fields": {"method": "GET",  "path": "/wp-login.php", "status": "404", "bytes": "0",    "ua": "",            "host": "",                "duration": ""}},
+  {"kind": "http_request", "source_ip": "2001:db8::200", "fields": {"method": "POST", "path": "/api/login",    "status": "401", "bytes": "89",   "ua": "curl/7.88.1", "host": "api.example.com", "duration": "0.007"}}
+]

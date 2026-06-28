@@ -140,6 +140,9 @@ func TestNginxParser_Matches(t *testing.T) {
 		{"file:/etc/nginx/custom.log", true},
 		{"nginx:proxy-web-auto", true},            // docker collector with parser: nginx
 		{"nginx:/var/log/custom/proxy.log", true}, // file collector with parser: nginx
+		{"apache:wordpress-app", true},            // docker collector with parser: apache (combined-log alias)
+		{"apache:/var/log/apache2/access.log", true},
+		{"apache-error:my-container", false}, // handled by ApacheErrorParser, not here
 		{"file:/var/log/auth.log", false},
 		{"journald:sshd", false},
 		{"ssh:mycontainer", false},

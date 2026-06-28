@@ -1,0 +1,9 @@
+[
+  {"kind": "http_request", "source_ip": "192.0.2.1",    "fields": {"method": "GET",    "path": "/index.html",       "status": "200", "bytes": "1234", "ua": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"}},
+  {"kind": "http_request", "source_ip": "192.0.2.2",    "fields": {"method": "POST",   "path": "/api/login",        "status": "401", "bytes": "89",   "ua": "curl/7.88.0"}},
+  {"kind": "http_request", "source_ip": "198.51.100.1", "fields": {"method": "GET",    "path": "/wp-login.php",     "status": "404", "bytes": "0",    "ua": "python-requests/2.31.0"}},
+  {"kind": "http_request", "source_ip": "198.51.100.1", "fields": {"method": "POST",   "path": "/xmlrpc.php",       "status": "200", "bytes": "512",  "ua": "Go-http-client/1.1"}},
+  {"kind": "http_request", "source_ip": "198.51.100.2", "fields": {"method": "GET",    "path": "/.env",             "status": "404", "bytes": "0",    "ua": "masscan/1.0"}},
+  {"kind": "http_request", "source_ip": "2001:db8::42", "fields": {"method": "HEAD",   "path": "/robots.txt",       "status": "200", "bytes": "0",    "ua": "Googlebot/2.1 (+http://www.google.com/bot.html)"}},
+  {"kind": "http_request", "source_ip": "192.0.2.3",    "fields": {"method": "DELETE", "path": "/api/v1/post/42",   "status": "204", "bytes": "0",    "ua": "axios/1.6.0"}}
+]

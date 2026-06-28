@@ -108,7 +108,7 @@ still escalates today.
 ### From a release (when available)
 
 ```sh
-curl -sfL https://get.ezyshield.com | sh
+curl -sfL https://get.ezyshield.com | sudo sh
 ```
 
 The installer fetches the latest signed binaries (`ezyshield` and
@@ -243,6 +243,18 @@ public issue for security reports.
 Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) first; a
 [CLA](CLA.md) is required. Every PR ships code + tests + doc updates together,
 and CI (lint, tests, CodeQL, fuzz, security gates) must be green to merge.
+
+---
+
+## ❤️ Sponsors
+
+EzyShield is free and open source, and always will be (AGPL-3.0). If it keeps
+your servers safer, consider sponsoring — it funds focused time to build this in
+the open, independently.
+
+[**→ Become a sponsor**](https://github.com/sponsors/evertramos)
+
+<!-- sponsors --><!-- sponsors -->
 
 ---
 

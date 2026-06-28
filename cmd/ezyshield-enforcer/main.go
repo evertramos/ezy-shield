@@ -14,15 +14,29 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 )
 
+// Injected via -ldflags at build time; see Makefile.
+var (
+	version   = "dev"
+	commit    = "none"
+	buildDate = "unknown"
+)
+
 func main() {
 	socketPath := flag.String("socket", "/run/ezyshield-enforcer/enforcer.sock", "path to the enforcer unix socket")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("ezyshield-enforcer %s (commit: %s, built: %s)\n", version, commit, buildDate)
+		return
+	}
 
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
 

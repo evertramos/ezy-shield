@@ -50,8 +50,15 @@ func newServer(socketPath string, run nftRunner) *Server {
 // socketPath returns the unix socket path (for tests to connect to).
 func (s *Server) sockPath() string { return s.socketPath }
 
+// daemonGroupName is the unix group the EzyShield daemon runs as. The enforcer
+// socket is chowned to root:<daemonGroupName> 0660 so the unprivileged daemon
+// can connect while non-group users cannot. Kept in sync with the same constant
+// in cmd/ezyshield/ownership.go (issue #92).
+const daemonGroupName = "ezyshield"
+
 // listen creates the unix socket with 0660 permissions and group=ezyshield.
-// The socket is root-owned so only root (or group ezyshield) can connect.
+// The socket is root-owned so only root (or group ezyshield) can connect
+// (issue #92, SECURITY-REVIEW.md §3).
 func (s *Server) listen(ctx context.Context) error {
 	// Remove a stale socket from a previous run.
 	_ = os.Remove(s.socketPath)
@@ -68,15 +75,28 @@ func (s *Server) listen(ctx context.Context) error {
 		return fmt.Errorf("enforcer: chmod socket: %w", err)
 	}
 
-	// Set group to "ezyshield" if it exists.  Non-fatal if not (e.g., tests).
-	if g, err := user.LookupGroup("ezyshield"); err == nil {
-		if gid, err := strconv.Atoi(g.Gid); err == nil {
-			if err := os.Chown(s.socketPath, 0, gid); err != nil {
-				slog.Warn("enforcer: could not set socket group", "err", err)
-			}
+	// Set group to "ezyshield" if it exists. A missing group on a production
+	// host is a misconfiguration — without it the daemon (running as
+	// User=ezyshield) cannot connect. Tests on hosts without the group fall
+	// through and the socket stays root:root, which is fine for that scope.
+	if g, err := user.LookupGroup(daemonGroupName); err == nil {
+		gid, err := strconv.Atoi(g.Gid)
+		if err != nil {
+			slog.Warn("enforcer: invalid group id for ezyshield",
+				slog.String("gid", g.Gid), slog.String("err", err.Error()))
+		} else if err := os.Chown(s.socketPath, 0, gid); err != nil {
+			slog.Warn("enforcer: could not chown socket to ezyshield group",
+				slog.Int("gid", gid), slog.String("err", err.Error()))
+		} else {
+			slog.Info("enforcer: socket ready",
+				slog.String("path", s.socketPath),
+				slog.String("owner", "root:"+daemonGroupName),
+				slog.String("mode", "0660"))
 		}
 	} else {
-		slog.Debug("enforcer: group 'ezyshield' not found, socket group unchanged")
+		// Non-fatal for tests; production should always have the group.
+		slog.Warn("enforcer: ezyshield group not found, socket stays root:root — daemon won't connect until 'ezyshield init' creates the group",
+			slog.String("err", err.Error()))
 	}
 
 	s.ln = ln

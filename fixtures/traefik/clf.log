@@ -1,0 +1,7 @@
+203.0.113.1 - - [26/Jun/2026:12:00:00 +0000] "GET /index.html HTTP/1.1" 200 1234 "-" "Mozilla/5.0" 1 "web-router@docker" "http://backend:80" 5ms
+198.51.100.10 - - [26/Jun/2026:12:00:01 +0000] "GET /wp-login.php HTTP/1.1" 404 0 "-" "python-requests/2.27.1" 2 "wp-router@docker" "http://wordpress:80" 12ms
+198.51.100.10 - - [26/Jun/2026:12:00:02 +0000] "POST /xmlrpc.php HTTP/1.1" 200 1024 "-" "Go-http-client/1.1" 3 "wp-router@docker" "http://wordpress:80" 8ms
+198.51.100.11 - - [26/Jun/2026:12:00:03 +0000] "GET /.env HTTP/1.1" 404 0 "-" "masscan/1.0" 4 "default-router@docker" "http://app:80" 3ms
+2001:db8::1 - alice [26/Jun/2026:12:00:04 +0000] "DELETE /api/v1/resource HTTP/2.0" 204 0 "-" "axios/0.27.2" 5 "api-router@docker" "http://api:8080" 1.234s
+THIS LINE IS NOT VALID — MUST BE SKIPPED
+192.0.2.4 - - [26/Jun/2026:12:00:05 +0000] "HEAD /config.php HTTP/1.1" 404 0 "-" "zgrab/0.x" 6 "default-router@docker" "http://app:80" 2ms

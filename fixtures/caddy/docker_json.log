@@ -1,0 +1,4 @@
+{"log":"203.0.113.50 - - [26/Jun/2026:12:00:01 +0000] \"GET /index.html HTTP/2.0\" 200 1234\n","stream":"stdout","time":"2026-06-26T12:00:01.123Z"}
+{"log":"198.51.100.99 - - [26/Jun/2026:12:00:02 +0000] \"GET /wp-login.php HTTP/2.0\" 404 0\n","stream":"stdout","time":"2026-06-26T12:00:02.234Z"}
+{"log":"{\"level\":\"info\",\"ts\":1719403205.123,\"logger\":\"http.log.access\",\"msg\":\"handled request\",\"request\":{\"remote_ip\":\"2001:db8::200\",\"remote_port\":\"5050\",\"proto\":\"HTTP/2.0\",\"method\":\"POST\",\"host\":\"api.example.com\",\"uri\":\"/api/login\",\"headers\":{\"User-Agent\":[\"curl/7.88.1\"]}},\"duration\":0.007,\"size\":89,\"status\":401}\n","stream":"stdout","time":"2026-06-26T12:00:03.345Z"}
+not a docker json wrapper — must be skipped

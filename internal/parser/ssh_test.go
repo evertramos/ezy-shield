@@ -3,6 +3,7 @@ package parser_test
 import (
 	"bufio"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -20,9 +21,12 @@ type goldenEvent struct {
 	Fields   map[string]string `json:"fields"`
 }
 
-// discardLogger returns a slog.Logger that discards all output.
+// discardLogger returns a slog.Logger that discards all output. Using
+// io.Discard avoids the fd-0 finalizer trap of os.NewFile(0, os.DevNull),
+// which would close stdin when the *os.File was GC'd and cause spurious
+// EBADF errors in unrelated tests opening fixture files.
 func discardLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(os.NewFile(0, os.DevNull), nil))
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
 // runGoldenTest parses every line in fixtureFile and compares the resulting

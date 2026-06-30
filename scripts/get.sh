@@ -39,9 +39,20 @@ BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
-curl -sfL "${BASE_URL}/ezyshield-${SUFFIX}" -o "${TMP}/ezyshield"
-curl -sfL "${BASE_URL}/ezyshield-enforcer-${SUFFIX}" -o "${TMP}/ezyshield-enforcer"
-curl -sfL "${BASE_URL}/checksums.txt" -o "${TMP}/checksums.txt"
+if ! curl -sfL "${BASE_URL}/ezyshield-${SUFFIX}" -o "${TMP}/ezyshield"; then
+  echo "Error: binary not found at ${BASE_URL}/ezyshield-${SUFFIX}"
+  echo "The release ${VERSION} may not have pre-built binaries yet."
+  echo "Build from source: go build -o ezyshield ./cmd/ezyshield"
+  exit 1
+fi
+if ! curl -sfL "${BASE_URL}/ezyshield-enforcer-${SUFFIX}" -o "${TMP}/ezyshield-enforcer"; then
+  echo "Error: binary not found at ${BASE_URL}/ezyshield-enforcer-${SUFFIX}"
+  exit 1
+fi
+if ! curl -sfL "${BASE_URL}/checksums.txt" -o "${TMP}/checksums.txt"; then
+  echo "Error: checksums.txt not found in release ${VERSION}. Cannot verify integrity."
+  exit 1
+fi
 
 # Verify checksums
 cd "$TMP"

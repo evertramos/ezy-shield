@@ -1,15 +1,15 @@
 name: CI
 
-on:
-  push:
-    branches: [main]
-  pull_request:
-
 permissions:
   contents: read
 
 env:
   GO_VERSION: "1.26"
+
+on:
+  push:
+    branches: [main]
+  pull_request:
 
 jobs:
   # Skips gracefully until issue #1 lands go.mod, then becomes mandatory.

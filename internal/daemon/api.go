@@ -11,13 +11,25 @@ import "encoding/json"
 // ezyshield group (or root) can connect. Mutating verbs (ban, unban, allow)
 // are logged to the append-only audit_log.
 type SocketRequest struct {
-	// Verb selects the operation: "status", "list", "ban", "unban", "allow".
+	// Verb selects the operation: "status", "list", "list_allow", "ban",
+	// "unban", "allow".
 	Verb string `json:"verb"`
-	// IP is a plain netip.Addr string, present for ban/unban/allow.
+	// IP is the target for ban/unban/allow. Accepts either a bare address
+	// ("1.2.3.4") or a CIDR ("203.0.113.0/24"). A bare address is treated
+	// as a host prefix (/32 or /128).
 	IP string `json:"ip,omitempty"`
 	// TTL is a Go duration string (e.g. "5m", "24h") for the ban verb.
 	// Zero or absent means the policy strike table decides.
 	TTL string `json:"ttl,omitempty"`
+	// For is a duration string (e.g. "24h", "7d") for the allow verb.
+	// Mutually exclusive with Until. Empty = permanent allow.
+	For string `json:"for,omitempty"`
+	// Until is an absolute time for the allow verb in ISO 8601 form
+	// ("2026-07-15" or "2026-07-15T18:00:00[Z]"). Mutually exclusive with For.
+	Until string `json:"until,omitempty"`
+	// Reason is an operator-supplied free-text note, surfaced in list output
+	// and the audit log.
+	Reason string `json:"reason,omitempty"`
 }
 
 // SocketResponse is returned by the daemon for every request.
@@ -56,4 +68,15 @@ type BanEntry struct {
 	// ASN is the autonomous system number string (e.g. "AS12345"), or "" when
 	// enrichment is not configured.
 	ASN string `json:"asn,omitempty"`
+}
+
+// AllowEntry is one element in the array returned by the "list_allow" verb.
+type AllowEntry struct {
+	// Prefix is the canonical CIDR string (single hosts are /32 or /128).
+	Prefix string `json:"prefix"`
+	// Expires is one of: "never" (permanent), an ISO 8601 timestamp (more than
+	// 24 h remaining), or a "<n>h remaining" string for short TTLs. Clients
+	// should treat the value as already formatted for display.
+	Expires string `json:"expires"`
+	Reason  string `json:"reason,omitempty"`
 }

@@ -21,6 +21,7 @@ import (
 	"github.com/evertramos/ezy-shield/internal/enrich"
 	"github.com/evertramos/ezy-shield/internal/notify"
 	"github.com/evertramos/ezy-shield/internal/rules"
+	"github.com/evertramos/ezy-shield/internal/store"
 	"github.com/evertramos/ezy-shield/pkg/sdk"
 )
 
@@ -45,6 +46,12 @@ type daemonStore interface {
 	ActiveBans(ctx context.Context) ([]sdk.Action, error)
 	ExpireBans(ctx context.Context, now time.Time) (int, error)
 	Unban(ctx context.Context, ip netip.Addr) error
+	UnbanPrefix(ctx context.Context, prefix netip.Prefix) (int, error)
+	AuditOp(ctx context.Context, op string, prefix netip.Prefix, ttl time.Duration, reason string) error
+	AddAllow(ctx context.Context, prefix netip.Prefix, expiresAt *time.Time, reason string) error
+	RemoveAllow(ctx context.Context, prefix netip.Prefix) (int, error)
+	ListAllow(ctx context.Context) ([]store.AllowEntry, error)
+	ExpireAllows(ctx context.Context, now time.Time) (int, error)
 }
 
 // geoLookup is the minimal interface consumed from *enrich.Enricher.
@@ -217,6 +224,12 @@ func (d *Daemon) Run(parentCtx context.Context) error {
 		slog.WarnContext(ctx, "daemon: startup enforcer sync failed", "err", err)
 	}
 
+	// Restore the runtime allowlist from the store (entries added by `ezyshield
+	// allow` survive daemon restarts and expire automatically).
+	if err := d.reloadAllowlist(ctx); err != nil {
+		slog.WarnContext(ctx, "daemon: startup allowlist reload failed", "err", err)
+	}
+
 	rawLines := make(chan sdk.RawLine, rawLinesBuf)
 
 	// collCtx controls collectors only; cancelled on SIGTERM to start draining.
@@ -257,6 +270,9 @@ func (d *Daemon) Run(parentCtx context.Context) error {
 
 	// Expire bans periodically.
 	go d.runExpireBans(ctx)
+
+	// Expire temporal allowlist entries periodically.
+	go d.runExpireAllows(ctx)
 
 	// Signal handling.
 	sigCh := make(chan os.Signal, 1)
@@ -586,6 +602,24 @@ func (d *Daemon) isRuntimeAllowlisted(ip netip.Addr) bool {
 	return false
 }
 
+// reloadAllowlist rebuilds the in-memory runtime allowlist from the store.
+// Called at startup and after expiry sweeps so the in-memory view never lags
+// behind the persisted state.
+func (d *Daemon) reloadAllowlist(ctx context.Context) error {
+	entries, err := d.store.ListAllow(ctx)
+	if err != nil {
+		return fmt.Errorf("list allows: %w", err)
+	}
+	prefixes := make([]netip.Prefix, 0, len(entries))
+	for _, e := range entries {
+		prefixes = append(prefixes, e.Prefix)
+	}
+	d.mu.Lock()
+	d.runtimeAllowlist = prefixes
+	d.mu.Unlock()
+	return nil
+}
+
 // syncEnforcer loads active bans from the store and calls Enforcer.Sync.
 func (d *Daemon) syncEnforcer(ctx context.Context) error {
 	if d.enforcer == nil {
@@ -612,6 +646,32 @@ func (d *Daemon) runFlush(ctx context.Context) {
 			return
 		case now := <-t.C:
 			d.agg.Flush(ctx, now.Add(-d.agg.Windows()[len(d.agg.Windows())-1]))
+		}
+	}
+}
+
+// runExpireAllows periodically removes elapsed allowlist entries from the store
+// and rebuilds the in-memory runtime allowlist so expired ranges stop bypassing
+// the decision pipeline within at most one tick.
+func (d *Daemon) runExpireAllows(ctx context.Context) {
+	t := time.NewTicker(time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-t.C:
+			n, err := d.store.ExpireAllows(ctx, now)
+			if err != nil {
+				slog.ErrorContext(ctx, "daemon: expire allows error", "err", err)
+				continue
+			}
+			if n > 0 {
+				slog.InfoContext(ctx, "daemon: expired allows", "count", n)
+				if err := d.reloadAllowlist(ctx); err != nil {
+					slog.ErrorContext(ctx, "daemon: post-expire allow reload failed", "err", err)
+				}
+			}
 		}
 	}
 }

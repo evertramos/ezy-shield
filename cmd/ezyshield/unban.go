@@ -13,14 +13,18 @@ func newUnbanCmd() *cobra.Command {
 	var socketPath string
 
 	cmd := &cobra.Command{
-		Use:   "unban <ip>",
-		Short: "Remove an IP ban via the running daemon",
-		Long: `Send an unban request to the daemon for the given IP address.
+		Use:   "unban <ip|cidr>",
+		Short: "Remove an IP or CIDR ban via the running daemon",
+		Long: `Send an unban request to the daemon for the given IP address or CIDR.
 
-The IP is removed from the active ban set in the store and from nftables
-(if armed). The operation is logged to the audit log.`,
+A bare address removes the single ban for that IP. A CIDR removes every active
+ban whose IP falls within the range. The operation is logged to the audit log
+in either case.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validateTarget(args[0]); err != nil {
+				return err
+			}
 			return runUnban(cmd, socketPath, args[0])
 		},
 	}
@@ -31,15 +35,15 @@ The IP is removed from the active ban set in the store and from nftables
 	return cmd
 }
 
-func runUnban(cmd *cobra.Command, socketPath, ip string) error {
+func runUnban(cmd *cobra.Command, socketPath, target string) error {
 	resp, err := daemonRPC(context.Background(), socketPath,
-		daemon.SocketRequest{Verb: "unban", IP: ip})
+		daemon.SocketRequest{Verb: "unban", IP: target})
 	if err != nil {
 		return err
 	}
 	if jsonOutput {
 		return writeJSON(cmd.OutOrStdout(), resp)
 	}
-	_, err = fmt.Fprintf(cmd.OutOrStdout(), "unbanned %s\n", ip)
+	_, err = fmt.Fprintf(cmd.OutOrStdout(), "unbanned %s\n", target)
 	return err
 }

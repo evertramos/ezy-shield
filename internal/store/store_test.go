@@ -478,6 +478,146 @@ func TestUpsertScanRecord_Upsert(t *testing.T) {
 	}
 }
 
+// TestAllowlist_AddListExpire exercises the allowlist persistence path:
+// permanent rows survive expiry sweeps, dated rows go away once they pass now.
+func TestAllowlist_AddListExpire(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	// Permanent.
+	if err := db.AddAllow(ctx, netip.MustParsePrefix("10.0.0.0/8"), nil, "admin"); err != nil {
+		t.Fatalf("AddAllow permanent: %v", err)
+	}
+	// Dated, far future.
+	future := time.Now().Add(48 * time.Hour)
+	if err := db.AddAllow(ctx, netip.MustParsePrefix("203.0.113.0/24"), &future, "pentest"); err != nil {
+		t.Fatalf("AddAllow future: %v", err)
+	}
+	// Already expired.
+	past := time.Now().Add(-time.Hour)
+	if err := db.AddAllow(ctx, netip.MustParsePrefix("198.51.100.42/32"), &past, "stale"); err != nil {
+		t.Fatalf("AddAllow past: %v", err)
+	}
+
+	entries, err := db.ListAllow(ctx)
+	if err != nil {
+		t.Fatalf("ListAllow: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("want 3 entries before expiry, got %d", len(entries))
+	}
+
+	removed, err := db.ExpireAllows(ctx, time.Now())
+	if err != nil {
+		t.Fatalf("ExpireAllows: %v", err)
+	}
+	if removed != 1 {
+		t.Errorf("want 1 expired, got %d", removed)
+	}
+
+	entries, err = db.ListAllow(ctx)
+	if err != nil {
+		t.Fatalf("ListAllow after expire: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("want 2 entries after expire, got %d", len(entries))
+	}
+	for _, e := range entries {
+		if e.Prefix.String() == "198.51.100.42/32" {
+			t.Error("expired entry should have been removed")
+		}
+	}
+}
+
+// TestAllowlist_Upsert verifies repeated AddAllow updates expires_at/reason
+// without creating duplicate rows (single PRIMARY KEY collision behaviour).
+func TestAllowlist_Upsert(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	pfx := netip.MustParsePrefix("203.0.113.0/24")
+
+	if err := db.AddAllow(ctx, pfx, nil, "first"); err != nil {
+		t.Fatalf("AddAllow first: %v", err)
+	}
+	exp := time.Now().Add(24 * time.Hour)
+	if err := db.AddAllow(ctx, pfx, &exp, "second"); err != nil {
+		t.Fatalf("AddAllow second: %v", err)
+	}
+
+	entries, err := db.ListAllow(ctx)
+	if err != nil {
+		t.Fatalf("ListAllow: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("upsert must keep row count at 1, got %d", len(entries))
+	}
+	if entries[0].Reason != "second" {
+		t.Errorf("reason: want %q, got %q", "second", entries[0].Reason)
+	}
+	if entries[0].ExpiresAt.IsZero() {
+		t.Error("expires_at should be set after second add")
+	}
+}
+
+// TestAllowlist_CanonicalPrefix verifies prefixes are stored in masked form, so
+// "1.2.3.5/24" and "1.2.3.0/24" collapse to a single row.
+func TestAllowlist_CanonicalPrefix(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	if err := db.AddAllow(ctx, netip.MustParsePrefix("1.2.3.5/24"), nil, ""); err != nil {
+		t.Fatalf("AddAllow uncanonical: %v", err)
+	}
+	if err := db.AddAllow(ctx, netip.MustParsePrefix("1.2.3.0/24"), nil, ""); err != nil {
+		t.Fatalf("AddAllow canonical: %v", err)
+	}
+
+	entries, err := db.ListAllow(ctx)
+	if err != nil {
+		t.Fatalf("ListAllow: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("want 1 collapsed row, got %d", len(entries))
+	}
+	if got := entries[0].Prefix.String(); got != "1.2.3.0/24" {
+		t.Errorf("stored prefix: want canonical %q, got %q", "1.2.3.0/24", got)
+	}
+}
+
+// TestUnbanPrefix verifies a wider prefix removes every ban whose IP falls
+// inside it and leaves outside-bans untouched.
+func TestUnbanPrefix(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	inside1 := netip.MustParseAddr("10.0.0.1")
+	inside2 := netip.MustParseAddr("10.0.5.42")
+	outside := netip.MustParseAddr("203.0.113.7")
+
+	for _, ip := range []netip.Addr{inside1, inside2, outside} {
+		if err := db.RecordStrike(ctx, action(ip, 1, time.Hour)); err != nil {
+			t.Fatalf("RecordStrike %s: %v", ip, err)
+		}
+	}
+
+	n, err := db.UnbanPrefix(ctx, netip.MustParsePrefix("10.0.0.0/8"))
+	if err != nil {
+		t.Fatalf("UnbanPrefix: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("UnbanPrefix: want 2 removed, got %d", n)
+	}
+
+	bans, err := db.ActiveBans(ctx)
+	if err != nil {
+		t.Fatalf("ActiveBans: %v", err)
+	}
+	if len(bans) != 1 || bans[0].IP != outside {
+		t.Errorf("only outside ban should remain, got %+v", bans)
+	}
+}
+
 // TestScanBaseline_MultipleProtocols verifies tcp and tcp6 rows are independent.
 func TestScanBaseline_MultipleProtocols(t *testing.T) {
 	ctx := context.Background()

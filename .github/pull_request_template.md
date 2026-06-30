@@ -28,7 +28,7 @@ Closes #
 lock-out / injection / privilege-escalation / secret-exfil / evasion? Explain.
 
 ## Checklist
-- [ ] Follows AGENTS.md Hard Rules (no new listeners, allowlist supremacy, dry-run default, secrets out of code)
+- [ ] Follows .ezy/agents/AGENTS.md Hard Rules (no new listeners, allowlist supremacy, dry-run default, secrets out of code)
 - [ ] No hardening systemd directive removed (or justified above)
 - [ ] Docs updated (PLAN/ARCHITECTURE/guide) if behavior changed
 - [ ] New dependency justified (or none added)

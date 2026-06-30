@@ -13,16 +13,24 @@ import (
 )
 
 func newListCmd() *cobra.Command {
-	var socketPath string
-	var byCountry bool
-	var byASN bool
+	var (
+		socketPath string
+		byCountry  bool
+		byASN      bool
+		allow      bool
+	)
 
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List active bans from the running daemon",
-		Long:  `Query the daemon for the current set of active bans and print them.`,
-		Args:  cobra.NoArgs,
+		Short: "List active bans (or allowlist entries) from the running daemon",
+		Long: `Query the daemon and print the current set of active bans.
+
+Use --allow to list the persisted allowlist instead, including expiry info.`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if allow {
+				return runListAllow(cmd, socketPath)
+			}
 			return runList(cmd, socketPath, byCountry, byASN)
 		},
 	}
@@ -33,6 +41,8 @@ func newListCmd() *cobra.Command {
 		"group bans by country (requires GeoIP enrichment)")
 	cmd.Flags().BoolVar(&byASN, "by-asn", false,
 		"group bans by ASN (requires GeoIP enrichment)")
+	cmd.Flags().BoolVar(&allow, "allow", false,
+		"list allowlist entries instead of bans")
 
 	return cmd
 }
@@ -66,6 +76,35 @@ func runList(cmd *cobra.Command, socketPath string, byCountry, byASN bool) error
 	default:
 		return printBanTable(cmd, entries)
 	}
+}
+
+func runListAllow(cmd *cobra.Command, socketPath string) error {
+	resp, err := daemonRPC(context.Background(), socketPath,
+		daemon.SocketRequest{Verb: "list_allow"})
+	if err != nil {
+		return err
+	}
+
+	if jsonOutput {
+		return writeJSON(cmd.OutOrStdout(), resp)
+	}
+
+	var entries []daemon.AllowEntry
+	if err := json.Unmarshal(resp.Data, &entries); err != nil {
+		return fmt.Errorf("parse list_allow response: %w", err)
+	}
+
+	if len(entries) == 0 {
+		_, err := fmt.Fprintln(cmd.OutOrStdout(), "no allowlist entries")
+		return err
+	}
+
+	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "IP/CIDR\tEXPIRES\tREASON") //nolint:errcheck
+	for _, e := range entries {
+		fmt.Fprintf(w, "%s\t%s\t%s\n", e.Prefix, e.Expires, e.Reason) //nolint:errcheck
+	}
+	return w.Flush()
 }
 
 func printBanTable(cmd *cobra.Command, entries []daemon.BanEntry) error {

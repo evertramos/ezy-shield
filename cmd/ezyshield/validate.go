@@ -219,7 +219,7 @@ func checkPolicyFile(w io.Writer, path string, errs, warns *int) (*config.Policy
 // reachability so an operator sees which integrations are wired up.
 func checkCross(w io.Writer, cfg *config.Config, _ *config.Policy, errs, warns *int) {
 	any := false
-	if cfg.Enforce != nil && cfg.Enforce.Cloudflare != nil {
+	if cfg.Enforce != nil && len(cfg.Enforce.Cloudflare) > 0 {
 		passLine(w, "Cloudflare api_token referenced via env:")
 		any = true
 	}
@@ -280,8 +280,14 @@ func collectSecretRefs(cfg *config.Config) []secretFieldRef {
 			add(fmt.Sprintf("ai.providers[%d].api_key", i), p.APIKey)
 		}
 	}
-	if cfg.Enforce != nil && cfg.Enforce.Cloudflare != nil {
-		add("enforce.cloudflare.api_token", cfg.Enforce.Cloudflare.APIToken)
+	if cfg.Enforce != nil {
+		for i, cf := range cfg.Enforce.Cloudflare {
+			field := "enforce.cloudflare.api_token"
+			if len(cfg.Enforce.Cloudflare) > 1 {
+				field = fmt.Sprintf("enforce.cloudflare[%d].api_token", i)
+			}
+			add(field, cf.APIToken)
+		}
 	}
 	if cfg.Notify != nil {
 		if t := cfg.Notify.Telegram; t != nil {

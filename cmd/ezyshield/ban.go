@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/netip"
 
 	"github.com/spf13/cobra"
 
@@ -13,38 +14,59 @@ func newBanCmd() *cobra.Command {
 	var (
 		socketPath string
 		ttl        string
+		reason     string
 	)
 
 	cmd := &cobra.Command{
-		Use:   "ban <ip>",
-		Short: "Manually ban an IP via the running daemon",
-		Long: `Send a ban request to the daemon for the given IP address.
+		Use:   "ban <ip|cidr>",
+		Short: "Manually ban an IP or CIDR via the running daemon",
+		Long: `Send a ban request to the daemon for the given IP address or CIDR.
+
+A bare address (e.g. 1.2.3.4) is treated as a host prefix (/32 or /128).
+A CIDR (e.g. 203.0.113.0/24) bans the entire range.
 
 If the daemon is in dry-run mode (armed=false in policy.yaml) the command is
 recorded in the audit log but no firewall rule is written.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runBan(cmd, socketPath, args[0], ttl)
+			if err := validateTarget(args[0]); err != nil {
+				return err
+			}
+			return runBan(cmd, socketPath, args[0], ttl, reason)
 		},
 	}
 
 	cmd.Flags().StringVar(&socketPath, "socket", daemon.DefaultSocketPath,
 		"path to daemon control socket")
 	cmd.Flags().StringVar(&ttl, "ttl", "",
-		"ban duration, e.g. \"5m\", \"24h\" (empty = policy strike table)")
+		"ban duration, e.g. \"5m\", \"24h\", \"7d\" (empty = policy strike table)")
+	cmd.Flags().StringVar(&reason, "reason", "",
+		"free-text note, shown in audit log")
 
 	return cmd
 }
 
-func runBan(cmd *cobra.Command, socketPath, ip, ttl string) error {
+func runBan(cmd *cobra.Command, socketPath, target, ttl, reason string) error {
 	resp, err := daemonRPC(context.Background(), socketPath,
-		daemon.SocketRequest{Verb: "ban", IP: ip, TTL: ttl})
+		daemon.SocketRequest{Verb: "ban", IP: target, TTL: ttl, Reason: reason})
 	if err != nil {
 		return err
 	}
 	if jsonOutput {
 		return writeJSON(cmd.OutOrStdout(), resp)
 	}
-	_, err = fmt.Fprintf(cmd.OutOrStdout(), "ban queued for %s\n", ip)
+	_, err = fmt.Fprintf(cmd.OutOrStdout(), "ban queued for %s\n", target)
 	return err
+}
+
+// validateTarget rejects inputs that are neither a valid IP nor a valid CIDR
+// before they reach the daemon, so the user gets a clear message client-side.
+func validateTarget(s string) error {
+	if _, err := netip.ParsePrefix(s); err == nil {
+		return nil
+	}
+	if _, err := netip.ParseAddr(s); err == nil {
+		return nil
+	}
+	return fmt.Errorf("invalid ip or cidr: %q", s)
 }

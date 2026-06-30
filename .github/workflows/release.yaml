@@ -59,6 +59,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          # Overwrite any pre-existing notes instead of appending to them,
+          # so notes are not duplicated if the release already exists.
+          append_body: false
           files: |
             dist/ezyshield-*
             dist/checksums.txt

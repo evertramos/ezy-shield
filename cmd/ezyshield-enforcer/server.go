@@ -69,38 +69,51 @@ func (s *Server) listen(ctx context.Context) error {
 		return fmt.Errorf("enforcer: listen %s: %w", s.socketPath, err)
 	}
 
-	// 0660 → owner rw, group rw, other none (SECURITY-REVIEW.md §3).
+	// Chown to root:ezyshield first, then chmod 0660 — owner rw, group rw,
+	// other none (SECURITY-REVIEW.md §3). Standard fail2ban/sshguard pattern:
+	// admins in the daemon group can use the socket without sudo (issue #6).
+	chownEnforcerSocket(s.socketPath)
 	if err := os.Chmod(s.socketPath, 0o660); err != nil { //nolint:gosec // G302: 0660 is intentional; socket is group-restricted to 'ezyshield'
 		_ = ln.Close()
 		return fmt.Errorf("enforcer: chmod socket: %w", err)
 	}
 
-	// Set group to "ezyshield" if it exists. A missing group on a production
-	// host is a misconfiguration — without it the daemon (running as
-	// User=ezyshield) cannot connect. Tests on hosts without the group fall
-	// through and the socket stays root:root, which is fine for that scope.
-	if g, err := user.LookupGroup(daemonGroupName); err == nil {
-		gid, err := strconv.Atoi(g.Gid)
-		if err != nil {
-			slog.Warn("enforcer: invalid group id for ezyshield",
-				slog.String("gid", g.Gid), slog.String("err", err.Error()))
-		} else if err := os.Chown(s.socketPath, 0, gid); err != nil {
-			slog.Warn("enforcer: could not chown socket to ezyshield group",
-				slog.Int("gid", gid), slog.String("err", err.Error()))
-		} else {
-			slog.Info("enforcer: socket ready",
-				slog.String("path", s.socketPath),
-				slog.String("owner", "root:"+daemonGroupName),
-				slog.String("mode", "0660"))
-		}
-	} else {
-		// Non-fatal for tests; production should always have the group.
-		slog.Warn("enforcer: ezyshield group not found, socket stays root:root — daemon won't connect until 'ezyshield init' creates the group",
-			slog.String("err", err.Error()))
-	}
-
 	s.ln = ln
 	return nil
+}
+
+// chownEnforcerSocket chowns path to root:ezyshield. If the group is missing
+// (e.g., a container without 'ezyshield init' run) it falls back to the current
+// process uid/gid so the socket is still owned by something usable, and logs a
+// warning so the operator notices.
+func chownEnforcerSocket(path string) {
+	g, lookupErr := user.LookupGroup(daemonGroupName)
+	if lookupErr != nil {
+		uid, gid := os.Getuid(), os.Getgid()
+		slog.Warn("enforcer: ezyshield group not found, falling back to current uid:gid — daemon (User=ezyshield) cannot connect until 'ezyshield init' creates the group",
+			slog.String("path", path), slog.Int("uid", uid), slog.Int("gid", gid),
+			slog.String("err", lookupErr.Error()))
+		if err := os.Chown(path, uid, gid); err != nil {
+			slog.Warn("enforcer: socket chown fallback failed",
+				slog.String("path", path), slog.String("err", err.Error()))
+		}
+		return
+	}
+	gid, err := strconv.Atoi(g.Gid)
+	if err != nil {
+		slog.Warn("enforcer: invalid group id for ezyshield",
+			slog.String("gid", g.Gid), slog.String("err", err.Error()))
+		return
+	}
+	if err := os.Chown(path, 0, gid); err != nil {
+		slog.Warn("enforcer: could not chown socket to root:ezyshield",
+			slog.Int("gid", gid), slog.String("err", err.Error()))
+		return
+	}
+	slog.Info("enforcer: socket ready",
+		slog.String("path", path),
+		slog.String("owner", "root:"+daemonGroupName),
+		slog.String("mode", "0660"))
 }
 
 // init initialises the nftables table/set/chain and loads the current set

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -15,6 +16,12 @@ import (
 
 	"github.com/evertramos/ezy-shield/pkg/sdk"
 )
+
+// daemonGroupName is the unix group the EzyShield daemon runs as. The control
+// socket is chowned to root:<daemonGroupName> 0660 so any admin in that group
+// can run ezyshield status/list/ban/unban/allow without sudo. Matches the
+// fail2ban/sshguard pattern (issue #6).
+const daemonGroupName = "ezyshield"
 
 // asnString formats a uint32 ASN as "AS<n>", or "" when zero.
 func asnString(n uint32) string {
@@ -57,7 +64,10 @@ func (d *Daemon) serveSocket(ctx context.Context) {
 	}
 
 	// Set permissions immediately after bind so a window between bind and chmod
-	// is as narrow as possible.
+	// is as narrow as possible. The standard for security daemons (fail2ban,
+	// sshguard) is root:ezyshield 0660 so admins in the group can use the
+	// control socket without sudo — see issue #6.
+	chownSocketToDaemonGroup(ctx, d.socketPath)
 	if err := os.Chmod(d.socketPath, socketPerm); err != nil {
 		slog.WarnContext(ctx, "daemon: socket chmod failed",
 			"path", d.socketPath, "err", err)
@@ -83,6 +93,34 @@ func (d *Daemon) serveSocket(ctx context.Context) {
 			continue
 		}
 		go d.handleConn(ctx, conn)
+	}
+}
+
+// chownSocketToDaemonGroup chowns path to root:ezyshield. When the group is
+// not present on the host (uncommon outside production; happens in containers
+// or fresh dev hosts before 'ezyshield init') it falls back to the current
+// process uid/gid so the socket is still owned by something usable, and logs a
+// warning so the operator notices.
+func chownSocketToDaemonGroup(ctx context.Context, path string) {
+	g, lookupErr := user.LookupGroup(daemonGroupName)
+	if lookupErr != nil {
+		uid, gid := os.Getuid(), os.Getgid()
+		slog.WarnContext(ctx, "daemon: ezyshield group not found, falling back to current uid:gid — admins outside the daemon's user cannot use the socket without sudo",
+			"path", path, "uid", uid, "gid", gid, "err", lookupErr)
+		if err := os.Chown(path, uid, gid); err != nil {
+			slog.WarnContext(ctx, "daemon: socket chown fallback failed", "path", path, "err", err)
+		}
+		return
+	}
+	gid, err := strconv.Atoi(g.Gid)
+	if err != nil {
+		slog.WarnContext(ctx, "daemon: invalid gid for ezyshield group",
+			"path", path, "gid", g.Gid, "err", err)
+		return
+	}
+	if err := os.Chown(path, 0, gid); err != nil {
+		slog.WarnContext(ctx, "daemon: socket chown to root:ezyshield failed",
+			"path", path, "gid", gid, "err", err)
 	}
 }
 

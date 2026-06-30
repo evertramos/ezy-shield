@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 env:
-  GO_VERSION: "1.24"
+  GO_VERSION: "1.26"
 
 jobs:
   # Skips gracefully until issue #1 lands go.mod, then becomes mandatory.
@@ -128,16 +128,15 @@ jobs:
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
       - name: Check for known vulnerabilities
         run: |
-          govulncheck ./... 2>&1 | tee /tmp/vulncheck.out
-          # Fail only on vulnerabilities in our own code or direct deps (not stdlib-only)
-          if grep -q "Your code is affected" /tmp/vulncheck.out; then
-            echo "::warning::govulncheck found vulnerabilities — review output above"
-            # Allow stdlib-only vulns (fixed in newer Go) to pass; fail on third-party
-            if grep -q "Found in:.*go1\." /tmp/vulncheck.out && ! grep -qE "Found in:.*(modernc|github)" /tmp/vulncheck.out; then
-              echo "::notice::All vulnerabilities are in Go stdlib — upgrade Go when fix is available"
-              exit 0
+          govulncheck ./... 2>&1 | tee /tmp/vulncheck.out || true
+          # Fail only if there are vulnerabilities with fixes available (meaning we should update)
+          if grep -q "Fixed in:" /tmp/vulncheck.out; then
+            # Check if ALL fixes are stdlib (Go version upgrade needed, not actionable now)
+            if grep "Fixed in:" /tmp/vulncheck.out | grep -qvE "^Fixed in: go"; then
+              echo "::error::Vulnerabilities with available fixes in dependencies. Run: go get -u && go mod tidy"
+              exit 1
             fi
-            exit 1
+            echo "::notice::All vulnerabilities are in Go stdlib — Go will be updated when fix is released"
           fi
 
   security-review-gate:

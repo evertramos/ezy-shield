@@ -1,6 +1,6 @@
 # Security Policy
 
-EzyShield is a security tool, so we take vulnerabilities in it seriously.
+EzyShield is a security tool, so we take vulnerabilities seriously.
 
 ## Reporting a vulnerability
 Please do NOT open a public issue. Use GitHub's private vulnerability reporting

@@ -34,9 +34,10 @@ const (
 // serveSocket creates the unix socket and accepts connections until ctx is done.
 // It creates the socket directory (0750) if absent.
 //
-// Security: the socket is created at socketPath with mode 0660.  The kernel
-// enforces access by UID/GID; no further authentication is done.  All mutating
-// commands (ban, unban, allow) are written to audit_log.
+// Security: the socket is created at socketPath with mode 0660 and chowned to
+// the running daemon's UID/GID. The kernel enforces access by UID/GID; no
+// further authentication is done. All mutating commands (ban, unban, allow)
+// are written to audit_log.
 func (d *Daemon) serveSocket(ctx context.Context) {
 	dir := filepath.Dir(d.socketPath)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
@@ -56,8 +57,17 @@ func (d *Daemon) serveSocket(ctx context.Context) {
 		return
 	}
 
-	// Set permissions immediately after bind so a window between bind and chmod
-	// is as narrow as possible.
+	// Set ownership and permissions immediately after bind so the window
+	// between bind and the final ACL is as narrow as possible. Chown to the
+	// running uid/gid guarantees that even when the daemon is started as root
+	// (e.g., manual launch outside systemd) the socket is reachable by the
+	// account the daemon will run under, instead of being silently left as
+	// root:root (issue #6).
+	uid, gid := os.Getuid(), os.Getgid()
+	if err := os.Chown(d.socketPath, uid, gid); err != nil {
+		slog.WarnContext(ctx, "daemon: socket chown failed",
+			"path", d.socketPath, "uid", uid, "gid", gid, "err", err)
+	}
 	if err := os.Chmod(d.socketPath, socketPerm); err != nil {
 		slog.WarnContext(ctx, "daemon: socket chmod failed",
 			"path", d.socketPath, "err", err)

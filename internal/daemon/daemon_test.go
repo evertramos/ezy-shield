@@ -6,7 +6,9 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"os"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -228,6 +230,80 @@ func TestEndToEnd_LRUCap(t *testing.T) {
 	if got := d.agg.Len(); got > cap+1 {
 		t.Errorf("aggregator Len = %d after LRU cap=%d; expected ≤ %d", got, cap, cap+1)
 	}
+}
+
+// TestServeSocket_Permissions verifies the daemon control socket is created
+// with mode 0660 and owned by the daemon's running uid/gid (issue #6).
+func TestServeSocket_Permissions(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	db, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	policy := &config.Policy{
+		Armed:            false,
+		BanThreshold:     config.DefaultBanThreshold,
+		ObserveThreshold: config.DefaultObserveThreshold,
+		MaxBansPerMinute: config.DefaultMaxBansPerMinute,
+		Strikes:          config.DefaultStrikes,
+	}
+
+	sockPath := t.TempDir() + "/ezyshield.sock"
+	d, err := New(Config{
+		Policy:     policy,
+		Store:      db,
+		SocketPath: sockPath,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	srvDone := make(chan struct{})
+	go func() {
+		d.serveSocket(ctx)
+		close(srvDone)
+	}()
+
+	// Wait for the socket file to appear.
+	deadline := time.Now().Add(2 * time.Second)
+	var info os.FileInfo
+	for time.Now().Before(deadline) {
+		var statErr error
+		info, statErr = os.Stat(sockPath)
+		if statErr == nil && info.Mode()&os.ModeSocket != 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if info == nil || info.Mode()&os.ModeSocket == 0 {
+		cancel()
+		<-srvDone
+		t.Fatalf("socket %s not created within deadline", sockPath)
+	}
+
+	gotPerm := info.Mode().Perm()
+	const wantPerm = os.FileMode(0o660)
+	if gotPerm != wantPerm {
+		t.Errorf("socket perms: got %04o, want %04o", gotPerm, wantPerm)
+	}
+
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatalf("stat sys is not *syscall.Stat_t: %T", info.Sys())
+	}
+	if got, want := int(stat.Uid), os.Getuid(); got != want {
+		t.Errorf("socket uid: got %d, want %d", got, want)
+	}
+	if got, want := int(stat.Gid), os.Getgid(); got != want {
+		t.Errorf("socket gid: got %d, want %d", got, want)
+	}
+
+	cancel()
+	<-srvDone
 }
 
 // TestSocketHandlers exercises handleStatus / handleList / handleAllow using

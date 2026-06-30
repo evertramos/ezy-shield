@@ -1,15 +1,15 @@
 name: CI
 
-on:
-  push:
-    branches: [main]
-  pull_request:
-
 permissions:
   contents: read
 
 env:
-  GO_VERSION: "1.24"
+  GO_VERSION: "1.26"
+
+on:
+  push:
+    branches: [main]
+  pull_request:
 
 jobs:
   # Skips gracefully until issue #1 lands go.mod, then becomes mandatory.
@@ -18,7 +18,7 @@ jobs:
     outputs:
       has_go: ${{ steps.check.outputs.has_go }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: check
         run: |
           if [ -f go.mod ]; then echo "has_go=true" >> "$GITHUB_OUTPUT";
@@ -29,8 +29,8 @@ jobs:
     if: needs.detect.outputs.has_go == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -41,17 +41,17 @@ jobs:
       - name: go vet
         run: go vet ./...
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v7
+        uses: golangci/golangci-lint-action@v9
         with:
-          version: "v2.1"
+          version: "v2.12"
 
   test:
     needs: detect
     if: needs.detect.outputs.has_go == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -68,8 +68,8 @@ jobs:
       matrix:
         goarch: [amd64, arm64]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -83,7 +83,7 @@ jobs:
   docs:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Required docs present
         run: |
           for f in SECURITY.md LICENSE docs/SECURITY-REVIEW.md; do
@@ -104,8 +104,8 @@ jobs:
     if: needs.detect.outputs.has_go == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -119,8 +119,8 @@ jobs:
     if: needs.detect.outputs.has_go == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -128,16 +128,15 @@ jobs:
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
       - name: Check for known vulnerabilities
         run: |
-          govulncheck ./... 2>&1 | tee /tmp/vulncheck.out
-          # Fail only on vulnerabilities in our own code or direct deps (not stdlib-only)
-          if grep -q "Your code is affected" /tmp/vulncheck.out; then
-            echo "::warning::govulncheck found vulnerabilities — review output above"
-            # Allow stdlib-only vulns (fixed in newer Go) to pass; fail on third-party
-            if grep -q "Found in:.*go1\." /tmp/vulncheck.out && ! grep -qE "Found in:.*(modernc|github)" /tmp/vulncheck.out; then
-              echo "::notice::All vulnerabilities are in Go stdlib — upgrade Go when fix is available"
-              exit 0
+          govulncheck ./... 2>&1 | tee /tmp/vulncheck.out || true
+          # Fail only if there are vulnerabilities with fixes available (meaning we should update)
+          if grep -q "Fixed in:" /tmp/vulncheck.out; then
+            # Check if ALL fixes are stdlib (Go version upgrade needed, not actionable now)
+            if grep "Fixed in:" /tmp/vulncheck.out | grep -qvE "^Fixed in: go"; then
+              echo "::error::Vulnerabilities with available fixes in dependencies. Run: go get -u && go mod tidy"
+              exit 1
             fi
-            exit 1
+            echo "::notice::All vulnerabilities are in Go stdlib — Go will be updated when fix is released"
           fi
 
   security-review-gate:
@@ -145,7 +144,7 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Check critical paths require a filled security review

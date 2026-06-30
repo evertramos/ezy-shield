@@ -33,3 +33,8 @@ dist/
 build/
 bin/
 coverage.out
+
+# Dev files
+.ezy/
+CLAUDE.md
+

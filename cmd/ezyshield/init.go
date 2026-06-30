@@ -322,10 +322,10 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 	}
 	p.println("")
 	p.println("Next steps:")
-	p.println("  ezyshield status        — live view of detections")
-	p.println("  ezyshield doctor        — verify configuration")
+	p.println("  sudo ezyshield status        — live view of detections")
+	p.println("  sudo ezyshield doctor        — verify configuration")
 	if !state.armed {
-		p.println("  ezyshield arm           — switch from dry-run to armed (after 24h+ validation)")
+		p.println("  sudo ezyshield arm           — switch from dry-run to armed (after 24h+ validation)")
 	}
 
 	return p.err

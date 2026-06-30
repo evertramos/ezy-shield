@@ -311,6 +311,107 @@ func TestSocketHandlers(t *testing.T) {
 		}
 	})
 
+	t.Run("allow_cidr_covers_all_addrs_in_range", func(t *testing.T) {
+		resp := call(t, SocketRequest{
+			Verb:   "allow",
+			IP:     "192.0.2.0/24",
+			Reason: "pentest",
+		})
+		if !resp.OK {
+			t.Fatalf("allow cidr failed: %s", resp.Error)
+		}
+		// Every IP in the range must now be allowlisted.
+		for _, last := range []byte{1, 100, 254} {
+			ip := netip.AddrFrom4([4]byte{192, 0, 2, last})
+			if !d.isRuntimeAllowlisted(ip) {
+				t.Errorf("expected %s to be runtime-allowlisted", ip)
+			}
+		}
+		// An IP outside the range must NOT be allowlisted.
+		outside := netip.MustParseAddr("192.0.3.1")
+		if d.isRuntimeAllowlisted(outside) {
+			t.Errorf("did not expect %s to be runtime-allowlisted", outside)
+		}
+	})
+
+	t.Run("allow_for_duration_expires", func(t *testing.T) {
+		resp := call(t, SocketRequest{
+			Verb: "allow",
+			IP:   "198.51.100.0/24",
+			For:  "1h",
+		})
+		if !resp.OK {
+			t.Fatalf("allow --for failed: %s", resp.Error)
+		}
+		ip := netip.MustParseAddr("198.51.100.42")
+		if !d.isRuntimeAllowlisted(ip) {
+			t.Errorf("expected %s to be runtime-allowlisted", ip)
+		}
+
+		// Sweep with "now" two hours from now: the temporal allow must vanish.
+		if _, err := db.ExpireAllows(ctx, time.Now().Add(2*time.Hour)); err != nil {
+			t.Fatalf("ExpireAllows: %v", err)
+		}
+		if err := d.reloadAllowlist(ctx); err != nil {
+			t.Fatalf("reloadAllowlist: %v", err)
+		}
+		if d.isRuntimeAllowlisted(ip) {
+			t.Errorf("%s should no longer be allowlisted after expiry sweep", ip)
+		}
+	})
+
+	t.Run("allow_for_invalid_duration", func(t *testing.T) {
+		resp := call(t, SocketRequest{Verb: "allow", IP: "10.99.0.0/24", For: "banana"})
+		if resp.OK {
+			t.Error("expected error for invalid --for, got OK")
+		}
+	})
+
+	t.Run("allow_for_and_until_mutually_exclusive", func(t *testing.T) {
+		resp := call(t, SocketRequest{
+			Verb: "allow", IP: "10.98.0.0/24",
+			For: "24h", Until: "2099-01-01",
+		})
+		if resp.OK {
+			t.Error("expected error when both --for and --until are set, got OK")
+		}
+	})
+
+	t.Run("allow_until_in_past_rejected", func(t *testing.T) {
+		resp := call(t, SocketRequest{Verb: "allow", IP: "10.97.0.0/24", Until: "2000-01-01"})
+		if resp.OK {
+			t.Error("expected error for past --until, got OK")
+		}
+	})
+
+	t.Run("list_allow_returns_entries", func(t *testing.T) {
+		resp := call(t, SocketRequest{Verb: "list_allow"})
+		if !resp.OK {
+			t.Fatalf("list_allow failed: %s", resp.Error)
+		}
+		var entries []AllowEntry
+		if err := json.Unmarshal(resp.Data, &entries); err != nil {
+			t.Fatalf("unmarshal AllowEntry: %v", err)
+		}
+		if len(entries) == 0 {
+			t.Error("list_allow returned 0 entries; expected at least one from earlier sub-tests")
+		}
+	})
+
+	t.Run("ban_cidr_accepted", func(t *testing.T) {
+		resp := call(t, SocketRequest{Verb: "ban", IP: "203.0.113.0/24"})
+		if !resp.OK {
+			t.Errorf("ban cidr failed: %s", resp.Error)
+		}
+	})
+
+	t.Run("unban_cidr_accepted", func(t *testing.T) {
+		resp := call(t, SocketRequest{Verb: "unban", IP: "203.0.113.0/24"})
+		if !resp.OK {
+			t.Errorf("unban cidr failed: %s", resp.Error)
+		}
+	})
+
 	t.Run("unknown_verb", func(t *testing.T) {
 		resp := call(t, SocketRequest{Verb: "explode"})
 		if resp.OK {

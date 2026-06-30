@@ -346,6 +346,195 @@ func (s *DB) Audit(ctx context.Context, a sdk.Action) error {
 	return nil
 }
 
+// AuditOp appends an audit entry for an operation that targets a prefix rather
+// than a single IP (manual ban/unban/allow of a CIDR). reason is operator-provided
+// free text; the prefix is recorded in the ip column so existing audit consumers
+// keep working unchanged.
+func (s *DB) AuditOp(ctx context.Context, op string, prefix netip.Prefix, ttl time.Duration, reason string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO audit_log (recorded_at, op, ip, ttl_seconds, strike_num, reason)
+		VALUES (?, ?, ?, ?, 0, ?)
+	`, nowRFC3339(), op, prefix.Masked().String(), int64(ttl.Seconds()), reason)
+	if err != nil {
+		return fmt.Errorf("store: AuditOp: %w", err)
+	}
+	return nil
+}
+
+// AllowEntry is one row of the allowlist table.
+type AllowEntry struct {
+	Prefix    netip.Prefix
+	ExpiresAt time.Time // zero value = permanent
+	Reason    string
+	CreatedAt time.Time
+}
+
+// AddAllow upserts prefix into the allowlist. A nil expiresAt means permanent;
+// a non-nil value sets the absolute expiry time. The prefix is canonicalised
+// (Masked) before storage so 1.2.3.5/24 and 1.2.3.0/24 collapse to one row.
+func (s *DB) AddAllow(ctx context.Context, prefix netip.Prefix, expiresAt *time.Time, reason string) error {
+	var expStr *string
+	if expiresAt != nil {
+		v := expiresAt.UTC().Format(time.RFC3339Nano)
+		expStr = &v
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO allowlist (prefix, expires_at, reason, created_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(prefix) DO UPDATE SET
+			expires_at = excluded.expires_at,
+			reason     = excluded.reason,
+			created_at = excluded.created_at
+	`, prefix.Masked().String(), expStr, reason, nowRFC3339())
+	if err != nil {
+		return fmt.Errorf("store: AddAllow: %w", err)
+	}
+	return nil
+}
+
+// RemoveAllow deletes prefix from the allowlist. It is idempotent: missing
+// rows are not an error. Returns the number of rows removed.
+func (s *DB) RemoveAllow(ctx context.Context, prefix netip.Prefix) (int, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM allowlist WHERE prefix = ?`, prefix.Masked().String())
+	if err != nil {
+		return 0, fmt.Errorf("store: RemoveAllow: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+// ListAllow returns every row currently in the allowlist, sorted by prefix.
+// Callers should call ExpireAllows first to flush stale entries.
+func (s *DB) ListAllow(ctx context.Context) ([]AllowEntry, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT prefix, expires_at, reason, created_at
+		FROM allowlist
+		ORDER BY prefix
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("store: ListAllow: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []AllowEntry
+	for rows.Next() {
+		var (
+			prefixStr string
+			expiresAt sql.NullString
+			reason    string
+			createdAt string
+		)
+		if err := rows.Scan(&prefixStr, &expiresAt, &reason, &createdAt); err != nil {
+			return nil, fmt.Errorf("store: ListAllow scan: %w", err)
+		}
+		pfx, err := netip.ParsePrefix(prefixStr)
+		if err != nil {
+			return nil, fmt.Errorf("store: ListAllow bad prefix %q: %w", prefixStr, err)
+		}
+		entry := AllowEntry{Prefix: pfx, Reason: reason}
+		if expiresAt.Valid {
+			t, err := time.Parse(time.RFC3339Nano, expiresAt.String)
+			if err != nil {
+				return nil, fmt.Errorf("store: ListAllow parse expires_at: %w", err)
+			}
+			entry.ExpiresAt = t
+		}
+		if createdAt != "" {
+			if t, err := time.Parse(time.RFC3339Nano, createdAt); err == nil {
+				entry.CreatedAt = t
+			}
+		}
+		out = append(out, entry)
+	}
+	return out, rows.Err()
+}
+
+// ExpireAllows removes allowlist rows whose expires_at is before now and writes
+// one audit_log entry per removal. Permanent rows (NULL expires_at) are kept.
+func (s *DB) ExpireAllows(ctx context.Context, now time.Time) (int, error) {
+	nowStr := now.UTC().Format(time.RFC3339Nano)
+
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO audit_log (recorded_at, op, ip, ttl_seconds, strike_num, reason)
+		SELECT ?, 'allow_expire', prefix, 0, 0, 'allowlist ttl expired'
+		FROM allowlist
+		WHERE expires_at IS NOT NULL AND expires_at < ?
+	`, nowStr, nowStr)
+	if err != nil {
+		return 0, fmt.Errorf("store: ExpireAllows audit: %w", err)
+	}
+
+	res, err := s.db.ExecContext(ctx, `
+		DELETE FROM allowlist WHERE expires_at IS NOT NULL AND expires_at < ?
+	`, nowStr)
+	if err != nil {
+		return 0, fmt.Errorf("store: ExpireAllows: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+// UnbanPrefix removes every active ban whose IP falls within prefix. Each
+// removed ban is appended to audit_log. Returns the number of bans removed.
+// Single-host prefixes (/32 or /128) are equivalent to Unban for that IP.
+func (s *DB) UnbanPrefix(ctx context.Context, prefix netip.Prefix) (int, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT ip FROM bans_active`)
+	if err != nil {
+		return 0, fmt.Errorf("store: UnbanPrefix scan: %w", err)
+	}
+	var matches []string
+	for rows.Next() {
+		var ipStr string
+		if err := rows.Scan(&ipStr); err != nil {
+			_ = rows.Close()
+			return 0, fmt.Errorf("store: UnbanPrefix scan row: %w", err)
+		}
+		ip, perr := netip.ParseAddr(ipStr)
+		if perr != nil {
+			continue // skip malformed rows rather than failing the whole op
+		}
+		if prefix.Contains(ip) {
+			matches = append(matches, ipStr)
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return 0, fmt.Errorf("store: UnbanPrefix close: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("store: UnbanPrefix err: %w", err)
+	}
+
+	if len(matches) == 0 {
+		return 0, nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("store: UnbanPrefix begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	now := nowRFC3339()
+	pfxStr := prefix.Masked().String()
+	for _, ipStr := range matches {
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM bans_active WHERE ip = ?`, ipStr); err != nil {
+			return 0, fmt.Errorf("store: UnbanPrefix delete: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO audit_log (recorded_at, op, ip, ttl_seconds, strike_num, reason)
+			VALUES (?, 'unban', ?, 0, 0, ?)
+		`, now, ipStr, "manual unban via "+pfxStr); err != nil {
+			return 0, fmt.Errorf("store: UnbanPrefix audit: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("store: UnbanPrefix commit: %w", err)
+	}
+	return len(matches), nil
+}
+
 // RecordUsage inserts a row into ai_usage for a single AI provider call.
 // cost_usd is derived by the caller from token counts and provider pricing.
 func (s *DB) RecordUsage(ctx context.Context, provider string, usage sdk.Usage) error {

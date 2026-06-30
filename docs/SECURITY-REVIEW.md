@@ -1,6 +1,6 @@
 # SECURITY-REVIEW.md — Playbook for AI & human security review
 
-> Read this **before reviewing or writing any PR**. AGENTS.md has the day-to-day
+> Read this **before reviewing or writing any PR**. .ezy/agents/AGENTS.md has the day-to-day
 > rules; this file is the adversarial lens. EzyShield is a root-capable security
 > daemon — a bug here isn't a crash, it's a server compromise or a self-inflicted
 > outage. Review like an attacker who has read this whole repo.
@@ -51,7 +51,7 @@ attacker. Treat every parsed field as adversarial.
 
 ## 2. 🔴 Decision engine — the lock-out / false-ban surface
 
-The worst non-root bug is banning the admin or a whole CDN. (See AGENTS.md Hard
+The worst non-root bug is banning the admin or a whole CDN. (See .ezy/agents/AGENTS.md Hard
 Rules; this is the verification side.)
 
 - [ ] Allowlist is checked **first** and is **unbypassable** — no code path bans

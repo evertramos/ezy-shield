@@ -9,6 +9,8 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/evertramos/ezy-shield/pkg/sdk"
@@ -103,6 +105,8 @@ func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
 		resp = d.handleStatus(ctx)
 	case "list":
 		resp = d.handleList(ctx)
+	case "list_allow":
+		resp = d.handleListAllow(ctx)
 	case "ban":
 		resp = d.handleBan(ctx, req)
 	case "unban":
@@ -110,7 +114,7 @@ func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
 	case "allow":
 		resp = d.handleAllow(ctx, req)
 	default:
-		resp = SocketResponse{Error: fmt.Sprintf("unknown verb %q; valid: status list ban unban allow", req.Verb)}
+		resp = SocketResponse{Error: fmt.Sprintf("unknown verb %q; valid: status list list_allow ban unban allow", req.Verb)}
 	}
 
 	writeResponse(conn, resp)
@@ -164,24 +168,24 @@ func (d *Daemon) handleList(ctx context.Context) SocketResponse {
 	return SocketResponse{OK: true, Data: raw}
 }
 
-// handleBan manually bans an IP, bypassing the rule engine.
-// The IP is still checked against the allowlist in the enforcer.
+// handleBan manually bans an IP or CIDR, bypassing the rule engine.
+// The target is still checked against the allowlist in the enforcer.
 func (d *Daemon) handleBan(ctx context.Context, req SocketRequest) SocketResponse {
-	ip, err := parseSocketIP(req.IP)
+	prefix, err := parseSocketTarget(req.IP)
 	if err != nil {
 		return SocketResponse{Error: err.Error()}
 	}
 
 	var ttl time.Duration
 	if req.TTL != "" {
-		ttl, err = time.ParseDuration(req.TTL)
+		ttl, err = parseExtendedDuration(req.TTL)
 		if err != nil {
 			return SocketResponse{Error: fmt.Sprintf("invalid ttl %q: %v", req.TTL, err)}
 		}
 	}
 
 	if d.enforcer != nil && d.policy.Armed {
-		t := sdk.Target{IP: ip, TTL: ttl}
+		t := targetFromPrefix(prefix, ttl)
 		if err := d.enforcer.Ban(ctx, t); err != nil {
 			return SocketResponse{Error: fmt.Sprintf("enforcer ban: %v", err)}
 		}
@@ -192,66 +196,199 @@ func (d *Daemon) handleBan(ctx context.Context, req SocketRequest) SocketRespons
 		op = "dry_ban"
 	}
 
-	action := sdk.Action{IP: ip, Op: op, TTL: ttl, Reason: "manual ban via CLI"}
-	if err := d.store.Audit(ctx, action); err != nil {
-		slog.ErrorContext(ctx, "daemon: audit manual ban", "ip", ip, "err", err)
+	reason := req.Reason
+	if reason == "" {
+		reason = "manual ban via CLI"
+	}
+	if err := d.store.AuditOp(ctx, op, prefix, ttl, reason); err != nil {
+		slog.ErrorContext(ctx, "daemon: audit manual ban", "prefix", prefix, "err", err)
 	}
 
 	return SocketResponse{OK: true}
 }
 
-// handleUnban removes an IP from the ban set and the store.
+// handleUnban removes a single IP or every IP within a CIDR from the ban set
+// (in the store) and asks the enforcer to drop the matching rule(s).
 func (d *Daemon) handleUnban(ctx context.Context, req SocketRequest) SocketResponse {
-	ip, err := parseSocketIP(req.IP)
+	prefix, err := parseSocketTarget(req.IP)
 	if err != nil {
 		return SocketResponse{Error: err.Error()}
 	}
 
 	if d.enforcer != nil {
-		t := sdk.Target{IP: ip}
+		t := targetFromPrefix(prefix, 0)
 		if err := d.enforcer.Unban(ctx, t); err != nil {
 			// Log but don't fail — store cleanup should still proceed.
-			slog.ErrorContext(ctx, "daemon: enforcer unban failed", "ip", ip, "err", err)
+			slog.ErrorContext(ctx, "daemon: enforcer unban failed", "prefix", prefix, "err", err)
 		}
 	}
 
-	if err := d.store.Unban(ctx, ip); err != nil {
-		return SocketResponse{Error: fmt.Sprintf("store unban: %v", err)}
+	if prefix.Bits() == prefix.Addr().BitLen() {
+		if err := d.store.Unban(ctx, prefix.Addr()); err != nil {
+			return SocketResponse{Error: fmt.Sprintf("store unban: %v", err)}
+		}
+	} else {
+		if _, err := d.store.UnbanPrefix(ctx, prefix); err != nil {
+			return SocketResponse{Error: fmt.Sprintf("store unban prefix: %v", err)}
+		}
 	}
 
 	return SocketResponse{OK: true}
 }
 
-// handleAllow adds ip to the daemon's runtime allowlist.
-// The entry takes effect immediately for the pipeline but is not persisted
-// across daemon restarts (use policy.yaml for permanent allowlist entries).
+// handleAllow persists prefix to the allowlist (with an optional TTL) and
+// updates the daemon's in-memory runtime allowlist so the change takes effect
+// immediately for the pipeline.
 func (d *Daemon) handleAllow(ctx context.Context, req SocketRequest) SocketResponse {
-	ip, err := parseSocketIP(req.IP)
+	prefix, err := parseSocketTarget(req.IP)
 	if err != nil {
 		return SocketResponse{Error: err.Error()}
 	}
+	prefix = prefix.Masked()
 
-	prefix := netip.PrefixFrom(ip, ip.BitLen())
+	if req.For != "" && req.Until != "" {
+		return SocketResponse{Error: "cannot combine 'for' and 'until'"}
+	}
 
-	d.mu.Lock()
-	d.runtimeAllowlist = append(d.runtimeAllowlist, prefix)
-	d.mu.Unlock()
+	var expiresAt *time.Time
+	switch {
+	case req.For != "":
+		dur, err := parseExtendedDuration(req.For)
+		if err != nil {
+			return SocketResponse{Error: fmt.Sprintf("invalid duration %q: %v", req.For, err)}
+		}
+		if dur <= 0 {
+			return SocketResponse{Error: fmt.Sprintf("duration must be positive: %q", req.For)}
+		}
+		t := time.Now().UTC().Add(dur)
+		expiresAt = &t
+	case req.Until != "":
+		t, err := parseUntil(req.Until)
+		if err != nil {
+			return SocketResponse{Error: fmt.Sprintf("invalid until %q: %v", req.Until, err)}
+		}
+		if !t.After(time.Now()) {
+			return SocketResponse{Error: fmt.Sprintf("until is in the past: %q", req.Until)}
+		}
+		expiresAt = &t
+	}
 
-	slog.InfoContext(ctx, "daemon: runtime allowlist updated", "ip", ip)
+	if err := d.store.AddAllow(ctx, prefix, expiresAt, req.Reason); err != nil {
+		return SocketResponse{Error: fmt.Sprintf("store add allow: %v", err)}
+	}
+
+	var ttl time.Duration
+	if expiresAt != nil {
+		ttl = time.Until(*expiresAt)
+	}
+	if err := d.store.AuditOp(ctx, "allow", prefix, ttl, req.Reason); err != nil {
+		slog.ErrorContext(ctx, "daemon: audit allow", "prefix", prefix, "err", err)
+	}
+
+	if err := d.reloadAllowlist(ctx); err != nil {
+		slog.ErrorContext(ctx, "daemon: reload allowlist after add", "err", err)
+	}
+
+	slog.InfoContext(ctx, "daemon: runtime allowlist updated",
+		"prefix", prefix, "expires_at", expiresAt, "reason", req.Reason)
 	return SocketResponse{OK: true}
 }
 
-// parseSocketIP parses a plain IP address from a socket request.
-// Returns an error with a user-safe message on failure.
-func parseSocketIP(s string) (netip.Addr, error) {
-	if s == "" {
-		return netip.Addr{}, fmt.Errorf("ip is required")
-	}
-	ip, err := netip.ParseAddr(s)
+// handleListAllow returns every persisted allowlist entry with display-ready
+// expiry strings ("never", "<n>h remaining", or an ISO 8601 timestamp).
+func (d *Daemon) handleListAllow(ctx context.Context) SocketResponse {
+	entries, err := d.store.ListAllow(ctx)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("invalid ip %q: %v", s, err)
+		return SocketResponse{Error: fmt.Sprintf("list allow: %v", err)}
 	}
-	return ip, nil
+
+	now := time.Now()
+	out := make([]AllowEntry, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, AllowEntry{
+			Prefix:  e.Prefix.String(),
+			Expires: formatExpires(e.ExpiresAt, now),
+			Reason:  e.Reason,
+		})
+	}
+	raw, _ := json.Marshal(out)
+	return SocketResponse{OK: true, Data: raw}
+}
+
+// formatExpires renders an expiry time for `ezyshield list --allow` output.
+// The zero time means permanent; a non-zero time within ~24 h is rendered as
+// "<n>h remaining"; otherwise the absolute date is returned (RFC 3339 date).
+func formatExpires(t time.Time, now time.Time) string {
+	if t.IsZero() {
+		return "never"
+	}
+	remaining := t.Sub(now)
+	if remaining <= 0 {
+		return "expired"
+	}
+	if remaining < 24*time.Hour {
+		return remaining.Round(time.Hour).String() + " remaining"
+	}
+	return t.UTC().Format("2006-01-02")
+}
+
+// parseSocketTarget accepts a bare IP ("1.2.3.4") or a CIDR ("10.0.0.0/8")
+// and returns the equivalent netip.Prefix (single hosts become /32 or /128).
+func parseSocketTarget(s string) (netip.Prefix, error) {
+	if s == "" {
+		return netip.Prefix{}, fmt.Errorf("ip or cidr is required")
+	}
+	if p, err := netip.ParsePrefix(s); err == nil {
+		return p, nil
+	}
+	a, err := netip.ParseAddr(s)
+	if err != nil {
+		return netip.Prefix{}, fmt.Errorf("invalid ip or cidr %q", s)
+	}
+	return netip.PrefixFrom(a, a.BitLen()), nil
+}
+
+// targetFromPrefix maps a netip.Prefix to the sdk.Target shape expected by
+// enforcers. Single-host prefixes go in the IP field so single-IP enforcers
+// take the IP fast path; wider ranges go in Prefix.
+func targetFromPrefix(p netip.Prefix, ttl time.Duration) sdk.Target {
+	if p.Bits() == p.Addr().BitLen() {
+		return sdk.Target{IP: p.Addr(), TTL: ttl}
+	}
+	return sdk.Target{Prefix: p, TTL: ttl}
+}
+
+// parseExtendedDuration extends time.ParseDuration with day units (e.g. "7d"
+// or "30d") because Go's stdlib stops at hours. The trailing 'd' is converted
+// to N*24h and then handed to time.ParseDuration; everything else is left as-is.
+func parseExtendedDuration(s string) (time.Duration, error) {
+	if strings.HasSuffix(s, "d") {
+		n, err := strconv.Atoi(strings.TrimSuffix(s, "d"))
+		if err != nil {
+			return 0, fmt.Errorf("invalid day count in %q", s)
+		}
+		if n < 0 {
+			return 0, fmt.Errorf("negative day count in %q", s)
+		}
+		return time.Duration(n) * 24 * time.Hour, nil
+	}
+	return time.ParseDuration(s)
+}
+
+// parseUntil accepts ISO 8601 date or datetime in either local or UTC form.
+// Date-only inputs are interpreted as 00:00 UTC on that date.
+func parseUntil(s string) (time.Time, error) {
+	for _, layout := range []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02T15:04:05",
+		"2006-01-02",
+	} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("expected ISO 8601 date or datetime")
 }
 
 // writeResponse encodes resp as JSON to conn.  Errors are logged, not returned,

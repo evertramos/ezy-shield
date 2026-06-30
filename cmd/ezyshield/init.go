@@ -83,26 +83,26 @@ func (p *wPrinter) println(s string) {
 
 // wizardState collects detected values and user answers.
 type wizardState struct {
-	osArch         string
-	nftPath        string
-	hasDocker      bool
-	proxyContainer string
-	allContainers  []dockerContainer
-	sshUnit        string
-	publicIP       string
-	sshSourceIP    string
+	osArch        string
+	nftPath       string
+	hasDocker     bool
+	allContainers []dockerContainer
+	sshUnit       string
+	publicIP      string
+	sshSourceIP   string
 
 	hasWordPress bool
 	wpRulesPath  string
 
-	monitorContainers []string
-	monitorSSH        bool
-	adminIPs          []string
-	enableAI          bool
-	aiProvider        string
-	aiModel           string
-	aiKeyEnvVar       string
-	armed             bool
+	webServers    []detectedWebServer  // detection result (for display + prompts)
+	webCollectors []webServerCollector // operator-approved collectors
+	monitorSSH    bool
+	adminIPs      []string
+	enableAI      bool
+	aiProvider    string
+	aiModel       string
+	aiKeyEnvVar   string
+	armed         bool
 }
 
 type dockerContainer struct {
@@ -158,11 +158,8 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 
 	state.allContainers = detectDockerContainers()
 	state.hasDocker = len(state.allContainers) > 0
-	state.proxyContainer = pickProxyContainer(state.allContainers)
-	if state.proxyContainer != "" {
-		p.printf("  proxy container: %s\n", state.proxyContainer)
-	} else if state.hasDocker {
-		p.printf("  docker: %d container(s) found (no proxy auto-detected)\n", len(state.allContainers))
+	if state.hasDocker {
+		p.printf("  docker:       %d container(s) running\n", len(state.allContainers))
 	} else {
 		p.println("  docker:       not running / no containers")
 	}
@@ -172,6 +169,10 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 		state.wpRulesPath = filepath.Join(configDir, "rules.yaml")
 		p.printf("  WordPress detected — will write custom rules: %s\n", state.wpRulesPath)
 	}
+
+	p.println("\n  Detecting web servers...")
+	state.webServers = detectWebServers(state.allContainers)
+	renderWebServerSummary(p, state.webServers)
 
 	state.sshUnit = detectSSHUnit()
 	p.printf("  SSH unit:     %s\n", state.sshUnit)
@@ -368,13 +369,8 @@ func askQuestions(sc *bufio.Scanner, state *wizardState, yes bool) {
 		return def
 	}
 
-	// Container to monitor
-	if state.hasDocker {
-		ans := ask("Docker container to monitor (nginx/proxy)", state.proxyContainer)
-		if ans != "" {
-			state.monitorContainers = []string{ans}
-		}
-	}
+	// Per-server collector confirmation (replaces the old single proxy prompt).
+	state.webCollectors = confirmWebServerCollectors(ask, askBool, state.webServers)
 
 	// SSH monitoring
 	if state.sshUnit != "" {
@@ -433,15 +429,20 @@ func writeGeneratedConfig(path string, state *wizardState) error {
 	b.WriteString("log:\n  level: info\n")
 
 	hasSSH := state.monitorSSH && state.sshUnit != ""
-	if !hasSSH && len(state.monitorContainers) == 0 {
+	if !hasSSH && len(state.webCollectors) == 0 {
 		b.WriteString("collectors: []\n")
 	} else {
 		b.WriteString("collectors:\n")
 		if hasSSH {
 			fmt.Fprintf(&b, "  - kind: journald\n    unit: %s\n", state.sshUnit)
 		}
-		for _, c := range state.monitorContainers {
-			fmt.Fprintf(&b, "  - kind: docker\n    container: %s\n    parser: nginx\n", c)
+		for _, wc := range state.webCollectors {
+			switch wc.Kind {
+			case "file":
+				fmt.Fprintf(&b, "  - kind: file\n    path: %s\n    parser: %s\n", wc.Path, wc.Parser)
+			case "docker":
+				fmt.Fprintf(&b, "  - kind: docker\n    container: %s\n    parser: %s\n", wc.Container, wc.Parser)
+			}
 		}
 	}
 
@@ -737,39 +738,51 @@ func detectDockerContainers() []dockerContainer {
 	return containers
 }
 
-// pickProxyContainer returns the most likely nginx/proxy container.
-// Preference order: proxy image + web ports → proxy image only → web ports only.
-func pickProxyContainer(containers []dockerContainer) string {
-	for _, c := range containers {
-		if isProxyImage(c.name, c.image) && hasWebPorts(c.ports) {
-			return c.name
+// confirmWebServerCollectors prompts the operator for each detected web
+// server and returns the collector list to write into config.yaml.
+//
+// Local entries surface a "Log path [default]:" follow-up so the operator can
+// override the auto-discovered path. Docker entries are confirmed by a single
+// yes/no — the collector targets the container, not a host file.
+func confirmWebServerCollectors(
+	ask func(question, def string) string,
+	askBool func(question string, def bool) bool,
+	servers []detectedWebServer,
+) []webServerCollector {
+	var out []webServerCollector
+	for _, ws := range servers {
+		var label string
+		switch ws.Location {
+		case "local":
+			label = fmt.Sprintf("Configure collector for %s (local)?", ws.Kind)
+		case "docker":
+			label = fmt.Sprintf("Configure collector for %s (container: %s)?", ws.Kind, ws.Container)
+		default:
+			continue
+		}
+		if !askBool(label, true) {
+			continue
+		}
+		switch ws.Location {
+		case "local":
+			path := ask("Log path", ws.LogPath)
+			if path == "" {
+				continue
+			}
+			out = append(out, webServerCollector{
+				Kind:   "file",
+				Path:   path,
+				Parser: ws.Parser,
+			})
+		case "docker":
+			out = append(out, webServerCollector{
+				Kind:      "docker",
+				Container: ws.Container,
+				Parser:    ws.Parser,
+			})
 		}
 	}
-	for _, c := range containers {
-		if isProxyImage(c.name, c.image) {
-			return c.name
-		}
-	}
-	for _, c := range containers {
-		if hasWebPorts(c.ports) {
-			return c.name
-		}
-	}
-	return ""
-}
-
-func isProxyImage(name, image string) bool {
-	for _, kw := range []string{"nginx", "proxy", "traefik", "caddy", "haproxy"} {
-		if strings.Contains(strings.ToLower(name), kw) ||
-			strings.Contains(strings.ToLower(image), kw) {
-			return true
-		}
-	}
-	return false
-}
-
-func hasWebPorts(ports string) bool {
-	return strings.Contains(ports, ":80->") || strings.Contains(ports, ":443->")
+	return out
 }
 
 func detectSSHUnit() string {

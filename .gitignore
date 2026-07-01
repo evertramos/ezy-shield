@@ -36,5 +36,6 @@ coverage.out
 
 # Dev files
 .ezy/
+.claude/
 CLAUDE.md
 

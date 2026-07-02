@@ -22,18 +22,28 @@ fi
 
 SUFFIX="${OS}-${ARCH}"
 
-# Get latest version
-echo "Fetching latest release..."
-VERSION=$(curl -sfL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed 's/.*"tag_name": *"//;s/".*//')
+# Source override: point the installer at a local mirror (air-gapped installs,
+# CI, or the QEMU e2e harness) instead of GitHub Releases. When set, the
+# "latest release" API lookup is skipped and artifacts + checksums.txt are
+# fetched directly from ${EZYSHIELD_BASE_URL}. Integrity is still verified.
+if [ -n "${EZYSHIELD_BASE_URL:-}" ]; then
+  VERSION="${EZYSHIELD_VERSION:-local}"
+  BASE_URL="$EZYSHIELD_BASE_URL"
+  echo "Installing EzyShield ${VERSION} (${SUFFIX}) from ${BASE_URL}..."
+else
+  # Get latest version
+  echo "Fetching latest release..."
+  VERSION=$(curl -sfL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed 's/.*"tag_name": *"//;s/".*//')
 
-if [ -z "$VERSION" ]; then
-  echo "Error: could not determine latest version"
-  exit 1
+  if [ -z "$VERSION" ]; then
+    echo "Error: could not determine latest version"
+    exit 1
+  fi
+
+  echo "Installing EzyShield ${VERSION} (${SUFFIX})..."
+
+  BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
 fi
-
-echo "Installing EzyShield ${VERSION} (${SUFFIX})..."
-
-BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
 
 # Download binaries
 TMP=$(mktemp -d)

@@ -6,12 +6,9 @@ import (
 	"os"
 	"os/user"
 	"strconv"
-)
 
-// daemonGroupName is the unix group the ezyshield daemon runs as. Config and
-// state files are chowned to root:<daemonGroupName> so the unprivileged daemon
-// can read them while still preventing world access.
-const daemonGroupName = "ezyshield"
+	"github.com/evertramos/ezy-shield/internal/ownership"
+)
 
 // errDaemonGroupMissing means the unix group "ezyshield" is not present on the
 // host yet — typically because 'ezyshield init' has not finished the user/
@@ -22,17 +19,17 @@ var errDaemonGroupMissing = errors.New("ezyshield group not found")
 // lookupDaemonGID returns the GID of the daemon group, or errDaemonGroupMissing
 // when the group does not exist on this host.
 func lookupDaemonGID() (int, error) {
-	g, err := user.LookupGroup(daemonGroupName)
+	g, err := user.LookupGroup(ownership.Group)
 	if err != nil {
 		var unknown user.UnknownGroupError
 		if errors.As(err, &unknown) {
 			return 0, errDaemonGroupMissing
 		}
-		return 0, fmt.Errorf("lookup group %s: %w", daemonGroupName, err)
+		return 0, fmt.Errorf("lookup group %s: %w", ownership.Group, err)
 	}
 	gid, err := strconv.Atoi(g.Gid)
 	if err != nil {
-		return 0, fmt.Errorf("invalid gid %q for group %s: %w", g.Gid, daemonGroupName, err)
+		return 0, fmt.Errorf("invalid gid %q for group %s: %w", g.Gid, ownership.Group, err)
 	}
 	return gid, nil
 }

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"syscall"
+
+	"github.com/evertramos/ezy-shield/internal/ownership"
 )
 
 // checkConfigOwnership verifies that path is owned by root:ezyshield, the
@@ -36,7 +38,7 @@ func checkConfigOwnership(path, label string) CheckResult {
 		if errors.Is(err, errDaemonGroupMissing) {
 			return CheckResult{Name: name, Status: statusFail,
 				Hint: fmt.Sprintf("group %q does not exist -- run 'ezyshield init' as root to create it",
-					daemonGroupName),
+					ownership.Group),
 			}
 		}
 		return CheckResult{Name: name, Status: statusFail, Hint: err.Error()}
@@ -52,7 +54,7 @@ func checkConfigOwnership(path, label string) CheckResult {
 	if gotUID != wantUID || gotGID != wantGIDu32 {
 		return CheckResult{Name: name, Status: statusFail,
 			Hint: fmt.Sprintf("ownership %d:%d, want %d:%d (root:%s) -- run: chown root:%s %s",
-				gotUID, gotGID, wantUID, wantGIDu32, daemonGroupName, daemonGroupName, path),
+				gotUID, gotGID, wantUID, wantGIDu32, ownership.Group, ownership.Group, path),
 		}
 	}
 	return CheckResult{Name: name, Status: statusPass}

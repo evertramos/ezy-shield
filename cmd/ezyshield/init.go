@@ -19,6 +19,7 @@ import (
 
 	"github.com/evertramos/ezy-shield/configs"
 	"github.com/evertramos/ezy-shield/internal/config"
+	"github.com/evertramos/ezy-shield/internal/ownership"
 )
 
 const (
@@ -567,16 +568,16 @@ func addAdminToEzyshieldGroup(out io.Writer) error {
 	if admin == "" || admin == "root" {
 		return nil
 	}
-	if alreadyInGroup(admin, daemonGroupName) {
-		if _, err := fmt.Fprintf(out, "  user %s: already in %s group\n", admin, daemonGroupName); err != nil {
+	if alreadyInGroup(admin, ownership.Group) {
+		if _, err := fmt.Fprintf(out, "  user %s: already in %s group\n", admin, ownership.Group); err != nil {
 			return fmt.Errorf("writing output: %w", err)
 		}
 		return nil
 	}
-	if err := runSysCmd("usermod", "-aG", daemonGroupName, admin); err != nil {
+	if err := runSysCmd("usermod", "-aG", ownership.Group, admin); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(out, "  user %s: added to %s group (log out + back in to take effect)\n", admin, daemonGroupName); err != nil {
+	if _, err := fmt.Fprintf(out, "  user %s: added to %s group (log out + back in to take effect)\n", admin, ownership.Group); err != nil {
 		return fmt.Errorf("writing output: %w", err)
 	}
 	return nil

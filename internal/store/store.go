@@ -375,9 +375,10 @@ func (s *DB) RecordManualBan(ctx context.Context, ip netip.Addr, ttl time.Durati
 }
 
 // Audit appends an audit entry for a. Use this for actions (e.g. "unban",
-// "notify_only") that don't go through RecordStrike. This is the ONLY function
-// allowed to write to audit_log; there are no UPDATE or DELETE paths for that
-// table.
+// "notify_only") that don't otherwise write to audit_log. audit_log is
+// append-only across the whole package — no code path issues UPDATE or DELETE
+// against it — but several methods (RecordStrike, RecordManualBan, Unban,
+// UnbanPrefix) each append their own entries as part of their transaction.
 func (s *DB) Audit(ctx context.Context, a sdk.Action) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO audit_log (recorded_at, op, ip, ttl_seconds, strike_num, reason)

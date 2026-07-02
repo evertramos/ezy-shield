@@ -648,3 +648,86 @@ func TestScanBaseline_MultipleProtocols(t *testing.T) {
 		t.Fatalf("want 3 records, got %d", len(got))
 	}
 }
+
+// TestRecordManualBan_Insert verifies a manual ban lands in bans_active and
+// becomes visible to ActiveBans (the store fix for `ezyshield list` seeing
+// operator bans).
+func TestRecordManualBan_Insert(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	if err := db.RecordManualBan(ctx, ip1, time.Hour, "manual ban via CLI"); err != nil {
+		t.Fatalf("RecordManualBan: %v", err)
+	}
+
+	bans, err := db.ActiveBans(ctx)
+	if err != nil {
+		t.Fatalf("ActiveBans: %v", err)
+	}
+	if len(bans) != 1 || bans[0].IP != ip1 {
+		t.Fatalf("want single ban for %s, got %+v", ip1, bans)
+	}
+	if bans[0].Reason != "manual ban via CLI" {
+		t.Errorf("reason = %q, want %q", bans[0].Reason, "manual ban via CLI")
+	}
+	if bans[0].Strike != 1 {
+		t.Errorf("manual ban strike_num = %d, want 1 (manual bans should not inflate strike count)", bans[0].Strike)
+	}
+}
+
+// TestRecordManualBan_Refresh verifies a second RecordManualBan on the same IP
+// updates the row via ON CONFLICT rather than inserting a duplicate (the table
+// is keyed by IP). The reason and TTL from the second call must win.
+func TestRecordManualBan_Refresh(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	if err := db.RecordManualBan(ctx, ip1, time.Hour, "first"); err != nil {
+		t.Fatalf("first RecordManualBan: %v", err)
+	}
+	if err := db.RecordManualBan(ctx, ip1, 24*time.Hour, "second"); err != nil {
+		t.Fatalf("second RecordManualBan: %v", err)
+	}
+	bans, err := db.ActiveBans(ctx)
+	if err != nil {
+		t.Fatalf("ActiveBans: %v", err)
+	}
+	if len(bans) != 1 {
+		t.Fatalf("want 1 ban after refresh, got %d — ON CONFLICT should upsert not append", len(bans))
+	}
+	if bans[0].Reason != "second" {
+		t.Errorf("reason = %q, want %q — second call must win", bans[0].Reason, "second")
+	}
+}
+
+// TestRecordManualBan_Permanent verifies ttl == 0 records a permanent ban
+// (expires_at NULL) so it never gets swept by ExpireBans.
+func TestRecordManualBan_Permanent(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	if err := db.RecordManualBan(ctx, ip2, 0, "forever"); err != nil {
+		t.Fatalf("RecordManualBan permanent: %v", err)
+	}
+	bans, err := db.ActiveBans(ctx)
+	if err != nil {
+		t.Fatalf("ActiveBans: %v", err)
+	}
+	if len(bans) != 1 {
+		t.Fatalf("want 1 ban, got %d", len(bans))
+	}
+	if bans[0].TTL != 0 {
+		t.Errorf("permanent ban should have TTL 0, got %v", bans[0].TTL)
+	}
+	// ExpireBans on a far-future clock must NOT sweep the permanent entry.
+	if _, err := db.ExpireBans(ctx, time.Now().Add(1_000_000*time.Hour)); err != nil {
+		t.Fatalf("ExpireBans: %v", err)
+	}
+	still, err := db.ActiveBans(ctx)
+	if err != nil {
+		t.Fatalf("ActiveBans post-expire: %v", err)
+	}
+	if len(still) != 1 {
+		t.Errorf("permanent ban must survive ExpireBans, got %d bans left", len(still))
+	}
+}

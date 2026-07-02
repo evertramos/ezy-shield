@@ -648,3 +648,141 @@ func TestScanBaseline_MultipleProtocols(t *testing.T) {
 		t.Fatalf("want 3 records, got %d", len(got))
 	}
 }
+
+// TestRecordManualBan_Insert verifies a manual ban lands in bans_active and
+// becomes visible to ActiveBans (the store fix for `ezyshield list` seeing
+// operator bans).
+func TestRecordManualBan_Insert(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	if err := db.RecordManualBan(ctx, ip1, time.Hour, "manual ban via CLI"); err != nil {
+		t.Fatalf("RecordManualBan: %v", err)
+	}
+
+	bans, err := db.ActiveBans(ctx)
+	if err != nil {
+		t.Fatalf("ActiveBans: %v", err)
+	}
+	if len(bans) != 1 || bans[0].IP != ip1 {
+		t.Fatalf("want single ban for %s, got %+v", ip1, bans)
+	}
+	if bans[0].Reason != "manual ban via CLI" {
+		t.Errorf("reason = %q, want %q", bans[0].Reason, "manual ban via CLI")
+	}
+	if bans[0].Strike != 1 {
+		t.Errorf("manual ban strike_num = %d, want 1 (manual bans should not inflate strike count)", bans[0].Strike)
+	}
+}
+
+// TestRecordManualBan_Refresh verifies a second RecordManualBan on the same IP
+// updates the row via ON CONFLICT rather than inserting a duplicate (the table
+// is keyed by IP). The reason and TTL from the second call must win.
+func TestRecordManualBan_Refresh(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	if err := db.RecordManualBan(ctx, ip1, time.Hour, "first"); err != nil {
+		t.Fatalf("first RecordManualBan: %v", err)
+	}
+	if err := db.RecordManualBan(ctx, ip1, 24*time.Hour, "second"); err != nil {
+		t.Fatalf("second RecordManualBan: %v", err)
+	}
+	bans, err := db.ActiveBans(ctx)
+	if err != nil {
+		t.Fatalf("ActiveBans: %v", err)
+	}
+	if len(bans) != 1 {
+		t.Fatalf("want 1 ban after refresh, got %d — ON CONFLICT should upsert not append", len(bans))
+	}
+	if bans[0].Reason != "second" {
+		t.Errorf("reason = %q, want %q — second call must win", bans[0].Reason, "second")
+	}
+}
+
+// TestRecordManualBan_Permanent verifies ttl == 0 records a permanent ban
+// (expires_at NULL) so it never gets swept by ExpireBans.
+func TestRecordManualBan_Permanent(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	if err := db.RecordManualBan(ctx, ip2, 0, "forever"); err != nil {
+		t.Fatalf("RecordManualBan permanent: %v", err)
+	}
+	bans, err := db.ActiveBans(ctx)
+	if err != nil {
+		t.Fatalf("ActiveBans: %v", err)
+	}
+	if len(bans) != 1 {
+		t.Fatalf("want 1 ban, got %d", len(bans))
+	}
+	if bans[0].TTL != 0 {
+		t.Errorf("permanent ban should have TTL 0, got %v", bans[0].TTL)
+	}
+	// ExpireBans on a far-future clock must NOT sweep the permanent entry.
+	if _, err := db.ExpireBans(ctx, time.Now().Add(1_000_000*time.Hour)); err != nil {
+		t.Fatalf("ExpireBans: %v", err)
+	}
+	still, err := db.ActiveBans(ctx)
+	if err != nil {
+		t.Fatalf("ActiveBans post-expire: %v", err)
+	}
+	if len(still) != 1 {
+		t.Errorf("permanent ban must survive ExpireBans, got %d bans left", len(still))
+	}
+}
+
+// TestRecordManualBan_RefreshPreservesRuleEngineStrikeNum documents an
+// intentional design decision (Copilot flagged this as a potential bug in
+// review): when a manual ban lands on top of an existing rule-engine ban, the
+// ON CONFLICT upsert does NOT overwrite strike_num. The rule-engine's
+// escalation history — five failed logins → strike 3, for example — is more
+// signal than "operator refreshed with strike 1", and losing that history
+// would make future automatic escalations start over from zero. banned_at,
+// expires_at, and reason ARE updated so the operator's ban does take effect;
+// only the strike counter is preserved.
+func TestRecordManualBan_RefreshPreservesRuleEngineStrikeNum(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	// Simulate the rule engine banning ip1 at strike 3.
+	if err := db.RecordStrike(ctx, action(ip1, 3, time.Hour)); err != nil {
+		t.Fatalf("RecordStrike: %v", err)
+	}
+	// Operator issues a manual ban on the same IP.
+	if err := db.RecordManualBan(ctx, ip1, 24*time.Hour, "operator ack"); err != nil {
+		t.Fatalf("RecordManualBan: %v", err)
+	}
+	bans, err := db.ActiveBans(ctx)
+	if err != nil {
+		t.Fatalf("ActiveBans: %v", err)
+	}
+	if len(bans) != 1 {
+		t.Fatalf("want 1 ban after refresh, got %d", len(bans))
+	}
+	if bans[0].Strike != 3 {
+		t.Errorf("strike_num = %d, want 3 preserved from rule engine (see comment)", bans[0].Strike)
+	}
+	if bans[0].Reason != "operator ack" {
+		t.Errorf("reason = %q, want %q (manual ban wins on reason)", bans[0].Reason, "operator ack")
+	}
+}
+
+// TestRecordManualBan_RejectsNegativeTTL: a negative duration must not
+// silently become a permanent ban (Copilot review). parseExtendedDuration
+// happily returns negatives, so defense-in-depth belongs at the store layer.
+func TestRecordManualBan_RejectsNegativeTTL(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	if err := db.RecordManualBan(ctx, ip1, -1*time.Hour, "typo"); err == nil {
+		t.Fatal("expected error for negative ttl, got nil")
+	}
+	bans, err := db.ActiveBans(ctx)
+	if err != nil {
+		t.Fatalf("ActiveBans: %v", err)
+	}
+	if len(bans) != 0 {
+		t.Errorf("nothing should have been recorded for a rejected ban, got %d bans", len(bans))
+	}
+}

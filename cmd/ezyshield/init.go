@@ -19,6 +19,7 @@ import (
 
 	"github.com/evertramos/ezy-shield/configs"
 	"github.com/evertramos/ezy-shield/internal/config"
+	"github.com/evertramos/ezy-shield/internal/ownership"
 )
 
 const (
@@ -213,6 +214,11 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 	if !skipSystem {
 		if err := createEzyshieldUser(p.w); err != nil {
 			p.printf("  warning: could not create ezyshield user: %v\n", err)
+		}
+		// Add the invoking admin to the ezyshield group so they can use the
+		// control socket (root:ezyshield 0660) without sudo — issue #6.
+		if err := addAdminToEzyshieldGroup(p.w); err != nil {
+			p.printf("  warning: could not add admin to ezyshield group: %v\n", err)
 		}
 	}
 
@@ -552,6 +558,49 @@ func writeEnvFile(path, provider, keyEnvVar string) error {
 }
 
 // ── System installation helpers ──────────────────────────────────────────────
+
+// addAdminToEzyshieldGroup adds the invoking sudo user (SUDO_USER) to the
+// ezyshield group so they can use the control socket without sudo. When the
+// wizard is run directly as root (no SUDO_USER) there is no admin account to
+// add and the function is a no-op. Idempotent — usermod -aG is safe to repeat.
+func addAdminToEzyshieldGroup(out io.Writer) error {
+	admin := os.Getenv("SUDO_USER")
+	if admin == "" || admin == "root" {
+		return nil
+	}
+	if alreadyInGroup(admin, ownership.Group) {
+		if _, err := fmt.Fprintf(out, "  user %s: already in %s group\n", admin, ownership.Group); err != nil {
+			return fmt.Errorf("writing output: %w", err)
+		}
+		return nil
+	}
+	if err := runSysCmd("usermod", "-aG", ownership.Group, admin); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(out, "  user %s: added to %s group (log out + back in to take effect)\n", admin, ownership.Group); err != nil {
+		return fmt.Errorf("writing output: %w", err)
+	}
+	return nil
+}
+
+// alreadyInGroup checks /etc/group via `id -nG <user>` for the group name.
+// Falls back to false on any error so the caller will attempt usermod, which
+// is idempotent and surfaces a real error if something is actually wrong.
+func alreadyInGroup(username, group string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	//nolint:gosec // fixed binary, username sourced from SUDO_USER (set by sudo)
+	out, err := exec.CommandContext(ctx, "id", "-nG", username).Output()
+	if err != nil {
+		return false
+	}
+	for _, g := range strings.Fields(string(out)) {
+		if g == group {
+			return true
+		}
+	}
+	return false
+}
 
 func createEzyshieldUser(out io.Writer) error {
 	if runCmdSilent("id", "ezyshield") == nil {

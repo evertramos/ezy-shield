@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+#
+# wipe.sh — completely remove EzyShield from this host.
+#
+# Runs the six-step teardown from issue #10
+# (https://github.com/evertramos/ezy-shield/issues/10):
+#
+#   1. Stop + disable services
+#   2. Remove systemd units + daemon-reload
+#   3. Remove binaries
+#   4. Remove config, state, runtime dirs
+#   5. Remove ezyshield user + group
+#   6. Remove the nftables table
+#
+# Every step is idempotent — safe to re-run after a partial wipe.
+#
+# ⚠️  DESTRUCTIVE. Requires root and an explicit --yes.
+#
+# Usage:
+#   sudo ./wipe.sh --yes                 # do it
+#   sudo ./wipe.sh --dry-run             # show what would run, change nothing
+#   sudo ./wipe.sh --yes --backup /path  # tar /etc/ezyshield + /var/lib/ezyshield
+#                                        #   into <path>/ezyshield-wipe-<date>.tar.gz
+#                                        #   BEFORE deleting anything
+#
+set -euo pipefail
+
+CONFIG_DIR=/etc/ezyshield
+STATE_DIR=/var/lib/ezyshield
+INSTALL_DIR=/usr/local/bin
+NFT_TABLE="inet ezyshield"
+SYSTEMD_DIR=/etc/systemd/system
+
+YES=0
+DRY=0
+BACKUP_TO=""
+
+usage() { sed -n '2,25p' "$0"; exit "${1:-0}"; }
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --yes)      YES=1 ;;
+    --dry-run)  DRY=1 ;;
+    --backup)   BACKUP_TO="${2:-}"; shift ;;
+    -h|--help)  usage 0 ;;
+    *)          echo "unknown arg: $1 (try --help)" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+info() { printf '\033[36m▸ %s\033[0m\n' "$1"; }
+ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; }
+warn() { printf '  \033[33m! %s\033[0m\n' "$1"; }
+die()  { printf '\033[31mERROR: %s\033[0m\n' "$1" >&2; exit 1; }
+
+# run <cmd...> — echo in dry-run, execute otherwise. Never abort on nonzero
+# because the whole script is meant to converge on "gone" — a missing file
+# from a partial previous wipe is not a failure.
+run() {
+  if [ "$DRY" = 1 ]; then
+    printf '  \033[33m[dry-run]\033[0m %s\n' "$*"
+  else
+    "$@" 2>/dev/null || true
+  fi
+}
+
+[ "$(id -u)" = 0 ] || die "must run as root"
+
+if [ "$YES" != 1 ] && [ "$DRY" != 1 ]; then
+  cat <<MSG >&2
+This will PERMANENTLY remove EzyShield from this host:
+  - stop + disable both services
+  - delete /etc/ezyshield, /var/lib/ezyshield, /run/ezyshield*
+  - delete the systemd units
+  - delete /usr/local/bin/ezyshield{,-enforcer}
+  - remove the ezyshield user + group
+  - drop the 'inet ezyshield' nftables table (and every rule in it)
+
+If that's what you want, re-run with:
+    sudo $0 --yes
+
+To just see what would happen:
+    sudo $0 --dry-run
+MSG
+  exit 2
+fi
+
+# ── optional backup (before anything is destroyed) ───────────────────────────
+if [ -n "$BACKUP_TO" ]; then
+  info "0/6  Backup of config + state before wipe"
+  if [ "$DRY" = 1 ]; then
+    printf '  \033[33m[dry-run]\033[0m tar czf %s/ezyshield-wipe-%s.tar.gz %s %s\n' \
+      "$BACKUP_TO" "$(date +%F-%H%M%S)" "$CONFIG_DIR" "$STATE_DIR"
+  else
+    mkdir -p "$BACKUP_TO"
+    dest="$BACKUP_TO/ezyshield-wipe-$(date +%F-%H%M%S).tar.gz"
+    # -P keeps absolute paths so restore lands back in the same place.
+    # Missing dirs are silently skipped — a partial install is normal here.
+    tar czPf "$dest" \
+      $( [ -d "$CONFIG_DIR" ] && printf '%s ' "$CONFIG_DIR" ) \
+      $( [ -d "$STATE_DIR"  ] && printf '%s ' "$STATE_DIR" ) \
+      2>/dev/null || true
+    if [ -s "$dest" ]; then
+      ok "backup written: $dest ($(du -h "$dest" | cut -f1))"
+    else
+      warn "nothing to back up (config + state dirs already gone)"
+      rm -f "$dest"
+    fi
+  fi
+fi
+
+# ── 1. Stop + disable services ───────────────────────────────────────────────
+info "1/6  Stop + disable services"
+run systemctl stop ezyshield ezyshield-enforcer
+run systemctl disable ezyshield ezyshield-enforcer
+ok "services stopped and disabled"
+
+# ── 2. Remove systemd units ──────────────────────────────────────────────────
+info "2/6  Remove systemd units"
+run rm -f "$SYSTEMD_DIR/ezyshield.service"
+run rm -f "$SYSTEMD_DIR/ezyshield-enforcer.service"
+run rm -rf "$SYSTEMD_DIR/ezyshield.service.d"
+run systemctl daemon-reload
+ok "units removed"
+
+# ── 3. Remove binaries ───────────────────────────────────────────────────────
+info "3/6  Remove binaries"
+run rm -f "$INSTALL_DIR/ezyshield" "$INSTALL_DIR/ezyshield-enforcer"
+ok "binaries removed"
+
+# ── 4. Remove config, state, runtime ─────────────────────────────────────────
+info "4/6  Remove config, state, runtime dirs"
+run rm -rf "$CONFIG_DIR"
+run rm -rf "$STATE_DIR"
+run rm -rf /run/ezyshield /run/ezyshield-enforcer
+ok "config + state + runtime gone"
+
+# ── 5. Remove user + group ───────────────────────────────────────────────────
+info "5/6  Remove ezyshield user + group"
+run userdel ezyshield
+run groupdel ezyshield
+ok "user + group removed"
+
+# ── 6. Remove nftables table ─────────────────────────────────────────────────
+info "6/6  Drop the '$NFT_TABLE' nftables table"
+if command -v nft >/dev/null 2>&1; then
+  run nft delete table "$NFT_TABLE"
+  ok "nftables table dropped"
+else
+  warn "nft binary not present, skipping (nothing to drop)"
+fi
+
+echo
+if [ "$DRY" = 1 ]; then
+  info "Dry-run complete — nothing was changed."
+else
+  info "EzyShield fully wiped. You can now run the installer from scratch."
+  echo "  curl -sfL https://get.ezyshield.com | sudo sh"
+  echo "  sudo ezyshield init"
+fi

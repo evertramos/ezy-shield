@@ -331,10 +331,61 @@ func (s *DB) Unban(ctx context.Context, ip netip.Addr) error {
 	return tx.Commit()
 }
 
+// RecordManualBan inserts (or refreshes) a single-IP entry in bans_active for a
+// manually-issued ban (e.g. `ezyshield ban <ip>`). It also appends an audit_log
+// row. Unlike RecordStrike it does NOT create a strikes record — a manual ban
+// isn't a rule-engine event and shouldn't inflate the offender's strike count.
+// ttl == 0 means permanent (expires_at NULL). reason is stored as-is.
+func (s *DB) RecordManualBan(ctx context.Context, ip netip.Addr, ttl time.Duration, reason string) error {
+	// A negative ttl is almost certainly caller error (parseExtendedDuration
+	// happily returns negatives for "-1h"). Silently storing it as a
+	// permanent ban — which the `if ttl > 0` branch below would do — is a
+	// surprising persistence pattern, so refuse it here.
+	if ttl < 0 {
+		return fmt.Errorf("store: negative ttl %s not allowed for manual ban", ttl)
+	}
+	ipStr := ip.String()
+	now := nowRFC3339()
+	ttlSec := int64(ttl.Seconds())
+
+	var expiresAt *string
+	if ttl > 0 {
+		t := time.Now().UTC().Add(ttl).Format(time.RFC3339Nano)
+		expiresAt = &t
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: begin RecordManualBan: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO bans_active (ip, banned_at, expires_at, strike_num, reason)
+		VALUES (?, ?, ?, 1, ?)
+		ON CONFLICT(ip) DO UPDATE SET
+			banned_at  = excluded.banned_at,
+			expires_at = excluded.expires_at,
+			reason     = excluded.reason
+	`, ipStr, now, expiresAt, reason); err != nil {
+		return fmt.Errorf("store: upsert manual ban: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO audit_log (recorded_at, op, ip, ttl_seconds, strike_num, reason)
+		VALUES (?, ?, ?, ?, 1, ?)
+	`, now, "ban", ipStr, ttlSec, reason); err != nil {
+		return fmt.Errorf("store: insert audit for manual ban: %w", err)
+	}
+
+	return tx.Commit()
+}
+
 // Audit appends an audit entry for a. Use this for actions (e.g. "unban",
-// "notify_only") that don't go through RecordStrike.
-// This is the ONLY function allowed to write to audit_log; there are no
-// UPDATE or DELETE paths for that table.
+// "notify_only") that don't otherwise write to audit_log. audit_log is
+// append-only across the whole package — no code path issues UPDATE or DELETE
+// against it — but several methods (RecordStrike, RecordManualBan, Unban,
+// UnbanPrefix) each append their own entries as part of their transaction.
 func (s *DB) Audit(ctx context.Context, a sdk.Action) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO audit_log (recorded_at, op, ip, ttl_seconds, strike_num, reason)

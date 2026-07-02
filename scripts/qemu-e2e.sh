@@ -57,6 +57,7 @@ ssh_opts=(-p "$SSH_PORT"
   -o LogLevel=ERROR -o ConnectTimeout=8)
 scp_opts=(-P "$SSH_PORT"
   -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+# shellcheck disable=SC2029  # by design: we want $@ to expand host-side into a shell command for the guest
 gssh() { ssh "${ssh_opts[@]}" "$GUEST_USER@localhost" "$@"; }
 
 wait_ssh() {
@@ -79,8 +80,10 @@ start_http() {
   info "Serving working-tree artifacts on 127.0.0.1:$HTTP_PORT (guest sees $GW:$HTTP_PORT)"
 }
 stop_http() {
-  [ -f "$HTTP_PIDFILE" ] && kill "$(cat "$HTTP_PIDFILE")" 2>/dev/null || true
-  rm -f "$HTTP_PIDFILE"
+  if [ -f "$HTTP_PIDFILE" ]; then
+    kill "$(cat "$HTTP_PIDFILE")" 2>/dev/null || true
+    rm -f "$HTTP_PIDFILE"
+  fi
 }
 
 provision() {

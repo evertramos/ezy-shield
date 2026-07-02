@@ -183,11 +183,14 @@ run_assertions() {
   ezyshield ban "$TEST_IP" --reason "e2e-test" 2>/dev/null || ezyshield ban "$TEST_IP" || true
   local banned=0
   for _ in $(seq 1 10); do
-    if nft list set $NFT_TABLE $NFT_SET 2>/dev/null | grep -q "$TEST_IP"; then banned=1; break; fi
+    if nft list set "$NFT_TABLE" "$NFT_SET" 2>/dev/null | grep -q "$TEST_IP"; then banned=1; break; fi
     sleep 0.5
   done
-  [ "$banned" = 1 ] && ok "banned $TEST_IP present in nft set '$NFT_TABLE $NFT_SET'" \
-                     || bad "banned $TEST_IP NOT in nft set — daemon can't reach enforcer (issue #6 regressed?)"
+  if [ "$banned" = 1 ]; then
+    ok "banned $TEST_IP present in nft set '$NFT_TABLE $NFT_SET'"
+  else
+    bad "banned $TEST_IP NOT in nft set — daemon can't reach enforcer (issue #6 regressed?)"
+  fi
 
   # 'ezyshield list' must show the ban we just made. Before the store fix, the
   # manual ban only wrote to audit_log so `list` returned "no active bans"
@@ -201,9 +204,13 @@ run_assertions() {
   ezyshield unban "$TEST_IP" 2>/dev/null || true
   local gone=1
   for _ in $(seq 1 10); do
-    if nft list set $NFT_TABLE $NFT_SET 2>/dev/null | grep -q "$TEST_IP"; then gone=0; sleep 0.5; else gone=1; break; fi
+    if nft list set "$NFT_TABLE" "$NFT_SET" 2>/dev/null | grep -q "$TEST_IP"; then gone=0; sleep 0.5; else gone=1; break; fi
   done
-  [ "$gone" = 1 ] && ok "unban removed $TEST_IP from nft set" || bad "unban did not remove $TEST_IP"
+  if [ "$gone" = 1 ]; then
+    ok "unban removed $TEST_IP from nft set"
+  else
+    bad "unban did not remove $TEST_IP"
+  fi
 
   info "Socket clobber refusal (the issue #14 fix)"
   # Manually invoking `ezyshield watch` while the systemd daemon is already up

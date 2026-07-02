@@ -73,7 +73,12 @@ func ProbeSocket(ctx context.Context, socketPath string) error {
 	// safe to treat as stale. Any other dial error (permission denied,
 	// timeout on a slow-but-live daemon) should be treated as in-use, since
 	// silently removing could clobber a live socket we simply can't reach.
-	if errors.Is(err, syscall.ECONNREFUSED) {
+	//
+	// ENOENT means the file was removed between our Stat and Dial (a crashed
+	// daemon cleaning up, or another restart racing us). Treat it the same as
+	// "path didn't exist to begin with" — safe to bind. Otherwise a benign
+	// race would surface as a spurious startup failure.
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	return fmt.Errorf("%w (dial %s): %w", ErrSocketInUse, socketPath, err)

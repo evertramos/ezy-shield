@@ -91,7 +91,7 @@ cleanup() {
   systemctl disable --now ezyshield-enforcer 2>/dev/null || true
   rm -f /etc/systemd/system/ezyshield.service /etc/systemd/system/ezyshield-enforcer.service
   systemctl daemon-reload 2>/dev/null || true
-  nft delete table $NFT_TABLE 2>/dev/null || true
+  nft delete table "$NFT_TABLE" 2>/dev/null || true
   userdel -r ezyshield 2>/dev/null || true
   groupdel ezyshield 2>/dev/null || true
   rm -rf "$CONFIG_DIR" "$STATE_DIR"

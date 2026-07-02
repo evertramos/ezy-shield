@@ -267,7 +267,7 @@ func (d *Daemon) Run(parentCtx context.Context) error {
 	// Socket server goroutine. Probe first so a manual `ezyshield watch`
 	// doesn't unlink and replace a live daemon's control socket (issue #14).
 	if d.socketPath != "" {
-		if err := ProbeSocket(d.socketPath); err != nil {
+		if err := ProbeSocket(ctx, d.socketPath); err != nil {
 			return fmt.Errorf("daemon: control socket unavailable: %w", err)
 		}
 		go d.serveSocket(ctx)

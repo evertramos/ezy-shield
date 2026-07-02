@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"net"
 	"os"
@@ -11,7 +12,7 @@ import (
 // TestProbeSocket_Missing: no file at path → safe to bind.
 func TestProbeSocket_Missing(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ezyshield.sock")
-	if err := ProbeSocket(path); err != nil {
+	if err := ProbeSocket(context.Background(), path); err != nil {
 		t.Fatalf("expected nil for missing socket, got: %v", err)
 	}
 }
@@ -25,7 +26,7 @@ func TestProbeSocket_Stale(t *testing.T) {
 	if err := os.WriteFile(path, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := ProbeSocket(path); err != nil {
+	if err := ProbeSocket(context.Background(), path); err != nil {
 		t.Fatalf("expected nil for stale socket, got: %v", err)
 	}
 }
@@ -34,13 +35,14 @@ func TestProbeSocket_Stale(t *testing.T) {
 // `ezyshield watch` refuses to clobber a live systemd-managed daemon (#14).
 func TestProbeSocket_Live(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ezyshield.sock")
-	ln, err := net.Listen("unix", path)
+	lc := net.ListenConfig{}
+	ln, err := lc.Listen(context.Background(), "unix", path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = ln.Close() }()
 
-	err = ProbeSocket(path)
+	err = ProbeSocket(context.Background(), path)
 	if err == nil {
 		t.Fatal("expected ErrSocketInUse for live socket, got nil")
 	}

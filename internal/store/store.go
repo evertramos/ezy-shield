@@ -331,10 +331,6 @@ func (s *DB) Unban(ctx context.Context, ip netip.Addr) error {
 	return tx.Commit()
 }
 
-// Audit appends an audit entry for a. Use this for actions (e.g. "unban",
-// "notify_only") that don't go through RecordStrike.
-// This is the ONLY function allowed to write to audit_log; there are no
-// UPDATE or DELETE paths for that table.
 // RecordManualBan inserts (or refreshes) a single-IP entry in bans_active for a
 // manually-issued ban (e.g. `ezyshield ban <ip>`). It also appends an audit_log
 // row. Unlike RecordStrike it does NOT create a strikes record — a manual ban
@@ -378,6 +374,10 @@ func (s *DB) RecordManualBan(ctx context.Context, ip netip.Addr, ttl time.Durati
 	return tx.Commit()
 }
 
+// Audit appends an audit entry for a. Use this for actions (e.g. "unban",
+// "notify_only") that don't go through RecordStrike. This is the ONLY function
+// allowed to write to audit_log; there are no UPDATE or DELETE paths for that
+// table.
 func (s *DB) Audit(ctx context.Context, a sdk.Action) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO audit_log (recorded_at, op, ip, ttl_seconds, strike_num, reason)

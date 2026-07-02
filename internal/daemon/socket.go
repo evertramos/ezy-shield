@@ -44,14 +44,15 @@ var ErrSocketInUse = errors.New("another ezyshield daemon is already listening o
 // listening. Called from Daemon.Run before starting so we fail fast instead of
 // unlinking a live socket. Uses a short dial timeout so a busy but responsive
 // daemon still answers.
-func ProbeSocket(socketPath string) error {
+func ProbeSocket(ctx context.Context, socketPath string) error {
 	if _, err := os.Stat(socketPath); err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
 		return fmt.Errorf("stat %s: %w", socketPath, err)
 	}
-	conn, err := net.DialTimeout("unix", socketPath, 200*time.Millisecond)
+	d := net.Dialer{Timeout: 200 * time.Millisecond}
+	conn, err := d.DialContext(ctx, "unix", socketPath)
 	if err != nil {
 		// Nothing listening — stale socket left over from a previous run.
 		return nil

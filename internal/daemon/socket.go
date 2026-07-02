@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/evertramos/ezy-shield/internal/ownership"
@@ -44,21 +45,38 @@ var ErrSocketInUse = errors.New("another ezyshield daemon is already listening o
 // listening. Called from Daemon.Run before starting so we fail fast instead of
 // unlinking a live socket. Uses a short dial timeout so a busy but responsive
 // daemon still answers.
+//
+// Safety: if the path exists but isn't a unix socket (regular file, symlink,
+// dir), or if we can't determine whether it's live (permission denied on
+// stat/dial), we treat that as "in use" — os.Remove on an unknown file would
+// be data loss. Only a clean "socket file present, dial refused" counts as
+// stale.
 func ProbeSocket(ctx context.Context, socketPath string) error {
-	if _, err := os.Stat(socketPath); err != nil {
+	info, err := os.Stat(socketPath)
+	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
-		return fmt.Errorf("stat %s: %w", socketPath, err)
+		// Permission denied, ENOTDIR, or anything else — don't touch it.
+		return fmt.Errorf("%w (stat %s): %w", ErrSocketInUse, socketPath, err)
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		return fmt.Errorf("%w: %s exists but is not a unix socket (mode=%s) — refusing to remove", ErrSocketInUse, socketPath, info.Mode())
 	}
 	d := net.Dialer{Timeout: 200 * time.Millisecond}
 	conn, err := d.DialContext(ctx, "unix", socketPath)
-	if err != nil {
-		// Nothing listening — stale socket left over from a previous run.
+	if err == nil {
+		_ = conn.Close()
+		return fmt.Errorf("%w: %s", ErrSocketInUse, socketPath)
+	}
+	// A "connection refused" on a real unix socket file means no listener —
+	// safe to treat as stale. Any other dial error (permission denied,
+	// timeout on a slow-but-live daemon) should be treated as in-use, since
+	// silently removing could clobber a live socket we simply can't reach.
+	if errors.Is(err, syscall.ECONNREFUSED) {
 		return nil
 	}
-	_ = conn.Close()
-	return fmt.Errorf("%w: %s", ErrSocketInUse, socketPath)
+	return fmt.Errorf("%w (dial %s): %w", ErrSocketInUse, socketPath, err)
 }
 
 // serveSocket creates the unix socket and accepts connections until ctx is done.
@@ -247,9 +265,19 @@ func (d *Daemon) handleBan(ctx context.Context, req SocketRequest) SocketRespons
 	// meant a manual ban reached nftables but silently didn't show up in list.
 	// bans_active is keyed by single IP; a CIDR ban still only gets audited
 	// (the store doesn't model prefix bans yet).
+	//
+	// Fail-safe: if the atomic RecordManualBan transaction fails (schema
+	// mismatch, disk full), fall back to AuditOp so the operator action is at
+	// least journaled — losing both the bans_active row and the audit trail
+	// would be a silent-failure regression (§10 SECURITY-REVIEW).
 	if prefix.Bits() == prefix.Addr().BitLen() && d.policy.Armed {
 		if err := d.store.RecordManualBan(ctx, prefix.Addr(), ttl, reason); err != nil {
-			slog.ErrorContext(ctx, "daemon: record manual ban", "ip", prefix.Addr(), "err", err)
+			slog.ErrorContext(ctx, "daemon: record manual ban failed, falling back to audit-only",
+				"ip", prefix.Addr(), "err", err)
+			if auditErr := d.store.AuditOp(ctx, op, prefix, ttl, reason); auditErr != nil {
+				slog.ErrorContext(ctx, "daemon: audit fallback also failed",
+					"prefix", prefix, "err", auditErr)
+			}
 		}
 	} else if err := d.store.AuditOp(ctx, op, prefix, ttl, reason); err != nil {
 		slog.ErrorContext(ctx, "daemon: audit manual ban", "prefix", prefix, "err", err)

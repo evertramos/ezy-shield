@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -32,12 +33,43 @@ const (
 	connDeadline = 10 * time.Second
 )
 
+// ErrSocketInUse is returned by ProbeSocket when another daemon is already
+// listening on the control socket. Daemon.Run surfaces this before starting so
+// a manual `ezyshield watch` doesn't clobber a systemd-managed daemon's socket
+// (issue #14). Callers should treat this as a startup failure, not warn-and-go.
+var ErrSocketInUse = errors.New("another ezyshield daemon is already listening on this socket")
+
+// ProbeSocket returns nil if socketPath is safe to bind (missing, or present
+// but stale — no listener). Returns ErrSocketInUse if a live daemon is
+// listening. Called from Daemon.Run before starting so we fail fast instead of
+// unlinking a live socket. Uses a short dial timeout so a busy but responsive
+// daemon still answers.
+func ProbeSocket(socketPath string) error {
+	if _, err := os.Stat(socketPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("stat %s: %w", socketPath, err)
+	}
+	conn, err := net.DialTimeout("unix", socketPath, 200*time.Millisecond)
+	if err != nil {
+		// Nothing listening — stale socket left over from a previous run.
+		return nil
+	}
+	_ = conn.Close()
+	return fmt.Errorf("%w: %s", ErrSocketInUse, socketPath)
+}
+
 // serveSocket creates the unix socket and accepts connections until ctx is done.
 // It creates the socket directory (0750) if absent.
 //
-// Security: the socket is created at socketPath with mode 0660.  The kernel
-// enforces access by UID/GID; no further authentication is done.  All mutating
+// Security: the socket is created at socketPath with mode 0660. The kernel
+// enforces access by UID/GID; no further authentication is done. All mutating
 // commands (ban, unban, allow) are written to audit_log.
+//
+// Callers MUST run ProbeSocket first (see Daemon.Run) to avoid clobbering a
+// live daemon's socket — issue #14. The os.Remove below is intended only for
+// stale sockets from previous runs, which ProbeSocket has already confirmed.
 func (d *Daemon) serveSocket(ctx context.Context) {
 	dir := filepath.Dir(d.socketPath)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
@@ -46,7 +78,8 @@ func (d *Daemon) serveSocket(ctx context.Context) {
 		return
 	}
 
-	// Remove a stale socket from a previous run.
+	// Remove a stale socket from a previous run — ProbeSocket in Run has
+	// already confirmed nothing is listening here.
 	_ = os.Remove(d.socketPath)
 
 	lc := net.ListenConfig{}

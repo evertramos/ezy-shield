@@ -25,7 +25,11 @@ SUFFIX="${OS}-${ARCH}"
 # Source override: point the installer at a local mirror (air-gapped installs,
 # CI, or the QEMU e2e harness) instead of GitHub Releases. When set, the
 # "latest release" API lookup is skipped and artifacts + checksums.txt are
-# fetched directly from ${EZYSHIELD_BASE_URL}. Integrity is still verified.
+# fetched directly from ${EZYSHIELD_BASE_URL}. Because checksums.txt is fetched
+# from the same base URL as the binaries, the SHA-256 comparison protects
+# against transfer corruption but does NOT authenticate a compromised or
+# malicious mirror — use this override only for trusted mirrors, air-gapped
+# installs from artifacts you already vetted, or the local dev harness.
 if [ -n "${EZYSHIELD_BASE_URL:-}" ]; then
   VERSION="${EZYSHIELD_VERSION:-local}"
   BASE_URL="$EZYSHIELD_BASE_URL"

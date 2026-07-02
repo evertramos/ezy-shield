@@ -337,6 +337,13 @@ func (s *DB) Unban(ctx context.Context, ip netip.Addr) error {
 // isn't a rule-engine event and shouldn't inflate the offender's strike count.
 // ttl == 0 means permanent (expires_at NULL). reason is stored as-is.
 func (s *DB) RecordManualBan(ctx context.Context, ip netip.Addr, ttl time.Duration, reason string) error {
+	// A negative ttl is almost certainly caller error (parseExtendedDuration
+	// happily returns negatives for "-1h"). Silently storing it as a
+	// permanent ban — which the `if ttl > 0` branch below would do — is a
+	// surprising persistence pattern, so refuse it here.
+	if ttl < 0 {
+		return fmt.Errorf("store: negative ttl %s not allowed for manual ban", ttl)
+	}
 	ipStr := ip.String()
 	now := nowRFC3339()
 	ttlSec := int64(ttl.Seconds())

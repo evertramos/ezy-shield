@@ -731,3 +731,58 @@ func TestRecordManualBan_Permanent(t *testing.T) {
 		t.Errorf("permanent ban must survive ExpireBans, got %d bans left", len(still))
 	}
 }
+
+// TestRecordManualBan_RefreshPreservesRuleEngineStrikeNum documents an
+// intentional design decision (Copilot flagged this as a potential bug in
+// review): when a manual ban lands on top of an existing rule-engine ban, the
+// ON CONFLICT upsert does NOT overwrite strike_num. The rule-engine's
+// escalation history — five failed logins → strike 3, for example — is more
+// signal than "operator refreshed with strike 1", and losing that history
+// would make future automatic escalations start over from zero. banned_at,
+// expires_at, and reason ARE updated so the operator's ban does take effect;
+// only the strike counter is preserved.
+func TestRecordManualBan_RefreshPreservesRuleEngineStrikeNum(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	// Simulate the rule engine banning ip1 at strike 3.
+	if err := db.RecordStrike(ctx, action(ip1, 3, time.Hour)); err != nil {
+		t.Fatalf("RecordStrike: %v", err)
+	}
+	// Operator issues a manual ban on the same IP.
+	if err := db.RecordManualBan(ctx, ip1, 24*time.Hour, "operator ack"); err != nil {
+		t.Fatalf("RecordManualBan: %v", err)
+	}
+	bans, err := db.ActiveBans(ctx)
+	if err != nil {
+		t.Fatalf("ActiveBans: %v", err)
+	}
+	if len(bans) != 1 {
+		t.Fatalf("want 1 ban after refresh, got %d", len(bans))
+	}
+	if bans[0].Strike != 3 {
+		t.Errorf("strike_num = %d, want 3 preserved from rule engine (see comment)", bans[0].Strike)
+	}
+	if bans[0].Reason != "operator ack" {
+		t.Errorf("reason = %q, want %q (manual ban wins on reason)", bans[0].Reason, "operator ack")
+	}
+}
+
+// TestRecordManualBan_RejectsNegativeTTL: a negative duration must not
+// silently become a permanent ban (Copilot review). parseExtendedDuration
+// happily returns negatives, so defense-in-depth belongs at the store layer.
+func TestRecordManualBan_RejectsNegativeTTL(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	if err := db.RecordManualBan(ctx, ip1, -1*time.Hour, "typo"); err == nil {
+		t.Fatal("expected error for negative ttl, got nil")
+	}
+	bans, err := db.ActiveBans(ctx)
+	if err != nil {
+		t.Fatalf("ActiveBans: %v", err)
+	}
+	if len(bans) != 0 {
+		t.Errorf("nothing should have been recorded for a rejected ban, got %d bans", len(bans))
+	}
+}

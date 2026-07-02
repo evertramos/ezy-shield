@@ -240,7 +240,17 @@ func (d *Daemon) handleBan(ctx context.Context, req SocketRequest) SocketRespons
 	if reason == "" {
 		reason = "manual ban via CLI"
 	}
-	if err := d.store.AuditOp(ctx, op, prefix, ttl, reason); err != nil {
+
+	// For a single-IP ban, record in bans_active so `ezyshield list` sees it.
+	// AuditOp alone (the previous behaviour) only wrote to audit_log, which
+	// meant a manual ban reached nftables but silently didn't show up in list.
+	// bans_active is keyed by single IP; a CIDR ban still only gets audited
+	// (the store doesn't model prefix bans yet).
+	if prefix.Bits() == prefix.Addr().BitLen() && d.policy.Armed {
+		if err := d.store.RecordManualBan(ctx, prefix.Addr(), ttl, reason); err != nil {
+			slog.ErrorContext(ctx, "daemon: record manual ban", "ip", prefix.Addr(), "err", err)
+		}
+	} else if err := d.store.AuditOp(ctx, op, prefix, ttl, reason); err != nil {
 		slog.ErrorContext(ctx, "daemon: audit manual ban", "prefix", prefix, "err", err)
 	}
 

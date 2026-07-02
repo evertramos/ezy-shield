@@ -335,6 +335,49 @@ func (s *DB) Unban(ctx context.Context, ip netip.Addr) error {
 // "notify_only") that don't go through RecordStrike.
 // This is the ONLY function allowed to write to audit_log; there are no
 // UPDATE or DELETE paths for that table.
+// RecordManualBan inserts (or refreshes) a single-IP entry in bans_active for a
+// manually-issued ban (e.g. `ezyshield ban <ip>`). It also appends an audit_log
+// row. Unlike RecordStrike it does NOT create a strikes record — a manual ban
+// isn't a rule-engine event and shouldn't inflate the offender's strike count.
+// ttl == 0 means permanent (expires_at NULL). reason is stored as-is.
+func (s *DB) RecordManualBan(ctx context.Context, ip netip.Addr, ttl time.Duration, reason string) error {
+	ipStr := ip.String()
+	now := nowRFC3339()
+	ttlSec := int64(ttl.Seconds())
+
+	var expiresAt *string
+	if ttl > 0 {
+		t := time.Now().UTC().Add(ttl).Format(time.RFC3339Nano)
+		expiresAt = &t
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: begin RecordManualBan: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO bans_active (ip, banned_at, expires_at, strike_num, reason)
+		VALUES (?, ?, ?, 1, ?)
+		ON CONFLICT(ip) DO UPDATE SET
+			banned_at  = excluded.banned_at,
+			expires_at = excluded.expires_at,
+			reason     = excluded.reason
+	`, ipStr, now, expiresAt, reason); err != nil {
+		return fmt.Errorf("store: upsert manual ban: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO audit_log (recorded_at, op, ip, ttl_seconds, strike_num, reason)
+		VALUES (?, ?, ?, ?, 1, ?)
+	`, now, "ban", ipStr, ttlSec, reason); err != nil {
+		return fmt.Errorf("store: insert audit for manual ban: %w", err)
+	}
+
+	return tx.Commit()
+}
+
 func (s *DB) Audit(ctx context.Context, a sdk.Action) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO audit_log (recorded_at, op, ip, ttl_seconds, strike_num, reason)

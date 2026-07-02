@@ -48,6 +48,7 @@ type daemonStore interface {
 	Unban(ctx context.Context, ip netip.Addr) error
 	UnbanPrefix(ctx context.Context, prefix netip.Prefix) (int, error)
 	AuditOp(ctx context.Context, op string, prefix netip.Prefix, ttl time.Duration, reason string) error
+	RecordManualBan(ctx context.Context, ip netip.Addr, ttl time.Duration, reason string) error
 	AddAllow(ctx context.Context, prefix netip.Prefix, expiresAt *time.Time, reason string) error
 	RemoveAllow(ctx context.Context, prefix netip.Prefix) (int, error)
 	ListAllow(ctx context.Context) ([]store.AllowEntry, error)

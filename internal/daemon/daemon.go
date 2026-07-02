@@ -48,6 +48,7 @@ type daemonStore interface {
 	Unban(ctx context.Context, ip netip.Addr) error
 	UnbanPrefix(ctx context.Context, prefix netip.Prefix) (int, error)
 	AuditOp(ctx context.Context, op string, prefix netip.Prefix, ttl time.Duration, reason string) error
+	RecordManualBan(ctx context.Context, ip netip.Addr, ttl time.Duration, reason string) error
 	AddAllow(ctx context.Context, prefix netip.Prefix, expiresAt *time.Time, reason string) error
 	RemoveAllow(ctx context.Context, prefix netip.Prefix) (int, error)
 	ListAllow(ctx context.Context) ([]store.AllowEntry, error)
@@ -263,8 +264,12 @@ func (d *Daemon) Run(parentCtx context.Context) error {
 	// Aggregator flush goroutine — keeps memory bounded by removing idle IPs.
 	go d.runFlush(ctx)
 
-	// Socket server goroutine.
+	// Socket server goroutine. Probe first so a manual `ezyshield watch`
+	// doesn't unlink and replace a live daemon's control socket (issue #14).
 	if d.socketPath != "" {
+		if err := ProbeSocket(ctx, d.socketPath); err != nil {
+			return fmt.Errorf("daemon: control socket unavailable: %w", err)
+		}
 		go d.serveSocket(ctx)
 	}
 

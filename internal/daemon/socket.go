@@ -3,25 +3,21 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/netip"
 	"os"
-	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
+	"github.com/evertramos/ezy-shield/internal/ownership"
 	"github.com/evertramos/ezy-shield/pkg/sdk"
 )
-
-// daemonGroupName is the unix group the EzyShield daemon runs as. The control
-// socket is chowned to root:<daemonGroupName> 0660 so any admin in that group
-// can run ezyshield status/list/ban/unban/allow without sudo. Matches the
-// fail2ban/sshguard pattern (issue #6).
-const daemonGroupName = "ezyshield"
 
 // asnString formats a uint32 ASN as "AS<n>", or "" when zero.
 func asnString(n uint32) string {
@@ -38,12 +34,66 @@ const (
 	connDeadline = 10 * time.Second
 )
 
+// ErrSocketInUse is returned by ProbeSocket when another daemon is already
+// listening on the control socket. Daemon.Run surfaces this before starting so
+// a manual `ezyshield watch` doesn't clobber a systemd-managed daemon's socket
+// (issue #14). Callers should treat this as a startup failure, not warn-and-go.
+var ErrSocketInUse = errors.New("another ezyshield daemon is already listening on this socket")
+
+// ProbeSocket returns nil if socketPath is safe to bind (missing, or present
+// but stale — no listener). Returns ErrSocketInUse if a live daemon is
+// listening. Called from Daemon.Run before starting so we fail fast instead of
+// unlinking a live socket. Uses a short dial timeout so a busy but responsive
+// daemon still answers.
+//
+// Safety: if the path exists but isn't a unix socket (regular file, symlink,
+// dir), or if we can't determine whether it's live (permission denied on
+// stat/dial), we treat that as "in use" — os.Remove on an unknown file would
+// be data loss. Only a clean "socket file present, dial refused" counts as
+// stale.
+func ProbeSocket(ctx context.Context, socketPath string) error {
+	info, err := os.Stat(socketPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		// Permission denied, ENOTDIR, or anything else — don't touch it.
+		return fmt.Errorf("%w (stat %s): %w", ErrSocketInUse, socketPath, err)
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		return fmt.Errorf("%w: %s exists but is not a unix socket (mode=%s) — refusing to remove", ErrSocketInUse, socketPath, info.Mode())
+	}
+	d := net.Dialer{Timeout: 200 * time.Millisecond}
+	conn, err := d.DialContext(ctx, "unix", socketPath)
+	if err == nil {
+		_ = conn.Close()
+		return fmt.Errorf("%w: %s", ErrSocketInUse, socketPath)
+	}
+	// A "connection refused" on a real unix socket file means no listener —
+	// safe to treat as stale. Any other dial error (permission denied,
+	// timeout on a slow-but-live daemon) should be treated as in-use, since
+	// silently removing could clobber a live socket we simply can't reach.
+	//
+	// ENOENT means the file was removed between our Stat and Dial (a crashed
+	// daemon cleaning up, or another restart racing us). Treat it the same as
+	// "path didn't exist to begin with" — safe to bind. Otherwise a benign
+	// race would surface as a spurious startup failure.
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return fmt.Errorf("%w (dial %s): %w", ErrSocketInUse, socketPath, err)
+}
+
 // serveSocket creates the unix socket and accepts connections until ctx is done.
 // It creates the socket directory (0750) if absent.
 //
-// Security: the socket is created at socketPath with mode 0660.  The kernel
-// enforces access by UID/GID; no further authentication is done.  All mutating
+// Security: the socket is created at socketPath with mode 0660. The kernel
+// enforces access by UID/GID; no further authentication is done. All mutating
 // commands (ban, unban, allow) are written to audit_log.
+//
+// Callers MUST run ProbeSocket first (see Daemon.Run) to avoid clobbering a
+// live daemon's socket — issue #14. The os.Remove below is intended only for
+// stale sockets from previous runs, which ProbeSocket has already confirmed.
 func (d *Daemon) serveSocket(ctx context.Context) {
 	dir := filepath.Dir(d.socketPath)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
@@ -52,7 +102,8 @@ func (d *Daemon) serveSocket(ctx context.Context) {
 		return
 	}
 
-	// Remove a stale socket from a previous run.
+	// Remove a stale socket from a previous run — ProbeSocket in Run has
+	// already confirmed nothing is listening here.
 	_ = os.Remove(d.socketPath)
 
 	lc := net.ListenConfig{}
@@ -65,9 +116,12 @@ func (d *Daemon) serveSocket(ctx context.Context) {
 
 	// Set permissions immediately after bind so a window between bind and chmod
 	// is as narrow as possible. The standard for security daemons (fail2ban,
-	// sshguard) is root:ezyshield 0660 so admins in the group can use the
+	// sshguard) is group=ezyshield 0660 so admins in the group can use the
 	// control socket without sudo — see issue #6.
-	chownSocketToDaemonGroup(ctx, d.socketPath)
+	if err := ownership.ChownToGroup(d.socketPath, ownership.Group); err != nil {
+		slog.WarnContext(ctx, "daemon: could not set control socket group; admins may need sudo until 'ezyshield init' creates the group",
+			"path", d.socketPath, "group", ownership.Group, "err", err)
+	}
 	if err := os.Chmod(d.socketPath, socketPerm); err != nil {
 		slog.WarnContext(ctx, "daemon: socket chmod failed",
 			"path", d.socketPath, "err", err)
@@ -93,34 +147,6 @@ func (d *Daemon) serveSocket(ctx context.Context) {
 			continue
 		}
 		go d.handleConn(ctx, conn)
-	}
-}
-
-// chownSocketToDaemonGroup chowns path to root:ezyshield. When the group is
-// not present on the host (uncommon outside production; happens in containers
-// or fresh dev hosts before 'ezyshield init') it falls back to the current
-// process uid/gid so the socket is still owned by something usable, and logs a
-// warning so the operator notices.
-func chownSocketToDaemonGroup(ctx context.Context, path string) {
-	g, lookupErr := user.LookupGroup(daemonGroupName)
-	if lookupErr != nil {
-		uid, gid := os.Getuid(), os.Getgid()
-		slog.WarnContext(ctx, "daemon: ezyshield group not found, falling back to current uid:gid — admins outside the daemon's user cannot use the socket without sudo",
-			"path", path, "uid", uid, "gid", gid, "err", lookupErr)
-		if err := os.Chown(path, uid, gid); err != nil {
-			slog.WarnContext(ctx, "daemon: socket chown fallback failed", "path", path, "err", err)
-		}
-		return
-	}
-	gid, err := strconv.Atoi(g.Gid)
-	if err != nil {
-		slog.WarnContext(ctx, "daemon: invalid gid for ezyshield group",
-			"path", path, "gid", g.Gid, "err", err)
-		return
-	}
-	if err := os.Chown(path, 0, gid); err != nil {
-		slog.WarnContext(ctx, "daemon: socket chown to root:ezyshield failed",
-			"path", path, "gid", gid, "err", err)
 	}
 }
 
@@ -238,7 +264,27 @@ func (d *Daemon) handleBan(ctx context.Context, req SocketRequest) SocketRespons
 	if reason == "" {
 		reason = "manual ban via CLI"
 	}
-	if err := d.store.AuditOp(ctx, op, prefix, ttl, reason); err != nil {
+
+	// For a single-IP ban, record in bans_active so `ezyshield list` sees it.
+	// AuditOp alone (the previous behaviour) only wrote to audit_log, which
+	// meant a manual ban reached nftables but silently didn't show up in list.
+	// bans_active is keyed by single IP; a CIDR ban still only gets audited
+	// (the store doesn't model prefix bans yet).
+	//
+	// Fail-safe: if the atomic RecordManualBan transaction fails (schema
+	// mismatch, disk full), fall back to AuditOp so the operator action is at
+	// least journaled — losing both the bans_active row and the audit trail
+	// would be a silent-failure regression (§10 SECURITY-REVIEW).
+	if prefix.Bits() == prefix.Addr().BitLen() && d.policy.Armed {
+		if err := d.store.RecordManualBan(ctx, prefix.Addr(), ttl, reason); err != nil {
+			slog.ErrorContext(ctx, "daemon: record manual ban failed, falling back to audit-only",
+				"ip", prefix.Addr(), "err", err)
+			if auditErr := d.store.AuditOp(ctx, op, prefix, ttl, reason); auditErr != nil {
+				slog.ErrorContext(ctx, "daemon: audit fallback also failed",
+					"prefix", prefix, "err", auditErr)
+			}
+		}
+	} else if err := d.store.AuditOp(ctx, op, prefix, ttl, reason); err != nil {
 		slog.ErrorContext(ctx, "daemon: audit manual ban", "prefix", prefix, "err", err)
 	}
 

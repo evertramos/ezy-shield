@@ -6,7 +6,12 @@ After=network.target
 [Service]
 Type=simple
 User=root
-Group=root
+# Group=ezyshield makes the process egid 'ezyshield', so the control socket (and
+# its RuntimeDirectory) is created root:ezyshield with no chown needed — the
+# daemon (User=ezyshield) can then connect. This avoids granting the privileged
+# enforcer CAP_CHOWN just to fix socket ownership (issue #6). The group is
+# created by `ezyshield init` (useradd) before this unit is installed.
+Group=ezyshield
 ExecStart=/usr/local/bin/ezyshield-enforcer --socket /run/ezyshield-enforcer/enforcer.sock
 Restart=on-failure
 RestartSec=3s
@@ -14,7 +19,8 @@ RestartSec=3s
 # This service holds CAP_NET_ADMIN to modify nftables; nothing else.
 # No network listeners — control is via unix socket only (AGENTS.md §2).
 # AmbientCapabilities grants CAP_NET_ADMIN to the process without running as
-# root in the traditional sense; CapabilityBoundingSet prevents acquiring more.
+# root in the traditional sense; CapabilityBoundingSet prevents acquiring more
+# (notably NOT CAP_CHOWN — socket ownership is handled via Group= above).
 AmbientCapabilities=CAP_NET_ADMIN
 CapabilityBoundingSet=CAP_NET_ADMIN
 

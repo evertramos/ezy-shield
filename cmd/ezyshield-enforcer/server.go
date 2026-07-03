@@ -21,6 +21,7 @@ import (
 // nft commands (SECURITY-REVIEW.md §3).
 var validVerbs = map[string]bool{
 	"add": true, "del": true, "flush": true, "list": true, "ping": true,
+	"allow_add": true, "allow_del": true, "allow_list": true, "allow_flush": true,
 }
 
 // Server is the enforcer unix-socket server.
@@ -186,6 +187,37 @@ func (s *Server) dispatch(ctx context.Context, req enforce.Request) enforce.Resp
 		s.mu.Lock()
 		delete(s.blocked, req.IP)
 		s.mu.Unlock()
+		return enforce.Response{OK: true}
+
+	case "allow_add":
+		if err := validateIP(req.IP); err != nil {
+			return enforce.Response{OK: false, Error: err.Error()}
+		}
+		if err := nftAddAllow(ctx, s.run, req.IP); err != nil {
+			return enforce.Response{OK: false, Error: err.Error()}
+		}
+		return enforce.Response{OK: true}
+
+	case "allow_del":
+		if err := validateIP(req.IP); err != nil {
+			return enforce.Response{OK: false, Error: err.Error()}
+		}
+		if err := nftDelAllow(ctx, s.run, req.IP); err != nil {
+			return enforce.Response{OK: false, Error: err.Error()}
+		}
+		return enforce.Response{OK: true}
+
+	case "allow_list":
+		ips, err := nftListAllow(ctx)
+		if err != nil {
+			return enforce.Response{OK: false, Error: err.Error()}
+		}
+		return enforce.Response{OK: true, IPs: ips}
+
+	case "allow_flush":
+		if err := nftFlushAllow(ctx, s.run); err != nil {
+			return enforce.Response{OK: false, Error: err.Error()}
+		}
 		return enforce.Response{OK: true}
 	}
 

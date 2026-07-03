@@ -373,6 +373,20 @@ func (d *Daemon) handleAllow(ctx context.Context, req SocketRequest) SocketRespo
 		slog.ErrorContext(ctx, "daemon: reload allowlist after add", "err", err)
 	}
 
+	// Push the new entry to the enforcer's @allowed set so the anti-lockout
+	// invariant (AGENTS.md §2) holds at the raw/prerouting hook too — where
+	// the block drops happen (issue #23). Only enforcers that manage local
+	// firewall state care about this; edge enforcers (Cloudflare) don't need
+	// it. Uses a type assertion so the sdk.Enforcer interface stays minimal.
+	// Failure is not fatal: the daemon-level allowlist check still catches
+	// the target upstream, and SyncAllowlist on the next startup reconciles.
+	if syncer, ok := d.enforcer.(allowlistSyncer); ok {
+		if err := syncer.Allow(ctx, prefix); err != nil {
+			slog.ErrorContext(ctx, "daemon: enforcer allow failed",
+				"prefix", prefix, "err", err)
+		}
+	}
+
 	slog.InfoContext(ctx, "daemon: runtime allowlist updated",
 		"prefix", prefix, "expires_at", expiresAt, "reason", req.Reason)
 	return SocketResponse{OK: true}

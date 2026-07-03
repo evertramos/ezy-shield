@@ -397,17 +397,45 @@ func askQuestions(sc *bufio.Scanner, state *wizardState, yes bool) {
 	state.enableAI = askBool("Enable AI analysis?", false)
 	if state.enableAI {
 		state.aiProvider = ask("AI provider (anthropic/openai/ollama)", "anthropic")
+		// askEnvVar wraps ask() with strict validation: the input must be a
+		// POSIX shell identifier and must not look like a well-known secret.
+		// This defends against issue #13 where an operator pasted the API key
+		// at the "Env var holding API key" prompt, causing the key to be
+		// written to config.yaml and later leaked to journald on every daemon
+		// restart. See docs/SECURITY-REVIEW.md §4.
+		const envVarPrompt = "Env var holding API key (NAME only, e.g. ANTHROPIC_API_KEY — never the key itself)"
+		askEnvVar := func(def string) string {
+			for attempt := 0; attempt < 3; attempt++ {
+				val := ask(envVarPrompt, def)
+				if val == "" {
+					return ""
+				}
+				if err := config.ValidateEnvVarName(val); err != nil {
+					// err is already redacted by ValidateEnvVarName — safe to print.
+					fmt.Printf("    rejected: %v\n", err)
+					fmt.Println("    Type ONLY the env-var NAME. The value goes in /etc/ezyshield/env after init.")
+					if yes {
+						// Non-interactive mode: don't loop forever on a bad default.
+						return ""
+					}
+					continue
+				}
+				return val
+			}
+			fmt.Println("    too many invalid attempts — leaving AI key env var unset; edit config.yaml later")
+			return ""
+		}
 		switch state.aiProvider {
 		case "anthropic":
 			state.aiModel = ask("Model", "claude-haiku-4-5-20251001")
-			state.aiKeyEnvVar = ask("Env var holding API key", "ANTHROPIC_API_KEY")
+			state.aiKeyEnvVar = askEnvVar("ANTHROPIC_API_KEY")
 		case "openai":
 			state.aiModel = ask("Model", "gpt-4o-mini")
-			state.aiKeyEnvVar = ask("Env var holding API key", "OPENAI_API_KEY")
+			state.aiKeyEnvVar = askEnvVar("OPENAI_API_KEY")
 		case "ollama":
 			state.aiModel = ask("Model", "llama3")
 		default:
-			state.aiKeyEnvVar = ask("Env var holding API key", "")
+			state.aiKeyEnvVar = askEnvVar("")
 		}
 	}
 

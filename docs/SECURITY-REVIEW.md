@@ -107,6 +107,10 @@ command execution through it.
       scoped to Firewall edit on one zone), and the code fails closed if a token
       has more scope than needed? (at least: docs say how to scope it.)
 
+**Known pitfalls (learned the hard way):**
+
+- **Operator paste-mistake at the env-var-name prompt (issue #13).** The `ezyshield init` wizard asks for the *name* of the env var holding the API key (e.g. `ANTHROPIC_API_KEY`). If the operator pastes the real key instead, the naive code path (a) writes `api_key: env:sk-ant-<full-key>` to `/etc/ezyshield/config.yaml` and (b) later logs `environment variable sk-ant-<full-key> is not set` to journald on every daemon restart — leaking the secret to whoever reads the system journal. The wizard must validate the input as a POSIX shell identifier (`^[A-Za-z_][A-Za-z0-9_]*$`) at prompt time, and `SecretRef.Resolve` / `UnmarshalYAML` in `internal/config` must reject a malformed `env:` reference at load time with a **redacted** error message. See `internal/config/secret.go` (`validateEnvVarName`, `redactSecret`) and the tests in `internal/config/secret_leak_test.go`.
+
 ## 5. 🔴 AI / LLM boundary — prompt injection
 
 Logs sent to the model are attacker-authored. The model's output then influences

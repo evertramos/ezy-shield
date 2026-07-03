@@ -27,8 +27,9 @@ chain prerouting {
     ip  saddr @allowed  accept
     ip6 saddr @allowed6 accept
 
-    # notrack skips conntrack for packets we're about to drop, saving state
-    # table slots under scanner floods (nftables wiki recommendation).
+    # notrack skips conntrack for packets we're about to drop, keeping the
+    # kernel conntrack table lean under scanner floods. Standard nftables
+    # idiom (see the References section below).
     ip  saddr @blocked  notrack
     ip6 saddr @blocked6 notrack
     ip  saddr @blocked  drop
@@ -60,16 +61,25 @@ The kernel evaluates prerouting hooks in strict priority order (lower = earlier)
 | Alternative | Rejected because |
 |---|---|
 | `mangle/prerouting` (-150) | Runs after conntrack. If `raw` works, `mangle` is strictly worse — same coverage, more overhead. |
-| Docker's `DOCKER-USER` chain | Docker's recommended integration point, but only covers docker-native forwarding. Misses `docker-proxy` and Podman rootless (both use userspace networking, bypass DOCKER-USER entirely). |
+| Docker's [`DOCKER-USER` chain](https://docs.docker.com/engine/network/packet-filtering-firewalls/#docker-on-linux) | Docker's own recommended integration point for user firewall rules, but it only sees traffic Docker forwards to containers through DNAT. Traffic accepted by the userspace `docker-proxy` never reaches this chain; Podman rootless (slirp4netns / pasta) never touches it either. |
 | Insert at `nat/prerouting priority -101` | Priority conflict — Docker registers at `-100`, and any rule at `-101` breaks legitimate NAT consumers. Fragile. |
 | eBPF/XDP drop | Best performance, but requires modern kernel and specialized tooling. Overkill for the current stage of the project. |
 | Keep existing chains, tell operators to disable `docker-proxy` (`userland-proxy: false`) | Requires per-operator configuration change with unrelated side effects (loses hairpin, some containers break). Not a solution — a workaround. |
 
-## Community precedent
+## References
 
-- **[Netfilter wiki — nftables best practices](https://wiki.nftables.org/)**: `raw/prerouting` with `notrack + drop` is the documented canonical placement for pure-drop IP blocklists. Pattern explicitly recommended by Pablo Neira Ayuso.
-- **[CrowdSec `cs-firewall-bouncer`](https://github.com/crowdsecurity/cs-firewall-bouncer)** — the closest architectural sibling to EzyShield. Its `nftables` backend registers the drop chain at `raw/prerouting` for exactly the reasons above. Production-grade precedent.
-- **fail2ban's modern `nftables-common.conf`**: moved the sinkhole to prerouting after the same class of container-bypass reports.
+**Primary documentation** — everything the design above relies on is in these pages:
+
+- **[nftables wiki — Configuring chains](https://wiki.nftables.org/wiki-nftables/index.php/Configuring_chains)** — canonical documentation of the netfilter hook priorities (`raw`, `mangle`, `dstnat`, `filter`, `srcnat`) reproduced in the priority table above, and the top-down rule-evaluation model on which the allow-before-drop ordering depends.
+- **[nftables wiki — Sets](https://wiki.nftables.org/wiki-nftables/index.php/Sets)** — how `flags interval, timeout, auto-merge` sets work, which is what `blocked` / `blocked6` and `allowed` / `allowed6` are built on.
+- **[nftables wiki — Simple ruleset for a server](https://wiki.nftables.org/wiki-nftables/index.php/Simple_ruleset_for_a_server)** — the wiki's own worked example uses allow-first ordering (accept rules before the terminating drop), the same pattern applied here on the prerouting chain.
+- **[Docker — Packet filtering and firewalls](https://docs.docker.com/engine/network/packet-filtering-firewalls/)** — Docker's official documentation of `DOCKER-USER`, how docker-proxy is spawned, and how user-installed firewall rules interact (or don't) with Docker's own NAT rules. Justifies why the `DOCKER-USER` alternative was rejected.
+
+**Precedent in similar OSS:**
+
+- **[CrowdSec `cs-firewall-bouncer` — nftables backend](https://github.com/crowdsecurity/cs-firewall-bouncer/tree/main/pkg/nftables)** — the closest architectural sibling to EzyShield (adaptive IP-blocklist bouncer for a Linux host). Its nftables backend registers a chain at `hook prerouting priority -300` for exactly the reasons in this ADR. Production-grade precedent maintained by the CrowdSec team.
+
+**Honesty about paraphrase:** in the pull request description and earlier reviews I attributed "the `raw/prerouting` + `notrack + drop` pattern" to a specific recommendation by Pablo Neira Ayuso (nftables maintainer). I don't have a specific talk, mailing-list post, or wiki page from him to point at — that was my paraphrase of the pattern being standard practice, not a literal quotation. The design still stands on the sources above; the attribution to a single person was overstated. Similarly, an earlier draft mentioned fail2ban having "moved to prerouting in modern releases"; I could not verify that in fail2ban's current documentation before writing this ADR and have dropped the claim.
 
 ## Consequences
 

@@ -89,14 +89,31 @@ The kernel evaluates prerouting hooks in strict priority order (lower = earlier)
 - `notrack` before `drop` saves conntrack table entries under scanner floods — real DoS-mitigation benefit.
 - Rule audit surface stays inside one nftables table (`inet ezyshield`) — no new tables, no cross-namespace surprises.
 
-**Trade-offs:**
+**Defense in depth (intentional, not a trade-off):**
 
-- Allowlist rules now live in two places (raw/prerouting and the daemon-side check). Both must be kept in sync. The daemon calls `SyncAllowlist` on startup, on every operator `allow` call, and on entry expiry.
+The allowlist now has representations at four layers, each defending against a different failure mode. This is layered design, not accidental duplication — collapsing to a single copy would remove protection in every direction we care about.
+
+| Layer | Where | What it protects against |
+|---|---|---|
+| Canonical | SQLite `allowlist` table (`store.AddAllow` / `ListAllow`) | Persistence, restart survival, audit. Single source of truth. |
+| Runtime — daemon | `d.runtimeAllowlist` in-memory | Pipeline (rules → AI → decision) checks BEFORE generating a ban. Avoids inflating audit_log with bans that never should have existed, and avoids paying to consult Claude on IPs we'd never ban anyway. |
+| Runtime — enforcer client | `NftablesEnforcer.allowlist` in-memory | Client-side belt-and-suspenders: refuses to send `add` to the enforcer even if the daemon layer above missed. Documented in `NftablesEnforcer` as an anti-lockout guard against direct invocation. |
+| Kernel | nft `@allowed` / `@allowed6` sets (this ADR) | Last line: if any bug in the layers above lets an allowlisted IP land in `@blocked`, the kernel's `accept` runs before `drop` and the packet gets through. Prevents admin/CI lockout even under a bugged daemon. |
+
+The layers reference the same canonical source but are consulted at different points in the packet's life and at different levels of privilege. Fusing them would either lock users out on any daemon bug (drop layer 4) or force the pipeline to hit external state on every event (drop layer 2). Neither is acceptable.
+
+Sync is a mechanical problem, not an architectural one, and is already implemented: `d.syncEnforcerAllowlist` runs on startup, on every operator `allow` call, and after every expiry sweep. See "Future work" for further hardening.
+
+**Other trade-offs:**
+
 - If an operator has pre-existing rules at `raw` for other reasons (rare — `raw` is typically empty), those rules coexist with the ezyshield chain but priority-tied ordering between multiple chains at the same hook+priority is undefined. Not expected to matter in practice; `raw` is essentially unused space in most deployments.
 - The `allowed` sets have no nft-native `timeout` — allowlist TTLs are enforced by the daemon's expiry loop. If the daemon crashes and stays down, allowed entries persist in nft until the daemon comes back and syncs. Acceptable — allow entries persisting a bit too long is failure-open in the right direction.
 
 **Future work not blocked by this ADR:**
 
 - `ezyshield doctor` gaining a check for the prerouting chain being registered correctly (right priority, right rule order).
+- `ezyshield doctor` gaining an "allowlist consistency" check — reads `store.ListAllow`, `d.runtimeAllowlist`, and the nft `@allowed` / `@allowed6` sets, and reports divergence between any two of them. Turns silent sync drift into a doctor `[FAIL]` instead of a lockout waiting to happen.
+- Periodic reconciliation loop in the daemon: a low-frequency ticker (every ~5 min) that runs `syncEnforcerAllowlist` unconditionally. `SyncAllowlist` is already idempotent, so the cost is a single `nft list set` + set-diff; the payoff is that any transient sync failure (nft unreachable during an operator `allow` call, race during expiry) is self-healing within the tick period instead of persisting until the next daemon restart.
+- Counter for "kernel-level accept saved us": every time the `@allowed accept` rule at prerouting fires with the same IP that was written to `@blocked` in the last few minutes, we know the upper layers had a bug and layer 4 caught it. Exporting that counter (log or metrics) turns "defense in depth" from an untestable claim into an observable one — a sustained rise means there's a real bug in the daemon-side check to hunt.
 - QEMU e2e harness gaining a Docker-container-target test that would have caught this from the start.
 - Possible future move to XDP/eBPF for the busiest scanner hosts, once justified by measured overhead.

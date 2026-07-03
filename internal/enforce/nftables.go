@@ -115,23 +115,81 @@ func (e *NftablesEnforcer) Sync(ctx context.Context, want []sdk.Target) error {
 
 // listIPs sends a "list" request and returns the current set contents.
 func (e *NftablesEnforcer) listIPs(ctx context.Context) ([]string, error) {
+	return e.listVerb(ctx, "list")
+}
+
+// listVerb is the shared implementation of the two list verbs ("list" for
+// blocked, "allow_list" for allowed).
+func (e *NftablesEnforcer) listVerb(ctx context.Context, verb string) ([]string, error) {
 	conn, err := e.dial(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Close() //nolint:errcheck
 
-	if err := sendRequest(conn, Request{Verb: "list"}); err != nil {
+	if err := sendRequest(conn, Request{Verb: verb}); err != nil {
 		return nil, err
 	}
 	var resp Response
 	if err := json.NewDecoder(bufio.NewReader(conn)).Decode(&resp); err != nil {
-		return nil, fmt.Errorf("enforce/nftables: decode list response: %w", err)
+		return nil, fmt.Errorf("enforce/nftables: decode %s response: %w", verb, err)
 	}
 	if !resp.OK {
-		return nil, fmt.Errorf("enforce/nftables: list: %s", resp.Error)
+		return nil, fmt.Errorf("enforce/nftables: %s: %s", verb, resp.Error)
 	}
 	return resp.IPs, nil
+}
+
+// Allow adds prefix to the nftables @allowed set via the enforcer helper.
+// The allowlist supremacy invariant (AGENTS.md §2) is enforced at the same
+// hook where drops happen — see initTable in cmd/ezyshield-enforcer/nft.go.
+// Called by the daemon whenever an allowlist entry is added.
+func (e *NftablesEnforcer) Allow(ctx context.Context, prefix netip.Prefix) error {
+	return e.rpc(ctx, Request{Verb: "allow_add", IP: prefix.String()})
+}
+
+// Unallow removes prefix from the nftables @allowed set. Called when the
+// operator explicitly revokes an allowlist entry or when an entry expires.
+// Missing element is treated as success (idempotent, race-safe).
+func (e *NftablesEnforcer) Unallow(ctx context.Context, prefix netip.Prefix) error {
+	return e.rpc(ctx, Request{Verb: "allow_del", IP: prefix.String()})
+}
+
+// SyncAllowlist reconciles the nftables @allowed sets with the desired list
+// of prefixes. Called at daemon startup after loading the persisted allowlist
+// from the store, and after any bulk mutation. Mirrors Sync for the block set.
+func (e *NftablesEnforcer) SyncAllowlist(ctx context.Context, want []netip.Prefix) error {
+	current, err := e.listVerb(ctx, "allow_list")
+	if err != nil {
+		return fmt.Errorf("enforce/nftables SyncAllowlist list: %w", err)
+	}
+	currentSet := make(map[string]bool, len(current))
+	for _, ip := range current {
+		currentSet[ip] = true
+	}
+	wantSet := make(map[string]bool, len(want))
+	for _, p := range want {
+		wantSet[p.String()] = true
+	}
+	// Add missing.
+	for k := range wantSet {
+		if !currentSet[k] {
+			slog.InfoContext(ctx, "enforce/nftables SyncAllowlist: adding", "ip", k)
+			if err := e.rpc(ctx, Request{Verb: "allow_add", IP: k}); err != nil {
+				return fmt.Errorf("enforce/nftables SyncAllowlist add %s: %w", k, err)
+			}
+		}
+	}
+	// Remove stale.
+	for k := range currentSet {
+		if !wantSet[k] {
+			slog.InfoContext(ctx, "enforce/nftables SyncAllowlist: removing stale", "ip", k)
+			if err := e.rpc(ctx, Request{Verb: "allow_del", IP: k}); err != nil {
+				return fmt.Errorf("enforce/nftables SyncAllowlist del %s: %w", k, err)
+			}
+		}
+	}
+	return nil
 }
 
 // rpc sends a request and checks the response is OK.

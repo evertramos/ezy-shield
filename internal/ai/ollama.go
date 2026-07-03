@@ -164,8 +164,8 @@ func (p *OllamaProvider) callOnce(ctx context.Context, prompt string) ([]sdk.Ver
 	}
 
 	var schema verdictSchema
-	if err := json.Unmarshal([]byte(apiResp.Message.Content), &schema); err != nil {
-		return nil, usage, fmt.Errorf("parse verdict JSON: %w", err)
+	if err := parseVerdictJSON(apiResp.Message.Content, &schema); err != nil {
+		return nil, usage, err
 	}
 	if len(schema.Results) == 0 {
 		return nil, usage, fmt.Errorf("empty results in response")

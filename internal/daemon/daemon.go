@@ -231,6 +231,13 @@ func (d *Daemon) Run(parentCtx context.Context) error {
 		slog.WarnContext(ctx, "daemon: startup allowlist reload failed", "err", err)
 	}
 
+	// Push the reloaded allowlist to the enforcer's @allowed set so the
+	// raw/prerouting drop rules honour allowlist-supremacy across restarts
+	// (issue #23). Only enforcers that manage local firewall state care.
+	if err := d.syncEnforcerAllowlist(ctx); err != nil {
+		slog.WarnContext(ctx, "daemon: startup enforcer allowlist sync failed", "err", err)
+	}
+
 	rawLines := make(chan sdk.RawLine, rawLinesBuf)
 
 	// collCtx controls collectors only; cancelled on SIGTERM to start draining.
@@ -641,6 +648,32 @@ func (d *Daemon) syncEnforcer(ctx context.Context) error {
 	return d.enforcer.Sync(ctx, targets)
 }
 
+// allowlistSyncer is the optional side of sdk.Enforcer that mirrors the
+// daemon's allowlist to a local firewall — currently only satisfied by the
+// nftables enforcer. Kept out of sdk.Enforcer proper because edge enforcers
+// (Cloudflare) don't have a matching concept.
+type allowlistSyncer interface {
+	Allow(ctx context.Context, prefix netip.Prefix) error
+	Unallow(ctx context.Context, prefix netip.Prefix) error
+	SyncAllowlist(ctx context.Context, want []netip.Prefix) error
+}
+
+// syncEnforcerAllowlist pushes the current runtime allowlist to the
+// enforcer's @allowed set. Called at startup (after reloadAllowlist) and
+// after each expiry sweep. No-op when the enforcer doesn't implement the
+// allowlistSyncer interface (e.g. Cloudflare edge enforcer alone).
+func (d *Daemon) syncEnforcerAllowlist(ctx context.Context) error {
+	syncer, ok := d.enforcer.(allowlistSyncer)
+	if !ok {
+		return nil
+	}
+	d.mu.RLock()
+	prefixes := make([]netip.Prefix, len(d.runtimeAllowlist))
+	copy(prefixes, d.runtimeAllowlist)
+	d.mu.RUnlock()
+	return syncer.SyncAllowlist(ctx, prefixes)
+}
+
 // runFlush periodically removes stale aggregator buckets to bound memory.
 func (d *Daemon) runFlush(ctx context.Context) {
 	t := time.NewTicker(flushInterval)
@@ -675,6 +708,11 @@ func (d *Daemon) runExpireAllows(ctx context.Context) {
 				slog.InfoContext(ctx, "daemon: expired allows", "count", n)
 				if err := d.reloadAllowlist(ctx); err != nil {
 					slog.ErrorContext(ctx, "daemon: post-expire allow reload failed", "err", err)
+				}
+				// Keep the enforcer's @allowed set in sync so expired
+				// entries no longer accept at the raw hook (issue #23).
+				if err := d.syncEnforcerAllowlist(ctx); err != nil {
+					slog.ErrorContext(ctx, "daemon: post-expire enforcer allowlist sync failed", "err", err)
 				}
 			}
 		}

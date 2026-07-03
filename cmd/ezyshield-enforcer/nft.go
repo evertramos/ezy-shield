@@ -12,9 +12,11 @@ import (
 )
 
 const (
-	nftTable = "inet ezyshield"
-	nftSet4  = "blocked"
-	nftSet6  = "blocked6"
+	nftTable     = "inet ezyshield"
+	nftSet4      = "blocked"
+	nftSet6      = "blocked6"
+	nftSetAllow4 = "allowed"
+	nftSetAllow6 = "allowed6"
 )
 
 // nftRunner abstracts nft execution so tests can inject a mock.
@@ -49,12 +51,39 @@ func realNftRunner(ctx context.Context, script []byte) error {
 // initTable creates the ezyshield table, sets, input chain, and forward chain
 // idempotently. Rules are rebuilt on every start to avoid duplicates:
 // flush chain (no-op on empty chain) then re-add.
-// The forward chain is required to block traffic destined for Docker/container
-// ports, which reach the host via DNAT and traverse the FORWARD hook, not INPUT.
+//
+// Layout (issue #23):
+//   - prerouting chain at priority `raw` (-300) — the earliest hook, runs
+//     before conntrack, before NAT, before docker-proxy accepts, and before
+//     Podman rootless slirp4netns/pasta. This is the canonical placement per
+//     the nftables wiki for pure-drop blocklists and matches the design of
+//     CrowdSec's cs-firewall-bouncer.
+//   - Allowlist rules (@allowed / @allowed6) come first — anti-lockout
+//     invariant (AGENTS.md §2): allowlist ALWAYS wins on the same hook.
+//   - `notrack` before `drop` skips conntrack for packets we're about to
+//     drop, saving state entries under scanner floods (recommended pattern
+//     in the netfilter wiki).
+//   - input + forward chains at priority `filter` (0) are kept unchanged as
+//     defense in depth. If for any reason a packet bypasses the raw drop
+//     (module reload race, external `nft flush ruleset`), these catch it.
+//
+// The allowed sets do not use `timeout` — allowlist TTLs are enforced by the
+// daemon which syncs the set on entry expiration. Blocked sets do use nft's
+// native `timeout` for ban expiry.
 func initTable(ctx context.Context, run nftRunner) error {
 	script := `add table inet ezyshield
 add set inet ezyshield blocked { type ipv4_addr ; flags interval,timeout ; auto-merge ; }
 add set inet ezyshield blocked6 { type ipv6_addr ; flags interval,timeout ; auto-merge ; }
+add set inet ezyshield allowed { type ipv4_addr ; flags interval ; auto-merge ; }
+add set inet ezyshield allowed6 { type ipv6_addr ; flags interval ; auto-merge ; }
+add chain inet ezyshield prerouting { type filter hook prerouting priority raw ; policy accept ; }
+flush chain inet ezyshield prerouting
+add rule inet ezyshield prerouting ip saddr @allowed accept
+add rule inet ezyshield prerouting ip6 saddr @allowed6 accept
+add rule inet ezyshield prerouting ip saddr @blocked notrack
+add rule inet ezyshield prerouting ip6 saddr @blocked6 notrack
+add rule inet ezyshield prerouting ip saddr @blocked drop
+add rule inet ezyshield prerouting ip6 saddr @blocked6 drop
 add chain inet ezyshield input { type filter hook input priority filter ; policy accept ; }
 flush chain inet ezyshield input
 add rule inet ezyshield input ip saddr @blocked drop
@@ -111,6 +140,59 @@ func nftDel(ctx context.Context, run nftRunner, ip string) error {
 func nftFlush(ctx context.Context, run nftRunner) error {
 	script := fmt.Sprintf("flush set %s %s\nflush set %s %s\n",
 		nftTable, nftSet4, nftTable, nftSet6)
+	return run(ctx, []byte(script))
+}
+
+// nftAddAllow adds ip to the appropriate @allowed set. Unlike @blocked,
+// allowlist entries have no nft-native timeout — the daemon owns TTL and
+// syncs the set on expiry. Idempotent: adding an already-present element
+// succeeds (nft add is a no-op on duplicates for interval sets).
+func nftAddAllow(ctx context.Context, run nftRunner, ip string) error {
+	set, err := allowSetForIP(ip)
+	if err != nil {
+		return err
+	}
+	script := fmt.Sprintf("add element %s %s { %s }\n", nftTable, set, ip)
+	return run(ctx, []byte(script))
+}
+
+// nftDelAllow removes ip from the appropriate @allowed set. Missing element
+// is treated as success — same race handling as nftDel.
+func nftDelAllow(ctx context.Context, run nftRunner, ip string) error {
+	set, err := allowSetForIP(ip)
+	if err != nil {
+		return err
+	}
+	script := fmt.Sprintf("delete element %s %s { %s }\n", nftTable, set, ip)
+	if err := run(ctx, []byte(script)); err != nil {
+		msg := err.Error()
+		if strings.Contains(msg, "not found in set") || strings.Contains(msg, "No such file or directory") {
+			slog.Debug("nftDelAllow: element already absent, ignoring", "ip", ip, "err", err)
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+// nftListAllow returns the current elements of both allowed sets.
+func nftListAllow(ctx context.Context) ([]string, error) {
+	ips4, err := listSet(ctx, nftSetAllow4)
+	if err != nil {
+		return nil, err
+	}
+	ips6, err := listSet(ctx, nftSetAllow6)
+	if err != nil {
+		return nil, err
+	}
+	return append(ips4, ips6...), nil
+}
+
+// nftFlushAllow clears both allowed sets. Used by the daemon at startup
+// before re-adding the full allowlist (idempotent sync).
+func nftFlushAllow(ctx context.Context, run nftRunner) error {
+	script := fmt.Sprintf("flush set %s %s\nflush set %s %s\n",
+		nftTable, nftSetAllow4, nftTable, nftSetAllow6)
 	return run(ctx, []byte(script))
 }
 
@@ -180,17 +262,29 @@ func parseSetElements(out []byte) []string {
 // setForIP returns "blocked" for IPv4 addresses/prefixes, "blocked6" for IPv6.
 // Validates that ip is a well-formed address or prefix — no raw nft syntax.
 func setForIP(ip string) (string, error) {
+	return setForIPIn(ip, nftSet4, nftSet6)
+}
+
+// allowSetForIP is the @allowed counterpart of setForIP.
+func allowSetForIP(ip string) (string, error) {
+	return setForIPIn(ip, nftSetAllow4, nftSetAllow6)
+}
+
+// setForIPIn picks the v4 or v6 set name for ip. Shared by setForIP and
+// allowSetForIP so validation stays in one place — no raw nft syntax reaches
+// script generation.
+func setForIPIn(ip, set4, set6 string) (string, error) {
 	if addr, err := netip.ParseAddr(ip); err == nil {
 		if addr.Is4() || addr.Is4In6() {
-			return nftSet4, nil
+			return set4, nil
 		}
-		return nftSet6, nil
+		return set6, nil
 	}
 	if pfx, err := netip.ParsePrefix(ip); err == nil {
 		if pfx.Addr().Is4() || pfx.Addr().Is4In6() {
-			return nftSet4, nil
+			return set4, nil
 		}
-		return nftSet6, nil
+		return set6, nil
 	}
 	return "", fmt.Errorf("nft: %q is not a valid IP address or CIDR prefix", ip)
 }

@@ -318,6 +318,7 @@ func TestInitTable_BothChainsPresent(t *testing.T) {
 	for _, want := range []string{
 		"hook input",
 		"hook forward",
+		"hook prerouting",
 		"ip saddr @blocked drop",
 		"ip6 saddr @blocked6 drop",
 	} {
@@ -325,11 +326,91 @@ func TestInitTable_BothChainsPresent(t *testing.T) {
 			t.Errorf("initTable script missing %q\nscript:\n%s", want, s)
 		}
 	}
-	// Both chains must reference @blocked and @blocked6.
 	inputIdx := strings.Index(s, "hook input")
 	forwardIdx := strings.Index(s, "hook forward")
 	if inputIdx < 0 || forwardIdx < 0 {
 		t.Fatal("missing input or forward hook declaration")
+	}
+}
+
+// TestInitTable_PreroutingSinkhole validates the raw/prerouting chain from
+// issue #23: correct priority, allowlist rules come BEFORE blocklist (the
+// anti-lockout invariant per AGENTS.md §2), notrack precedes drop for
+// conntrack economy under scanner floods.
+func TestInitTable_PreroutingSinkhole(t *testing.T) {
+	var captured []byte
+	run := func(_ context.Context, script []byte) error {
+		captured = script
+		return nil
+	}
+	if err := initTable(context.Background(), run); err != nil {
+		t.Fatalf("initTable: %v", err)
+	}
+	s := string(captured)
+
+	if !strings.Contains(s, "hook prerouting priority raw") {
+		t.Errorf("prerouting chain not at priority raw:\n%s", s)
+	}
+	if !strings.Contains(s, "add set inet ezyshield allowed ") ||
+		!strings.Contains(s, "add set inet ezyshield allowed6 ") {
+		t.Errorf("initTable missing @allowed sets:\n%s", s)
+	}
+	preroutingBlock := s[strings.Index(s, "flush chain inet ezyshield prerouting"):]
+	allowIdx := strings.Index(preroutingBlock, "@allowed accept")
+	notrackIdx := strings.Index(preroutingBlock, "@blocked notrack")
+	dropIdx := strings.Index(preroutingBlock, "@blocked drop")
+	if allowIdx < 0 || notrackIdx < 0 || dropIdx < 0 {
+		t.Fatalf("prerouting rules missing:\n%s", preroutingBlock)
+	}
+	if allowIdx >= notrackIdx || notrackIdx >= dropIdx {
+		t.Errorf("prerouting rule order wrong: allow=%d notrack=%d drop=%d\n%s",
+			allowIdx, notrackIdx, dropIdx, preroutingBlock)
+	}
+}
+
+// TestDispatch_AllowAdd covers the "allow_add" verb.
+func TestDispatch_AllowAdd(t *testing.T) {
+	mock := &mockNftCalls{}
+	srv := startTestServer(t, mock)
+
+	resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "allow_add", IP: "10.0.0.0/8"})
+	if !resp.OK {
+		t.Fatalf("allow_add failed: %s", resp.Error)
+	}
+	if len(mock.scripts) == 0 {
+		t.Fatal("expected nft script")
+	}
+	last := mock.scripts[len(mock.scripts)-1]
+	if !strings.Contains(last, "10.0.0.0/8") || !strings.Contains(last, "allowed") {
+		t.Errorf("nft script wrong shape: %s", last)
+	}
+}
+
+// TestDispatch_AllowDel covers the "allow_del" verb.
+func TestDispatch_AllowDel(t *testing.T) {
+	mock := &mockNftCalls{}
+	srv := startTestServer(t, mock)
+
+	resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "allow_del", IP: "10.0.0.0/8"})
+	if !resp.OK {
+		t.Fatalf("allow_del failed: %s", resp.Error)
+	}
+	last := mock.scripts[len(mock.scripts)-1]
+	if !strings.Contains(last, "delete element") || !strings.Contains(last, "allowed") {
+		t.Errorf("nft script wrong shape: %s", last)
+	}
+}
+
+// TestAllowSetForIP: v4 vs v6 routing.
+func TestAllowSetForIP(t *testing.T) {
+	if s, err := allowSetForIP("1.2.3.4"); err != nil || s != nftSetAllow4 {
+		t.Errorf("v4: got %s err=%v", s, err)
+	}
+	if s, err := allowSetForIP("::1"); err != nil || s != nftSetAllow6 {
+		t.Errorf("v6: got %s err=%v", s, err)
+	}
+	if _, err := allowSetForIP("not-an-ip"); err == nil {
+		t.Error("expected error for invalid IP")
 	}
 }
 

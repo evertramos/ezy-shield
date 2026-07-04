@@ -30,6 +30,7 @@ var validVerbs = map[string]bool{
 type Server struct {
 	socketPath string
 	run        nftRunner
+	runSs      ssRunner // pre-ban TCP session teardown (issue #30)
 
 	mu      sync.RWMutex
 	blocked map[string]bool // canonical IP/CIDR strings currently in nft set
@@ -43,6 +44,7 @@ func newServer(socketPath string, run nftRunner) *Server {
 	return &Server{
 		socketPath: socketPath,
 		run:        run,
+		runSs:      realSsRunner,
 		blocked:    make(map[string]bool),
 	}
 }
@@ -175,6 +177,15 @@ func (s *Server) dispatch(ctx context.Context, req enforce.Request) enforce.Resp
 		s.mu.Lock()
 		s.blocked[req.IP] = true
 		s.mu.Unlock()
+		// Kill any TCP sessions already established from this peer (issue #30).
+		// Only for single addresses — `ss -K dst` does not accept CIDR, and
+		// per-address teardown for a /24 would fan out into thousands of no-op
+		// calls. CIDR follow-up is tracked separately. Best-effort: the
+		// helper swallows all errors so a failed teardown never rolls back
+		// the committed nft ban (Hard Rule §1: safety invariant).
+		if _, err := netip.ParseAddr(req.IP); err == nil && s.runSs != nil {
+			_ = killSocketsForIP(ctx, s.runSs, req.IP)
+		}
 		return enforce.Response{OK: true}
 
 	case "del":

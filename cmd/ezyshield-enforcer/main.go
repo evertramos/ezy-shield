@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"syscall"
 )
@@ -53,6 +54,16 @@ func main() {
 	if err := srv.init(ctx); err != nil {
 		slog.Error("enforcer: init", "err", err)
 		os.Exit(1)
+	}
+
+	// One-shot probe for iproute2 `ss` — required to tear down pre-ban TCP
+	// sessions (issue #30). Missing binary is not fatal: killSocketsForIP is
+	// best-effort per Hard Rule §1, so we log at WARN and keep serving.
+	if ssPath, err := exec.LookPath("ss"); err == nil {
+		slog.Info("enforcer: ss detected; pre-ban TCP session teardown enabled", "path", ssPath)
+	} else {
+		slog.Warn("enforcer: ss binary not found on PATH; pre-ban TCP sessions will NOT be torn down (install iproute2)",
+			"err", err.Error())
 	}
 
 	slog.Info("enforcer: ready", "socket", *socketPath)

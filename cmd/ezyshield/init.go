@@ -27,7 +27,31 @@ const (
 	defaultSystemdDir = "/etc/systemd/system"
 	enforcerSockPath  = "/run/ezyshield-enforcer/enforcer.sock"
 	daemonSockPath    = "/run/ezyshield/ezyshield.sock"
+
+	// envFileName is the dot-prefixed shell env file that holds the AI API
+	// token loaded via systemd's EnvironmentFile= directive (issue #13 §3).
+	// The leading dot brings us in line with the Docker/Kubernetes convention
+	// and, more importantly, matches the systemd unit's EnvironmentFile path.
+	// Do NOT change this without updating configs/systemd/ezyshield.service.
+	envFileName = ".env"
+
+	// envAPIKeyPlaceholder is written to .env when the operator skips the
+	// token prompt (piped install, --yes, non-TTY, or blank paste). The
+	// loader (internal/config.SecretRef.Resolve) treats this exact string as
+	// equivalent to "unset" so a stale placeholder never gets forwarded to a
+	// real AI provider (issue #13 §5, §6).
+	envAPIKeyPlaceholder = "YOUR_API_KEY_HERE"
 )
+
+// aiProviderKeyName maps the supported AI provider names to the fixed env var
+// that will hold their API key. Ollama runs locally and has no key. This
+// table is the single source of truth — the wizard never asks the operator
+// for the env var NAME any more (issue #13 §1).
+var aiProviderKeyName = map[string]string{
+	"anthropic": "ANTHROPIC_API_KEY",
+	"openai":    "OPENAI_API_KEY",
+	"ollama":    "",
+}
 
 func newInitCmd() *cobra.Command {
 	var (
@@ -103,7 +127,27 @@ type wizardState struct {
 	aiProvider    string
 	aiModel       string
 	aiKeyEnvVar   string
-	armed         bool
+	// aiToken holds the operator-typed API key between the prompt and the
+	// .env write. It's ONLY the empty string or the raw token — never used
+	// in any log/print/error path (issue #13 §6). Note the deliberate lack
+	// of a getter and the redacted String() form on wizardState (below).
+	aiToken string
+	armed   bool
+}
+
+// String on *wizardState prints every field EXCEPT aiToken, which is masked.
+// This exists so an accidental `slog.Debug("state", "s", state)` or a test
+// helper that spins the struct through %+v cannot leak the token.
+func (s *wizardState) String() string {
+	if s == nil {
+		return "<nil wizardState>"
+	}
+	tokenMark := "<empty>"
+	if s.aiToken != "" {
+		tokenMark = "<redacted>"
+	}
+	return fmt.Sprintf("wizardState{enableAI=%v provider=%q model=%q keyEnvVar=%q token=%s armed=%v}",
+		s.enableAI, s.aiProvider, s.aiModel, s.aiKeyEnvVar, tokenMark, s.armed)
 }
 
 type dockerContainer struct {
@@ -234,7 +278,7 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 
 	configPath := filepath.Join(configDir, "config.yaml")
 	policyPath := filepath.Join(configDir, "policy.yaml")
-	envPath := filepath.Join(configDir, "env")
+	envPath := filepath.Join(configDir, envFileName)
 
 	if err := writeGeneratedConfig(configPath, state); err != nil {
 		return err
@@ -246,11 +290,24 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 	}
 	p.printf("  wrote %s\n", policyPath)
 
+	// AI env file: written whenever the provider expects a key (anthropic /
+	// openai) — even if the operator skipped the paste prompt, in which case
+	// we write the placeholder and print an instruction (issue #13 §5). We
+	// do NOT emit the token or a fingerprint of it here.
 	if state.enableAI && state.aiKeyEnvVar != "" {
-		if err := writeEnvFile(envPath, state.aiProvider, state.aiKeyEnvVar); err != nil {
+		wrote, kept, err := writeOrKeepEnvFile(envPath, state.aiKeyEnvVar, state.aiToken)
+		if err != nil {
 			return err
 		}
-		p.printf("  wrote %s (chmod 600)\n", envPath)
+		switch {
+		case kept:
+			p.printf("  kept %s (existing token preserved)\n", envPath)
+		case wrote && state.aiToken == "":
+			p.printf("  wrote %s (chmod 600, placeholder — edit and restart the daemon)\n", envPath)
+			p.printf("  AI API key not set. Edit %s to add it, then restart the daemon.\n", envPath)
+		case wrote:
+			p.printf("  wrote %s (chmod 600)\n", envPath)
+		}
 	}
 
 	if state.hasWordPress {
@@ -397,45 +454,42 @@ func askQuestions(sc *bufio.Scanner, state *wizardState, yes bool) {
 	state.enableAI = askBool("Enable AI analysis?", false)
 	if state.enableAI {
 		state.aiProvider = ask("AI provider (anthropic/openai/ollama)", "anthropic")
-		// askEnvVar wraps ask() with strict validation: the input must be a
-		// POSIX shell identifier and must not look like a well-known secret.
-		// This defends against issue #13 where an operator pasted the API key
-		// at the "Env var holding API key" prompt, causing the key to be
-		// written to config.yaml and later leaked to journald on every daemon
-		// restart. See docs/SECURITY-REVIEW.md §4.
-		const envVarPrompt = "Env var holding API key (NAME only, e.g. ANTHROPIC_API_KEY — never the key itself)"
-		askEnvVar := func(def string) string {
-			for attempt := 0; attempt < 3; attempt++ {
-				val := ask(envVarPrompt, def)
-				if val == "" {
-					return ""
-				}
-				if err := config.ValidateEnvVarName(val); err != nil {
-					// err is already redacted by ValidateEnvVarName — safe to print.
-					fmt.Printf("    rejected: %v\n", err)
-					fmt.Println("    Type ONLY the env-var NAME. The value goes in /etc/ezyshield/env after init.")
-					if yes {
-						// Non-interactive mode: don't loop forever on a bad default.
-						return ""
-					}
-					continue
-				}
-				return val
-			}
-			fmt.Println("    too many invalid attempts — leaving AI key env var unset; edit config.yaml later")
-			return ""
+		// The env var NAME is fixed per provider (issue #13 §1) — we NEVER
+		// prompt the operator for it. Anything not in the table (typo) falls
+		// through to no key at all; the wizard warns instead of guessing.
+		keyName, known := aiProviderKeyName[state.aiProvider]
+		if !known {
+			fmt.Printf("    unknown provider %q — supported: anthropic, openai, ollama; leaving AI key unset\n",
+				state.aiProvider)
 		}
+		state.aiKeyEnvVar = keyName
 		switch state.aiProvider {
 		case "anthropic":
 			state.aiModel = ask("Model", "claude-haiku-4-5-20251001")
-			state.aiKeyEnvVar = askEnvVar("ANTHROPIC_API_KEY")
 		case "openai":
 			state.aiModel = ask("Model", "gpt-4o-mini")
-			state.aiKeyEnvVar = askEnvVar("OPENAI_API_KEY")
 		case "ollama":
 			state.aiModel = ask("Model", "llama3")
-		default:
-			state.aiKeyEnvVar = askEnvVar("")
+		}
+		// Prompt for the token itself only when the provider actually uses
+		// one (i.e. keyName is non-empty). Reading is masked and comes from
+		// /dev/tty — never from the pipe stdin bufio.Scanner (issue #13 §2).
+		// Non-TTY stdin, --yes, or a blank paste all fall through to the
+		// placeholder path (§5). See readMaskedTokenFromTTY.
+		if keyName != "" && !yes {
+			tok, err := tokenReader(
+				fmt.Sprintf("  Paste your %s API token (input hidden, ENTER to skip): ", state.aiProvider))
+			switch {
+			case err != nil:
+				// Cannot read from /dev/tty (non-interactive, no tty) — fall
+				// through silently to the placeholder path. We DO NOT print
+				// err.Error() here because a broken tty error still shouldn't
+				// look scary; the writeEnvFile path will print the placeholder
+				// instructions in a moment.
+				state.aiToken = ""
+			default:
+				state.aiToken = tok
+			}
 		}
 	}
 
@@ -568,13 +622,52 @@ func writeGeneratedPolicy(path string, state *wizardState) error {
 	return nil
 }
 
-// writeEnvFile writes /etc/ezyshield/env with a placeholder for the AI API key (chmod 600).
-func writeEnvFile(path, provider, keyEnvVar string) error {
+// writeOrKeepEnvFile writes /etc/ezyshield/.env with the operator-supplied
+// token (issue #13 §3). Behavior matrix:
+//
+//	token != ""                       → overwrite with the real token
+//	token == "", .env already good    → preserve (idempotent re-run, §5)
+//	token == "", .env absent / stub   → write the placeholder
+//
+// "already good" means the file contains a line `<KEY>=<value>` where value is
+// neither empty nor the literal placeholder. This lets an operator re-run
+// `ezyshield init` without clobbering a working key.
+//
+// Returned wrote/kept booleans tell the caller which log line to print — the
+// token itself never appears in that log path (issue #13 §6).
+func writeOrKeepEnvFile(path, keyEnvVar, token string) (wrote, kept bool, err error) {
+	if keyEnvVar == "" {
+		// Nothing to write; caller shouldn't have called us. Defense.
+		return false, false, nil
+	}
+	// Idempotency check (§5): if we have no new token AND the file already
+	// contains a non-placeholder value for keyEnvVar, keep the existing file.
+	if token == "" {
+		if existing, ok := readEnvValue(path, keyEnvVar); ok &&
+			existing != "" && existing != envAPIKeyPlaceholder {
+			return false, true, nil
+		}
+	}
+	value := token
+	if value == "" {
+		value = envAPIKeyPlaceholder
+	}
+	if err := writeEnvFileContent(path, keyEnvVar, value); err != nil {
+		return false, false, err
+	}
+	return true, false, nil
+}
+
+// writeEnvFileContent writes exactly `<name>=<value>\n` (plus a short header
+// that does NOT include the token or a fingerprint of it) to path with mode
+// 0600 and root:ezyshield ownership. Extracted so tests can drive it directly.
+func writeEnvFileContent(path, name, value string) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# EzyShield environment — generated by 'ezyshield init'\n")
-	fmt.Fprintf(&b, "# Fill in the value below, then: systemctl restart ezyshield\n")
-	fmt.Fprintf(&b, "# Provider: %s\n", provider)
-	fmt.Fprintf(&b, "%s=YOUR_API_KEY_HERE\n", keyEnvVar)
+	fmt.Fprintf(&b, "# systemd loads this via EnvironmentFile= (see ezyshield.service).\n")
+	// One shell-style KEY=VALUE line, no quoting, no export, trailing \n so
+	// systemd parses it cleanly (issue #13 §3).
+	fmt.Fprintf(&b, "%s=%s\n", name, value)
 
 	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
@@ -583,6 +676,34 @@ func writeEnvFile(path, provider, keyEnvVar string) error {
 		return fmt.Errorf("set ownership on %s: %w", path, err)
 	}
 	return nil
+}
+
+// readEnvValue parses a shell env file (very simple: KEY=VALUE per line,
+// ignoring '#' comments and blank lines) and returns the value for name.
+// The 2nd return is false when the file is missing OR the key is absent.
+// The value returned is NEVER logged by callers — it may be the real token
+// (idempotency check).
+func readEnvValue(path, name string) (string, bool) {
+	f, err := os.Open(path) //nolint:gosec // path is admin-controlled; called only on the wizard's own writes
+	if err != nil {
+		return "", false
+	}
+	defer f.Close() //nolint:errcheck
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		if strings.TrimSpace(k) == name {
+			return strings.TrimSpace(v), true
+		}
+	}
+	return "", false
 }
 
 // ── System installation helpers ──────────────────────────────────────────────

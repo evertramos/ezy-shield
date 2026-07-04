@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/evertramos/ezy-shield/internal/config"
 	"github.com/evertramos/ezy-shield/pkg/sdk"
 )
 
@@ -30,7 +31,7 @@ func anthropicResponse(text string, inTok, outTok int) string {
 func makeProvider(t *testing.T, srv *httptest.Server, allowlist []netip.Prefix, maxTTL time.Duration, fallback RulesFunc) *AnthropicProvider {
 	t.Helper()
 	p := &AnthropicProvider{
-		apiKey:    "test-key",
+		apiKey:    config.NewSecret("test-key"),
 		model:     defaultModel,
 		endpoint:  srv.URL,
 		client:    srv.Client(),

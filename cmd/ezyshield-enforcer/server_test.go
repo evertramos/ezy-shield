@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -45,6 +46,10 @@ func startTestServer(t *testing.T, mock *mockNftCalls) *Server {
 
 	run := mock.runner()
 	srv := newServer(sockPath, run)
+	// Default to a no-op ssRunner so tests do not shell out to a real
+	// `ss -K` on the host during add verb coverage. Individual tests that
+	// need to assert kill-behaviour override srv.runSs after construction.
+	srv.runSs = func(_ context.Context, _ []string) error { return nil }
 
 	lc := &net.ListenConfig{}
 	ln, err := lc.Listen(context.Background(), "unix", sockPath)
@@ -585,5 +590,122 @@ func TestIntegration_BanUnban(t *testing.T) {
 		if got == ip {
 			t.Errorf("IP %s still present after del", ip)
 		}
+	}
+}
+
+// ── pre-ban TCP session teardown wiring (issue #30) ──────────────────────────
+
+// TestDispatch_AddInvokesNftAddThenKill verifies that a valid single-address
+// ban runs nft first and then `ss -K`, in that order. The order matters: the
+// nft rule must be committed before the teardown so a client that reconnects
+// mid-teardown is caught by the drop.
+func TestDispatch_AddInvokesNftAddThenKill(t *testing.T) {
+	nftMock := &mockNftCalls{}
+	srv := startTestServer(t, nftMock)
+
+	ssMock := &mockSsCalls{}
+	srv.runSs = ssMock.runner()
+
+	resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "add", IP: "1.2.3.4", TTLSeconds: 300})
+	if !resp.OK {
+		t.Fatalf("add failed: %s", resp.Error)
+	}
+
+	if len(nftMock.scripts) == 0 {
+		t.Fatal("expected nftAdd to have been called")
+	}
+	if len(ssMock.calls) != 1 {
+		t.Fatalf("expected exactly 1 ss call, got %d", len(ssMock.calls))
+	}
+	wantSsArgs := []string{"-K", "dst", "1.2.3.4"}
+	if !reflect.DeepEqual(ssMock.calls[0], wantSsArgs) {
+		t.Errorf("ss args: got %v, want %v", ssMock.calls[0], wantSsArgs)
+	}
+	// nftAdd script content sanity: contains the IP, so we know it ran with
+	// the right target. Order-of-invocation is guaranteed by the synchronous
+	// dispatch path — ss only runs if nftAdd returned nil.
+	if !strings.Contains(nftMock.scripts[0], "1.2.3.4") {
+		t.Errorf("nft script did not contain the target IP: %s", nftMock.scripts[0])
+	}
+}
+
+// TestDispatch_AddSkipsKillForCIDR asserts that ss -K is NOT invoked when the
+// ban target is a prefix. `ss -K dst` takes a single address; a /24 ban would
+// otherwise need per-address fan-out which is out of scope for this fix
+// (tracked as CIDR follow-up in issue #30).
+func TestDispatch_AddSkipsKillForCIDR(t *testing.T) {
+	nftMock := &mockNftCalls{}
+	srv := startTestServer(t, nftMock)
+
+	ssMock := &mockSsCalls{}
+	srv.runSs = ssMock.runner()
+
+	resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "add", IP: "10.0.0.0/24", TTLSeconds: 600})
+	if !resp.OK {
+		t.Fatalf("add CIDR failed: %s", resp.Error)
+	}
+
+	if len(ssMock.calls) != 0 {
+		t.Errorf("ss -K must not be invoked for CIDR bans, got calls: %v", ssMock.calls)
+	}
+}
+
+// TestDispatch_AllowAddDoesNotKill guards against a wiring mistake where the
+// kill helper leaks into the allowlist path. Allowlist adds have nothing to
+// tear down — the peer is *authorised*, not banned.
+func TestDispatch_AllowAddDoesNotKill(t *testing.T) {
+	nftMock := &mockNftCalls{}
+	srv := startTestServer(t, nftMock)
+
+	ssMock := &mockSsCalls{}
+	srv.runSs = ssMock.runner()
+
+	resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "allow_add", IP: "1.2.3.4"})
+	if !resp.OK {
+		t.Fatalf("allow_add failed: %s", resp.Error)
+	}
+
+	if len(ssMock.calls) != 0 {
+		t.Errorf("ss -K must not be invoked for allow_add, got calls: %v", ssMock.calls)
+	}
+}
+
+// TestDispatch_AddNftFailure_SkipsKill: if nftAdd returns an error the ban is
+// not committed and the RPC returns OK=false. In that case ss -K MUST NOT run
+// — killing sockets for an IP we failed to ban would be a user-visible
+// side-effect with no matching firewall rule.
+func TestDispatch_AddNftFailure_SkipsKill(t *testing.T) {
+	// Nft runner that always fails.
+	failing := func(_ context.Context, _ []byte) error {
+		return fmt.Errorf("nft -f: exit status 1\nsimulated failure")
+	}
+	f, err := os.CreateTemp("", "enforcer-srv-test-*.sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sockPath := f.Name()
+	_ = f.Close()
+	_ = os.Remove(sockPath)
+
+	srv := newServer(sockPath, failing)
+	ssMock := &mockSsCalls{}
+	srv.runSs = ssMock.runner()
+
+	lc := &net.ListenConfig{}
+	ln, err := lc.Listen(context.Background(), "unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.ln = ln
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() { cancel(); _ = os.Remove(sockPath) })
+	go func() { _ = srv.serve(ctx) }() //nolint:errcheck
+
+	resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "add", IP: "1.2.3.4"})
+	if resp.OK {
+		t.Fatalf("expected add to fail when nft fails, got OK")
+	}
+	if len(ssMock.calls) != 0 {
+		t.Errorf("ss -K must not be invoked when nftAdd fails, got calls: %v", ssMock.calls)
 	}
 }

@@ -107,6 +107,11 @@ if [ -n "$BACKUP_TO" ]; then
     dest="$BACKUP_TO/ezyshield-wipe-$(date +%F-%H%M%S).tar.gz"
     # -P keeps absolute paths so restore lands back in the same place.
     # Missing dirs are silently skipped — a partial install is normal here.
+    # SC2046 is deliberate: CONFIG_DIR and STATE_DIR are hardcoded constants
+    # at the top of this script (no spaces, no globs), and the whole point of
+    # the unquoted expansion is to insert zero-or-one path tokens into tar's
+    # argv depending on which directories currently exist.
+    # shellcheck disable=SC2046
     tar czPf "$dest" \
       $( [ -d "$CONFIG_DIR" ] && printf '%s ' "$CONFIG_DIR" ) \
       $( [ -d "$STATE_DIR"  ] && printf '%s ' "$STATE_DIR" ) \

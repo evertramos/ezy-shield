@@ -79,6 +79,13 @@ func (s SecretRef) IsSet() bool {
 // pasted an API key where a var NAME was expected and it ended up in
 // config.yaml as "api_key: env:sk-ant-..." — are rejected with a REDACTED
 // error message so the key never reaches the journal.
+//
+// When the env var is set but empty or the literal placeholder written by the
+// init wizard (§5 of issue #13), the returned error uses the operator-facing
+// phrasing "AI API key missing — check /etc/ezyshield/.env" and never echoes
+// the referenced variable name back into the message (defense-in-depth: even
+// though the name isn't the secret, matching one specific string is easier
+// than trying to filter journald ex-post).
 func (s SecretRef) Resolve() (string, error) {
 	if !s.IsSet() {
 		return "", fmt.Errorf("secret reference is not configured")
@@ -93,10 +100,63 @@ func (s SecretRef) Resolve() (string, error) {
 		return "", fmt.Errorf("secret reference is malformed: %w", err)
 	}
 	v, ok := os.LookupEnv(varName)
-	if !ok {
-		return "", fmt.Errorf("environment variable %s is not set", varName)
+	if !ok || v == "" || v == PlaceholderAPIKey {
+		return "", ErrAPIKeyMissing
 	}
 	return v, nil
+}
+
+// PlaceholderAPIKey is the exact string written into /etc/ezyshield/.env by
+// `ezyshield init` when the operator skips the token prompt (issue #13 §5).
+// The loader treats this value as equivalent to "unset" so a stale placeholder
+// never gets sent to a real AI provider.
+const PlaceholderAPIKey = "YOUR_API_KEY_HERE" //nolint:gosec // G101: literal placeholder — deliberately public, treated as "unset" by Resolve so it can never be forwarded to a real AI provider (issue #13 §5).
+
+// ErrAPIKeyMissing is the operator-facing error surfaced whenever an AI
+// SecretRef fails to resolve to a real token. Deliberately generic — it
+// points the operator at the .env file without echoing the referenced env
+// var name, the previous value, or any part of the referenced string. This
+// matches issue #13 §6 ("error is: 'AI API key missing — check
+// /etc/ezyshield/.env' — no reference to what was there").
+var ErrAPIKeyMissing = fmt.Errorf("AI API key missing — check /etc/ezyshield/.env")
+
+// Secret wraps a resolved credential token in a type whose String()/GoString()/
+// Format() methods return "<redacted>". Struct dumps (%+v, %v), log lines,
+// json.Marshal, and error-wrapping all see the redacted form; callers that
+// actually need the plaintext must go through Reveal(). This exists to satisfy
+// issue #13 §6 ("Redact in any struct dump / %+v / test helper by implementing
+// String() string on the secret type that returns \"<redacted>\"") and
+// SECURITY-REVIEW.md §4 (secrets never in logs/errors).
+type Secret struct {
+	v string
+}
+
+// NewSecret wraps v in a Secret. The caller is responsible for having sourced
+// v from an env var / systemd LoadCredential and NOT from an inline config
+// value (SecretRef.UnmarshalYAML already rejects the latter).
+func NewSecret(v string) Secret { return Secret{v: v} }
+
+// Reveal returns the raw token. Callers must use this ONLY to hand the token
+// to the outbound HTTP request (Authorization header etc.) — never in a log
+// message, error message, or format string. Grep the diff for Reveal() to
+// audit call sites.
+func (s Secret) Reveal() string { return s.v }
+
+// IsSet reports whether the wrapped value is non-empty.
+func (s Secret) IsSet() bool { return s.v != "" }
+
+// String implements fmt.Stringer and is the format verb %s / %v receives.
+// Always returns the fixed redaction marker; the raw token never appears.
+func (s Secret) String() string { return "<redacted>" }
+
+// GoString implements fmt.GoStringer so `%#v` also redacts.
+func (s Secret) GoString() string { return "<redacted>" }
+
+// MarshalJSON keeps Secret out of JSON dumps. Emitting the redacted string
+// rather than an empty object makes accidental Marshal calls visible in tests
+// without leaking the token.
+func (s Secret) MarshalJSON() ([]byte, error) {
+	return []byte(`"<redacted>"`), nil
 }
 
 // ValidateEnvVarName is the exported form of validateEnvVarName so the init

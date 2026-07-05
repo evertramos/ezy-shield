@@ -37,9 +37,10 @@ func (e *openaiRateLimitError) Error() string {
 }
 
 // OpenAIProvider implements sdk.AIProvider using the OpenAI Chat Completions API.
-// The API key is resolved from config at construction time and never logged.
+// The API key is stored as a config.Secret so struct dumps (%+v, log lines,
+// json.Marshal) render it as "<redacted>" — issue #13 §6.
 type OpenAIProvider struct {
-	apiKey    string
+	apiKey    config.Secret
 	model     string
 	endpoint  string // overridable in tests
 	client    *http.Client
@@ -66,7 +67,7 @@ func NewOpenAIProvider(
 		model = openaiDefaultModel
 	}
 	return &OpenAIProvider{
-		apiKey:    key,
+		apiKey:    config.NewSecret(key),
 		model:     model,
 		endpoint:  openaiEndpoint,
 		client:    &http.Client{Timeout: 30 * time.Second},
@@ -163,7 +164,10 @@ func (p *OpenAIProvider) callOnce(ctx context.Context, prompt string) ([]sdk.Ver
 		return nil, sdk.Usage{}, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+p.apiKey)
+	// Reveal() is the ONE and ONLY place we un-mask the token — right before it
+	// leaves the process on an outbound TLS connection. Grep for Reveal() to
+	// audit call sites (issue #13 §6).
+	req.Header.Set("Authorization", "Bearer "+p.apiKey.Reveal())
 
 	resp, err := p.client.Do(req)
 	if err != nil {

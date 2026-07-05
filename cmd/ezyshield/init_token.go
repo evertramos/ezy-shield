@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"syscall"
@@ -49,7 +50,17 @@ func readMaskedTokenFromTTY(prompt string) (string, error) {
 	if err != nil {
 		return "", ErrNoTTY
 	}
-	defer f.Close() //nolint:errcheck // read-only close on tty; error irrelevant to the token path
+	// /dev/tty is a character device — the kernel does not buffer writes on
+	// close, so there is no data-loss path for the prompt/newline writes above
+	// (unlike a regular file where a failed Close can drop unflushed data).
+	// Handling the close error explicitly (log-only, no propagation) satisfies
+	// static analysis and would catch a truly bizarre kernel state without
+	// changing the token path's semantics.
+	defer func() {
+		if cerr := f.Close(); cerr != nil {
+			slog.Warn("close /dev/tty after token read", "err", cerr)
+		}
+	}()
 
 	if !term.IsTerminal(int(f.Fd())) {
 		return "", ErrNoTTY

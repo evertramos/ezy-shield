@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/evertramos/ezy-shield/internal/config"
 	"github.com/evertramos/ezy-shield/pkg/sdk"
 )
 
@@ -31,7 +32,7 @@ func openaiResponse(content string, promptTok, completionTok int) string {
 func makeOpenAIProvider(t *testing.T, srv *httptest.Server, allowlist []netip.Prefix, maxTTL time.Duration, fallback RulesFunc) *OpenAIProvider {
 	t.Helper()
 	return &OpenAIProvider{
-		apiKey:    "test-openai-key",
+		apiKey:    config.NewSecret("test-openai-key"),
 		model:     openaiDefaultModel,
 		endpoint:  srv.URL,
 		client:    srv.Client(),
@@ -400,7 +401,7 @@ func TestOpenAI_SecretNotInRequestBody(t *testing.T) {
 	defer srv.Close()
 
 	p := &OpenAIProvider{
-		apiKey:   fakeKey,
+		apiKey:   config.NewSecret(fakeKey),
 		model:    openaiDefaultModel,
 		endpoint: srv.URL,
 		client:   srv.Client(),

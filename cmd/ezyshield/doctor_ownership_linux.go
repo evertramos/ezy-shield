@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"syscall"
 
@@ -58,4 +59,41 @@ func checkConfigOwnership(path, label string) CheckResult {
 		}
 	}
 	return CheckResult{Name: name, Status: statusPass}
+}
+
+// checkEnvOwnership returns "" when path is owned by root:ezyshield (issue #13
+// §8), or a hint string describing the remediation otherwise. Unlike
+// checkConfigOwnership above, this returns a hint (not a CheckResult) because
+// its caller (checkEnvFile) rolls the result into its own CheckResult so all
+// .env failures share the same Name.
+func checkEnvOwnership(path string) string {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err.Error()
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		// Best-effort: on kernels where we can't check, don't block.
+		return ""
+	}
+	wantGID, err := lookupDaemonGID()
+	if err != nil {
+		if errors.Is(err, errDaemonGroupMissing) {
+			return fmt.Sprintf("group %q does not exist -- run 'ezyshield init' as root", ownership.Group)
+		}
+		return err.Error()
+	}
+	// POSIX guarantees GIDs fit in uint32, but CodeQL flags the narrowing so
+	// we do an explicit bounds check — costs one branch, silences a legit
+	// static-analysis warning, and would catch a truly bizarre libc that
+	// hands back a negative or absurdly large id before we misinterpret it.
+	if wantGID < 0 || wantGID > math.MaxUint32 {
+		return fmt.Sprintf("gid %d for group %q out of uint32 range -- refusing to compare", wantGID, ownership.Group)
+	}
+	wantGIDu32 := uint32(wantGID)
+	if st.Uid != 0 || st.Gid != wantGIDu32 {
+		return fmt.Sprintf("ownership %d:%d, want 0:%d (root:%s) -- run: chown root:%s %s",
+			st.Uid, st.Gid, wantGIDu32, ownership.Group, ownership.Group, path)
+	}
+	return ""
 }

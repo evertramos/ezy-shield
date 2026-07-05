@@ -32,9 +32,10 @@ const (
 type RulesFunc func([]sdk.Aggregate) []sdk.Verdict
 
 // AnthropicProvider implements sdk.AIProvider using the Anthropic Messages API.
-// The API key is resolved from config at construction time and never logged.
+// The API key is stored as a config.Secret so struct dumps (%+v, log lines,
+// json.Marshal) render it as "<redacted>" — issue #13 §6.
 type AnthropicProvider struct {
-	apiKey    string
+	apiKey    config.Secret
 	model     string
 	endpoint  string // overridable in tests
 	client    *http.Client
@@ -61,7 +62,7 @@ func NewAnthropicProvider(
 		model = defaultModel
 	}
 	return &AnthropicProvider{
-		apiKey:    key,
+		apiKey:    config.NewSecret(key),
 		model:     model,
 		endpoint:  anthropicEndpoint,
 		client:    &http.Client{Timeout: 30 * time.Second},
@@ -225,7 +226,10 @@ func (p *AnthropicProvider) callOnce(ctx context.Context, prompt string) ([]sdk.
 		return nil, sdk.Usage{}, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", p.apiKey)
+	// Reveal() is the ONE and ONLY place we un-mask the token — right before it
+	// leaves the process on an outbound TLS connection. Grep for Reveal() to
+	// audit call sites (issue #13 §6).
+	req.Header.Set("x-api-key", p.apiKey.Reveal())
 	req.Header.Set("anthropic-version", anthropicVersion)
 
 	resp, err := p.client.Do(req)

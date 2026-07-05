@@ -8,6 +8,12 @@ Requires=ezyshield-enforcer.service
 Type=simple
 User=ezyshield
 Group=ezyshield
+# Load the AI API key (and any other secret) from /etc/ezyshield/.env. The
+# file is written by `ezyshield init` with 0600 root:ezyshield permissions.
+# Leading `-` means "don't fail the unit if the file is missing" — a fresh
+# install without AI configured has no .env, and the daemon fails closed
+# on AI paths only when a Resolve() call actually needs a token.
+EnvironmentFile=-/etc/ezyshield/.env
 ExecStart=/usr/local/bin/ezyshield watch
 Restart=on-failure
 RestartSec=5s

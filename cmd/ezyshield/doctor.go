@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
+	"github.com/evertramos/ezy-shield/internal/config"
 	"github.com/evertramos/ezy-shield/internal/enforce"
 )
 
@@ -79,6 +81,7 @@ func runDoctor(cmd *cobra.Command, configDir string, jsonOut bool) error {
 		checkJournaldReadable(),
 		checkEnforcerSocket(enforcerSockPath),
 		checkDockerSocket(),
+		checkEnvFile(filepath.Join(configDir, envFileName)),
 	}
 
 	summary := DoctorSummary{Total: len(checks)}
@@ -283,6 +286,108 @@ func checkDockerSocket() CheckResult {
 	defer conn.Close() //nolint:errcheck
 
 	return CheckResult{Name: name, Status: statusPass}
+}
+
+// checkEnvFile verifies the AI env file (issue #13 §8): exists, mode 0600,
+// owned root:ezyshield, and at least one KEY=VALUE line where VALUE is not
+// the literal placeholder written by `ezyshield init` when the operator
+// skipped the token prompt.
+//
+// This check is N/A (not FAIL) when the file is entirely absent because a
+// clean install without AI configured legitimately has no .env — the daemon
+// only fails when a Resolve() actually needs a token. When the file exists
+// but is broken (bad perms, wrong owner, placeholder still in), we FAIL
+// with a hint that never echoes the file contents.
+func checkEnvFile(path string) CheckResult {
+	name := "ai env file: " + envFileName
+
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return CheckResult{
+			Name:   name,
+			Status: statusNA,
+			Hint:   fmt.Sprintf("%s absent — no AI provider configured (fine unless AI is enabled)", path),
+		}
+	}
+	if err != nil {
+		return CheckResult{Name: name, Status: statusFail, Hint: err.Error()}
+	}
+	if !info.Mode().IsRegular() {
+		return CheckResult{Name: name, Status: statusFail,
+			Hint: path + " exists but is not a regular file"}
+	}
+
+	// §8 perms: must be exactly 0600 (owner-only). Anything looser is a
+	// disclosure risk — 0640 would let the ezyshield group read the file,
+	// which is fine for config.yaml (SecretRef only) but NOT for the raw
+	// token.
+	perm := info.Mode().Perm()
+	if perm != 0o600 {
+		return CheckResult{Name: name, Status: statusFail,
+			Hint: fmt.Sprintf("permissions %04o — must be 0600 — run: chmod 0600 %s", perm, path)}
+	}
+
+	// §8 ownership: root:ezyshield. checkFileOwnershipStrict lives in a
+	// build-tagged helper (doctor_ownership_linux.go / _other.go) since the
+	// syscall shape differs by OS. It returns "" when ownership matches or
+	// when the platform can't check, and a hint otherwise.
+	if hint := checkEnvOwnership(path); hint != "" {
+		return CheckResult{Name: name, Status: statusFail, Hint: hint}
+	}
+
+	// §8 non-placeholder: read the file, find any KEY=VALUE where VALUE is
+	// non-empty and is NOT the exact placeholder string. If we can find at
+	// least one such line, PASS. We never echo VALUE in the hint (issue
+	// #13 §6) — the operator knows which var they configured.
+	if hasReal, hint := envHasNonPlaceholderValue(path); !hasReal {
+		return CheckResult{Name: name, Status: statusFail,
+			Hint: hint + " — edit " + path + " and restart the daemon"}
+	}
+
+	return CheckResult{Name: name, Status: statusPass}
+}
+
+// envHasNonPlaceholderValue reports whether path contains at least one line of
+// the form `KEY=VALUE` where VALUE is neither empty nor the placeholder. The
+// second return is a short, non-echoing hint for the failure case.
+//
+// The parse is intentionally simple (matches init.go's readEnvValue) — this
+// is not a shell interpreter, and the wizard writes plain KEY=VALUE lines.
+func envHasNonPlaceholderValue(path string) (bool, string) {
+	f, err := os.Open(path) //nolint:gosec // admin-controlled config path
+	if err != nil {
+		return false, "cannot read " + path + ": " + err.Error()
+	}
+	defer f.Close() //nolint:errcheck
+
+	sc := bufio.NewScanner(f)
+	sawKey := false
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		if strings.TrimSpace(k) == "" {
+			continue
+		}
+		sawKey = true
+		v = strings.TrimSpace(v)
+		// Placeholder is the exact string init writes when the operator
+		// skipped the paste prompt. Any other non-empty value is a real
+		// token as far as doctor is concerned — validating it with the
+		// provider is out of scope (issue #13 non-goals).
+		if v != "" && v != config.PlaceholderAPIKey {
+			return true, ""
+		}
+	}
+	if !sawKey {
+		return false, "no KEY=VALUE line found"
+	}
+	return false, "value is the placeholder (" + config.PlaceholderAPIKey + ")"
 }
 
 // checkJournaldReadable returns PASS when journalctl is present and responds.

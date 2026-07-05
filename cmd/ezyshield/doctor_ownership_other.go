@@ -9,3 +9,8 @@ func checkConfigOwnership(_, label string) CheckResult {
 	return CheckResult{Name: label + ": ownership", Status: statusNA,
 		Hint: "ownership check is Linux-only"}
 }
+
+// checkEnvOwnership is a no-op on non-Linux platforms; see checkConfigOwnership.
+// Returning "" means "no finding" — the caller's other checks (perms,
+// placeholder) still run.
+func checkEnvOwnership(_ string) string { return "" }

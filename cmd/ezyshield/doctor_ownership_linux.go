@@ -59,3 +59,34 @@ func checkConfigOwnership(path, label string) CheckResult {
 	}
 	return CheckResult{Name: name, Status: statusPass}
 }
+
+// checkEnvOwnership returns "" when path is owned by root:ezyshield (issue #13
+// §8), or a hint string describing the remediation otherwise. Unlike
+// checkConfigOwnership above, this returns a hint (not a CheckResult) because
+// its caller (checkEnvFile) rolls the result into its own CheckResult so all
+// .env failures share the same Name.
+func checkEnvOwnership(path string) string {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err.Error()
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		// Best-effort: on kernels where we can't check, don't block.
+		return ""
+	}
+	wantGID, err := lookupDaemonGID()
+	if err != nil {
+		if errors.Is(err, errDaemonGroupMissing) {
+			return fmt.Sprintf("group %q does not exist -- run 'ezyshield init' as root", ownership.Group)
+		}
+		return err.Error()
+	}
+	// See checkConfigOwnership for the safety of this narrowing conversion.
+	wantGIDu32 := uint32(wantGID) //nolint:gosec // group ids fit in uint32
+	if st.Uid != 0 || st.Gid != wantGIDu32 {
+		return fmt.Sprintf("ownership %d:%d, want 0:%d (root:%s) -- run: chown root:%s %s",
+			st.Uid, st.Gid, wantGIDu32, ownership.Group, ownership.Group, path)
+	}
+	return ""
+}

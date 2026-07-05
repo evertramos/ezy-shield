@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/evertramos/ezy-shield/internal/config"
 	"github.com/evertramos/ezy-shield/pkg/sdk"
 )
 
@@ -22,7 +23,7 @@ const testAPIKey = "sk-ant-FAKEFAKEFAKEFAKE-SECRETSECRET" //nolint:gosec // G101
 func makeProviderWithKey(t *testing.T, srv *httptest.Server, apiKey string) *AnthropicProvider {
 	t.Helper()
 	return &AnthropicProvider{
-		apiKey:   apiKey,
+		apiKey:   config.NewSecret(apiKey),
 		model:    defaultModel,
 		endpoint: srv.URL,
 		client:   srv.Client(),

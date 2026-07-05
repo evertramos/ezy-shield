@@ -25,11 +25,17 @@
 #
 set -euo pipefail
 
-CONFIG_DIR=/etc/ezyshield
-STATE_DIR=/var/lib/ezyshield
-INSTALL_DIR=/usr/local/bin
-NFT_TABLE="inet ezyshield"
-SYSTEMD_DIR=/etc/systemd/system
+# These five paths are the only things this script touches. They are marked
+# `readonly` so a future edit that accidentally reassigns one — anywhere below
+# this point in the file — fails at bash-parse time instead of at `rm -rf`.
+# Combined with the `${VAR:?…}` guards on every destructive call below, this
+# closes the "empty variable + rm -rf" disaster class even against a bug
+# introduced by an editor of this script.
+readonly CONFIG_DIR=/etc/ezyshield
+readonly STATE_DIR=/var/lib/ezyshield
+readonly INSTALL_DIR=/usr/local/bin
+readonly NFT_TABLE="inet ezyshield"
+readonly SYSTEMD_DIR=/etc/systemd/system
 
 YES=0
 DRY=0
@@ -132,22 +138,27 @@ run systemctl disable ezyshield ezyshield-enforcer
 ok "services stopped and disabled"
 
 # ── 2. Remove systemd units ──────────────────────────────────────────────────
+# `${VAR:?msg}` aborts the script (with `msg` on stderr) if VAR is unset OR
+# empty. Belt-and-suspenders against a script edit that accidentally wipes
+# one of the constants above — the abort happens before any `rm` runs, so
+# there is no path from "empty variable" to a wrong-directory delete.
 info "2/6  Remove systemd units"
-run rm -f "$SYSTEMD_DIR/ezyshield.service"
-run rm -f "$SYSTEMD_DIR/ezyshield-enforcer.service"
-run rm -rf "$SYSTEMD_DIR/ezyshield.service.d"
+run rm -f  "${SYSTEMD_DIR:?SYSTEMD_DIR unset -- refusing to touch systemd}/ezyshield.service"
+run rm -f  "${SYSTEMD_DIR:?}/ezyshield-enforcer.service"
+run rm -rf "${SYSTEMD_DIR:?}/ezyshield.service.d"
 run systemctl daemon-reload
 ok "units removed"
 
 # ── 3. Remove binaries ───────────────────────────────────────────────────────
 info "3/6  Remove binaries"
-run rm -f "$INSTALL_DIR/ezyshield" "$INSTALL_DIR/ezyshield-enforcer"
+run rm -f "${INSTALL_DIR:?INSTALL_DIR unset -- refusing to rm binaries}/ezyshield" \
+          "${INSTALL_DIR:?}/ezyshield-enforcer"
 ok "binaries removed"
 
 # ── 4. Remove config, state, runtime ─────────────────────────────────────────
 info "4/6  Remove config, state, runtime dirs"
-run rm -rf "$CONFIG_DIR"
-run rm -rf "$STATE_DIR"
+run rm -rf "${CONFIG_DIR:?CONFIG_DIR unset -- refusing to rm -rf}"
+run rm -rf "${STATE_DIR:?STATE_DIR unset -- refusing to rm -rf}"
 run rm -rf /run/ezyshield /run/ezyshield-enforcer
 ok "config + state + runtime gone"
 
@@ -160,7 +171,7 @@ ok "user + group removed"
 # ── 6. Remove nftables table ─────────────────────────────────────────────────
 info "6/6  Drop the '$NFT_TABLE' nftables table"
 if command -v nft >/dev/null 2>&1; then
-  run nft delete table "$NFT_TABLE"
+  run nft delete table "${NFT_TABLE:?NFT_TABLE unset -- refusing to touch nftables}"
   ok "nftables table dropped"
 else
   warn "nft binary not present, skipping (nothing to drop)"

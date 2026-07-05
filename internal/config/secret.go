@@ -110,7 +110,7 @@ func (s SecretRef) Resolve() (string, error) {
 // `ezyshield init` when the operator skips the token prompt (issue #13 §5).
 // The loader treats this value as equivalent to "unset" so a stale placeholder
 // never gets sent to a real AI provider.
-const PlaceholderAPIKey = "YOUR_API_KEY_HERE"
+const PlaceholderAPIKey = "YOUR_API_KEY_HERE" //nolint:gosec // G101: literal placeholder — deliberately public, treated as "unset" by Resolve so it can never be forwarded to a real AI provider (issue #13 §5).
 
 // ErrAPIKeyMissing is the operator-facing error surfaced whenever an AI
 // SecretRef fails to resolve to a real token. Deliberately generic — it

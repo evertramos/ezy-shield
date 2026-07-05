@@ -40,7 +40,7 @@ const (
 	// loader (internal/config.SecretRef.Resolve) treats this exact string as
 	// equivalent to "unset" so a stale placeholder never gets forwarded to a
 	// real AI provider (issue #13 §5, §6).
-	envAPIKeyPlaceholder = "YOUR_API_KEY_HERE"
+	envAPIKeyPlaceholder = "YOUR_API_KEY_HERE" //nolint:gosec // G101: literal placeholder, deliberately public — the loader (SecretRef.Resolve) treats this exact string as "unset" so a stale placeholder never reaches a real AI provider.
 )
 
 // aiProviderKeyName maps the supported AI provider names to the fixed env var

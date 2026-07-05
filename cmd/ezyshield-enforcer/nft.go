@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/netip"
@@ -10,6 +11,46 @@ import (
 	"os/exec"
 	"strings"
 )
+
+// errElementAbsent is a stable, typed sentinel that nftDel and nftDelAllow
+// return when nft reports the target element is already gone from the set —
+// e.g. because nft's native per-element `timeout` fired between the caller's
+// list and delete (issue #39). Callers dispatch on this via errors.Is and
+// translate it into the wire-level enforce.CodeAlreadyAbsent response — the
+// nft stderr string is never propagated to the client, which lets the client
+// stay agnostic to nft version-to-version wording changes.
+var errElementAbsent = errors.New("nft: element already absent")
+
+// nftAbsentSignals lists all nft error substrings that mean "the element you
+// asked me to delete is not in the set". Detected at the helper (one hop
+// before the wire) so the client never has to parse nft stderr — see the
+// package comment for enforce.CodeAlreadyAbsent. Add new variants here as
+// they surface in the wild.
+//
+// Known variants:
+//   - "not found in set" — older nft, delete of a single element that isn't
+//     present in an `interval`-flagged set.
+//   - "element does not exist" — nftables 1.0+ / current stable Debian/Ubuntu;
+//     what the live kylian-s host was emitting when issue #39 was filed.
+//   - "No such file or directory" — surfaces when the set itself is missing
+//     (racy startup ordering). Treated as absent for delete symmetry.
+var nftAbsentSignals = []string{
+	"not found in set",
+	"element does not exist",
+	"No such file or directory",
+}
+
+// isNftAbsentErr reports whether msg contains any known nft "already absent"
+// signal. Substring match is intentional: nft prefixes with "Error: " and
+// often includes file:line context and the offending script line.
+func isNftAbsentErr(msg string) bool {
+	for _, s := range nftAbsentSignals {
+		if strings.Contains(msg, s) {
+			return true
+		}
+	}
+	return false
+}
 
 const (
 	nftTable     = "inet ezyshield"
@@ -114,11 +155,10 @@ func nftAdd(ctx context.Context, run nftRunner, ip string, ttlSec int64) error {
 	return run(ctx, []byte(script))
 }
 
-// nftDel removes ip from the appropriate set.
-// If nftables reports the element is already gone ("not found in set" or
-// "No such file or directory"), the delete is treated as success: the element
-// is absent either way. This covers the race where nft auto-expires a timed
-// element before the daemon calls Sync/Unban (issue #38).
+// nftDel removes ip from the appropriate set. If nftables reports the element
+// is already gone (see nftAbsentSignals), it returns errElementAbsent so the
+// dispatch layer can translate that into a typed enforce.CodeAlreadyAbsent
+// response — never propagating raw nft stderr to the client (issue #39).
 func nftDel(ctx context.Context, run nftRunner, ip string) error {
 	set, err := setForIP(ip)
 	if err != nil {
@@ -126,10 +166,9 @@ func nftDel(ctx context.Context, run nftRunner, ip string) error {
 	}
 	script := fmt.Sprintf("delete element %s %s { %s }\n", nftTable, set, ip)
 	if err := run(ctx, []byte(script)); err != nil {
-		msg := err.Error()
-		if strings.Contains(msg, "not found in set") || strings.Contains(msg, "No such file or directory") {
-			slog.Debug("nftDel: element already absent, ignoring", "ip", ip, "err", err)
-			return nil
+		if isNftAbsentErr(err.Error()) {
+			slog.Debug("nftDel: element already absent", "ip", ip)
+			return errElementAbsent
 		}
 		return err
 	}
@@ -157,7 +196,9 @@ func nftAddAllow(ctx context.Context, run nftRunner, ip string) error {
 }
 
 // nftDelAllow removes ip from the appropriate @allowed set. Missing element
-// is treated as success — same race handling as nftDel.
+// is signalled via errElementAbsent — same handling as nftDel; the allow set
+// has no nft-native timeout today but the code paths stay symmetric so a
+// future refactor cannot accidentally split their behaviour (issue #39, §5).
 func nftDelAllow(ctx context.Context, run nftRunner, ip string) error {
 	set, err := allowSetForIP(ip)
 	if err != nil {
@@ -165,10 +206,9 @@ func nftDelAllow(ctx context.Context, run nftRunner, ip string) error {
 	}
 	script := fmt.Sprintf("delete element %s %s { %s }\n", nftTable, set, ip)
 	if err := run(ctx, []byte(script)); err != nil {
-		msg := err.Error()
-		if strings.Contains(msg, "not found in set") || strings.Contains(msg, "No such file or directory") {
-			slog.Debug("nftDelAllow: element already absent, ignoring", "ip", ip, "err", err)
-			return nil
+		if isNftAbsentErr(err.Error()) {
+			slog.Debug("nftDelAllow: element already absent", "ip", ip)
+			return errElementAbsent
 		}
 		return err
 	}

@@ -41,7 +41,18 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --yes)      YES=1 ;;
     --dry-run)  DRY=1 ;;
-    --backup)   BACKUP_TO="${2:-}"; shift ;;
+    --backup)
+      # Reject if no arg or if $2 is another flag: `wipe.sh --backup --yes`
+      # would otherwise silently set BACKUP_TO="--yes" and try to tar into a
+      # directory called "--yes". Absolute path is a soft ergonomic guard;
+      # the operator ran as root and could pass any path anyway.
+      case "${2:-}" in
+        ""|--*) echo "ERROR: --backup requires a path argument (got: '${2:-}')" >&2; exit 2 ;;
+        /*)     BACKUP_TO="$2" ;;
+        *)      echo "ERROR: --backup requires an absolute path (got: '$2')" >&2; exit 2 ;;
+      esac
+      shift
+      ;;
     -h|--help)  usage 0 ;;
     *)          echo "unknown arg: $1 (try --help)" >&2; exit 2 ;;
   esac

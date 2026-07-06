@@ -119,6 +119,14 @@ type Daemon struct {
 	startTime  time.Time
 	version    string
 
+	// staticAllowlist holds the parsed policy.Allowlist + policy.AdminCIDRs.
+	// It is derived once at construction from d.policy and never mutated,
+	// so no lock is needed. Kept semantically separate from runtimeAllowlist
+	// so `ezyshield list --allow` / `ezyshield unallow` continue to reflect
+	// only store-owned (runtime) entries — static prefixes are only
+	// materialised at enforcer-sync time (see syncEnforcerAllowlist).
+	staticAllowlist []netip.Prefix
+
 	mu               sync.RWMutex
 	runtimeAllowlist []netip.Prefix // dynamically added by the 'allow' socket command
 
@@ -169,23 +177,24 @@ func New(dcfg Config) (*Daemon, error) {
 	}
 
 	d := &Daemon{
-		cfg:        dcfg.Cfg,
-		policy:     dcfg.Policy,
-		store:      dcfg.Store,
-		agg:        agg,
-		ruleEng:    ruleEng,
-		decEng:     decEng,
-		parsers:    dcfg.Parsers,
-		collectors: dcfg.Collectors,
-		enforcer:   dcfg.Enforcer,
-		notifier:   dcfg.Notifier,
-		aiProvider: dcfg.AIProvider,
-		aiBudget:   dcfg.AIBudget,
-		aiCache:    dcfg.AICache,
-		enricher:   enricherFrom(dcfg.Enricher),
-		socketPath: socketPath,
-		version:    dcfg.Version,
-		startTime:  time.Now(),
+		cfg:             dcfg.Cfg,
+		policy:          dcfg.Policy,
+		store:           dcfg.Store,
+		agg:             agg,
+		ruleEng:         ruleEng,
+		decEng:          decEng,
+		parsers:         dcfg.Parsers,
+		collectors:      dcfg.Collectors,
+		enforcer:        dcfg.Enforcer,
+		notifier:        dcfg.Notifier,
+		aiProvider:      dcfg.AIProvider,
+		aiBudget:        dcfg.AIBudget,
+		aiCache:         dcfg.AICache,
+		enricher:        enricherFrom(dcfg.Enricher),
+		staticAllowlist: staticAllowlistFromPolicy(dcfg.Policy),
+		socketPath:      socketPath,
+		version:         dcfg.Version,
+		startTime:       time.Now(),
 	}
 
 	if dcfg.Cfg != nil && dcfg.Cfg.AI != nil {
@@ -658,20 +667,89 @@ type allowlistSyncer interface {
 	SyncAllowlist(ctx context.Context, want []netip.Prefix) error
 }
 
-// syncEnforcerAllowlist pushes the current runtime allowlist to the
-// enforcer's @allowed set. Called at startup (after reloadAllowlist) and
-// after each expiry sweep. No-op when the enforcer doesn't implement the
-// allowlistSyncer interface (e.g. Cloudflare edge enforcer alone).
+// syncEnforcerAllowlist pushes the union of the policy allowlist
+// (policy.Allowlist + policy.AdminCIDRs, held in staticAllowlist) and the
+// runtime allowlist (store-owned entries) to the enforcer's @allowed set.
+// Called at startup (after reloadAllowlist) and after each expiry sweep.
+// No-op when the enforcer doesn't implement the allowlistSyncer interface
+// (e.g. Cloudflare edge enforcer alone).
+//
+// Materialising the union only here (not in runtimeAllowlist) keeps the
+// runtime slice semantically store-owned: `ezyshield list --allow` shows
+// only the entries an operator added at runtime, and audit trails aren't
+// polluted with static policy prefixes. Issue #37.
 func (d *Daemon) syncEnforcerAllowlist(ctx context.Context) error {
 	syncer, ok := d.enforcer.(allowlistSyncer)
 	if !ok {
 		return nil
 	}
 	d.mu.RLock()
-	prefixes := make([]netip.Prefix, len(d.runtimeAllowlist))
-	copy(prefixes, d.runtimeAllowlist)
+	runtime := make([]netip.Prefix, len(d.runtimeAllowlist))
+	copy(runtime, d.runtimeAllowlist)
 	d.mu.RUnlock()
-	return syncer.SyncAllowlist(ctx, prefixes)
+	want := unionPrefixes(d.staticAllowlist, runtime)
+	return syncer.SyncAllowlist(ctx, want)
+}
+
+// staticAllowlistFromPolicy parses policy.Allowlist + policy.AdminCIDRs into
+// []netip.Prefix. Entries are already validated at policy-load time (see
+// internal/config/policy.go Validate), so any parse failure here is treated
+// as "skip" — logging is deferred to the caller since we have no context.
+// Bare IPs in policy.Allowlist are widened to a host prefix (/32 or /128) so
+// nftables can accept them in the "interval" set flag.
+//
+// A nil policy returns nil (defensive; New rejects nil policy, but tests may
+// construct a Daemon differently in the future).
+func staticAllowlistFromPolicy(p *config.Policy) []netip.Prefix {
+	if p == nil {
+		return nil
+	}
+	prefixes := make([]netip.Prefix, 0, len(p.Allowlist)+len(p.AdminCIDRs))
+	for _, s := range p.Allowlist {
+		if pfx, err := netip.ParsePrefix(s); err == nil {
+			prefixes = append(prefixes, pfx)
+			continue
+		}
+		if a, err := netip.ParseAddr(s); err == nil {
+			prefixes = append(prefixes, netip.PrefixFrom(a, a.BitLen()))
+		}
+	}
+	for _, s := range p.AdminCIDRs {
+		if pfx, err := netip.ParsePrefix(s); err == nil {
+			prefixes = append(prefixes, pfx)
+		}
+	}
+	return prefixes
+}
+
+// unionPrefixes returns the deduplicated union of two prefix slices, preserving
+// the order of first occurrence (static entries first, then runtime).
+// netip.Prefix is comparable, so a map[netip.Prefix]struct{} is safe as a set.
+// Duplicates can arise legitimately when an operator runs `ezyshield allow
+// 203.0.113.42/32` for a prefix already listed in policy.admin_cidrs; the sync
+// must push each nft element exactly once (SyncAllowlist iterates a map, but
+// belt-and-suspenders: deduplicate before crossing the process boundary).
+func unionPrefixes(a, b []netip.Prefix) []netip.Prefix {
+	if len(a) == 0 && len(b) == 0 {
+		return nil
+	}
+	seen := make(map[netip.Prefix]struct{}, len(a)+len(b))
+	out := make([]netip.Prefix, 0, len(a)+len(b))
+	for _, p := range a {
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	for _, p := range b {
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	return out
 }
 
 // runFlush periodically removes stale aggregator buckets to bound memory.

@@ -589,7 +589,7 @@ func dryValidateCFToken(ctx context.Context, deps cdnDeps, cfg *config.Cloudflar
 		return fmt.Errorf("internal: unknown mode %q", cfg.Mode)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil) //nolint:gosec // G107: url is built from compile-time constant base + operator-typed ID validated to [a-f0-9]{32}
 	if err != nil {
 		// This can only happen for a malformed URL (would indicate an
 		// internal bug, not operator error). Report without echoing the
@@ -707,7 +707,7 @@ func emitCloudflareYAML(b *strings.Builder, step *cdnStep) {
 	if cfg.Name != "" {
 		fmt.Fprintf(b, "    name: %s\n", cfg.Name)
 	}
-	fmt.Fprintf(b, "    api_token: %s\n", string(cfg.APIToken))
+	fmt.Fprintf(b, "    api_token: %s\n", cfg.APIToken)
 	fmt.Fprintf(b, "    mode: %s\n", cfg.Mode)
 	if cfg.Action != "" {
 		fmt.Fprintf(b, "    action: %s\n", cfg.Action)

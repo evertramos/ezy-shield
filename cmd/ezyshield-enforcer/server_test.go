@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -479,20 +480,46 @@ func TestParseSetElements_Empty(t *testing.T) {
 	}
 }
 
-// ── nftDel "not found" idempotency (issue #38) ───────────────────────────────
+// ── nftDel already-absent signalling (issues #38, #39) ──────────────────────
 
-func TestNftDel_NotFoundInSet_Ignored(t *testing.T) {
-	for _, errMsg := range []string{
-		"Error: interval not found in set\ndelete element inet ezyshield blocked { 1.2.3.4 }",
-		"nft -f: exit status 1\nError: No such file or directory; did you mean table 'ezyshield' in family inet?",
-	} {
-		captured := errMsg
-		run := func(_ context.Context, _ []byte) error {
-			return fmt.Errorf("%s", captured)
-		}
-		if err := nftDel(context.Background(), run, "1.2.3.4"); err != nil {
-			t.Errorf("expected nil for %q, got: %v", errMsg, err)
-		}
+// TestNftDel_ElementAbsent_ReturnsSentinel asserts that every known nft
+// "already gone" stderr variant is translated to the errElementAbsent
+// sentinel — never propagated as a raw wrapped error. This is the single
+// place in the codebase where nft's free-form stderr is inspected; if a new
+// wording surfaces in the wild, extend nftAbsentSignals here rather than
+// string-matching downstream (issue #39, Hard Rule §5).
+func TestNftDel_ElementAbsent_ReturnsSentinel(t *testing.T) {
+	cases := []struct {
+		name   string
+		nftErr string
+	}{
+		{
+			name:   "not_found_in_set (older nft)",
+			nftErr: "Error: interval not found in set\ndelete element inet ezyshield blocked { 1.2.3.4 }",
+		},
+		{
+			name:   "no_such_file_or_directory (set missing)",
+			nftErr: "nft -f: exit status 1\nError: No such file or directory; did you mean table 'ezyshield' in family inet?",
+		},
+		{
+			// The live variant from issue #39 (nftables 1.0+ / current Debian
+			// / Ubuntu). This is the wording that was noise-flooding the
+			// kylian-s host every ban-expiry tick.
+			name:   "element_does_not_exist (nftables 1.0+, live host)",
+			nftErr: "nft -f: exit status 1\n/tmp/ezyshield-enforcer-XXX.nft:1:41-54: Error: element does not exist\ndelete element inet ezyshield blocked { 198.57.247.251 }",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			captured := tc.nftErr
+			run := func(_ context.Context, _ []byte) error {
+				return fmt.Errorf("%s", captured)
+			}
+			err := nftDel(context.Background(), run, "1.2.3.4")
+			if !errors.Is(err, errElementAbsent) {
+				t.Errorf("expected errElementAbsent, got: %v", err)
+			}
+		})
 	}
 }
 
@@ -500,8 +527,116 @@ func TestNftDel_OtherError_Propagated(t *testing.T) {
 	run := func(_ context.Context, _ []byte) error {
 		return fmt.Errorf("nft -f: exit status 1\npermission denied")
 	}
-	if err := nftDel(context.Background(), run, "1.2.3.4"); err == nil {
-		t.Error("expected error to propagate, got nil")
+	err := nftDel(context.Background(), run, "1.2.3.4")
+	if err == nil {
+		t.Fatal("expected error to propagate, got nil")
+	}
+	if errors.Is(err, errElementAbsent) {
+		t.Errorf("permission-denied must NOT be classified as absent, got: %v", err)
+	}
+}
+
+// TestNftDelAllow_ElementAbsent_ReturnsSentinel mirrors the block-set fix
+// for the allow-set delete path (issue #39, §5). Kept in step with nftDel
+// so the two never diverge.
+func TestNftDelAllow_ElementAbsent_ReturnsSentinel(t *testing.T) {
+	run := func(_ context.Context, _ []byte) error {
+		return fmt.Errorf("nft -f: exit status 1\nError: element does not exist")
+	}
+	err := nftDelAllow(context.Background(), run, "10.0.0.0/8")
+	if !errors.Is(err, errElementAbsent) {
+		t.Errorf("expected errElementAbsent from nftDelAllow, got: %v", err)
+	}
+}
+
+// TestDispatch_Del_AlreadyAbsent_TypedCode locks in the wire-format contract
+// from issue #39: when the helper detects the target was already gone, it
+// returns OK=true with Code=already_absent. The Error field MUST stay empty
+// so the client never sees nft's stderr text (that's the whole point of the
+// refactor — the client is not allowed to depend on nft's error wording).
+func TestDispatch_Del_AlreadyAbsent_TypedCode(t *testing.T) {
+	nftFail := func(_ context.Context, _ []byte) error {
+		return fmt.Errorf("nft -f: exit status 1\nError: element does not exist")
+	}
+	f, err := os.CreateTemp("", "enforcer-srv-test-*.sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sockPath := f.Name()
+	_ = f.Close()
+	_ = os.Remove(sockPath)
+
+	srv := newServer(sockPath, nftFail)
+	srv.runSs = func(_ context.Context, _ []string) error { return nil }
+	// Pre-populate the in-memory cache to prove the already-absent branch
+	// still evicts the entry (otherwise Sync would keep retrying every tick).
+	srv.blocked["1.2.3.4"] = true
+
+	lc := &net.ListenConfig{}
+	ln, err := lc.Listen(context.Background(), "unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.ln = ln
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() { cancel(); _ = os.Remove(sockPath) })
+	go func() { _ = srv.serve(ctx) }() //nolint:errcheck
+
+	resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "del", IP: "1.2.3.4"})
+	if !resp.OK {
+		t.Fatalf("expected OK=true for already-absent, got OK=false Error=%q", resp.Error)
+	}
+	if resp.Code != enforce.CodeAlreadyAbsent {
+		t.Errorf("expected Code=%q, got %q", enforce.CodeAlreadyAbsent, resp.Code)
+	}
+	if resp.Error != "" {
+		t.Errorf("Error must be empty for already-absent success (nft stderr must not leak to client), got: %q", resp.Error)
+	}
+	srv.mu.RLock()
+	still := srv.blocked["1.2.3.4"]
+	srv.mu.RUnlock()
+	if still {
+		t.Error("in-memory blocked cache still contains 1.2.3.4 after already-absent del")
+	}
+}
+
+// TestDispatch_Del_RealError_NoTypedCode: a permission-denied (or any other
+// real failure) MUST surface as OK=false with the error text. No stable code
+// is set, so a future refactor can't accidentally silence real failures.
+func TestDispatch_Del_RealError_NoTypedCode(t *testing.T) {
+	nftFail := func(_ context.Context, _ []byte) error {
+		return fmt.Errorf("nft -f: exit status 1\npermission denied")
+	}
+	f, err := os.CreateTemp("", "enforcer-srv-test-*.sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sockPath := f.Name()
+	_ = f.Close()
+	_ = os.Remove(sockPath)
+
+	srv := newServer(sockPath, nftFail)
+	srv.runSs = func(_ context.Context, _ []string) error { return nil }
+
+	lc := &net.ListenConfig{}
+	ln, err := lc.Listen(context.Background(), "unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.ln = ln
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() { cancel(); _ = os.Remove(sockPath) })
+	go func() { _ = srv.serve(ctx) }() //nolint:errcheck
+
+	resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "del", IP: "1.2.3.4"})
+	if resp.OK {
+		t.Fatal("expected OK=false for permission-denied, got OK=true")
+	}
+	if resp.Code == enforce.CodeAlreadyAbsent {
+		t.Errorf("permission-denied must NOT return CodeAlreadyAbsent; got Code=%q", resp.Code)
+	}
+	if resp.Error == "" {
+		t.Error("expected non-empty Error for real failure")
 	}
 }
 

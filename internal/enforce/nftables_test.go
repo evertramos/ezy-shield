@@ -323,6 +323,115 @@ func TestSync_EmptyWant_RemovesAll(t *testing.T) {
 	}
 }
 
+// ── SyncAllowlist tests (issue #37) ────────────────────────────────────────────
+
+// TestSyncAllowlist_AddsMissingRemovesStale asserts the enforcer's SyncAllowlist
+// reconciles the @allowed set: entries in want but not in the current listing
+// are added via allow_add; entries in current but not in want are removed via
+// allow_del. Mirrors TestSync_AddsMissingRemovesStale for the ban set.
+func TestSyncAllowlist_AddsMissingRemovesStale(t *testing.T) {
+	ms := newMockHelper(t)
+	// Current nft @allowed state: 1.1.1.1/32 (keep) and 2.2.2.2/32 (stale).
+	ms.setAllowListIPs([]string{"1.1.1.1/32", "2.2.2.2/32"})
+	e := enforce.New(ms.sock, nil)
+
+	want := []netip.Prefix{
+		netip.MustParsePrefix("1.1.1.1/32"),
+		netip.MustParsePrefix("3.3.3.3/32"), // missing → must be added
+	}
+	if err := e.SyncAllowlist(context.Background(), want); err != nil {
+		t.Fatal(err)
+	}
+
+	var adds, dels []string
+	for _, r := range ms.recorded() {
+		switch r.Verb {
+		case "allow_add":
+			adds = append(adds, r.IP)
+		case "allow_del":
+			dels = append(dels, r.IP)
+		}
+	}
+	sort.Strings(adds)
+	sort.Strings(dels)
+
+	if len(adds) != 1 || adds[0] != "3.3.3.3/32" {
+		t.Errorf("expected allow_add 3.3.3.3/32, got %v", adds)
+	}
+	if len(dels) != 1 || dels[0] != "2.2.2.2/32" {
+		t.Errorf("expected allow_del 2.2.2.2/32, got %v", dels)
+	}
+}
+
+// TestSyncAllowlist_Issue37_PolicyPrefixesReachHelper is the integration-level
+// regression for issue #37. It simulates the daemon's startup contract: after
+// the fix in internal/daemon/daemon.go, `syncEnforcerAllowlist` passes the
+// union of policy.Allowlist + policy.AdminCIDRs + runtime store entries.
+// This test verifies that when the daemon actually calls SyncAllowlist with
+// that union, the nftables enforcer translates every prefix into an
+// `allow_add` RPC — proving the @allowed / @allowed6 sets will end up
+// populated on a real nft backend.
+//
+// The prefixes here mirror the ones the issue calls out on the dogfood host.
+func TestSyncAllowlist_Issue37_PolicyPrefixesReachHelper(t *testing.T) {
+	ms := newMockHelper(t)
+	ms.setAllowListIPs(nil) // fresh boot; nft @allowed is empty
+	e := enforce.New(ms.sock, nil)
+
+	want := []netip.Prefix{
+		netip.MustParsePrefix("127.0.0.1/32"),
+		netip.MustParsePrefix("172.16.0.0/12"),
+		netip.MustParsePrefix("::1/128"),
+		netip.MustParsePrefix("189.6.10.31/32"),
+		netip.MustParsePrefix("51.77.145.130/32"),
+		netip.MustParsePrefix("2001:41d0:404:200::8218/128"),
+	}
+	if err := e.SyncAllowlist(context.Background(), want); err != nil {
+		t.Fatal(err)
+	}
+
+	got := map[string]bool{}
+	for _, r := range ms.recorded() {
+		if r.Verb == "allow_add" {
+			got[r.IP] = true
+		}
+	}
+	for _, p := range want {
+		if !got[p.String()] {
+			t.Errorf("expected allow_add for %s, but helper never saw it", p)
+		}
+	}
+	// No stale entries: nothing was in the current listing, so no allow_del.
+	for _, r := range ms.recorded() {
+		if r.Verb == "allow_del" {
+			t.Errorf("unexpected allow_del %s on fresh-boot sync", r.IP)
+		}
+	}
+}
+
+// TestSyncAllowlist_EmptyWantRemovesAll: if the daemon passes no prefixes
+// (empty policy + empty store), stale nft entries must be swept.
+func TestSyncAllowlist_EmptyWantRemovesAll(t *testing.T) {
+	ms := newMockHelper(t)
+	ms.setAllowListIPs([]string{"10.0.0.0/8", "192.0.2.1/32"})
+	e := enforce.New(ms.sock, nil)
+
+	if err := e.SyncAllowlist(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+
+	var dels []string
+	for _, r := range ms.recorded() {
+		if r.Verb == "allow_del" {
+			dels = append(dels, r.IP)
+		}
+	}
+	sort.Strings(dels)
+	if len(dels) != 2 || dels[0] != "10.0.0.0/8" || dels[1] != "192.0.2.1/32" {
+		t.Errorf("expected both prefixes removed, got %v", dels)
+	}
+}
+
 // ── Network error tests ────────────────────────────────────────────────────────
 
 func TestBan_SocketMissing_ReturnsError(t *testing.T) {

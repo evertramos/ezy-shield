@@ -73,7 +73,8 @@ func TestKillSocketsForIP_v6_Integration(t *testing.T) {
 	defer clientConn.Close()
 
 	select {
-	case <-serverConnCh:
+	case serverConn := <-serverConnCh:
+		defer serverConn.Close()
 	case err := <-acceptErr:
 		t.Fatalf("accept: %v", err)
 	case <-time.After(2 * time.Second):

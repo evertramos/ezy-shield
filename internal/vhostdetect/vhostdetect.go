@@ -157,10 +157,9 @@ func inspectContainer(ctx context.Context, cli DockerCLI, row psRow) (VHost, boo
 	if err != nil {
 		return VHost{}, false
 	}
-	inspectResolvedName := row.Name
 	// Fallback used purely to satisfy tests: some cases pass rows built
 	// without the ps step.
-	if inspectResolvedName == "" {
+	if row.Name == "" {
 		return VHost{}, false
 	}
 	domains := extractVirtualHost(raw)

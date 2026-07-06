@@ -46,6 +46,7 @@ type realCLI struct{}
 // caller-controlled via ctx.
 func DefaultCLI() DockerCLI { return realCLI{} }
 
+// Ps shells out to `docker ps` and returns its raw stdout.
 func (realCLI) Ps(ctx context.Context, format string) (string, error) {
 	//nolint:gosec // fixed binary; format string is a literal from this package
 	out, err := exec.CommandContext(ctx, "docker", "ps", "--format", format).Output()
@@ -55,6 +56,7 @@ func (realCLI) Ps(ctx context.Context, format string) (string, error) {
 	return string(out), nil
 }
 
+// Inspect shells out to `docker inspect --format` for a single container.
 func (realCLI) Inspect(ctx context.Context, container, format string) (string, error) {
 	//nolint:gosec // fixed binary; container is a Docker-provided name we
 	// just enumerated from `docker ps`, not user input; format is a literal.

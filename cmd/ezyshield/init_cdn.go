@@ -607,7 +607,7 @@ func dryValidateCFToken(ctx context.Context, deps cdnDeps, cfg *config.Cloudflar
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("Cloudflare API unreachable: %w", err)
+		return fmt.Errorf("cloudflare API unreachable: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -624,7 +624,7 @@ func dryValidateCFToken(ctx context.Context, deps cdnDeps, cfg *config.Cloudflar
 		}
 		return fmt.Errorf("token lacks scope %q (HTTP %d: %s)", scopeHint, resp.StatusCode, msg)
 	case resp.StatusCode >= 400:
-		return fmt.Errorf("Cloudflare API returned HTTP %d validating %s (transient?) — retry with `ezyshield init --add-cloudflare`",
+		return fmt.Errorf("cloudflare API returned HTTP %d validating %s (transient?) — retry with `ezyshield init --add-cloudflare`",
 			resp.StatusCode, cfg.Mode)
 	}
 	return nil

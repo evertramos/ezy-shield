@@ -151,6 +151,7 @@ type stdlibResolver struct {
 	r *net.Resolver
 }
 
+// LookupNetIP satisfies the Resolver interface using net.DefaultResolver.
 func (s stdlibResolver) LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error) {
 	return s.r.LookupNetIP(ctx, network, host)
 }

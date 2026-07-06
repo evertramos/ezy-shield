@@ -587,7 +587,7 @@ func TestWriteCloudflareEnvFile_PreservesAIKey(t *testing.T) {
 // wizard writes in the single-account happy path).
 func mustCFConfig(t *testing.T, mode, action, accountID, listName string, zoneIDs []string) *config.CloudflareCfg {
 	t.Helper()
-	return &config.CloudflareCfg{
+	return &config.CloudflareCfg{ //nolint:gosec // G101: APIToken below is a SecretRef sentinel pointing at env var, not a secret value
 		APIToken:  "env:CLOUDFLARE_API_TOKEN",
 		Mode:      mode,
 		Action:    action,

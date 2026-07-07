@@ -89,6 +89,7 @@ func TestInit_PromptsForTokenNotName_AnthropicProvider(t *testing.T) {
 
 	input := strings.Join([]string{
 		"",          // admin IP
+		"",          // CDN generic question (default: no)
 		"y",         // enable AI
 		"anthropic", // provider
 		"",          // model default
@@ -129,6 +130,7 @@ func TestInit_MaskedInput_NoEchoOnFailedPrompt(t *testing.T) {
 
 	input := strings.Join([]string{
 		"",          // admin IP
+		"",          // CDN generic question (default: no)
 		"y",         // enable AI
 		"anthropic", // provider
 		"",          // model default

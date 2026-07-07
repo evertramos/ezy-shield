@@ -133,6 +133,12 @@ type wizardState struct {
 	// of a getter and the redacted String() form on wizardState (below).
 	aiToken string
 	armed   bool
+
+	// cdn holds CDN-detection + CF-subflow state. Populated by runCDNStep
+	// during askQuestions (see init_cdn.go). Non-nil after askQuestions
+	// returns so downstream writers can rely on nil checks on cdn.cfCfg
+	// alone. Its String() masks the CF token.
+	cdn *cdnStep
 }
 
 // String on *wizardState prints every field EXCEPT aiToken, which is masked.
@@ -146,8 +152,8 @@ func (s *wizardState) String() string {
 	if s.aiToken != "" {
 		tokenMark = "<redacted>"
 	}
-	return fmt.Sprintf("wizardState{enableAI=%v provider=%q model=%q keyEnvVar=%q token=%s armed=%v}",
-		s.enableAI, s.aiProvider, s.aiModel, s.aiKeyEnvVar, tokenMark, s.armed)
+	return fmt.Sprintf("wizardState{enableAI=%v provider=%q model=%q keyEnvVar=%q token=%s armed=%v cdn=%s}",
+		s.enableAI, s.aiProvider, s.aiModel, s.aiKeyEnvVar, tokenMark, s.armed, s.cdn.String())
 }
 
 type dockerContainer struct {
@@ -158,6 +164,16 @@ type dockerContainer struct {
 
 func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) error {
 	p := &wPrinter{w: cmd.OutOrStdout()}
+
+	// Pre-flight: refuse before printing the banner or running detection if the
+	// wizard would clobber an existing config.yaml or policy.yaml. The writers
+	// themselves still guard against overwrite as defense-in-depth (see
+	// writeGeneratedConfig / writeGeneratedPolicy), but doing the check up
+	// front means the operator doesn't burn several minutes of Q&A only to be
+	// told at [3/5] that the run cannot succeed. Issue #5.
+	if err := preflightExistingConfigFiles(configDir); err != nil {
+		return err
+	}
 
 	p.println("")
 	p.println("EzyShield setup wizard")
@@ -310,6 +326,22 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 		}
 	}
 
+	// Cloudflare token: written to the same .env file, one line per token.
+	// Merge semantics preserve any AI KEY= line written above (issue #43).
+	// The token itself is NEVER logged — only "wrote" / "kept".
+	if state.cdn != nil && state.cdn.cfEnabled && state.cdn.cfToken != "" && state.cdn.cfTokenEnvVar != "" {
+		wrote, kept, err := writeCloudflareEnvFile(configDir, state.cdn.cfTokenEnvVar, state.cdn.cfToken)
+		if err != nil {
+			return err
+		}
+		switch {
+		case kept:
+			p.printf("  kept %s (existing Cloudflare token preserved)\n", envPath)
+		case wrote:
+			p.printf("  wrote %s (chmod 600, Cloudflare token merged)\n", envPath)
+		}
+	}
+
 	if state.hasWordPress {
 		if err := writeWordPressRules(state.wpRulesPath); err != nil {
 			return err
@@ -450,6 +482,18 @@ func askQuestions(sc *bufio.Scanner, state *wizardState, yes bool) {
 		state.adminIPs = splitIPs(rawAdmin)
 	}
 
+	// CDN detection + Cloudflare subflow — runs BEFORE AI so the loud-skip
+	// warning fires before the operator commits to any downstream config.
+	// See init_cdn.go for the flow and issue #43 for the design.
+	state.cdn = &cdnStep{}
+	runCDNStep(
+		context.Background(),
+		&wPrinter{w: os.Stdout},
+		closurePrompter{askFn: ask, askBoolFn: askBool},
+		state.cdn,
+		cdnDeps{Yes: yes},
+	)
+
 	// AI
 	state.enableAI = askBool("Enable AI analysis?", false)
 	if state.enableAI {
@@ -499,6 +543,46 @@ func askQuestions(sc *bufio.Scanner, state *wizardState, yes bool) {
 
 // ── Config file generation ───────────────────────────────────────────────────
 
+// preflightExistingConfigFiles refuses the wizard when config.yaml or
+// policy.yaml already exist in configDir, before any prompt or detection has
+// run. When both files exist, the single returned error lists both paths so
+// the operator can fix them in one shot rather than iteratively. Any stat
+// error other than "not exist" (e.g. permission denied on /etc/ezyshield)
+// short-circuits the same way — the wizard can't safely proceed if it can't
+// even see whether it would clobber. Issue #5.
+//
+// The late-stage checks inside writeGeneratedConfig / writeGeneratedPolicy
+// remain in place as defense-in-depth against a concurrent operator writing
+// the same file mid-wizard; this preflight is purely a UX improvement.
+func preflightExistingConfigFiles(configDir string) error {
+	targets := []string{
+		filepath.Join(configDir, "config.yaml"),
+		filepath.Join(configDir, "policy.yaml"),
+	}
+	var existing []string
+	for _, path := range targets {
+		if _, err := os.Stat(path); err == nil {
+			existing = append(existing, path)
+			continue
+		} else if !os.IsNotExist(err) {
+			// A stat error we don't recognise (permission, I/O, etc.) means we
+			// can't reason about whether the target is safe to write — fail
+			// closed with the underlying error so the operator sees the real
+			// cause. No secret can be reached through this path (configDir is
+			// operator-supplied and echoed).
+			return fmt.Errorf("checking %s: %w", path, err)
+		}
+	}
+	switch len(existing) {
+	case 0:
+		return nil
+	case 1:
+		return fmt.Errorf("%s already exists — delete it to regenerate", existing[0])
+	default:
+		return fmt.Errorf("%s already exist — delete them to regenerate", strings.Join(existing, ", "))
+	}
+}
+
 // writeGeneratedConfig writes config.yaml using only valid Config struct fields.
 // Validates via LoadConfigReader before writing to disk.
 func writeGeneratedConfig(path string, state *wizardState) error {
@@ -534,11 +618,18 @@ func writeGeneratedConfig(path string, state *wizardState) error {
 		}
 	}
 
-	if state.nftPath != "" {
-		b.WriteString("enforce:\n  nftables:\n")
-		fmt.Fprintf(&b, "    socket: %s\n", enforcerSockPath)
-		b.WriteString("    table: inet ezyshield\n")
-		b.WriteString("    set: blocked\n")
+	hasCF := state.cdn != nil && state.cdn.cfEnabled && state.cdn.cfCfg != nil
+	if state.nftPath != "" || hasCF {
+		b.WriteString("enforce:\n")
+		if state.nftPath != "" {
+			b.WriteString("  nftables:\n")
+			fmt.Fprintf(&b, "    socket: %s\n", enforcerSockPath)
+			b.WriteString("    table: inet ezyshield\n")
+			b.WriteString("    set: blocked\n")
+		}
+		if hasCF {
+			emitCloudflareYAML(&b, state.cdn)
+		}
 	}
 
 	if state.enableAI && state.aiProvider != "" {

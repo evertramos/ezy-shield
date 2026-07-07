@@ -55,6 +55,10 @@ func (e *NftablesEnforcer) Ban(ctx context.Context, t sdk.Target) error {
 }
 
 // Unban removes the target from the nftables blocked set via the enforcer helper.
+// A CodeAlreadyAbsent response is intentionally collapsed into nil: `ezyshield
+// unban <ip>` is defined as idempotent, and callers (CLI, admin API) already
+// treat a missing target as success — surfacing the code here would just
+// add ceremony without changing behaviour.
 func (e *NftablesEnforcer) Unban(ctx context.Context, t sdk.Target) error {
 	ip, err := targetKey(t)
 	if err != nil {
@@ -101,11 +105,22 @@ func (e *NftablesEnforcer) Sync(ctx context.Context, want []sdk.Target) error {
 	}
 
 	// Remove entries present in nftables but not in the desired set.
+	//
+	// The delete may race with nft's per-element `timeout`: our listIPs saw
+	// the element, but by the time this delete lands the kernel has already
+	// expired it (issue #39). The enforcer helper signals that with a typed
+	// Response.Code — we log at DEBUG and continue rather than surfacing a
+	// spurious ERROR for a state we wanted anyway (element absent).
 	for k := range currentSet {
 		if _, ok := wantSet[k]; !ok {
 			slog.InfoContext(ctx, "enforce/nftables Sync: removing stale", "ip", k)
-			if err := e.rpc(ctx, Request{Verb: "del", IP: k}); err != nil {
+			resp, err := e.rpcResp(ctx, Request{Verb: "del", IP: k})
+			if err != nil {
 				return fmt.Errorf("enforce/nftables Sync del %s: %w", k, err)
+			}
+			if resp.Code == CodeAlreadyAbsent {
+				slog.DebugContext(ctx, "enforce/nftables Sync: element already absent (nft-native timeout)",
+					"ip", k)
 			}
 		}
 	}
@@ -180,37 +195,55 @@ func (e *NftablesEnforcer) SyncAllowlist(ctx context.Context, want []netip.Prefi
 			}
 		}
 	}
-	// Remove stale.
+	// Remove stale. Symmetric with Sync's del path for the same race handling
+	// (issue #39, §5) — the allow set has no nft-native timeout today, but if
+	// an operator flushes it out-of-band between our list and delete the
+	// helper's already_absent signal must still be treated as no-op success.
 	for k := range currentSet {
 		if !wantSet[k] {
 			slog.InfoContext(ctx, "enforce/nftables SyncAllowlist: removing stale", "ip", k)
-			if err := e.rpc(ctx, Request{Verb: "allow_del", IP: k}); err != nil {
+			resp, err := e.rpcResp(ctx, Request{Verb: "allow_del", IP: k})
+			if err != nil {
 				return fmt.Errorf("enforce/nftables SyncAllowlist del %s: %w", k, err)
+			}
+			if resp.Code == CodeAlreadyAbsent {
+				slog.DebugContext(ctx, "enforce/nftables SyncAllowlist: element already absent",
+					"ip", k)
 			}
 		}
 	}
 	return nil
 }
 
-// rpc sends a request and checks the response is OK.
+// rpc sends a request and returns nil on OK, else a wrapped error. Callers
+// that need to inspect Response.Code (e.g. the Sync loops, to distinguish
+// "already absent" from a real success) should use rpcResp instead.
 func (e *NftablesEnforcer) rpc(ctx context.Context, req Request) error {
+	_, err := e.rpcResp(ctx, req)
+	return err
+}
+
+// rpcResp is the shared low-level RPC: it sends req, decodes the response,
+// and returns the typed Response so callers can dispatch on Response.Code.
+// Non-OK responses return a wrapped error (matching rpc's contract).
+func (e *NftablesEnforcer) rpcResp(ctx context.Context, req Request) (Response, error) {
+	var resp Response
 	conn, err := e.dial(ctx)
 	if err != nil {
-		return err
+		return resp, err
 	}
 	defer conn.Close() //nolint:errcheck
 
 	if err := sendRequest(conn, req); err != nil {
-		return err
+		return resp, err
 	}
-	var resp Response
 	if err := json.NewDecoder(bufio.NewReader(conn)).Decode(&resp); err != nil {
-		return fmt.Errorf("enforce/nftables: decode response: %w", err)
+		return resp, fmt.Errorf("enforce/nftables: decode response: %w", err)
 	}
 	if !resp.OK {
-		return fmt.Errorf("enforce/nftables %s: %s", req.Verb, resp.Error)
+		return resp, fmt.Errorf("enforce/nftables %s: %s", req.Verb, resp.Error)
 	}
-	return nil
+	return resp, nil
 }
 
 func (e *NftablesEnforcer) dial(ctx context.Context) (net.Conn, error) {

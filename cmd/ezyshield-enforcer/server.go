@@ -193,6 +193,17 @@ func (s *Server) dispatch(ctx context.Context, req enforce.Request) enforce.Resp
 			return enforce.Response{OK: false, Error: err.Error()}
 		}
 		if err := nftDel(ctx, s.run, req.IP); err != nil {
+			// Typed signal: nft-native timeout (or an out-of-band flush) beat
+			// us to it. Desired end state (absent) is achieved — respond OK
+			// with a stable code the client can trace at DEBUG instead of
+			// ERROR (issue #39). Sync the in-memory cache so we don't keep
+			// re-issuing deletes on subsequent Sync ticks.
+			if errors.Is(err, errElementAbsent) {
+				s.mu.Lock()
+				delete(s.blocked, req.IP)
+				s.mu.Unlock()
+				return enforce.Response{OK: true, Code: enforce.CodeAlreadyAbsent}
+			}
 			return enforce.Response{OK: false, Error: err.Error()}
 		}
 		s.mu.Lock()
@@ -214,6 +225,10 @@ func (s *Server) dispatch(ctx context.Context, req enforce.Request) enforce.Resp
 			return enforce.Response{OK: false, Error: err.Error()}
 		}
 		if err := nftDelAllow(ctx, s.run, req.IP); err != nil {
+			// Symmetric with "del": already-absent maps to the typed OK code.
+			if errors.Is(err, errElementAbsent) {
+				return enforce.Response{OK: true, Code: enforce.CodeAlreadyAbsent}
+			}
 			return enforce.Response{OK: false, Error: err.Error()}
 		}
 		return enforce.Response{OK: true}

@@ -55,6 +55,15 @@ Isso gera:
 - `/etc/ezyshield/rules.yaml`
 - `/var/lib/ezyshield/` (dados de runtime, SQLite)
 
+> **Pré-flight (issue #5):** o wizard verifica logo no início se `config.yaml`
+> ou `policy.yaml` já existem no diretório de destino (`--config-dir` ou o
+> padrão `/etc/ezyshield`). Se qualquer um deles já existir, `ezyshield init`
+> falha em menos de 1s — **antes** de imprimir o banner "Detecting
+> environment..." — listando todos os caminhos pré-existentes num único erro
+> para você removê-los de uma só vez. Isso evita responder o wizard inteiro
+> só para descobrir no final que ele não conseguiria gravar. Para regenerar,
+> remova os arquivos apontados e rode `sudo ezyshield init` de novo.
+
 ### `ezyshield doctor`
 
 Valida toda a configuração e verifica dependências:

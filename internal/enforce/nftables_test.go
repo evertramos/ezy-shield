@@ -2,12 +2,15 @@ package enforce_test
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net"
 	"net/netip"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -50,11 +53,15 @@ func newMockHelper(t *testing.T) *mockHelper {
 		sock: sockPath,
 		ln:   ln,
 		responses: map[string]enforce.Response{
-			"add":   {OK: true},
-			"del":   {OK: true},
-			"flush": {OK: true},
-			"list":  {OK: true},
-			"ping":  {OK: true},
+			"add":         {OK: true},
+			"del":         {OK: true},
+			"flush":       {OK: true},
+			"list":        {OK: true},
+			"ping":        {OK: true},
+			"allow_add":   {OK: true},
+			"allow_del":   {OK: true},
+			"allow_list":  {OK: true},
+			"allow_flush": {OK: true},
 		},
 	}
 	go ms.serve()
@@ -69,6 +76,20 @@ func (ms *mockHelper) setListIPs(ips []string) {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 	ms.responses["list"] = enforce.Response{OK: true, IPs: ips}
+}
+
+// setResponse overrides the pre-programmed reply for a specific verb.
+func (ms *mockHelper) setResponse(verb string, resp enforce.Response) {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	ms.responses[verb] = resp
+}
+
+// setAllowListIPs configures the reply for the "allow_list" verb.
+func (ms *mockHelper) setAllowListIPs(ips []string) {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	ms.responses["allow_list"] = enforce.Response{OK: true, IPs: ips}
 }
 
 func (ms *mockHelper) recorded() []enforce.Request {
@@ -302,6 +323,115 @@ func TestSync_EmptyWant_RemovesAll(t *testing.T) {
 	}
 }
 
+// ── SyncAllowlist tests (issue #37) ────────────────────────────────────────────
+
+// TestSyncAllowlist_AddsMissingRemovesStale asserts the enforcer's SyncAllowlist
+// reconciles the @allowed set: entries in want but not in the current listing
+// are added via allow_add; entries in current but not in want are removed via
+// allow_del. Mirrors TestSync_AddsMissingRemovesStale for the ban set.
+func TestSyncAllowlist_AddsMissingRemovesStale(t *testing.T) {
+	ms := newMockHelper(t)
+	// Current nft @allowed state: 1.1.1.1/32 (keep) and 2.2.2.2/32 (stale).
+	ms.setAllowListIPs([]string{"1.1.1.1/32", "2.2.2.2/32"})
+	e := enforce.New(ms.sock, nil)
+
+	want := []netip.Prefix{
+		netip.MustParsePrefix("1.1.1.1/32"),
+		netip.MustParsePrefix("3.3.3.3/32"), // missing → must be added
+	}
+	if err := e.SyncAllowlist(context.Background(), want); err != nil {
+		t.Fatal(err)
+	}
+
+	var adds, dels []string
+	for _, r := range ms.recorded() {
+		switch r.Verb {
+		case "allow_add":
+			adds = append(adds, r.IP)
+		case "allow_del":
+			dels = append(dels, r.IP)
+		}
+	}
+	sort.Strings(adds)
+	sort.Strings(dels)
+
+	if len(adds) != 1 || adds[0] != "3.3.3.3/32" {
+		t.Errorf("expected allow_add 3.3.3.3/32, got %v", adds)
+	}
+	if len(dels) != 1 || dels[0] != "2.2.2.2/32" {
+		t.Errorf("expected allow_del 2.2.2.2/32, got %v", dels)
+	}
+}
+
+// TestSyncAllowlist_Issue37_PolicyPrefixesReachHelper is the integration-level
+// regression for issue #37. It simulates the daemon's startup contract: after
+// the fix in internal/daemon/daemon.go, `syncEnforcerAllowlist` passes the
+// union of policy.Allowlist + policy.AdminCIDRs + runtime store entries.
+// This test verifies that when the daemon actually calls SyncAllowlist with
+// that union, the nftables enforcer translates every prefix into an
+// `allow_add` RPC — proving the @allowed / @allowed6 sets will end up
+// populated on a real nft backend.
+//
+// The prefixes here mirror the ones the issue calls out on the dogfood host.
+func TestSyncAllowlist_Issue37_PolicyPrefixesReachHelper(t *testing.T) {
+	ms := newMockHelper(t)
+	ms.setAllowListIPs(nil) // fresh boot; nft @allowed is empty
+	e := enforce.New(ms.sock, nil)
+
+	want := []netip.Prefix{
+		netip.MustParsePrefix("127.0.0.1/32"),
+		netip.MustParsePrefix("172.16.0.0/12"),
+		netip.MustParsePrefix("::1/128"),
+		netip.MustParsePrefix("203.0.113.42/32"),
+		netip.MustParsePrefix("203.0.113.99/32"),
+		netip.MustParsePrefix("2001:db8:404:200::8218/128"),
+	}
+	if err := e.SyncAllowlist(context.Background(), want); err != nil {
+		t.Fatal(err)
+	}
+
+	got := map[string]bool{}
+	for _, r := range ms.recorded() {
+		if r.Verb == "allow_add" {
+			got[r.IP] = true
+		}
+	}
+	for _, p := range want {
+		if !got[p.String()] {
+			t.Errorf("expected allow_add for %s, but helper never saw it", p)
+		}
+	}
+	// No stale entries: nothing was in the current listing, so no allow_del.
+	for _, r := range ms.recorded() {
+		if r.Verb == "allow_del" {
+			t.Errorf("unexpected allow_del %s on fresh-boot sync", r.IP)
+		}
+	}
+}
+
+// TestSyncAllowlist_EmptyWantRemovesAll: if the daemon passes no prefixes
+// (empty policy + empty store), stale nft entries must be swept.
+func TestSyncAllowlist_EmptyWantRemovesAll(t *testing.T) {
+	ms := newMockHelper(t)
+	ms.setAllowListIPs([]string{"10.0.0.0/8", "192.0.2.1/32"})
+	e := enforce.New(ms.sock, nil)
+
+	if err := e.SyncAllowlist(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+
+	var dels []string
+	for _, r := range ms.recorded() {
+		if r.Verb == "allow_del" {
+			dels = append(dels, r.IP)
+		}
+	}
+	sort.Strings(dels)
+	if len(dels) != 2 || dels[0] != "10.0.0.0/8" || dels[1] != "192.0.2.1/32" {
+		t.Errorf("expected both prefixes removed, got %v", dels)
+	}
+}
+
 // ── Network error tests ────────────────────────────────────────────────────────
 
 func TestBan_SocketMissing_ReturnsError(t *testing.T) {
@@ -309,6 +439,136 @@ func TestBan_SocketMissing_ReturnsError(t *testing.T) {
 	err := e.Ban(context.Background(), sdk.Target{IP: netip.MustParseAddr("1.2.3.4")})
 	if err == nil {
 		t.Fatal("expected error when socket is missing")
+	}
+}
+
+// ── Post-expire race: nft-native timeout beat us to the delete (issue #39) ──
+
+// captureSlog installs a slog handler that writes to a bytes.Buffer for the
+// duration of the test. It returns the buffer and a cleanup that restores the
+// previous default. The text handler makes level assertions trivial without
+// tying tests to a specific JSON shape.
+func captureSlog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	buf := &bytes.Buffer{}
+	// Debug level so we see every no-op annotation the Sync path emits.
+	handler := slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})
+	prev := slog.Default()
+	slog.SetDefault(slog.New(handler))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return buf
+}
+
+// TestSync_DelAlreadyAbsent_NotAnError verifies the fix for issue #39: when
+// the enforcer helper reports the element was already gone (nft's native
+// per-element timeout fired between our list and delete), Sync must return
+// nil and MUST NOT log at ERROR. A DEBUG/INFO trace is fine — that's how ops
+// still get a breadcrumb the delete was a no-op.
+func TestSync_DelAlreadyAbsent_NotAnError(t *testing.T) {
+	ms := newMockHelper(t)
+	// Current nft state includes the stale IP (list saw it before the timer
+	// fired). After list, the timeout expires and the delete finds nothing.
+	ms.setListIPs([]string{"1.1.1.1", "2.2.2.2"})
+	// Helper reports a typed "already absent" success on del — the wire-format
+	// contract from cmd/ezyshield-enforcer/server.go. The client MUST rely on
+	// this stable code, never on the free-form nft stderr text.
+	ms.setResponse("del", enforce.Response{OK: true, Code: enforce.CodeAlreadyAbsent})
+
+	buf := captureSlog(t)
+	e := enforce.New(ms.sock, nil)
+
+	// Empty want → both currently-present IPs should be deleted.
+	if err := e.Sync(context.Background(), nil); err != nil {
+		t.Fatalf("Sync returned error for already-absent del: %v", err)
+	}
+
+	logs := buf.String()
+	if strings.Contains(logs, "level=ERROR") {
+		t.Errorf("Sync logged at ERROR for already-absent del; log:\n%s", logs)
+	}
+	// Sanity: we should see *some* trace mentioning already_absent so ops can
+	// still audit the no-op. Either the info "removing stale" line or a debug
+	// annotation is acceptable.
+	if !strings.Contains(logs, "1.1.1.1") && !strings.Contains(logs, "already_absent") {
+		t.Errorf("Sync produced no trace of the no-op del; log:\n%s", logs)
+	}
+}
+
+// TestSync_DelRealError_StillPropagates locks in the regression guard from
+// step 4 of the fix plan: a real error on del (permission denied, missing
+// set, syntax error, EOF from helper) MUST still surface. If a future refactor
+// accidentally treats every del failure as "already absent" this test blows up.
+func TestSync_DelRealError_StillPropagates(t *testing.T) {
+	cases := []struct {
+		name string
+		resp enforce.Response
+	}{
+		{"permission_denied", enforce.Response{OK: false, Error: "permission denied"}},
+		{"missing_set", enforce.Response{OK: false, Error: "nft: no such set 'blocked'"}},
+		{"syntax_error", enforce.Response{OK: false, Error: "nft syntax error near '{'"}},
+		// A code the client does not know about must NOT be silently treated
+		// as already_absent — this guards the wire contract.
+		{"unknown_code", enforce.Response{OK: false, Code: "some_future_code", Error: "boom"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ms := newMockHelper(t)
+			ms.setListIPs([]string{"3.3.3.3"})
+			ms.setResponse("del", tc.resp)
+			e := enforce.New(ms.sock, nil)
+			if err := e.Sync(context.Background(), nil); err == nil {
+				t.Fatalf("expected Sync to return error for %s, got nil", tc.name)
+			}
+		})
+	}
+}
+
+// TestSyncAllowlist_DelAlreadyAbsent_NotAnError mirrors the block-set fix for
+// the allow-set delete path. The allow set has no nft-native timeout today,
+// but the code paths must stay symmetric — a future refactor that adds
+// timeouts (or an operator that flushes the set out-of-band between our list
+// and delete) should not resurface issue #39 on the allowlist.
+func TestSyncAllowlist_DelAlreadyAbsent_NotAnError(t *testing.T) {
+	ms := newMockHelper(t)
+	ms.setAllowListIPs([]string{"10.0.0.0/8"})
+	ms.setResponse("allow_del", enforce.Response{OK: true, Code: enforce.CodeAlreadyAbsent})
+
+	buf := captureSlog(t)
+	e := enforce.New(ms.sock, nil)
+
+	// Empty want → the allow entry we listed must be deleted (or, thanks to
+	// the fix, treated as already-gone without error).
+	if err := e.SyncAllowlist(context.Background(), nil); err != nil {
+		t.Fatalf("SyncAllowlist returned error for already-absent allow_del: %v", err)
+	}
+	if strings.Contains(buf.String(), "level=ERROR") {
+		t.Errorf("SyncAllowlist logged at ERROR for already-absent del; log:\n%s", buf.String())
+	}
+}
+
+// TestSyncAllowlist_DelRealError_StillPropagates locks in the regression
+// guard for the allow-set delete path (issue #39, step 5).
+func TestSyncAllowlist_DelRealError_StillPropagates(t *testing.T) {
+	ms := newMockHelper(t)
+	ms.setAllowListIPs([]string{"10.0.0.0/8"})
+	ms.setResponse("allow_del", enforce.Response{OK: false, Error: "permission denied"})
+	e := enforce.New(ms.sock, nil)
+	if err := e.SyncAllowlist(context.Background(), nil); err == nil {
+		t.Fatal("expected SyncAllowlist to return error for real failure, got nil")
+	}
+}
+
+// TestUnban_AlreadyAbsent_TreatedAsSuccess documents the direct-Unban
+// contract: an already-absent target on Unban is still a success. This keeps
+// the CLI's `ezyshield unban <ip>` idempotent — running it twice never errors.
+func TestUnban_AlreadyAbsent_TreatedAsSuccess(t *testing.T) {
+	ms := newMockHelper(t)
+	ms.setResponse("del", enforce.Response{OK: true, Code: enforce.CodeAlreadyAbsent})
+	e := enforce.New(ms.sock, nil)
+
+	ip := netip.MustParseAddr("1.2.3.4")
+	if err := e.Unban(context.Background(), sdk.Target{IP: ip}); err != nil {
+		t.Fatalf("Unban returned error for already-absent target: %v", err)
 	}
 }
 

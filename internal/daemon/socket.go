@@ -275,6 +275,12 @@ func (d *Daemon) handleBan(ctx context.Context, req SocketRequest) SocketRespons
 	// mismatch, disk full), fall back to AuditOp so the operator action is at
 	// least journaled — losing both the bans_active row and the audit trail
 	// would be a silent-failure regression (§10 SECURITY-REVIEW).
+	//
+	// stored tracks whether the primary store write (RecordManualBan or AuditOp)
+	// succeeded. We only emit the "daemon: action" INFO line on that happy path:
+	// the audit-fallback ERROR-log branch already surfaces the failure, and a
+	// duplicate INFO there would falsely suggest the action was recorded.
+	stored := false
 	if prefix.Bits() == prefix.Addr().BitLen() && d.policy.Armed {
 		if err := d.store.RecordManualBan(ctx, prefix.Addr(), ttl, reason); err != nil {
 			slog.ErrorContext(ctx, "daemon: record manual ban failed, falling back to audit-only",
@@ -283,9 +289,26 @@ func (d *Daemon) handleBan(ctx context.Context, req SocketRequest) SocketRespons
 				slog.ErrorContext(ctx, "daemon: audit fallback also failed",
 					"prefix", prefix, "err", auditErr)
 			}
+		} else {
+			stored = true
 		}
 	} else if err := d.store.AuditOp(ctx, op, prefix, ttl, reason); err != nil {
 		slog.ErrorContext(ctx, "daemon: audit manual ban", "prefix", prefix, "err", err)
+	} else {
+		stored = true
+	}
+
+	// Emit an INFO line matching the pipeline path's message so tools that grep
+	// "daemon: action" catch CLI actions too. source=cli discriminates from the
+	// automatic path (which sets source=rules|ai inside reason today). Issue #45.
+	if stored {
+		slog.InfoContext(ctx, "daemon: action",
+			"op", op,
+			"ip", prefix.String(),
+			"ttl", ttl,
+			"reason", reason,
+			"source", "cli",
+		)
 	}
 
 	return SocketResponse{OK: true}
@@ -316,6 +339,18 @@ func (d *Daemon) handleUnban(ctx context.Context, req SocketRequest) SocketRespo
 			return SocketResponse{Error: fmt.Sprintf("store unban prefix: %v", err)}
 		}
 	}
+
+	// Emit an INFO line matching the pipeline path's message so tools that grep
+	// "daemon: action" catch CLI unbans too. Reason is empty because the CLI
+	// unban path doesn't send one today — issue #45 said to leave that as-is
+	// rather than invent a placeholder.
+	slog.InfoContext(ctx, "daemon: action",
+		"op", "unban",
+		"ip", prefix.String(),
+		"ttl", time.Duration(0),
+		"reason", req.Reason,
+		"source", "cli",
+	)
 
 	return SocketResponse{OK: true}
 }
@@ -389,6 +424,19 @@ func (d *Daemon) handleAllow(ctx context.Context, req SocketRequest) SocketRespo
 
 	slog.InfoContext(ctx, "daemon: runtime allowlist updated",
 		"prefix", prefix, "expires_at", expiresAt, "reason", req.Reason)
+
+	// Emit an INFO line matching the pipeline path's message so tools that grep
+	// "daemon: action" catch CLI allows too. ttl mirrors the value we hand to
+	// AuditOp above (0 for permanent, otherwise the computed remaining
+	// duration), so this line and the audit_log entry agree. Issue #45.
+	slog.InfoContext(ctx, "daemon: action",
+		"op", "allow",
+		"ip", prefix.String(),
+		"ttl", ttl,
+		"reason", req.Reason,
+		"source", "cli",
+	)
+
 	return SocketResponse{OK: true}
 }
 

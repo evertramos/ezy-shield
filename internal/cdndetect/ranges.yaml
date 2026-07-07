@@ -1,0 +1,109 @@
+# CDN IP ranges — embedded at compile time via ranges.go (go:embed).
+#
+# Data-only file. A maintainer refreshes any provider by editing this file
+# and opening a PR — no code changes required. Each provider entry lists
+# authoritative source URLs so refreshes can be verified.
+#
+# Format:
+#   providers:
+#     - id: cloudflare              # short lowercase id used in code
+#       name: Cloudflare            # display name shown in prompts
+#       sources:                    # human docs — where these ranges came from
+#         - https://www.cloudflare.com/ips-v4
+#         - https://www.cloudflare.com/ips-v6
+#       ranges:                     # list of CIDR strings (v4 and v6 mixed OK)
+#         - 173.245.48.0/20
+#         - 2400:cb00::/32
+#
+# When updating, do NOT delete a provider entry that is currently empty —
+# leave the stub so downstream code (init wizard prompts, tests) can list
+# it as "detection not yet populated" rather than silently disappearing.
+
+providers:
+  # Cloudflare — the only provider with populated ranges in the initial cut.
+  # Ranges from https://www.cloudflare.com/ips-v4 and /ips-v6 (Cloudflare
+  # publishes these as stable endpoints; last verified 2025-04). Refresh by
+  # fetching both files and replacing the range list below.
+  - id: cloudflare
+    name: Cloudflare
+    sources:
+      - https://www.cloudflare.com/ips-v4
+      - https://www.cloudflare.com/ips-v6
+    ranges:
+      # IPv4
+      - 173.245.48.0/20
+      - 103.21.244.0/22
+      - 103.22.200.0/22
+      - 103.31.4.0/22
+      - 141.101.64.0/18
+      - 108.162.192.0/18
+      - 190.93.240.0/20
+      - 188.114.96.0/20
+      - 197.234.240.0/22
+      - 198.41.128.0/17
+      - 162.158.0.0/15
+      - 104.16.0.0/13
+      - 104.24.0.0/14
+      - 172.64.0.0/13
+      - 131.0.72.0/22
+      # IPv6
+      - 2400:cb00::/32
+      - 2606:4700::/32
+      - 2803:f800::/32
+      - 2405:b500::/32
+      - 2405:8100::/32
+      - 2a06:98c0::/29
+      - 2c0f:f248::/32
+
+  # Bunny.net — stub. Refresh from https://bunny.net/api/system/edgeserverlist
+  # (returns JSON) once a stable public URL for their edge ranges is confirmed.
+  # Leave ranges empty rather than guessing.
+  - id: bunny
+    name: Bunny.net
+    sources:
+      - https://bunny.net/api/system/edgeserverlist
+    ranges: []
+
+  # Fastly — stub. Refresh from https://api.fastly.com/public-ip-list
+  # (returns JSON: {addresses, ipv6_addresses}). Populate in a follow-up PR
+  # once the Fastly enforcer exists to consume the detection result.
+  - id: fastly
+    name: Fastly
+    sources:
+      - https://api.fastly.com/public-ip-list
+    ranges: []
+
+  # Amazon CloudFront — stub. AWS publishes ip-ranges.json with a
+  # service=CLOUDFRONT filter; populate in a follow-up PR alongside the
+  # AWS WAF enforcer work.
+  - id: aws_cloudfront
+    name: Amazon CloudFront
+    sources:
+      - https://ip-ranges.amazonaws.com/ip-ranges.json
+    ranges: []
+
+  # Akamai — stub. Akamai does not publish a single stable IP range URL for
+  # all edge services (per-product / customer-specific delegated ranges).
+  # Populate from a customer-provided list, or fall back to reverse-DNS
+  # heuristics (akamaitechnologies.com PTR) in a future revision.
+  - id: akamai
+    name: Akamai
+    sources: []
+    ranges: []
+
+  # Google Cloud CDN — stub. Google publishes cloud.json which includes
+  # all Google edge ranges; a subset covers CDN. Populate in a follow-up PR.
+  - id: gcp_cdn
+    name: Google Cloud CDN
+    sources:
+      - https://www.gstatic.com/ipranges/cloud.json
+    ranges: []
+
+  # Azure Front Door — stub. Microsoft publishes service tag JSON per region
+  # via a versioned download endpoint that changes weekly; needs a resolver.
+  # Populate in a follow-up PR.
+  - id: azure_frontdoor
+    name: Azure Front Door
+    sources:
+      - https://www.microsoft.com/en-us/download/details.aspx?id=56519
+    ranges: []

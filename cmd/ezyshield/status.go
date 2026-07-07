@@ -77,7 +77,7 @@ func runStatus(cmd *cobra.Command, socketPath, enforcerSocketPath string) error 
 
 	bansByStrike, err := fetchBansByStrike(ctx, socketPath)
 	if err != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not fetch per-strike counts: %v\n", err)
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not fetch per-strike counts: %v\n", err) //nolint:errcheck
 	} else {
 		out.BansByStrike = bansByStrike
 	}
@@ -133,18 +133,18 @@ func printStatusOutput(cmd *cobra.Command, out StatusOutput) error {
 
 func printStatusText(cmd *cobra.Command, out StatusOutput) error {
 	w := cmd.OutOrStdout()
-	fmt.Fprintf(w, "daemon:    %s\n", out.Daemon)
-	fmt.Fprintf(w, "enforcer:  %s\n", out.Enforcer)
+	fmt.Fprintf(w, "daemon:    %s\n", out.Daemon)   //nolint:errcheck
+	fmt.Fprintf(w, "enforcer:  %s\n", out.Enforcer) //nolint:errcheck
 	if out.Daemon == "stopped" {
 		if out.Message != "" {
-			fmt.Fprintf(w, "message:   %s\n", out.Message)
+			fmt.Fprintf(w, "message:   %s\n", out.Message) //nolint:errcheck
 		}
 		return nil
 	}
-	fmt.Fprintf(w, "mode:      %s\n", out.Mode)
-	fmt.Fprintf(w, "uptime:    %s\n", out.Uptime)
-	fmt.Fprintf(w, "version:   %s\n", out.Version)
-	fmt.Fprintf(w, "bans:      %d\n", out.ActiveBans)
+	fmt.Fprintf(w, "mode:      %s\n", out.Mode)       //nolint:errcheck
+	fmt.Fprintf(w, "uptime:    %s\n", out.Uptime)     //nolint:errcheck
+	fmt.Fprintf(w, "version:   %s\n", out.Version)    //nolint:errcheck
+	fmt.Fprintf(w, "bans:      %d\n", out.ActiveBans) //nolint:errcheck
 	if len(out.BansByStrike) > 0 {
 		keys := make([]string, 0, len(out.BansByStrike))
 		for k := range out.BansByStrike {
@@ -159,9 +159,9 @@ func printStatusText(cmd *cobra.Command, out StatusOutput) error {
 			}
 			return keys[i] < keys[j]
 		})
-		fmt.Fprintln(w, "  by strike:")
+		fmt.Fprintln(w, "  by strike:") //nolint:errcheck
 		for _, k := range keys {
-			fmt.Fprintf(w, "    %-12s %d\n", k+":", out.BansByStrike[k])
+			fmt.Fprintf(w, "    %-12s %d\n", k+":", out.BansByStrike[k]) //nolint:errcheck
 		}
 	}
 	return nil

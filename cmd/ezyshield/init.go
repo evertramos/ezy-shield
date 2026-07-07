@@ -133,6 +133,12 @@ type wizardState struct {
 	// of a getter and the redacted String() form on wizardState (below).
 	aiToken string
 	armed   bool
+
+	// cdn holds CDN-detection + CF-subflow state. Populated by runCDNStep
+	// during askQuestions (see init_cdn.go). Non-nil after askQuestions
+	// returns so downstream writers can rely on nil checks on cdn.cfCfg
+	// alone. Its String() masks the CF token.
+	cdn *cdnStep
 }
 
 // String on *wizardState prints every field EXCEPT aiToken, which is masked.
@@ -146,8 +152,8 @@ func (s *wizardState) String() string {
 	if s.aiToken != "" {
 		tokenMark = "<redacted>"
 	}
-	return fmt.Sprintf("wizardState{enableAI=%v provider=%q model=%q keyEnvVar=%q token=%s armed=%v}",
-		s.enableAI, s.aiProvider, s.aiModel, s.aiKeyEnvVar, tokenMark, s.armed)
+	return fmt.Sprintf("wizardState{enableAI=%v provider=%q model=%q keyEnvVar=%q token=%s armed=%v cdn=%s}",
+		s.enableAI, s.aiProvider, s.aiModel, s.aiKeyEnvVar, tokenMark, s.armed, s.cdn.String())
 }
 
 type dockerContainer struct {
@@ -310,6 +316,22 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 		}
 	}
 
+	// Cloudflare token: written to the same .env file, one line per token.
+	// Merge semantics preserve any AI KEY= line written above (issue #43).
+	// The token itself is NEVER logged — only "wrote" / "kept".
+	if state.cdn != nil && state.cdn.cfEnabled && state.cdn.cfToken != "" && state.cdn.cfTokenEnvVar != "" {
+		wrote, kept, err := writeCloudflareEnvFile(configDir, state.cdn.cfTokenEnvVar, state.cdn.cfToken)
+		if err != nil {
+			return err
+		}
+		switch {
+		case kept:
+			p.printf("  kept %s (existing Cloudflare token preserved)\n", envPath)
+		case wrote:
+			p.printf("  wrote %s (chmod 600, Cloudflare token merged)\n", envPath)
+		}
+	}
+
 	if state.hasWordPress {
 		if err := writeWordPressRules(state.wpRulesPath); err != nil {
 			return err
@@ -450,6 +472,18 @@ func askQuestions(sc *bufio.Scanner, state *wizardState, yes bool) {
 		state.adminIPs = splitIPs(rawAdmin)
 	}
 
+	// CDN detection + Cloudflare subflow — runs BEFORE AI so the loud-skip
+	// warning fires before the operator commits to any downstream config.
+	// See init_cdn.go for the flow and issue #43 for the design.
+	state.cdn = &cdnStep{}
+	runCDNStep(
+		context.Background(),
+		&wPrinter{w: os.Stdout},
+		closurePrompter{askFn: ask, askBoolFn: askBool},
+		state.cdn,
+		cdnDeps{Yes: yes},
+	)
+
 	// AI
 	state.enableAI = askBool("Enable AI analysis?", false)
 	if state.enableAI {
@@ -534,11 +568,18 @@ func writeGeneratedConfig(path string, state *wizardState) error {
 		}
 	}
 
-	if state.nftPath != "" {
-		b.WriteString("enforce:\n  nftables:\n")
-		fmt.Fprintf(&b, "    socket: %s\n", enforcerSockPath)
-		b.WriteString("    table: inet ezyshield\n")
-		b.WriteString("    set: blocked\n")
+	hasCF := state.cdn != nil && state.cdn.cfEnabled && state.cdn.cfCfg != nil
+	if state.nftPath != "" || hasCF {
+		b.WriteString("enforce:\n")
+		if state.nftPath != "" {
+			b.WriteString("  nftables:\n")
+			fmt.Fprintf(&b, "    socket: %s\n", enforcerSockPath)
+			b.WriteString("    table: inet ezyshield\n")
+			b.WriteString("    set: blocked\n")
+		}
+		if hasCF {
+			emitCloudflareYAML(&b, state.cdn)
+		}
 	}
 
 	if state.enableAI && state.aiProvider != "" {

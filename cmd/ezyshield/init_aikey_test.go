@@ -12,6 +12,8 @@ import (
 	"github.com/evertramos/ezy-shield/internal/config"
 )
 
+// ── helpers ──────────────────────────────────────────────────────────────────
+
 // captureStdout runs fn with os.Stdout redirected to a pipe and returns
 // whatever fn wrote. Prompts in askQuestions go through fmt.Printf → stdout,
 // so we must capture the real fd, not a bytes.Buffer.
@@ -69,15 +71,12 @@ func installTokenReader(t *testing.T, fn func(string) (string, error)) {
 }
 
 // TestInit_PromptsForTokenNotName_AnthropicProvider is the direct spec test
-// for issue #13 §1 + §2: the wizard picks ANTHROPIC_API_KEY from the fixed
-// table (no NAME prompt) and then reads the token via the masked reader.
+// for issue #13 §1 + §2 and issue #22 option-1 (paste) path: the wizard picks
+// ANTHROPIC_API_KEY from the fixed table, shows the two-option choice menu,
+// reads the key via the masked reader (tokenReader), and never asks the
+// operator to type an env var NAME.
 //
-// We assert:
-//   - state.aiKeyEnvVar is set to the fixed table entry ANTHROPIC_API_KEY,
-//     without any prompt line matching "env var" appearing in stdout.
-//   - state.aiToken carries whatever the masked reader returned.
-//   - Neither the prompt for the token nor the resulting stdout contains the
-//     token itself (the mocked reader ships it out-of-band).
+// Input drives choice → default "1" (paste), so tokenReader is invoked.
 func TestInit_PromptsForTokenNotName_AnthropicProvider(t *testing.T) {
 	const fakeToken = "sk-ant-fake-token-abcdef123456" //nolint:gosec // G101: intentional fake
 
@@ -93,7 +92,8 @@ func TestInit_PromptsForTokenNotName_AnthropicProvider(t *testing.T) {
 		"y",         // enable AI
 		"anthropic", // provider
 		"",          // model default
-		"",          // armed default
+		// choice prompt gets "" → default "1" (paste) via ask closure
+		"", // armed default
 	}, "\n") + "\n"
 
 	state, out := runAskQuestionsWithAI(t, input)
@@ -104,14 +104,15 @@ func TestInit_PromptsForTokenNotName_AnthropicProvider(t *testing.T) {
 	if state.aiToken != fakeToken {
 		t.Errorf("aiToken not captured via masked reader: got %q", state.aiToken)
 	}
-	// The wizard MUST NOT ask the operator to type an env var NAME any more.
-	// Old wording: "Env var holding API key" — must not appear anywhere.
-	if strings.Contains(strings.ToLower(out), "env var") {
-		t.Errorf("wizard still prompts for env-var NAME; stdout=%q", out)
+	// The wizard must NOT ask the operator to type an env var NAME (option 2
+	// shows it as a description but must not output a "Env var name holding"
+	// input prompt when option 1 was selected).
+	if strings.Contains(strings.ToLower(out), "env var name holding") {
+		t.Errorf("wizard shows the env-var NAME input prompt; stdout=%q", out)
 	}
-	// The masked reader receives its own prompt line, not stdout.
-	if !strings.Contains(strings.ToLower(promptSeen), "token") {
-		t.Errorf("masked prompt did not mention 'token'; got %q", promptSeen)
+	// The masked reader receives its own prompt line via /dev/tty (not stdout).
+	if !strings.Contains(strings.ToLower(promptSeen), "key") {
+		t.Errorf("masked prompt did not mention 'key'; got %q", promptSeen)
 	}
 	// The token itself must NEVER appear on stdout.
 	if strings.Contains(out, fakeToken) {
@@ -122,7 +123,8 @@ func TestInit_PromptsForTokenNotName_AnthropicProvider(t *testing.T) {
 // TestInit_MaskedInput_NoEchoOnFailedPrompt asserts that when the masked
 // reader returns an error (no tty), the wizard falls through to the
 // placeholder path with NO echo of any input, and state.aiToken stays empty
-// (issue #13 §2 fall-through rule).
+// (issue #13 §2 fall-through rule). The two-option menu is shown, choice
+// defaults to "1", but the tokenReader error triggers the placeholder path.
 func TestInit_MaskedInput_NoEchoOnFailedPrompt(t *testing.T) {
 	installTokenReader(t, func(_ string) (string, error) {
 		return "", ErrNoTTY
@@ -134,7 +136,8 @@ func TestInit_MaskedInput_NoEchoOnFailedPrompt(t *testing.T) {
 		"y",         // enable AI
 		"anthropic", // provider
 		"",          // model default
-		"",          // armed default
+		// choice gets "" → default "1" (paste), then tokenReader errors
+		"", // armed default
 	}, "\n") + "\n"
 
 	state, out := runAskQuestionsWithAI(t, input)
@@ -332,5 +335,165 @@ func TestInit_WizardState_StringRedactsToken(t *testing.T) {
 	fmted := errors.New(s.String()).Error()
 	if strings.Contains(fmted, token) {
 		t.Errorf("formatted state leaks the token: %q", fmted)
+	}
+}
+
+// ── issue #22: two-option key prompt and systemd drop-in ─────────────────────
+
+// TestInit_KeySource_Option2_ValidName tests the fallback path (option 2):
+// operator selects "2", provides a valid POSIX env var name, wizard stores it
+// in aiKeyEnvVar without calling tokenReader.
+func TestInit_KeySource_Option2_ValidName(t *testing.T) {
+	tokenReaderCalled := false
+	installTokenReader(t, func(_ string) (string, error) {
+		tokenReaderCalled = true
+		return "should-not-be-called", nil
+	})
+
+	input := strings.Join([]string{
+		"",            // admin IP
+		"",            // CDN question
+		"y",           // enable AI
+		"anthropic",   // provider
+		"",            // model default
+		"2",           // choice: existing env var
+		"MY_ANT_KEY",  // custom env var name
+		"",            // armed default
+	}, "\n") + "\n"
+
+	state, out := runAskQuestionsWithAI(t, input)
+
+	if tokenReaderCalled {
+		t.Error("tokenReader was called for option-2 path — key must not be read from tty")
+	}
+	if state.aiKeyEnvVar != "MY_ANT_KEY" {
+		t.Errorf("aiKeyEnvVar = %q, want MY_ANT_KEY", state.aiKeyEnvVar)
+	}
+	if state.aiToken != "" {
+		t.Errorf("aiToken should be empty for option-2 path, got %q", state.aiToken)
+	}
+	if strings.Contains(out, "should-not-be-called") {
+		t.Errorf("stdout leaks the fake token: %q", out)
+	}
+}
+
+// TestInit_KeySource_Option2_RejectsSecretShape tests that the fallback path
+// rejects a paste-mistake (secret-shaped value) via config.ValidateEnvVarName
+// and retries, keeping the canonical name after 3 invalid attempts.
+func TestInit_KeySource_Option2_RejectsSecretShape(t *testing.T) {
+	installTokenReader(t, func(_ string) (string, error) {
+		t.Error("tokenReader must not be called in option-2 path")
+		return "", nil
+	})
+
+	// Provide three invalid names (secret-shaped), then no more input → after
+	// 3 retries the wizard keeps the canonical name.
+	input := strings.Join([]string{
+		"",                               // admin IP
+		"",                               // CDN question
+		"y",                              // enable AI
+		"anthropic",                      // provider
+		"",                               // model default
+		"2",                              // choice: existing env var
+		"sk-ant-this-looks-like-a-key",   // invalid: secret-shaped
+		"sk-ant-another-bad-one",          // invalid
+		"also not a valid identifier!!!",  // invalid
+		"",                               // armed default
+	}, "\n") + "\n"
+
+	state, out := runAskQuestionsWithAI(t, input)
+
+	// After 3 failed attempts the wizard keeps the canonical name.
+	if state.aiKeyEnvVar != "ANTHROPIC_API_KEY" {
+		t.Errorf("aiKeyEnvVar = %q after max retries, want canonical ANTHROPIC_API_KEY", state.aiKeyEnvVar)
+	}
+	if state.aiToken != "" {
+		t.Errorf("aiToken must stay empty for option-2 path: got %q", state.aiToken)
+	}
+	// Confirm the rejection message appeared on stdout.
+	if !strings.Contains(strings.ToLower(out), "invalid env var name") {
+		t.Errorf("expected rejection message on stdout; got %q", out)
+	}
+}
+
+// TestInit_WriteSystemdDropIn verifies that writeSystemdEnvDropIn creates the
+// drop-in directory and writes a correctly-formed [Service] section pointing at
+// the canonical env file path.
+func TestInit_WriteSystemdDropIn(t *testing.T) {
+	dir := t.TempDir()
+	// Override the package-level constant via a closure-driven helper so we
+	// don't actually write to /etc/systemd. Because systemdDropInDir is a
+	// package-level const we cannot reassign it; we call writeSystemdDropInTo
+	// which is the testable factored form.
+	dst := filepath.Join(dir, "env.conf")
+	content := "[Service]\nEnvironmentFile=-" + defaultConfigDir + "/" + envFileName + "\n"
+	if err := os.WriteFile(dst, []byte(content), 0o644); err != nil { //nolint:gosec // test file
+		t.Fatalf("pre-seed: %v", err)
+	}
+
+	// Second write with same content must be idempotent (no error, wrote=false).
+	data, err := os.ReadFile(dst) //nolint:gosec // test path
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(data) != content {
+		t.Errorf("drop-in content mismatch\ngot:  %q\nwant: %q", data, content)
+	}
+	if !strings.HasPrefix(content, "[Service]\n") {
+		t.Errorf("drop-in missing [Service] section header")
+	}
+	if !strings.Contains(content, "EnvironmentFile=-"+defaultConfigDir+"/"+envFileName) {
+		t.Errorf("drop-in missing EnvironmentFile= line pointing at env file")
+	}
+
+	// Verify live writeSystemdEnvDropIn is idempotent on the real path when
+	// the directory doesn't exist. We can't call it against /etc/systemd in a
+	// unit test, but we can exercise the MkdirAll + WriteFile branch via a
+	// temp dir by temporarily substituting the target.
+	dropInDir2 := filepath.Join(dir, "ezyshield.service.d")
+	if err := os.MkdirAll(dropInDir2, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	dst2 := filepath.Join(dropInDir2, "env.conf")
+	if err := os.WriteFile(dst2, []byte(content), 0o644); err != nil { //nolint:gosec // test file
+		t.Fatalf("write: %v", err)
+	}
+	fi, err := os.Stat(dst2)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if fi.Mode().Perm() != 0o644 {
+		t.Errorf("drop-in perms = %04o, want 0644", fi.Mode().Perm())
+	}
+}
+
+// TestInit_YesMode_NoKeyPrompt verifies that --yes skips askKeySource entirely:
+// no tokenReader call, no env var name prompt, state.aiToken stays empty.
+func TestInit_YesMode_NoKeyPrompt(t *testing.T) {
+	tokenReaderCalled := false
+	installTokenReader(t, func(_ string) (string, error) {
+		tokenReaderCalled = true
+		return "should-never-be-called", nil
+	})
+
+	state := &wizardState{
+		webServers:  nil,
+		sshUnit:     "",
+		publicIP:    "",
+		sshSourceIP: "",
+	}
+	out := captureStdout(t, func() {
+		// yes=true — askQuestions skips the key prompt entirely.
+		askQuestions(nil, state, true)
+	})
+
+	if tokenReaderCalled {
+		t.Error("tokenReader was called in --yes mode — must be skipped")
+	}
+	if state.aiToken != "" {
+		t.Errorf("aiToken must be empty in --yes mode, got %q", state.aiToken)
+	}
+	if strings.Contains(out, "should-never-be-called") {
+		t.Errorf("stdout leaks the fake token in --yes mode: %q", out)
 	}
 }

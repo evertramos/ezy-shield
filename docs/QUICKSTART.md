@@ -1,28 +1,29 @@
-# Guia de Início Rápido — EzyShield
+# EzyShield Quick Start
 
-> ⚠️ Projeto em pré-alpha. Use em modo dry-run e reporte bugs via issues.
+> ⚠️ Pre-alpha project. Run in dry-run mode and report bugs via issues.
+> Portuguese translation: [docs/QUICKSTART.pt-BR.md](QUICKSTART.pt-BR.md)
 
 ---
 
-## 1. Requisitos
+## 1. Requirements
 
-| Requisito | Versão mínima |
-|-----------|---------------|
-| Go        | 1.24+         |
-| Linux     | kernel 4.x+   |
-| nftables  | 0.9+          |
+| Requirement | Minimum version |
+|-------------|-----------------|
+| Go          | 1.24+           |
+| Linux       | kernel 4.x+     |
+| nftables    | 0.9+            |
 
-Verifique:
+Verify:
 
 ```bash
-go version        # go1.24 ou superior
-uname -s          # Linux
-nft --version     # nftables v0.9+
+go version       # go1.24 or later
+uname -s         # Linux
+nft --version    # nftables v0.9+
 ```
 
 ---
 
-## 2. Instalação (build from source)
+## 2. Installation (build from source)
 
 ```bash
 git clone https://github.com/evertramos/ezy-shield.git
@@ -31,7 +32,7 @@ go build -o ezyshield ./cmd/ezyshield
 sudo mv ezyshield /usr/local/bin/
 ```
 
-Confirme a instalação:
+Confirm the installation:
 
 ```bash
 ezyshield version
@@ -39,56 +40,100 @@ ezyshield version
 
 ---
 
-## 3. Setup inicial
+## 3. Initial setup
 
 ### `ezyshield init`
 
-Cria a estrutura de diretórios e os arquivos de configuração padrão:
+Runs the interactive setup wizard: detects the environment, writes config files, installs systemd units, and starts EzyShield in dry-run mode.
 
 ```bash
 sudo ezyshield init
 ```
 
-Isso gera:
+This creates:
 - `/etc/ezyshield/config.yaml`
 - `/etc/ezyshield/policy.yaml`
-- `/etc/ezyshield/rules.yaml`
-- `/var/lib/ezyshield/` (dados de runtime, SQLite)
+- `/etc/ezyshield/rules.yaml` (when WordPress containers are detected)
+- `/etc/ezyshield/.env` (AI API key, mode 0600)
+- `/etc/systemd/system/ezyshield.service.d/env.conf` (systemd drop-in)
+- `/var/lib/ezyshield/` (runtime data, SQLite)
 
-> **Pré-flight (issue #5):** o wizard verifica logo no início se `config.yaml`
-> ou `policy.yaml` já existem no diretório de destino (`--config-dir` ou o
-> padrão `/etc/ezyshield`). Se qualquer um deles já existir, `ezyshield init`
-> falha em menos de 1s — **antes** de imprimir o banner "Detecting
-> environment..." — listando todos os caminhos pré-existentes num único erro
-> para você removê-los de uma só vez. Isso evita responder o wizard inteiro
-> só para descobrir no final que ele não conseguiria gravar. Para regenerar,
-> remova os arquivos apontados e rode `sudo ezyshield init` de novo.
+> **Pre-flight (issue #5):** the wizard checks immediately whether `config.yaml`
+> or `policy.yaml` already exist in the target directory (`--config-dir` or the
+> default `/etc/ezyshield`). If either exists, `ezyshield init` fails in under
+> 1 s — **before** printing the "Detecting environment..." banner — listing all
+> pre-existing paths in a single error so you can remove them in one shot. To
+> regenerate, delete the listed files and re-run `sudo ezyshield init`.
+
+#### AI provider API key (issue #22)
+
+When you enable AI analysis, the wizard presents a choice:
+
+```
+How do you want to provide the anthropic API key?
+  1) Paste it here — stored in /etc/ezyshield/.env (recommended)
+  2) I already have it in an env var (e.g. from sops / vault / LoadCredential)
+```
+
+**Option 1 (recommended for most people):** paste the key directly. Input is
+echo-suppressed (like `sudo`). The key is written only to
+`/etc/ezyshield/.env` (mode `0600 root:ezyshield`). `config.yaml` always
+contains `api_key: env:ANTHROPIC_API_KEY` — the raw key value never touches
+any config file, log, or process argument list.
+
+**Option 2 (advanced — sops / vault / LoadCredential):** supply the env var
+name where your platform already exposes the key. The wizard validates the
+name with `^[A-Za-z_][A-Za-z0-9_]*$` and rejects any secret-shaped input
+(issue #13 guard). Your key value is never touched or read by the wizard.
+
+**`--yes` / non-interactive mode:** skips the key prompt. A placeholder entry
+(`ANTHROPIC_API_KEY=YOUR_API_KEY_HERE`) is written to `/etc/ezyshield/.env`.
+Edit the file and restart the daemon after provisioning.
+
+In all cases the wizard also creates
+`/etc/systemd/system/ezyshield.service.d/env.conf` containing:
+
+```ini
+[Service]
+EnvironmentFile=-/etc/ezyshield/.env
+```
+
+This ensures the daemon picks up the key even on hosts running an older service
+file. `systemctl daemon-reload` is run automatically before `enable --now`.
+
+Canonical env var names (hardcoded, not user-configurable):
+
+| Provider    | Env var             |
+|-------------|---------------------|
+| `anthropic` | `ANTHROPIC_API_KEY` |
+| `openai`    | `OPENAI_API_KEY`    |
+| `ollama`    | *(no key needed)*   |
 
 ### `ezyshield doctor`
 
-Valida toda a configuração e verifica dependências:
+Validates all configuration and checks dependencies:
 
 ```bash
 sudo ezyshield doctor
 ```
 
-Saída esperada:
+Expected output:
 
 ```
-✓ config.yaml válido
-✓ policy.yaml válido
-✓ rules.yaml válido
-✓ nftables acessível
-✓ diretório de dados gravável
+✓ config.yaml valid
+✓ policy.yaml valid
+✓ rules.yaml valid
+✓ nftables accessible
+✓ data directory writable
 ```
 
 ---
 
-## 4. Configuração — config.yaml
+## 4. Configuration — config.yaml
 
-Arquivo principal em `/etc/ezyshield/config.yaml`.
+Main file at `/etc/ezyshield/config.yaml`.
 
-### Collectors (fontes de log)
+### Collectors (log sources)
 
 ```yaml
 collectors:
@@ -98,11 +143,11 @@ collectors:
     path: /var/log/nginx/access.log
 ```
 
-Tipos disponíveis:
-- `journald` — requer campo `unit` (nome do serviço systemd)
-- `file` — requer campo `path` (caminho do arquivo de log)
+Available types:
+- `journald` — requires `unit` field (systemd service name)
+- `file` — requires `path` field (log file path)
 
-### Enforce (enforcement local)
+### Enforce (local enforcement)
 
 ```yaml
 enforce:
@@ -112,43 +157,47 @@ enforce:
     set: blocked
 ```
 
-Para ativar o enforcement local via nftables:
+To enable local enforcement via nftables:
 
-1. Certifique-se de que o helper privilegiado (`ezyshield-enforcer`) está rodando e escutando no socket unix configurado (padrão: `/run/ezyshield-enforcer/enforcer.sock`).
-2. Adicione a seção `enforce.nftables` ao `config.yaml` (como acima).
-3. Defina `armed: true` em `policy.yaml`.
-4. Inicie o daemon: `ezyshield watch`.
+1. Make sure the privileged helper (`ezyshield-enforcer`) is running and listening on the configured unix socket (default: `/run/ezyshield-enforcer/enforcer.sock`).
+2. Add the `enforce.nftables` section to `config.yaml` (as above).
+3. Set `armed: true` in `policy.yaml`.
+4. Start the daemon: `ezyshield watch`.
 
-> **Nota**: Se o socket do enforcer não existir no momento da inicialização, o daemon registra um WARN e continua operando — bans ficam armazenados no SQLite e serão aplicados quando o helper estiver disponível (reconexão automática).
+> **Note**: If the enforcer socket does not exist at startup, the daemon logs a WARN and continues operating — bans are stored in SQLite and applied when the helper becomes available (automatic reconnection).
 
-### AI (análise inteligente — opcional)
+### AI (optional — intelligent analysis)
 
 ```yaml
 ai:
   provider: anthropic
-  api_key: env:EZYSHIELD_AI_API_KEY
+  model: claude-haiku-4-5-20251001
+  api_key: env:ANTHROPIC_API_KEY
   ambiguous_band: [30, 75]
   token_budget_daily: 500000
 ```
 
-> **Importante**: Segredos (tokens, senhas) devem usar referência `env:NOME_DA_VARIAVEL`. Valores inline são rejeitados na carga do config.
+> **Important**: Secrets (tokens, passwords) must use `env:VAR_NAME` references.
+> Inline values are rejected at config load time. The `ezyshield init` wizard
+> always writes `env:CANONICAL_NAME` — the raw key value never enters
+> `config.yaml`.
 
 ---
 
-## 5. Configuração — policy.yaml
+## 5. Configuration — policy.yaml
 
-Arquivo em `/etc/ezyshield/policy.yaml`. Controla comportamento de bloqueio.
+File at `/etc/ezyshield/policy.yaml`. Controls blocking behavior.
 
-### armed (modo de operação)
+### armed (operating mode)
 
 ```yaml
-armed: false   # dry-run (padrão) — nenhum bloqueio real
-# armed: true  # ativar somente após validar com 'ezyshield doctor'
+armed: false   # dry-run (default) — no real blocking
+# armed: true  # enable only after validating with 'ezyshield doctor'
 ```
 
 ### Allowlist
 
-IPs e CIDRs que **nunca** serão bloqueados:
+IPs and CIDRs that are **never** blocked:
 
 ```yaml
 allowlist:
@@ -156,40 +205,48 @@ allowlist:
   - 10.0.0.1
 
 admin_cidrs:
-  - 203.0.113.50/32   # seu IP de acesso SSH
+  - 203.0.113.50/32   # your SSH access IP
 ```
 
-### Strike table (escalação de banimentos)
+### Strike table (ban escalation)
 
 ```yaml
 strikes:
-  - ttl: 5m      # strike 1 — 5 minutos
-  - ttl: 1h      # strike 2 — 1 hora
-  - ttl: 24h     # strike 3 — 24 horas
-  - ttl: 168h    # strike 4 — 7 dias
-  - ttl: 0       # strike 5 — permanente
+  - ttl: 5m      # strike 1 — 5 minutes
+  - ttl: 1h      # strike 2 — 1 hour
+  - ttl: 24h     # strike 3 — 24 hours
+  - ttl: 168h    # strike 4 — 7 days
+  - ttl: 0       # strike 5 — permanent
 ```
 
-### Thresholds (limiares de score)
+> **Deduplication semantics:** one *strike* represents one **attack episode**, not
+> a single malicious request. While an IP is already banned (active record in
+> `bans_active`), new detections are suppressed — no new strike is recorded, no
+> RPC call to the enforcer is made, and only `offenders.last_seen` is updated.
+> When the ban expires (via `ExpireBans`), the next detection advances to the next
+> ladder level normally. This makes `offenders.total_strikes` a real recidivism
+> indicator, not a raw request counter.
+
+### Thresholds (score cutoffs)
 
 ```yaml
-ban_threshold: 70       # score ≥ 70 → aplica strike
-observe_threshold: 40   # score 40-69 → log/notifica, sem ban
-max_bans_per_minute: 30 # segurança: pausa enforcement se exceder
+ban_threshold: 70       # score ≥ 70 → apply strike
+observe_threshold: 40   # score 40–69 → log/notify, no ban
+max_bans_per_minute: 30 # safety: pause enforcement if exceeded
 ```
 
 ---
 
-## 6. Regras customizadas — rules.yaml
+## 6. Custom rules — rules.yaml
 
-Arquivo em `/etc/ezyshield/rules.yaml`. Define regras de detecção.
+File at `/etc/ezyshield/rules.yaml`. Defines detection rules.
 
-### Estrutura de uma regra
+### Rule structure
 
 ```yaml
 rules:
   - name: ssh_bruteforce
-    description: "Falhas de autenticação SSH repetidas"
+    description: "Repeated SSH authentication failures"
     kinds: [ssh_fail, ssh_invalid_user]
     window: 60s
     threshold: 5
@@ -197,26 +254,26 @@ rules:
     category: bruteforce
 ```
 
-### Campos
+### Fields
 
-| Campo        | Descrição                                          |
-|--------------|--------------------------------------------------|
-| `name`       | Identificador único da regra                      |
-| `description`| Descrição legível                                 |
-| `kinds`      | Tipos de evento que ativam a regra                |
-| `window`     | Janela de tempo para contagem                     |
-| `threshold`  | Nº de ocorrências para disparar                   |
-| `score`      | Pontuação atribuída (0-100)                       |
-| `category`   | Categoria (`bruteforce`, `scanner`, etc.)         |
-| `field`      | Campo do evento para filtro (opcional)            |
-| `value`      | Valor exato do campo (opcional)                   |
-| `contains`   | Substring no campo (opcional)                     |
+| Field        | Description                                        |
+|--------------|----------------------------------------------------|
+| `name`       | Unique rule identifier                             |
+| `description`| Human-readable description                         |
+| `kinds`      | Event types that activate the rule                 |
+| `window`     | Time window for counting                           |
+| `threshold`  | Number of occurrences to trigger                   |
+| `score`      | Assigned score (0–100)                             |
+| `category`   | Category (`bruteforce`, `scanner`, etc.)           |
+| `field`      | Event field to filter (optional)                   |
+| `value`      | Exact field value (optional)                       |
+| `contains`   | Substring in the field (optional)                  |
 
-### Exemplo: regra customizada para bloquear scanners de API
+### Example: custom rule for API scanners
 
 ```yaml
   - name: api_scanner
-    description: "Varredura de endpoints inexistentes na API"
+    description: "Scan of non-existent API endpoints"
     kinds: [http_request]
     field: status
     value: "404"
@@ -226,23 +283,23 @@ rules:
     category: scanner
 ```
 
-> **Nota**: O arquivo custom substitui as regras padrão por completo (não há merge). Copie as regras built-in que deseja manter.
+> **Note**: A custom file completely replaces the default rules (no merge). Copy any built-in rules you want to keep.
 
 ---
 
-## 7. Notificações
+## 7. Notifications
 
 ### Telegram
 
-1. Crie um bot via [@BotFather](https://t.me/BotFather) e obtenha o token.
-2. Adicione o bot ao grupo/canal e obtenha o `chat_id`.
-3. Exporte o token como variável de ambiente:
+1. Create a bot via [@BotFather](https://t.me/BotFather) and get the token.
+2. Add the bot to the group/channel and get the `chat_id`.
+3. Export the token as an environment variable:
 
 ```bash
 export EZYSHIELD_TELEGRAM_BOT_TOKEN="123456:ABC-DEF..."
 ```
 
-4. Configure em `config.yaml`:
+4. Configure in `config.yaml`:
 
 ```yaml
 notify:
@@ -253,54 +310,54 @@ notify:
     bot_token: env:EZYSHIELD_TELEGRAM_BOT_TOKEN
     chat_ids:
       - "-1001234567890"
-    severity: []   # vazio = todas; ou: [warn, critical]
+    severity: []   # empty = all; or: [warn, critical]
 ```
 
 ### Email (SMTP)
 
-1. Exporte a senha SMTP:
+1. Export the SMTP password:
 
 ```bash
-export EZYSHIELD_SMTP_PASSWORD="sua-senha-smtp"
+export EZYSHIELD_SMTP_PASSWORD="your-smtp-password"
 ```
 
-2. Configure em `config.yaml`:
+2. Configure in `config.yaml`:
 
 ```yaml
   email:
-    from: ezyshield@seudominio.com
+    from: ezyshield@yourdomain.com
     to:
-      - admin@seudominio.com
-    host: smtp.seudominio.com
+      - admin@yourdomain.com
+    host: smtp.yourdomain.com
     port: 587
-    username: ezyshield@seudominio.com
+    username: ezyshield@yourdomain.com
     password: env:EZYSHIELD_SMTP_PASSWORD
     tls: starttls   # starttls | tls | none
     severity: []
 ```
 
-Modos TLS disponíveis:
-- `starttls` — porta 587 (padrão, recomendado)
-- `tls` — porta 465 (TLS implícito)
-- `none` — sem criptografia (não recomendado)
+Available TLS modes:
+- `starttls` — port 587 (default, recommended)
+- `tls` — port 465 (implicit TLS)
+- `none` — no encryption (not recommended)
 
 ---
 
-## 8. Testar notificações
+## 8. Test notifications
 
-Após configurar, valide o envio sem precisar de um evento real:
+After configuring, validate delivery without a real event:
 
 ```bash
-# Testar canal Telegram
+# Test Telegram channel
 sudo ezyshield test-notify telegram
 
-# Testar canal Email
+# Test Email channel
 sudo ezyshield test-notify email
 ```
 
-Se tudo estiver correto, você receberá uma notificação de teste no canal configurado. Em caso de erro, a saída indicará o problema (token inválido, chat_id incorreto, falha SMTP, etc.).
+If everything is correct, you will receive a test notification in the configured channel. On error, the output indicates the problem (invalid token, incorrect chat_id, SMTP failure, etc.).
 
-Use `--json` para saída estruturada:
+Use `--json` for structured output:
 
 ```bash
 sudo ezyshield test-notify telegram --json
@@ -308,26 +365,26 @@ sudo ezyshield test-notify telegram --json
 
 ---
 
-## 9. Rodar o daemon
+## 9. Run the daemon
 
-O `watch` roda o pipeline completo (collectors → detecção → decisão → enforcement
-→ notificação). Enquanto `armed: false` no `policy.yaml`, ele opera em **dry-run**:
-processa tudo e registra o que *seria* bloqueado, sem tocar no firewall.
+`watch` runs the full pipeline (collectors → detection → decision → enforcement
+→ notification). While `armed: false` in `policy.yaml`, it operates in **dry-run**:
+processes everything and logs what *would* be blocked, without touching the firewall.
 
 ```bash
-# Foreground (dry-run enquanto armed: false)
+# Foreground (dry-run while armed: false)
 sudo ezyshield watch
 ```
 
-> Não existe um comando `dry-run` separado: o dry-run é o modo padrão, controlado
-> por `armed` no `policy.yaml`. Valide o comportamento com `armed: false` antes de
-> mudar para `armed: true`.
+> There is no separate `dry-run` command: dry-run is the default mode, controlled
+> by `armed` in `policy.yaml`. Validate behavior with `armed: false` before
+> switching to `armed: true`.
 
-### Como serviço (systemd)
+### As a systemd service
 
-Units prontas acompanham o repositório em [`configs/systemd/`](../configs/systemd/):
-`ezyshield.service` (daemon) e `ezyshield-enforcer.service` (helper privilegiado
-com `CAP_NET_ADMIN`). Instale e ative:
+Ready-made units are included in [`configs/systemd/`](../configs/systemd/):
+`ezyshield.service` (daemon) and `ezyshield-enforcer.service` (privileged helper
+with `CAP_NET_ADMIN`). Install and activate:
 
 ```bash
 sudo cp configs/systemd/ezyshield-enforcer.service /etc/systemd/system/
@@ -337,11 +394,11 @@ sudo systemctl enable --now ezyshield-enforcer
 sudo systemctl enable --now ezyshield
 ```
 
-### Checklist antes de ativar
+### Checklist before enabling
 
-1. ✅ `ezyshield doctor` sem erros
-2. ✅ `allowlist` com seus IPs de acesso
-3. ✅ `admin_cidrs` com seu IP SSH
-4. ✅ Notificações testadas com `test-notify`
-5. ✅ `armed: false` para validar com dry-run primeiro
-6. ⬜ Após validação, mudar para `armed: true`
+1. ✅ `ezyshield doctor` with no errors
+2. ✅ `allowlist` with your access IPs
+3. ✅ `admin_cidrs` with your SSH IP
+4. ✅ Notifications tested with `test-notify`
+5. ✅ `armed: false` to validate with dry-run first
+6. ⬜ After validation, change to `armed: true`

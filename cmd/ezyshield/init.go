@@ -41,6 +41,11 @@ const (
 	// equivalent to "unset" so a stale placeholder never gets forwarded to a
 	// real AI provider (issue #13 §5, §6).
 	envAPIKeyPlaceholder = "YOUR_API_KEY_HERE" //nolint:gosec // G101: literal placeholder, deliberately public — the loader (SecretRef.Resolve) treats this exact string as "unset" so a stale placeholder never reaches a real AI provider.
+
+	// systemdDropInDir is the per-unit drop-in override directory. The init
+	// wizard writes env.conf here so EnvironmentFile= is active even on hosts
+	// with an older embedded service file that predates issue #22.
+	systemdDropInDir = defaultSystemdDir + "/ezyshield.service.d"
 )
 
 // aiProviderKeyName maps the supported AI provider names to the fixed env var
@@ -368,6 +373,12 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 		return err
 	}
 
+	if wrote, err := writeSystemdEnvDropIn(); err != nil {
+		p.printf("  warning: could not write systemd drop-in: %v\n", err)
+	} else if wrote {
+		p.printf("  wrote %s/env.conf (EnvironmentFile drop-in)\n", systemdDropInDir)
+	}
+
 	if err := runSysCmd("systemctl", "daemon-reload"); err != nil {
 		return fmt.Errorf("daemon-reload: %w", err)
 	}
@@ -515,30 +526,76 @@ func askQuestions(sc *bufio.Scanner, state *wizardState, yes bool) {
 		case "ollama":
 			state.aiModel = ask("Model", "llama3")
 		}
-		// Prompt for the token itself only when the provider actually uses
-		// one (i.e. keyName is non-empty). Reading is masked and comes from
-		// /dev/tty — never from the pipe stdin bufio.Scanner (issue #13 §2).
-		// Non-TTY stdin, --yes, or a blank paste all fall through to the
-		// placeholder path (§5). See readMaskedTokenFromTTY.
+		// Two-option prompt (issue #22): operator chooses between pasting the
+		// key now (option 1, happy path) or referencing an existing env var
+		// from sops / vault / LoadCredential (option 2, advanced path). Both
+		// options are skipped when yes=true (placeholder path, issue #13 §5).
 		if keyName != "" && !yes {
-			tok, err := tokenReader(
-				fmt.Sprintf("  Paste your %s API token (input hidden, ENTER to skip): ", state.aiProvider))
-			switch {
-			case err != nil:
-				// Cannot read from /dev/tty (non-interactive, no tty) — fall
-				// through silently to the placeholder path. We DO NOT print
-				// err.Error() here because a broken tty error still shouldn't
-				// look scary; the writeEnvFile path will print the placeholder
-				// instructions in a moment.
-				state.aiToken = ""
-			default:
-				state.aiToken = tok
-			}
+			askKeySource(ask, state)
 		}
 	}
 
 	// Dry-run vs armed
 	state.armed = askBool("Start in armed mode? (no = dry-run, recommended for first run)", false)
+}
+
+// askKeySource presents the two-option API-key prompt for issue #22.
+// Option 1 (default): read the actual key value echo-suppressed via
+// tokenReader (/dev/tty); store it in state.aiToken for writeOrKeepEnvFile.
+// Option 2 (advanced): operator supplies their own env var name (validated
+// by config.ValidateEnvVarName, rejecting paste-mistake secrets); state.aiToken
+// stays empty and the placeholder path handles the env file.
+//
+// Never called when yes=true — that path writes a placeholder without prompting.
+func askKeySource(ask func(string, string) string, state *wizardState) {
+	fmt.Printf("\n  How do you want to provide the %s API key?\n", state.aiProvider)
+	fmt.Println("    1) Paste it here — stored in /etc/ezyshield/.env (recommended)")
+	fmt.Println("    2) I already have it in an env var (e.g. from sops / vault / LoadCredential)")
+	choice := ask("Choice", "1")
+	if strings.TrimSpace(choice) == "2" {
+		for attempt := 0; attempt < 3; attempt++ {
+			name := ask(
+				fmt.Sprintf("Env var name holding the %s API key", state.aiProvider),
+				state.aiKeyEnvVar)
+			if err := config.ValidateEnvVarName(name); err != nil {
+				fmt.Printf("    invalid env var name: %v\n", err)
+				continue
+			}
+			state.aiKeyEnvVar = name
+			return
+		}
+		fmt.Println("    Too many invalid attempts; keeping the canonical env var name.")
+		return
+	}
+	// Option 1: read the key echo-suppressed from /dev/tty.
+	tok, err := tokenReader(
+		fmt.Sprintf("  Paste your %s API key (input hidden, ENTER to skip): ", state.aiProvider))
+	if err != nil {
+		// Cannot open /dev/tty (non-interactive / no controlling tty). Fall
+		// through silently — writeOrKeepEnvFile will write the placeholder.
+		state.aiToken = ""
+		return
+	}
+	state.aiToken = tok
+}
+
+// writeSystemdEnvDropIn emits /etc/systemd/system/ezyshield.service.d/env.conf
+// so EnvironmentFile=-/etc/ezyshield/.env is active even on hosts running an
+// older service file that predates this directive (issue #22). Idempotent: if
+// the file already contains the exact content no write occurs.
+func writeSystemdEnvDropIn() (wrote bool, err error) {
+	if err := os.MkdirAll(systemdDropInDir, 0o755); err != nil {
+		return false, fmt.Errorf("creating drop-in dir %s: %w", systemdDropInDir, err)
+	}
+	content := "[Service]\nEnvironmentFile=-" + defaultConfigDir + "/" + envFileName + "\n"
+	dst := filepath.Join(systemdDropInDir, "env.conf")
+	if existing, rerr := os.ReadFile(dst); rerr == nil && string(existing) == content { //nolint:gosec // path is a fixed admin-only constant
+		return false, nil
+	}
+	if err := os.WriteFile(dst, []byte(content), 0o644); err != nil { //nolint:gosec // 0644 is standard for systemd units
+		return false, fmt.Errorf("writing %s: %w", dst, err)
+	}
+	return true, nil
 }
 
 // ── Config file generation ───────────────────────────────────────────────────

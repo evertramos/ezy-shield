@@ -168,6 +168,14 @@ You can also have the daemon rescan on a schedule (`scan.interval` in config).
 sudo ezyshield init      # 🚧 interactive wizard; writes /etc/ezyshield/*.yaml
 ```
 
+> **Pre-flight (issue #5):** before printing the "Detecting environment..."
+> banner, `ezyshield init` stats `<config-dir>/config.yaml` and
+> `<config-dir>/policy.yaml`. If either already exists, the wizard fails fast
+> (within ~1s) with a single error listing every pre-existing path — so you
+> don't answer the entire questionnaire only to be told at the end that it
+> couldn't write. To regenerate, delete the listed files and re-run. The same
+> check honours `--config-dir <path>` for non-default target directories.
+
 Or write `/etc/ezyshield/config.yaml` directly:
 
 ```yaml

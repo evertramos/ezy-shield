@@ -165,6 +165,16 @@ type dockerContainer struct {
 func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) error {
 	p := &wPrinter{w: cmd.OutOrStdout()}
 
+	// Pre-flight: refuse before printing the banner or running detection if the
+	// wizard would clobber an existing config.yaml or policy.yaml. The writers
+	// themselves still guard against overwrite as defense-in-depth (see
+	// writeGeneratedConfig / writeGeneratedPolicy), but doing the check up
+	// front means the operator doesn't burn several minutes of Q&A only to be
+	// told at [3/5] that the run cannot succeed. Issue #5.
+	if err := preflightExistingConfigFiles(configDir); err != nil {
+		return err
+	}
+
 	p.println("")
 	p.println("EzyShield setup wizard")
 	p.println("======================")
@@ -532,6 +542,46 @@ func askQuestions(sc *bufio.Scanner, state *wizardState, yes bool) {
 }
 
 // ── Config file generation ───────────────────────────────────────────────────
+
+// preflightExistingConfigFiles refuses the wizard when config.yaml or
+// policy.yaml already exist in configDir, before any prompt or detection has
+// run. When both files exist, the single returned error lists both paths so
+// the operator can fix them in one shot rather than iteratively. Any stat
+// error other than "not exist" (e.g. permission denied on /etc/ezyshield)
+// short-circuits the same way — the wizard can't safely proceed if it can't
+// even see whether it would clobber. Issue #5.
+//
+// The late-stage checks inside writeGeneratedConfig / writeGeneratedPolicy
+// remain in place as defense-in-depth against a concurrent operator writing
+// the same file mid-wizard; this preflight is purely a UX improvement.
+func preflightExistingConfigFiles(configDir string) error {
+	targets := []string{
+		filepath.Join(configDir, "config.yaml"),
+		filepath.Join(configDir, "policy.yaml"),
+	}
+	var existing []string
+	for _, path := range targets {
+		if _, err := os.Stat(path); err == nil {
+			existing = append(existing, path)
+			continue
+		} else if !os.IsNotExist(err) {
+			// A stat error we don't recognise (permission, I/O, etc.) means we
+			// can't reason about whether the target is safe to write — fail
+			// closed with the underlying error so the operator sees the real
+			// cause. No secret can be reached through this path (configDir is
+			// operator-supplied and echoed).
+			return fmt.Errorf("checking %s: %w", path, err)
+		}
+	}
+	switch len(existing) {
+	case 0:
+		return nil
+	case 1:
+		return fmt.Errorf("%s already exists — delete it to regenerate", existing[0])
+	default:
+		return fmt.Errorf("%s already exist — delete them to regenerate", strings.Join(existing, ", "))
+	}
+}
 
 // writeGeneratedConfig writes config.yaml using only valid Config struct fields.
 // Validates via LoadConfigReader before writing to disk.

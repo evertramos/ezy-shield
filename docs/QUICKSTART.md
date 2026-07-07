@@ -345,3 +345,50 @@ sudo systemctl enable --now ezyshield
 4. ✅ Notificações testadas com `test-notify`
 5. ✅ `armed: false` para validar com dry-run primeiro
 6. ⬜ Após validação, mudar para `armed: true`
+
+---
+
+## 10. Verificar o status do daemon
+
+Use `ezyshield status` para inspecionar o estado atual do daemon e do helper enforcer sem precisar consultar `ezyshield list` nem arquivos de configuração:
+
+```bash
+ezyshield status
+```
+
+Saída de exemplo (modo enforce, daemon e enforcer ativos):
+
+```
+daemon:    running
+enforcer:  running
+mode:      enforce
+uptime:    3h2m
+version:   v1.0.0
+bans:      6
+  by strike:
+    strike 1:    3
+    strike 2:    1
+    permanent:   2
+```
+
+| Campo      | Valores possíveis                  | Significado                                      |
+|------------|------------------------------------|--------------------------------------------------|
+| `daemon`   | `running` / `stopped`              | Se o processo `ezyshield watch` está ativo       |
+| `enforcer` | `running` / `stopped`              | Se o `ezyshield-enforcer` está respondendo       |
+| `mode`     | `enforce` / `dry-run`              | Reflete `armed` no `policy.yaml`                 |
+| `uptime`   | duração (ex. `3h2m`)               | Tempo desde o início do daemon                   |
+| `bans`     | inteiro                            | Total de IPs banidos no momento                  |
+| by strike  | `strike N` / `permanent`          | Distribuição dos banimentos por nível de strike  |
+
+Para saída estruturada (scripts/monitoramento):
+
+```bash
+ezyshield status --json
+```
+
+Flags opcionais:
+
+| Flag                        | Padrão                                         | Uso                                  |
+|-----------------------------|------------------------------------------------|--------------------------------------|
+| `--socket PATH`             | `/run/ezyshield/ezyshield.sock`                | Socket do daemon                     |
+| `--enforcer-socket PATH`    | `/run/ezyshield-enforcer/enforcer.sock`        | Socket do helper enforcer            |

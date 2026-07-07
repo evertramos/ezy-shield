@@ -170,6 +170,8 @@ strikes:
   - ttl: 0       # strike 5 — permanente
 ```
 
+> **Semântica de deduplicação:** Um *strike* representa um **episódio de ataque**, não uma requisição individual. Enquanto um IP já está banido (registro ativo em `bans_active`), novas detecções são suprimidas — nenhum novo strike é gravado, nenhuma chamada RPC ao enforcer ocorre, e apenas `offenders.last_seen` é atualizado. Isso é refletido no campo `Op` da ação como `"already_banned"`. Quando o banimento expira (via `ExpireBans`), a próxima detecção avança para o próximo nível da escada normalmente. Isso torna `offenders.total_strikes` um indicador de reincidência real, não um contador bruto de requisições maliciosas.
+
 ### Thresholds (limiares de score)
 
 ```yaml

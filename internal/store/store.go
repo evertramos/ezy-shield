@@ -210,6 +210,42 @@ func (s *DB) RecordStrike(ctx context.Context, a sdk.Action) error {
 	return tx.Commit()
 }
 
+// HasActiveBan returns true when ip has a row in bans_active (permanent or
+// not-yet-expired), false when it does not. Callers should rely on the
+// daemon's expiry ticker to keep stale rows pruned; this method never
+// deletes rows on its own. All SQL uses parameterized queries; ip is never
+// interpolated into the query string (Hard Rule §4).
+func (s *DB) HasActiveBan(ctx context.Context, ip netip.Addr) (bool, error) {
+	var dummy int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM bans_active WHERE ip = ?`, ip.String()).Scan(&dummy)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("store: HasActiveBan %s: %w", ip, err)
+	}
+	return true, nil
+}
+
+// BumpLastSeen updates offenders.last_seen for ip to now. It is a
+// lightweight write — the only store mutation on the suppression path when
+// an IP is already actively banned. If ip has no offender row yet (rare
+// race during manual bans), the row is inserted with total_strikes=0.
+// All SQL uses parameterized queries (Hard Rule §4).
+func (s *DB) BumpLastSeen(ctx context.Context, ip netip.Addr) error {
+	now := nowRFC3339()
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO offenders (ip, first_seen, last_seen, total_strikes)
+		VALUES (?, ?, ?, 0)
+		ON CONFLICT(ip) DO UPDATE SET last_seen = excluded.last_seen
+	`, ip.String(), now, now)
+	if err != nil {
+		return fmt.Errorf("store: BumpLastSeen %s: %w", ip, err)
+	}
+	return nil
+}
+
 // GetStrikeCount returns the total cumulative strike count for ip.
 // Returns 0 (not an error) if the IP has never been seen.
 func (s *DB) GetStrikeCount(ctx context.Context, ip netip.Addr) (int, error) {

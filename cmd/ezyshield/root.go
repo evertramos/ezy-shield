@@ -39,6 +39,7 @@ Commands read as:  ezyshield <verb>   (equivalent to: ezy shield <verb>)`,
 		newAllowCmd(),
 		newScanCmd(),
 		newUpdateCmd(),
+		newDashboardCmd(),
 	)
 
 	return root

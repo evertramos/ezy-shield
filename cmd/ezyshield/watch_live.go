@@ -48,7 +48,7 @@ func runWatch(cmd *cobra.Command, socketPath string, follow bool) error {
 
 	// Verify the daemon is running by attempting a connection
 	if err := verifyDaemonRunning(ctx, socketPath); err != nil {
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), //nolint:errcheck
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
 			"EzyShield daemon is not running — start with: sudo systemctl start ezyshield\n")
 		return err
 	}
@@ -70,7 +70,7 @@ func verifyDaemonRunning(ctx context.Context, socketPath string) error {
 	if err != nil {
 		return fmt.Errorf("connect to daemon socket %s: %w", socketPath, err)
 	}
-	_ = conn.Close() //nolint:errcheck,gosec
+	_ = conn.Close()
 	return nil
 }
 
@@ -88,13 +88,13 @@ func watchLive(cmd *cobra.Command, ctx context.Context, socketPath string) error
 		case <-ticker.C:
 			resp, err := daemonRPC(ctx, socketPath, daemon.SocketRequest{Verb: "list"})
 			if err != nil {
-				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "error fetching bans: %v\n", err) //nolint:errcheck
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "error fetching bans: %v\n", err)
 				continue
 			}
 
 			var bans []daemon.BanEntry
 			if err := json.Unmarshal(resp.Data, &bans); err != nil {
-				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "error parsing response: %v\n", err) //nolint:errcheck
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "error parsing response: %v\n", err)
 				continue
 			}
 
@@ -148,7 +148,7 @@ func printBansText(cmd *cobra.Command, bans []daemon.BanEntry, newBans []daemon.
 	w := cmd.OutOrStdout()
 
 	if len(bans) == 0 {
-		_, _ = fmt.Fprintf(w, "No active bans\n") //nolint:errcheck
+		_, _ = fmt.Fprintf(w, "No active bans\n")
 		return
 	}
 
@@ -163,9 +163,9 @@ func printBansText(cmd *cobra.Command, bans []daemon.BanEntry, newBans []daemon.
 		return bans[i].IP < bans[j].IP
 	})
 
-	_, _ = fmt.Fprintf(w, "Active bans (%d):\n", len(bans))                   //nolint:errcheck
-	_, _ = fmt.Fprintf(w, "  %-40s  %-12s  %s\n", "IP/CIDR", "TTL", "Reason") //nolint:errcheck
-	_, _ = fmt.Fprintf(w, "  %s  %s  %s\n",                                   //nolint:errcheck
+	_, _ = fmt.Fprintf(w, "Active bans (%d):\n", len(bans))
+	_, _ = fmt.Fprintf(w, "  %-40s  %-12s  %s\n", "IP/CIDR", "TTL", "Reason")
+	_, _ = fmt.Fprintf(w, "  %s  %s  %s\n",
 		repeatStr("─", 40), repeatStr("─", 12), repeatStr("─", 30))
 
 	for _, b := range bans {
@@ -179,7 +179,7 @@ func printBansText(cmd *cobra.Command, bans []daemon.BanEntry, newBans []daemon.
 			reason = "(no reason)"
 		}
 
-		_, _ = fmt.Fprintf(w, "%s%-40s  %-12s  %s\n", //nolint:errcheck
+		_, _ = fmt.Fprintf(w, "%s%-40s  %-12s  %s\n",
 			marker, b.IP, b.TTL, reason)
 	}
 }

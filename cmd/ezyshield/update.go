@@ -255,7 +255,7 @@ func runUpdate(ctx context.Context, opts updateOptions) error {
 		// Make executable before verify step. File is temporary and will be deleted
 		// or installed atomically; 0755 is needed for execution (gossec G302 is a false
 		// positive here since the file is ephemeral and in /tmp with restrictive perms).
-		if err := os.Chmod(tmp, 0755); err != nil { //nolint:gosec
+		if err := os.Chmod(tmp, 0755); err != nil { //nolint:gosec // G302: temporary binary in /tmp
 			return fmt.Errorf("chmod temp binary %s: %w", spec.Name, err)
 		}
 
@@ -318,9 +318,7 @@ func fetchTargetRelease(ctx context.Context, c *update.Client, pinned string) (*
 func verifyBinary(ctx context.Context, path string) error {
 	vctx, cancel := context.WithTimeout(ctx, verifyExecTimeout)
 	defer cancel()
-	// G204: path is a temp file we just wrote inside the destination directory,
-	// derived from os.Executable() — not log-derived.
-	out, err := exec.CommandContext(vctx, path, "--version").CombinedOutput() //nolint:gosec
+	out, err := exec.CommandContext(vctx, path, "--version").CombinedOutput() //nolint:gosec // G204: temp binary path, not log-derived
 	if err != nil {
 		return fmt.Errorf("exec %s --version: %w (output: %s)", filepath.Base(path), err, truncate(out, 200))
 	}

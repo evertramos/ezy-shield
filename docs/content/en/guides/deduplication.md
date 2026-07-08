@@ -1,3 +1,9 @@
+---
+title: Strike Deduplication
+description: Understand how EzyShield avoids redundant bans
+order: 3
+---
+
 # Active-Ban Deduplication — EzyShield
 
 ## Overview
@@ -125,4 +131,4 @@ These operate on the burst tier and allow more requests before triggering, since
 - Issue #48: sustained-tier rules for low & slow detection (2026-07-08)
 - `internal/decision/engine.go`: `Engine.Decide` — active-ban guard
 - `internal/store/store.go`: `HasActiveBan`, `BumpLastSeen`
-- `docs/QUICKSTART.md`: strike table and deduplication semantics (PT-BR)
+- `docs/content/en/getting-started/index.md`: strike table and deduplication semantics

@@ -84,7 +84,7 @@ func (s *Server) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := s.sessions.Create(username)
+	token, _, err := s.sessions.Create(username)
 	if err != nil {
 		s.logger.Error("session create", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)

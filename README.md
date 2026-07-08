@@ -1,7 +1,17 @@
-[![CI](https://github.com/evertramos/ezy-shield/actions/workflows/ci.yaml/badge.svg)](https://github.com/evertramos/ezy-shield/actions/workflows/ci.yaml)
-[![CodeQL](https://github.com/evertramos/ezy-shield/actions/workflows/codeql.yaml/badge.svg)](https://github.com/evertramos/ezy-shield/actions/workflows/codeql.yaml)
-[![Go 1.24+](https://img.shields.io/badge/go-1.24+-00ADD8.svg)](https://go.dev)
-[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL%203.0-blue.svg)](LICENSE)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo/ezyshield-lockup-mono-white.svg">
+    <source media="(prefers-color-scheme: light)" srcset="assets/logo/ezyshield-lockup-mono-dark.svg">
+    <img src="assets/logo/ezyshield-lockup-mono-dark.svg" alt="EzyShield" width="400">
+  </picture>
+</p>
+
+<p align="center">
+  <a href="https://github.com/evertramos/ezy-shield/actions/workflows/ci.yaml"><img src="https://github.com/evertramos/ezy-shield/actions/workflows/ci.yaml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/evertramos/ezy-shield/actions/workflows/codeql.yaml"><img src="https://github.com/evertramos/ezy-shield/actions/workflows/codeql.yaml/badge.svg" alt="CodeQL"></a>
+  <a href="https://go.dev"><img src="https://img.shields.io/badge/go-1.24+-00ADD8.svg" alt="Go 1.24+"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL%203.0-blue.svg" alt="License: AGPL-3.0"></a>
+</p>
 
 # EzyShield
 
@@ -119,10 +129,10 @@ The installer fetches the latest signed binaries (`ezyshield` and
 To install a specific version or release candidate, set `EZYSHIELD_VERSION`:
 
 ```sh
-curl -sfL https://get.ezyshield.com | EZYSHIELD_VERSION=v0.3.0-rc.1 sudo sh
+curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=v0.3.0-rc.1 sh
 ```
 
-See [docs/guides/install.md](docs/guides/install.md) for complete installation options.
+See [docs/content/en/guides/install.md](docs/content/en/guides/install.md) for complete installation options.
 
 ### From source (works today)
 
@@ -213,7 +223,7 @@ notify:
 
 Start in dry-run (`armed: false` in `policy.yaml`), watch what it *would* block,
 then arm it. The full setup walkthrough — collectors, AI, notifications, custom
-rules — is in [docs/QUICKSTART.md](docs/QUICKSTART.md).
+rules — is in [docs/content/en/getting-started/index.md](docs/content/en/getting-started/index.md).
 
 ---
 

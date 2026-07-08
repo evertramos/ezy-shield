@@ -1,3 +1,9 @@
+---
+title: Implantando no Cloudflare
+description: Bloqueie IPs na borda com Cloudflare
+order: 1
+---
+
 # Bloqueio de IPs na Edge da Cloudflare
 
 Este guia mostra como configurar o EzyShield para bloquear IPs maliciosos na edge da Cloudflare usando o modo **Lists** (recomendado para a maioria das implantações).
@@ -228,6 +234,6 @@ Result: 4/5 checks passed, 1 failed
 
 ## Veja Também
 
-- [ADR-0002: Estratégia de Bloqueio na Cloudflare](../../docs/adr/0002-cloudflare-rulesets-api-over-ip-access-rules.md)
+- ADR-0002: Estratégia de Bloqueio na Cloudflare (ver repositório ezy-shield `docs/internal/adr/`)
 - [Documentação da API Cloudflare: Custom IP Lists](https://developers.cloudflare.com/api/operations/lists-list-lists)
 - [Painel da Cloudflare](https://dash.cloudflare.com)

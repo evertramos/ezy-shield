@@ -21,7 +21,6 @@ import (
 const (
 	cfDefaultListName = "ezyshield_blocked"
 	cfListItemTag     = "ezyshield"
-	cfListItemPerPage = 1000 // Cloudflare max page size for list items
 	cfListBatchMax    = 1000 // Cloudflare bulk add/remove limit per request
 )
 
@@ -359,16 +358,18 @@ func (e *CloudflareListsEnforcer) discoverList(ctx context.Context) (string, map
 		return "", nil, fmt.Errorf("cloudflare list lists: %s", cfErrMsg(ls.Errors))
 	}
 	var listID string
+	var numItems int
 	for _, l := range ls.Result {
 		if l.Name == e.listName && l.Kind == "ip" {
 			listID = l.ID
+			numItems = l.NumItems
 			break
 		}
 	}
 	if listID == "" {
 		return "", nil, nil
 	}
-	items, err := e.fetchAllItems(ctx, listID)
+	items, err := e.fetchAllItems(ctx, listID, numItems)
 	if err != nil {
 		return "", nil, err
 	}
@@ -379,18 +380,25 @@ func (e *CloudflareListsEnforcer) discoverList(ctx context.Context) (string, map
 // ezyshield-managed subset (comment starts with cfListItemTag). The page count
 // is bounded to defend against a misbehaving API that returns an unmoving
 // cursor — the free-plan cap is 10 000 items, so 50 pages of 1 000 is plenty.
-func (e *CloudflareListsEnforcer) fetchAllItems(ctx context.Context, listID string) (map[string]string, error) {
+// When numItems is 0 (empty list), returns early to avoid Cloudflare API error 10027.
+func (e *CloudflareListsEnforcer) fetchAllItems(ctx context.Context, listID string, numItems int) (map[string]string, error) {
 	const maxPages = 50
 	managed := make(map[string]string)
+
+	// Early return for empty lists: Cloudflare returns error 10027 when per_page is set on empty lists
+	if numItems == 0 {
+		return managed, nil
+	}
+
 	cursor := ""
 	for page := 0; page < maxPages; page++ {
 		if err := e.limiter.wait(ctx); err != nil {
 			return nil, err
 		}
-		url := fmt.Sprintf("%s/accounts/%s/rules/lists/%s/items?per_page=%d",
-			e.baseURL, e.accountID, listID, cfListItemPerPage)
+		url := fmt.Sprintf("%s/accounts/%s/rules/lists/%s/items",
+			e.baseURL, e.accountID, listID)
 		if cursor != "" {
-			url += "&cursor=" + cursor
+			url += "?cursor=" + cursor
 		}
 		resp, err := e.doRequest(ctx, http.MethodGet, url, nil)
 		if err != nil {
@@ -509,7 +517,8 @@ func (e *CloudflareListsEnforcer) addItems(ctx context.Context, listID string, i
 	}
 	if needRefresh {
 		// The async path returned only an operation_id; re-page to recover IDs.
-		all, err := e.fetchAllItems(ctx, listID)
+		// Pass numItems=1 as a safe default since we know items exist (we just added them).
+		all, err := e.fetchAllItems(ctx, listID, 1)
 		if err != nil {
 			return nil, fmt.Errorf("post-add refresh: %w", err)
 		}
@@ -814,9 +823,10 @@ func isManagedListItem(comment string) bool {
 // ── Cloudflare Lists API wire types ──────────────────────────────────────────
 
 type cfListInfo struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Kind string `json:"kind"`
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Kind     string `json:"kind"`
+	NumItems int    `json:"num_items"`
 }
 
 type cfListListsResp struct {

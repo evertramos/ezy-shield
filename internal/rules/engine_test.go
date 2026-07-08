@@ -543,6 +543,173 @@ func TestEvaluate_SSHBruteforceSustained_Triggers(t *testing.T) {
 	}
 }
 
+// ---- contains_any ----
+
+func TestEvaluate_ContainsAny_Triggers(t *testing.T) {
+	content := `
+rules:
+  - name: test_contains_any
+    kinds: [http_request]
+    field: path
+    contains_any: [phpunit, shell.php, .git]
+    window: 60s
+    threshold: 2
+    score: 90
+    category: exploit_probe
+`
+	tmp := filepath.Join(t.TempDir(), "rules.yaml")
+	if err := os.WriteFile(tmp, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	e, err := rules.New(tmp)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Two matches: one with phpunit, one with .git
+	sample := []sdk.Event{
+		httpEvent("200", "/admin/phpunit"),
+		httpEvent("200", "/repo/.git/config"),
+	}
+	agg := makeAgg(ip1, w60, sample)
+
+	verdicts := e.Evaluate(context.Background(), agg)
+	if v := findVerdict(verdicts, "exploit_probe"); v == nil {
+		t.Fatal("expected exploit_probe verdict from contains_any")
+	}
+}
+
+func TestEvaluate_ContainsAny_NoMatch(t *testing.T) {
+	content := `
+rules:
+  - name: test_contains_any
+    kinds: [http_request]
+    field: path
+    contains_any: [phpunit, shell.php, .git]
+    window: 60s
+    threshold: 2
+    score: 90
+    category: exploit_probe
+`
+	tmp := filepath.Join(t.TempDir(), "rules.yaml")
+	if err := os.WriteFile(tmp, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	e, err := rules.New(tmp)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// No matches: legitimate paths
+	sample := []sdk.Event{
+		httpEvent("200", "/index.html"),
+		httpEvent("200", "/api/users"),
+	}
+	agg := makeAgg(ip1, w60, sample)
+
+	verdicts := e.Evaluate(context.Background(), agg)
+	if v := findVerdict(verdicts, "exploit_probe"); v != nil {
+		t.Errorf("expected no exploit_probe, got %v", v)
+	}
+}
+
+func TestEvaluate_ContainsAny_PartialMatch(t *testing.T) {
+	content := `
+rules:
+  - name: test_contains_any
+    kinds: [http_request]
+    field: path
+    contains_any: [phpunit, shell.php, .git]
+    window: 60s
+    threshold: 2
+    score: 90
+    category: exploit_probe
+`
+	tmp := filepath.Join(t.TempDir(), "rules.yaml")
+	if err := os.WriteFile(tmp, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	e, err := rules.New(tmp)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Only one match, threshold is 2 — must not fire
+	sample := []sdk.Event{
+		httpEvent("200", "/admin/phpunit"),
+		httpEvent("200", "/index.html"),
+	}
+	agg := makeAgg(ip1, w60, sample)
+
+	verdicts := e.Evaluate(context.Background(), agg)
+	if v := findVerdict(verdicts, "exploit_probe"); v != nil {
+		t.Errorf("expected no verdict below threshold, got %v", v)
+	}
+}
+
+func TestNew_ContainsAndContainsAny_MutualExclusion(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+	}{
+		{
+			name: "value and contains_any both set",
+			content: `rules:
+  - name: test
+    kinds: [http_request]
+    field: path
+    value: "/foo"
+    contains_any: ["bar", "baz"]
+    window: 60s
+    threshold: 1
+    score: 70
+    category: scanner`,
+		},
+		{
+			name: "contains and contains_any both set",
+			content: `rules:
+  - name: test
+    kinds: [http_request]
+    field: path
+    contains: "bar"
+    contains_any: ["foo", "baz"]
+    window: 60s
+    threshold: 1
+    score: 70
+    category: scanner`,
+		},
+		{
+			name: "value, contains, and contains_any all set",
+			content: `rules:
+  - name: test
+    kinds: [http_request]
+    field: path
+    value: "/foo"
+    contains: "bar"
+    contains_any: ["baz", "qux"]
+    window: 60s
+    threshold: 1
+    score: 70
+    category: scanner`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := filepath.Join(t.TempDir(), "rules.yaml")
+			if err := os.WriteFile(tmp, []byte(tc.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := rules.New(tmp); err == nil {
+				t.Errorf("expected validation error for %q", tc.name)
+			}
+		})
+	}
+}
+
 // ---- context cancellation ----
 
 func TestEvaluate_ContextCancelled(t *testing.T) {

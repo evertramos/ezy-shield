@@ -29,8 +29,8 @@ func (d *duration) UnmarshalYAML(value *yaml.Node) error {
 }
 
 // spec describes a single detection rule loaded from YAML.
-// Field and Value/Contains are optional; omitting Field matches all events of
-// the listed kinds. Value and Contains are mutually exclusive.
+// Field and Value/Contains/ContainsAny are optional; omitting Field matches all events of
+// the listed kinds. Value, Contains, and ContainsAny are mutually exclusive.
 type spec struct {
 	Name        string   `yaml:"name"`
 	Description string   `yaml:"description,omitempty"`
@@ -38,6 +38,7 @@ type spec struct {
 	Field       string   `yaml:"field,omitempty"`
 	Value       string   `yaml:"value,omitempty"`
 	Contains    string   `yaml:"contains,omitempty"`
+	ContainsAny []string `yaml:"contains_any,omitempty"`
 	Window      duration `yaml:"window"`
 	Threshold   int      `yaml:"threshold"`
 	Score       int      `yaml:"score"`
@@ -180,6 +181,14 @@ func countMatches(r spec, agg sdk.Aggregate) int {
 			total++
 		} else if r.Contains != "" && strings.Contains(val, r.Contains) {
 			total++
+		} else if len(r.ContainsAny) > 0 {
+			// ContainsAny: OR logic — match if any substring is found
+			for _, sub := range r.ContainsAny {
+				if strings.Contains(val, sub) {
+					total++
+					break
+				}
+			}
 		}
 	}
 	return total
@@ -211,8 +220,8 @@ func validateRules(rules []spec) error {
 		if time.Duration(r.Window) <= 0 {
 			return fmt.Errorf("rule %q: window must be > 0", r.Name)
 		}
-		if r.Value != "" && r.Contains != "" {
-			return fmt.Errorf("rule %q: value and contains are mutually exclusive", r.Name)
+		if (r.Value != "" && r.Contains != "") || (r.Value != "" && len(r.ContainsAny) > 0) || (r.Contains != "" && len(r.ContainsAny) > 0) {
+			return fmt.Errorf("rule %q: value, contains, and contains_any are mutually exclusive", r.Name)
 		}
 		if r.Category == "" {
 			return fmt.Errorf("rule %q: category is required", r.Name)

@@ -49,3 +49,43 @@ rules:
     threshold: 1
     score: 90
     category: scanner
+
+  # ── Sustained-tier rules (low & slow detection) ─────────────────────────
+
+  - name: http_wp_probe_sustained
+    description: "Sustained wp-login attempts (low & slow bruteforce)"
+    kinds: [http_request]
+    field: path
+    contains: wp-login
+    window: 3600s
+    threshold: 10
+    score: 75
+    category: bruteforce
+
+  - name: http_xmlrpc_sustained
+    description: "Sustained xmlrpc abuse"
+    kinds: [http_request]
+    field: path
+    contains: xmlrpc.php
+    window: 3600s
+    threshold: 8
+    score: 75
+    category: bruteforce
+
+  - name: http_scanner_sustained
+    description: "Sustained 404 scanner (directory/endpoint enumeration)"
+    kinds: [http_request]
+    field: status
+    value: "404"
+    window: 3600s
+    threshold: 60
+    score: 70
+    category: scanner
+
+  - name: ssh_bruteforce_sustained
+    description: "Sustained SSH brute force (low & slow)"
+    kinds: [ssh_fail, ssh_invalid_user]
+    window: 3600s
+    threshold: 15
+    score: 80
+    category: bruteforce

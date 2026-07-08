@@ -4,9 +4,11 @@ O dashboard do EzyShield é uma pequena UI web que roda ao lado do daemon e
 oferece aos operadores uma visão via navegador do estado do daemon, banimentos
 ativos, histórico de strikes, allowlist e logs.
 
-**Status:** Fase 2 — autenticação, páginas de status, banimentos ativos
-e allowlist, mais ações de ban / unban / allow via POST. O log-tail em
-tempo real via WebSocket entra na Fase 3 (issue #56).
+**Status:** Fase 3 — autenticação, páginas de status, banimentos
+ativos, allowlist e event log, ações de ban / unban / allow via POST,
+mais um canal WebSocket que empurra novos eventos de `audit_log` para
+todas as abas abertas em quase tempo real. A redação server-side de
+linhas de log entra na Fase 4 (issue #56).
 
 ---
 
@@ -124,6 +126,8 @@ banner "Daemon offline" no lugar dos dados ao vivo.
 | GET    | `/dashboard`             | obrigatória | Overview de status: estado do daemon, modo, uptime, versão, contagem de bans ativos, distribuição por strike |
 | GET    | `/dashboard/bans`        | obrigatória | Tabela de bans ativos com botão de unban por linha + form de ban manual |
 | GET    | `/dashboard/allowlist`   | obrigatória | Tabela de entradas da allowlist + form de adicionar entrada    |
+| GET    | `/dashboard/events`      | obrigatória | Tabela das últimas 100 linhas de `audit_log`; atualiza em tempo real via WebSocket |
+| GET    | `/dashboard/ws`          | obrigatória | Upgrade para WebSocket; empurra envelopes `audit` / `refresh`  |
 | POST   | `/dashboard/ban`         | obrigatória | Ação de ban manual; redireciona para `/dashboard/bans`         |
 | POST   | `/dashboard/unban`       | obrigatória | Ação de unban manual; redireciona para `/dashboard/bans`       |
 | POST   | `/dashboard/allow`       | obrigatória | Ação de adicionar à allowlist; redireciona para `/dashboard/allowlist` |
@@ -146,6 +150,48 @@ URLs forjadas não injetem strings arbitrárias na UI.
 | `bad-form`       | Submit malformado                                               |
 | `daemon-error`   | Daemon acessível mas devolveu resposta não-OK                   |
 | `daemon-offline` | Socket unix do daemon não aceitou a conexão                     |
+
+### Updates ao vivo (`/dashboard/ws`)
+
+Toda página abre um WebSocket em `/dashboard/ws` via um script pequeno
+(nada de framework). O endpoint passa pelo mesmo `requireAuth` que as
+demais rotas: um upgrade sem sessão vira `303 See Other` para
+`/login`, então uma aba que já deslogou não fica com canal aberto.
+
+O dashboard usa um **event bus baseado em polling** em vez de push do
+daemon: a cada 3 segundos ele chama a RPC `events`, faz diff pelo
+maior `audit_log.id` já visto, e distribui as linhas novas para cada
+cliente conectado. É uma troca deliberada — latência sub-second por
+uma superfície bem menor: nada muda na API de controle do daemon,
+não há reader long-lived no socket e o daemon não guarda memória de
+subscribers.
+
+Envelope na rede (JSON, sempre frames de texto UTF-8):
+
+```json
+{"type": "hello"}
+{"type": "audit",   "entry": {"id": 42, "recorded_at": "2026-07-08T02:15:00Z", "op": "ban", "ip": "203.0.113.7", "ttl_seconds": 300, "strike": 1, "reason": "sshd"}}
+{"type": "refresh"}
+```
+
+Só esses três tipos chegam ao navegador. Quando um ciclo de poll
+traz mais de 10 eventos, o bus colapsa a rajada em um único
+`refresh` e o navegador recarrega a página. Esse limite mais a
+cadência de 3 s deixam a taxa por cliente bem abaixo do orçamento
+de 10 mensagens/segundo definido em `AGENTS.md §2`.
+
+A reconexão fica com o helper `EzyLive` embutido no layout:
+back-off exponencial começando em 1 s e limitado a 30 s, com um
+"live dot" no header que fica verde quando o socket está aberto.
+
+### `/dashboard/events`
+
+Tabela server-rendered com as últimas 100 linhas do `audit_log`
+(mais novas primeiro), schema idêntico ao objeto `entry` acima. O
+script da página escuta em `EzyLive.on('audit', …)` e insere linhas
+novas no topo sem recarregar, deduplicando por `data-audit-id`. O
+DOM é limitado a 100 linhas para uma aba de longa duração não
+crescer sem controle.
 
 Cookies de sessão:
 - nome `ezyshield_dashboard`,
@@ -190,6 +236,26 @@ recusa do navegador em downgrade para plaintext.
   banner de offline (nas leituras) ou flash code `daemon-offline` (nas
   escritas) no lugar de um erro cru de dial.
 
-Adições da Fase 3 (ainda não implementadas): token CSRF em rotas que mudam
-estado, audit log para toda operação de escrita, limite de sessões por
-conta, log-tail via WebSocket com redação server-side.
+### Adições da Fase 3
+
+- **Event bus + WebSocket:** canal autenticado que empurra novas
+  linhas de `audit_log` para cada aba aberta. O bus faz o polling do
+  daemon usando o mesmo orçamento de contexto de 2 s que os page
+  loads, então um daemon travado não trava o writer. A fila de saída
+  por cliente é limitada (32 mensagens) — um cliente lento é dropado
+  em vez de fazer back-pressure no bus. Rajadas maiores que 10
+  colapsam em um envelope `refresh` para a taxa por cliente ficar
+  abaixo do orçamento do dashboard em `AGENTS.md §2`.
+- **RPC `events`:** novo verbo no socket de controle do daemon
+  devolve as últimas N linhas de `audit_log`. Limit default 100,
+  clamp em `[1, 1000]` no store, sem escrita — a garantia
+  append-only em `audit_log` continua válida.
+- **Mesma guarda de auth:** o upgrade de WebSocket passa pelo mesmo
+  middleware `requireAuth` que todas as outras rotas `/dashboard`,
+  então uma aba não autenticada não consegue abrir o canal. O
+  header `Origin` é validado pela biblioteca WebSocket no handshake.
+
+Adições da Fase 4 (ainda não implementadas): token CSRF em rotas
+que mudam estado, audit log para toda operação de escrita do
+dashboard, limite de sessões por conta, log-tail com redação
+server-side.

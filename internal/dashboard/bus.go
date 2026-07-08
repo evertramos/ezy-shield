@@ -208,8 +208,8 @@ func (b *eventBus) broadcast(fresh []daemon.EventEntry) {
 // listed fields ever leave the server, so a browser tab receives a
 // stable JSON schema even as the internal daemon.EventEntry evolves.
 type wsMessage struct {
-	Type  string              `json:"type"` // "audit" | "refresh" | "hello"
-	Entry *daemon.EventEntry  `json:"entry,omitempty"`
+	Type  string             `json:"type"` // "audit" | "refresh" | "hello"
+	Entry *daemon.EventEntry `json:"entry,omitempty"`
 }
 
 func maxAuditID(events []daemon.EventEntry) int64 {

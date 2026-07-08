@@ -234,6 +234,6 @@ Result: 4/5 checks passed, 1 failed
 
 ## See Also
 
-- [ADR-0002: Cloudflare Enforcement Strategy](../../internal/adr/0002-cloudflare-rulesets-api-over-ip-access-rules.md)
+- ADR-0002: Cloudflare Enforcement Strategy (see ezy-shield repo `docs/internal/adr/`)
 - [Cloudflare API Docs: Custom IP Lists](https://developers.cloudflare.com/api/operations/lists-list-lists)
 - [Cloudflare Dashboard](https://dash.cloudflare.com)

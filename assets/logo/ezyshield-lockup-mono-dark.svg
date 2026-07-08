@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="12 6 717 212" width="717" height="212">
+  
+  <g transform="translate(10,20)"><svg x="0" y="0" width="180" height="180" viewBox="0 0 1024 1024">
+  <defs>
+    <mask id="m">
+      <path d="M253 90 L771 90 Q849 90 849 168 L849 470 C849 720 715 858 512 956 C309 858 175 720 175 470 L175 168 Q175 90 253 90 Z" fill="#fff"></path>
+      <rect x="332" y="286" width="360" height="76" rx="38" fill="#000"></rect>
+      <rect x="332" y="402" width="360" height="76" rx="38" fill="#000"></rect>
+      <rect x="332" y="518" width="360" height="76" rx="38" fill="#000"></rect>
+    </mask>
+  </defs>
+  <rect width="1024" height="1024" fill="#0e1726" mask="url(#m)"></rect>
+</svg></g>
+  <text x="206" y="142" font-family="'IBM Plex Sans', system-ui, sans-serif" font-weight="600" font-size="110" letter-spacing="-1.15" fill="#0e1726">EzyShield</text>
+</svg>

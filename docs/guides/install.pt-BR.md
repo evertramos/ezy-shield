@@ -75,7 +75,7 @@ sudo rm /usr/local/bin/ezyshield /usr/local/bin/ezyshield-enforcer
 curl -sfL https://get.ezyshield.com | sudo sh
 
 # Ou versão específica
-curl -sfL https://get.ezyshield.com | EZYSHIELD_VERSION=v0.4.0 sh
+curl -sfL https://get.ezyshield.com | EZYSHIELD_VERSION=v0.4.0 sudo sh
 ```
 
 ---

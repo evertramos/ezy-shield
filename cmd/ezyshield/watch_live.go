@@ -163,9 +163,9 @@ func printBansText(cmd *cobra.Command, bans []daemon.BanEntry, newBans []daemon.
 		return bans[i].IP < bans[j].IP
 	})
 
-	_, _ = fmt.Fprintf(w, "Active bans (%d):\n", len(bans))           //nolint:errcheck
+	_, _ = fmt.Fprintf(w, "Active bans (%d):\n", len(bans))                   //nolint:errcheck
 	_, _ = fmt.Fprintf(w, "  %-40s  %-12s  %s\n", "IP/CIDR", "TTL", "Reason") //nolint:errcheck
-	_, _ = fmt.Fprintf(w, "  %s  %s  %s\n",                         //nolint:errcheck
+	_, _ = fmt.Fprintf(w, "  %s  %s  %s\n",                                   //nolint:errcheck
 		repeatStr("─", 40), repeatStr("─", 12), repeatStr("─", 30))
 
 	for _, b := range bans {

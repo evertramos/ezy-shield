@@ -2,6 +2,7 @@ package rules_test
 
 import (
 	"context"
+	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -508,7 +509,7 @@ func TestEvaluate_ScannerSustained_Triggers(t *testing.T) {
 	// 60 distinct 404s in 1h window triggers http_scanner_sustained
 	sample := make([]sdk.Event, 60)
 	for i := range sample {
-		sample[i] = httpEvent("404", "/path/"+string(rune(i)))
+		sample[i] = httpEvent("404", fmt.Sprintf("/path/%d", i))
 	}
 	agg := makeAgg(ip1, w3600, sample)
 

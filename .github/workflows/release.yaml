@@ -18,6 +18,7 @@ on:
           - patch
           - minor
           - major
+          - rc
 
 jobs:
   tag:
@@ -33,26 +34,51 @@ jobs:
       - name: Calculate next version
         id: bump
         run: |
-          # Get latest tag
-          LATEST=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
-          if [ -z "$LATEST" ]; then
-            LATEST="v0.0.0"
+          BUMP="${{ inputs.bump }}"
+
+          if [ "$BUMP" = "rc" ]; then
+            # RC mode: find latest RC tag and increment, or create first RC from latest stable
+            LATEST_RC=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$' | head -1)
+
+            if [ -n "$LATEST_RC" ]; then
+              # Increment existing RC: v0.1.0-rc.1 → v0.1.0-rc.2
+              BASE=$(echo "$LATEST_RC" | sed 's/-rc\.[0-9]*//')
+              RC_NUM=$(echo "$LATEST_RC" | grep -oP 'rc\.\K[0-9]+')
+              RC_NUM=$((RC_NUM + 1))
+              NEW_TAG="${BASE}-rc.${RC_NUM}"
+            else
+              # No RC exists: take latest stable and create -rc.1
+              LATEST=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+              if [ -z "$LATEST" ]; then
+                LATEST="v0.0.0"
+              fi
+              # Bump minor for the RC base (next planned release)
+              MAJOR=$(echo "$LATEST" | sed 's/v//' | cut -d. -f1)
+              MINOR=$(echo "$LATEST" | sed 's/v//' | cut -d. -f2)
+              MINOR=$((MINOR + 1))
+              NEW_TAG="v${MAJOR}.${MINOR}.0-rc.1"
+            fi
+          else
+            # Stable release: bump major/minor/patch
+            LATEST=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+            if [ -z "$LATEST" ]; then
+              LATEST="v0.0.0"
+            fi
+            echo "Latest tag: $LATEST"
+
+            MAJOR=$(echo "$LATEST" | sed 's/v//' | cut -d. -f1)
+            MINOR=$(echo "$LATEST" | sed 's/v//' | cut -d. -f2)
+            PATCH=$(echo "$LATEST" | sed 's/v//' | cut -d. -f3)
+
+            case "$BUMP" in
+              major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+              minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+              patch) PATCH=$((PATCH + 1)) ;;
+            esac
+
+            NEW_TAG="v${MAJOR}.${MINOR}.${PATCH}"
           fi
-          echo "Latest tag: $LATEST"
 
-          # Parse version
-          MAJOR=$(echo "$LATEST" | sed 's/v//' | cut -d. -f1)
-          MINOR=$(echo "$LATEST" | sed 's/v//' | cut -d. -f2)
-          PATCH=$(echo "$LATEST" | sed 's/v//' | cut -d. -f3)
-
-          # Bump
-          case "${{ inputs.bump }}" in
-            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
-            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
-            patch) PATCH=$((PATCH + 1)) ;;
-          esac
-
-          NEW_TAG="v${MAJOR}.${MINOR}.${PATCH}"
           echo "New tag: $NEW_TAG"
           echo "new_tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
 

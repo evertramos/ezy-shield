@@ -786,3 +786,133 @@ func TestRecordManualBan_RejectsNegativeTTL(t *testing.T) {
 		t.Errorf("nothing should have been recorded for a rejected ban, got %d bans", len(bans))
 	}
 }
+
+// TestHasActiveBan_NotPresent verifies HasActiveBan returns false for a
+// never-seen IP — the baseline state before any ban is recorded.
+func TestHasActiveBan_NotPresent(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	found, err := db.HasActiveBan(ctx, ip1)
+	if err != nil {
+		t.Fatalf("HasActiveBan on empty DB: %v", err)
+	}
+	if found {
+		t.Error("want false for unseen IP, got true")
+	}
+}
+
+// TestHasActiveBan_PresentAfterStrike verifies HasActiveBan returns true once
+// RecordStrike writes a row to bans_active.
+func TestHasActiveBan_PresentAfterStrike(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	if err := db.RecordStrike(ctx, action(ip1, 1, time.Hour)); err != nil {
+		t.Fatalf("RecordStrike: %v", err)
+	}
+	found, err := db.HasActiveBan(ctx, ip1)
+	if err != nil {
+		t.Fatalf("HasActiveBan: %v", err)
+	}
+	if !found {
+		t.Error("want true after RecordStrike, got false")
+	}
+}
+
+// TestHasActiveBan_FalseAfterExpiry verifies HasActiveBan returns false once
+// the ban row is removed by ExpireBans.
+func TestHasActiveBan_FalseAfterExpiry(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	// Record a short ban that expires in the past.
+	a := action(ip1, 1, time.Millisecond)
+	if err := db.RecordStrike(ctx, a); err != nil {
+		t.Fatalf("RecordStrike: %v", err)
+	}
+
+	// Expire bans relative to a time well in the future.
+	if _, err := db.ExpireBans(ctx, time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("ExpireBans: %v", err)
+	}
+
+	found, err := db.HasActiveBan(ctx, ip1)
+	if err != nil {
+		t.Fatalf("HasActiveBan post-expiry: %v", err)
+	}
+	if found {
+		t.Error("want false after ban expiry, got true")
+	}
+}
+
+// TestHasActiveBan_PermanentNeverExpires verifies a permanent ban (TTL=0)
+// is never swept by ExpireBans and remains visible to HasActiveBan.
+func TestHasActiveBan_PermanentNeverExpires(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	if err := db.RecordStrike(ctx, action(ip1, 5, 0)); err != nil { // TTL 0 = permanent
+		t.Fatalf("RecordStrike permanent: %v", err)
+	}
+
+	// ExpireBans with a far-future clock must not remove permanent rows.
+	if _, err := db.ExpireBans(ctx, time.Now().Add(1_000_000*time.Hour)); err != nil {
+		t.Fatalf("ExpireBans: %v", err)
+	}
+
+	found, err := db.HasActiveBan(ctx, ip1)
+	if err != nil {
+		t.Fatalf("HasActiveBan post-expire: %v", err)
+	}
+	if !found {
+		t.Error("want true for permanent ban after ExpireBans, got false")
+	}
+}
+
+// TestBumpLastSeen_CreatesOffenderRow verifies BumpLastSeen upserts an
+// offender row when none exists yet (manual-ban edge case).
+func TestBumpLastSeen_CreatesOffenderRow(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	if err := db.BumpLastSeen(ctx, ip1); err != nil {
+		t.Fatalf("BumpLastSeen on empty DB: %v", err)
+	}
+
+	// GetStrikeCount reads from offenders; total_strikes must be 0 (not an error).
+	n, err := db.GetStrikeCount(ctx, ip1)
+	if err != nil {
+		t.Fatalf("GetStrikeCount after BumpLastSeen: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("total_strikes = %d after BumpLastSeen, want 0", n)
+	}
+}
+
+// TestBumpLastSeen_DoesNotIncrementStrikeCount verifies BumpLastSeen does not
+// increment total_strikes on an existing offender row — only last_seen changes.
+func TestBumpLastSeen_DoesNotIncrementStrikeCount(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	// Establish an offender row with strike count 1.
+	if err := db.RecordStrike(ctx, action(ip1, 1, time.Hour)); err != nil {
+		t.Fatalf("RecordStrike: %v", err)
+	}
+
+	// Bump last_seen three times — total_strikes must remain 1.
+	for range 3 {
+		if err := db.BumpLastSeen(ctx, ip1); err != nil {
+			t.Fatalf("BumpLastSeen: %v", err)
+		}
+	}
+
+	n, err := db.GetStrikeCount(ctx, ip1)
+	if err != nil {
+		t.Fatalf("GetStrikeCount: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("total_strikes = %d after 3 BumpLastSeen calls, want 1", n)
+	}
+}

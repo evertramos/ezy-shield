@@ -23,6 +23,20 @@ type Config struct {
 	AI         *AICfg         `yaml:"ai"`
 	Notify     *NotifyCfg     `yaml:"notify"`
 	Enrich     *EnrichCfg     `yaml:"enrich"`
+	Dashboard  *DashboardCfg  `yaml:"dashboard"`
+}
+
+// DashboardCfg configures the localhost-only web UI (see docs/dashboard.md).
+// Both fields are optional; the dashboard command falls back to safe defaults
+// (127.0.0.1:9090 and <data_dir>/dashboard.db).
+type DashboardCfg struct {
+	// Addr is the "host:port" the dashboard binds to. Must resolve to a
+	// loopback address (127.0.0.1, ::1, or the literal "localhost").
+	// Any other value is refused at startup — no 0.0.0.0 escape hatch.
+	Addr string `yaml:"addr"`
+	// AuthDBPath is the SQLite file storing the admin password hash.
+	// Defaults to <data_dir>/dashboard.db when empty.
+	AuthDBPath string `yaml:"auth_db_path"`
 }
 
 // EnrichCfg configures GeoIP/ASN enrichment via MaxMind MMDB databases.
@@ -181,15 +195,16 @@ type NFTablesCfg struct {
 //
 // Two enforcement modes are supported:
 //   - "lists" (default): account-level Custom IP List. One API call propagates
-//     to every zone that references the list (via a WAF Custom Rule the
-//     operator wires up once). Free plan: 1 list, 10 000 items. Requires
-//     account_id; zone_ids are ignored.
+//     to every zone that references the list. When zone_ids is set, WAF Custom
+//     Rules are automatically managed in each zone. Free plan: 1 list, 10 000 items.
+//     Requires account_id; zone_ids are optional (auto-management).
 //   - "rulesets": per-zone WAF Custom Rule that contains an ip.src list. One
 //     API call per zone; ~200 IP cap per rule (auto-split). Requires zone_ids;
 //     account_id is ignored.
 //
 // Token scoping:
-//   - lists mode: Account:Account Filter Lists:Edit on the chosen account.
+//   - lists mode (no zones): Account:Account Filter Lists:Edit on the chosen account.
+//   - lists mode (with zones): Account:Account Filter Lists:Edit + Zone:Firewall Services:Edit on each zone.
 //   - rulesets mode: Zone:Firewall:Edit on each listed zone (least-privilege).
 type CloudflareCfg struct {
 	// Name is a short operator-chosen label used to disambiguate accounts in
@@ -451,6 +466,12 @@ func validateCloudflare(cf CloudflareCfg) error {
 		if cf.ListName != "" {
 			if err := validateCFListName(cf.ListName); err != nil {
 				return fmt.Errorf("'list_name': %w", err)
+			}
+		}
+		// zone_ids are optional in lists mode; when set, WAF rules are auto-managed per zone
+		for i, z := range cf.ZoneIDs {
+			if z == "" {
+				return fmt.Errorf("zone_ids[%d]: must not be empty", i)
 			}
 		}
 	case "rulesets":

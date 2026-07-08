@@ -1,6 +1,10 @@
 #!/bin/sh
 # get.ezyshield.com — EzyShield installer
-# Usage: curl -sfL https://get.ezyshield.com | sh
+# Usage: curl -sfL https://get.ezyshield.com | sudo sh
+#
+# Environment variables:
+#   EZYSHIELD_VERSION    Install a specific release (e.g., v0.3.0-rc.1). Must start with 'v'.
+#   EZYSHIELD_BASE_URL   Install from a custom mirror. Overrides version selection.
 set -eu
 
 REPO="evertramos/ezy-shield"
@@ -31,11 +35,24 @@ SUFFIX="${OS}-${ARCH}"
 # malicious mirror — use this override only for trusted mirrors, air-gapped
 # installs from artifacts you already vetted, or the local dev harness.
 if [ -n "${EZYSHIELD_BASE_URL:-}" ]; then
+  # Custom mirror (highest priority)
   VERSION="${EZYSHIELD_VERSION:-local}"
   BASE_URL="$EZYSHIELD_BASE_URL"
   echo "Installing EzyShield ${VERSION} (${SUFFIX}) from ${BASE_URL}..."
+elif [ -n "${EZYSHIELD_VERSION:-}" ]; then
+  # Specific version from GitHub Releases
+  VERSION="$EZYSHIELD_VERSION"
+
+  # Validate tag format (must start with 'v')
+  case "$VERSION" in
+    v*) ;;
+    *) echo "Error: EZYSHIELD_VERSION must start with 'v' (got: $VERSION)"; exit 1 ;;
+  esac
+
+  BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
+  echo "Installing EzyShield ${VERSION} (${SUFFIX})..."
 else
-  # Get latest version
+  # Default: fetch latest version
   echo "Fetching latest release..."
   VERSION=$(curl -sfL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed 's/.*"tag_name": *"//;s/".*//')
 
@@ -54,7 +71,9 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 if ! curl -sfL "${BASE_URL}/checksums.txt" -o "${TMP}/checksums.txt"; then
-  echo "Error: checksums.txt not found in release ${VERSION}. Cannot verify integrity."
+  echo "Error: checksums.txt not found at ${BASE_URL}/checksums.txt"
+  echo "The release ${VERSION} may not have pre-built binaries yet."
+  echo "Available releases: https://github.com/${REPO}/releases"
   exit 1
 fi
 if ! curl -sfL "${BASE_URL}/ezyshield-${SUFFIX}" -o "${TMP}/ezyshield"; then

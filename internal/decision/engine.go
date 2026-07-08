@@ -31,6 +31,13 @@ var ErrRateLimited = errors.New("decision: global ban rate limit exceeded")
 // Store is the persistence interface required by Engine.
 // The concrete *store.DB satisfies this interface.
 type Store interface {
+	// HasActiveBan returns true when ip has an unexpired row in bans_active,
+	// false when it does not. The engine calls this before GetStrikeCount to
+	// suppress redundant strike/enforcer writes for already-banned IPs.
+	HasActiveBan(ctx context.Context, ip netip.Addr) (bool, error)
+	// BumpLastSeen updates offenders.last_seen for ip without recording a strike.
+	// It is the only store write on the suppression path.
+	BumpLastSeen(ctx context.Context, ip netip.Addr) error
 	// GetStrikeCount returns the cumulative strike count for ip (0 if never seen).
 	GetStrikeCount(ctx context.Context, ip netip.Addr) (int, error)
 	// RecordStrike persists a ban strike and updates bans_active + audit_log.
@@ -130,6 +137,33 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 			slog.ErrorContext(ctx, "decision: audit notify-only", "ip", ip, "err", err)
 		}
 		return act, nil
+	}
+
+	// ── Active-ban guard (issue #28) ─────────────────────────────────────────
+	// If the IP already has an active ban (temp or permanent), suppress the
+	// strike/audit/enforcer writes. Only offenders.last_seen is bumped so the
+	// IP still appears as "active" in observability. bans_active remains the
+	// enforcer source of truth; the Sync loop handles expiry races.
+	//
+	// Dry-run is handled further below — we still skip the store check in
+	// dry-run mode because RecordStrike is also skipped there. The guard runs
+	// only when armed=true to preserve the current dry-run semantics unchanged.
+	if e.policy.Armed {
+		banned, err := e.store.HasActiveBan(ctx, ip)
+		if err != nil {
+			// Non-fatal: log and fall through to the normal strike path rather
+			// than silently suppressing a verdict on a DB error.
+			slog.ErrorContext(ctx, "decision: HasActiveBan failed — falling through to strike path",
+				"ip", ip, "err", err)
+		} else if banned {
+			slog.InfoContext(ctx, "decision: already_banned — suppressing strike/enforcer",
+				"ip", ip)
+			act := sdk.Action{IP: ip, Op: "already_banned", Reason: "active ban in bans_active", Verdicts: verdicts}
+			if err := e.store.BumpLastSeen(ctx, ip); err != nil {
+				slog.ErrorContext(ctx, "decision: BumpLastSeen failed", "ip", ip, "err", err)
+			}
+			return act, nil
+		}
 	}
 
 	// score ≥ ban_threshold → compute strike escalation.

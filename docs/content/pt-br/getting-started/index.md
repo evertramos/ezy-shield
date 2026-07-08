@@ -1,3 +1,9 @@
+---
+title: Começando
+description: Guia de início rápido
+order: 1
+---
+
 # Guia de Início Rápido — EzyShield
 
 > ⚠️ Projeto em pré-alpha. Use em modo dry-run e reporte bugs via issues.

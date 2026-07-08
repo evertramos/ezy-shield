@@ -1,3 +1,9 @@
+---
+title: Dashboard
+description: Web dashboard for monitoring and control
+order: 1
+---
+
 # Dashboard
 
 The EzyShield dashboard is a small web UI that runs alongside the daemon and

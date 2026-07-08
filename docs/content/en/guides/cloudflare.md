@@ -1,3 +1,9 @@
+---
+title: Deploying to Cloudflare
+description: Block IPs at the edge with Cloudflare
+order: 1
+---
+
 # Cloudflare Edge Enforcement
 
 This guide walks you through setting up EzyShield to block malicious IPs at the Cloudflare edge using the **Lists mode** (recommended for most deployments).

@@ -109,7 +109,11 @@ command execution through it.
 
 **Known pitfalls (learned the hard way):**
 
-- **Operator paste-mistake at the env-var-name prompt (issue #13).** The `ezyshield init` wizard asks for the *name* of the env var holding the API key (e.g. `ANTHROPIC_API_KEY`). If the operator pastes the real key instead, the naive code path (a) writes `api_key: env:sk-ant-<full-key>` to `/etc/ezyshield/config.yaml` and (b) later logs `environment variable sk-ant-<full-key> is not set` to journald on every daemon restart — leaking the secret to whoever reads the system journal. The wizard must validate the input as a POSIX shell identifier (`^[A-Za-z_][A-Za-z0-9_]*$`) at prompt time, and `SecretRef.Resolve` / `UnmarshalYAML` in `internal/config` must reject a malformed `env:` reference at load time with a **redacted** error message. See `internal/config/secret.go` (`validateEnvVarName`, `redactSecret`) and the tests in `internal/config/secret_leak_test.go`.
+- **Operator paste-mistake at the env-var-name prompt (issue #13, mitigated in #22).** The original wizard asked for the *name* of the env var holding the API key (e.g. `ANTHROPIC_API_KEY`). If the operator pasted the real key instead, the naive code path (a) wrote `api_key: env:sk-ant-<full-key>` to `/etc/ezyshield/config.yaml` and (b) later logged `environment variable sk-ant-<full-key> is not set` to journald on every daemon restart — leaking the secret to whoever reads the system journal.
+
+  **Mitigation (issue #22):** the wizard (cmd/ezyshield/init.go `askKeySource`) now presents two options: (1) paste the key value directly — input is echo-suppressed via `term.ReadPassword`; the raw key is written only to `/etc/ezyshield/.env` (mode `0600 root:ezyshield`) and `config.yaml` always contains `api_key: env:CANONICAL_NAME`; or (2) supply an env var name manually for advanced setups (sops / vault / LoadCredential) — this path still validates the name as a POSIX shell identifier (`^[A-Za-z_][A-Za-z0-9_]*$`) via `config.ValidateEnvVarName`, rejecting secret-shaped input. The raw API key value **never enters `config.yaml`** through the wizard, regardless of which option is chosen.
+
+  Canonical env var names are hardcoded per provider (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OLLAMA_API_KEY`) and not user-configurable — eliminating the class of "invent an env var name" confusion entirely. See `cmd/ezyshield/init.go` (`askKeySource`, `writeOrKeepEnvFile`) and `internal/config/secret.go` (`ValidateEnvVarName`, `redactSecret`).
 
 ## 5. 🔴 AI / LLM boundary — prompt injection
 

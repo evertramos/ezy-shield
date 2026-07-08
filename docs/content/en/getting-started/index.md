@@ -312,7 +312,7 @@ sudo ezyshield test-notify email
 ## 9. Run the daemon
 
 ```bash
-sudo ezyshield watch
+sudo ezyshield run
 ```
 
 While `armed: false`, EzyShield runs in **dry-run**: it processes everything and

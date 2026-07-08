@@ -32,6 +32,7 @@ Commands read as:  ezyshield <verb>   (equivalent to: ezy shield <verb>)`,
 		newValidateCmd(),
 		newCompletionCmd(root),
 		newTestNotifyCmd(),
+		newTestEnforceCmd(),
 		newWatchCmd(),
 		newBanCmd(),
 		newUnbanCmd(),
@@ -39,6 +40,7 @@ Commands read as:  ezyshield <verb>   (equivalent to: ezy shield <verb>)`,
 		newAllowCmd(),
 		newScanCmd(),
 		newUpdateCmd(),
+		newDashboardCmd(),
 	)
 
 	return root

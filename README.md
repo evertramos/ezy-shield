@@ -114,6 +114,16 @@ curl -sfL https://get.ezyshield.com | sudo sh
 The installer fetches the latest signed binaries (`ezyshield` and
 `ezyshield-enforcer`) and verifies checksums.
 
+### Specific version (including release candidates)
+
+To install a specific version or release candidate, set `EZYSHIELD_VERSION`:
+
+```sh
+curl -sfL https://get.ezyshield.com | EZYSHIELD_VERSION=v0.3.0-rc.1 sudo sh
+```
+
+See [docs/guides/install.md](docs/guides/install.md) for complete installation options.
+
 ### From source (works today)
 
 ```sh

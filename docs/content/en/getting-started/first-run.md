@@ -13,7 +13,7 @@ After installation, you've configured EzyShield with at least one log source. No
 By default, EzyShield runs in **dry-run mode** — it analyzes logs and makes decisions, but never blocks anything. This is intentional: observe first, arm second.
 
 ```bash
-sudo ezyshield watch
+sudo ezyshield run
 ```
 
 You'll see output like:

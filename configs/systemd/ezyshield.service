@@ -14,7 +14,7 @@ Group=ezyshield
 # install without AI configured has no .env, and the daemon fails closed
 # on AI paths only when a Resolve() call actually needs a token.
 EnvironmentFile=-/etc/ezyshield/.env
-ExecStart=/usr/local/bin/ezyshield watch
+ExecStart=/usr/local/bin/ezyshield run
 Restart=on-failure
 RestartSec=5s
 

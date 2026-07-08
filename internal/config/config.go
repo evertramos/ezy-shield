@@ -23,6 +23,20 @@ type Config struct {
 	AI         *AICfg         `yaml:"ai"`
 	Notify     *NotifyCfg     `yaml:"notify"`
 	Enrich     *EnrichCfg     `yaml:"enrich"`
+	Dashboard  *DashboardCfg  `yaml:"dashboard"`
+}
+
+// DashboardCfg configures the localhost-only web UI (see docs/dashboard.md).
+// Both fields are optional; the dashboard command falls back to safe defaults
+// (127.0.0.1:9090 and <data_dir>/dashboard.db).
+type DashboardCfg struct {
+	// Addr is the "host:port" the dashboard binds to. Must resolve to a
+	// loopback address (127.0.0.1, ::1, or the literal "localhost").
+	// Any other value is refused at startup — no 0.0.0.0 escape hatch.
+	Addr string `yaml:"addr"`
+	// AuthDBPath is the SQLite file storing the admin password hash.
+	// Defaults to <data_dir>/dashboard.db when empty.
+	AuthDBPath string `yaml:"auth_db_path"`
 }
 
 // EnrichCfg configures GeoIP/ASN enrichment via MaxMind MMDB databases.

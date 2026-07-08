@@ -33,7 +33,12 @@ jobs:
           SOURCE_BRANCH="${GITHUB_REF_NAME}"
           SOURCE_SHA="$(git rev-parse --short HEAD)"
 
-          rsync -av --delete docs/content/ site/docs/
+          rsync -av --delete \
+            --exclude='.vitepress/' \
+            --exclude='package.json' \
+            --exclude='package-lock.json' \
+            --exclude='node_modules/' \
+            docs/content/ site/docs/
           cd site
 
           if git diff --quiet; then

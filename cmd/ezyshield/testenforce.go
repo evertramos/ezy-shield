@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -136,7 +137,7 @@ func testCloudflareBackend(ctx context.Context, cfcfg *config.CloudflareCfg) *ba
 	}
 
 	// Check 1: Token validity
-	tokenID, status, err := checkTokenValidity(ctx, token)
+	tokenID, status, err := checkTokenValidity(ctx, token, cfcfg.AccountID)
 	if err != nil {
 		result.Status = "error"
 		result.Message = fmt.Sprintf("Token validation failed: %v", err)
@@ -298,8 +299,21 @@ func testCloudflareRulesetsMode(ctx context.Context, token string, cfcfg *config
 	}
 }
 
-func checkTokenValidity(ctx context.Context, token string) (string, string, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", "https://api.cloudflare.com/client/v4/user/tokens/verify", nil)
+// checkTokenValidity verifies a Cloudflare API token. Detects the token type:
+// - cfat_ prefix → Account API Token → verify via /accounts/{account_id}/tokens/verify
+// - Otherwise → User API Token → verify via /user/tokens/verify
+func checkTokenValidity(ctx context.Context, token, accountID string) (string, string, error) {
+	verifyURL := "https://api.cloudflare.com/client/v4/user/tokens/verify"
+
+	// Detect Account API Token by cfat_ prefix
+	if strings.HasPrefix(token, "cfat_") {
+		if accountID == "" {
+			return "", "", fmt.Errorf("account_id is required for Account API Tokens (cfat_ prefix)")
+		}
+		verifyURL = fmt.Sprintf("https://api.cloudflare.com/client/v4/accounts/%s/tokens/verify", accountID)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", verifyURL, nil)
 	if err != nil {
 		return "", "", err
 	}

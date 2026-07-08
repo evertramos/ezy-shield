@@ -54,7 +54,33 @@ rules:
     description: "Known RCE exploit paths (zero legitimate use)"
     kinds: [http_request]
     field: path
-    contains_any: [phpunit, cgi-bin, .git, .aws, actuator, admin.php, shell.php, wp-content/plugins, plugins.php, install.php, config.php, database.yml, secrets, .htaccess, package.json, composer.json, web.config, debug.log, error.log, access.log, apache2, ssh-key, private_key, id_rsa, terraform, .terraform, vault, lambda, rds, kinesis, dynamodb, s3, cloudformation]
+    contains_any:
+      - phpunit
+      - eval-stdin.php
+      - ".%2e"
+      - "%%32"
+      - allow_url_include
+      - auto_prepend_file
+      - ".git/config"
+      - ".git/HEAD"
+      - ".aws/credentials"
+      - ".ssh/id_rsa"
+      - private_key
+      - shell.php
+      - actuator/env
+      - actuator/health
+      - /_ignition/execute-solution
+      - /solr/admin
+      - /boaform/admin
+      - /server-status
+      - /telescope/requests
+      - /wp-content/debug.log
+      - error.log
+      - access.log
+      - .htaccess
+      - .terraform
+      - ssh-key
+      - vault/token
     window: 60s
     threshold: 1
     score: 95

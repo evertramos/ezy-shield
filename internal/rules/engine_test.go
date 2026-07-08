@@ -710,6 +710,148 @@ func TestNew_ContainsAndContainsAny_MutualExclusion(t *testing.T) {
 	}
 }
 
+// ---- http_rce_probe ----
+
+func TestEvaluate_RCEProbe_Triggers(t *testing.T) {
+	e := mustEngine(t)
+	// Single RCE probe path must trigger (threshold=1, score=95)
+	sample := []sdk.Event{
+		httpEvent("404", "/.git/config"),
+	}
+	agg := makeAgg(ip1, w60, sample)
+
+	verdicts := e.Evaluate(context.Background(), agg)
+	found := findVerdict(verdicts, "exploit_probe")
+	if found == nil {
+		t.Fatalf("expected exploit_probe verdict, got %v", verdicts)
+	}
+	if found.Score != 95 {
+		t.Errorf("Score = %d, want 95", found.Score)
+	}
+}
+
+func TestEvaluate_RCEProbe_MultipleExploitPaths(t *testing.T) {
+	e := mustEngine(t)
+	// Multiple different RCE paths
+	sample := []sdk.Event{
+		httpEvent("500", "/admin.php"),
+		httpEvent("200", "/phpunit"),
+		httpEvent("404", "/.aws/credentials"),
+	}
+	agg := makeAgg(ip1, w60, sample)
+
+	verdicts := e.Evaluate(context.Background(), agg)
+	found := findVerdict(verdicts, "exploit_probe")
+	if found == nil {
+		t.Fatalf("expected exploit_probe verdict for multiple probes, got %v", verdicts)
+	}
+}
+
+func TestEvaluate_RCEProbe_NoFalsePositives(t *testing.T) {
+	e := mustEngine(t)
+	// Legitimate paths must not trigger
+	sample := []sdk.Event{
+		httpEvent("200", "/index.html"),
+		httpEvent("200", "/api/users"),
+		httpEvent("200", "/config/app.json"),
+	}
+	agg := makeAgg(ip1, w60, sample)
+
+	verdicts := e.Evaluate(context.Background(), agg)
+	if v := findVerdict(verdicts, "exploit_probe"); v != nil {
+		t.Errorf("expected no exploit_probe for legitimate paths, got %v", v)
+	}
+}
+
+// ---- http_scanner_400 ----
+
+func TestEvaluate_HTTPScanner400_Triggers(t *testing.T) {
+	e := mustEngine(t)
+	sample := make([]sdk.Event, 10)
+	for i := range sample {
+		sample[i] = httpEvent("400", "/path")
+	}
+	agg := makeAgg(ip1, w60, sample)
+
+	verdicts := e.Evaluate(context.Background(), agg)
+	found := findVerdict(verdicts, "scanner")
+	if found == nil {
+		t.Fatalf("expected scanner verdict for 10 400s, got %v", verdicts)
+	}
+	if found.Score != 60 {
+		t.Errorf("Score = %d, want 60", found.Score)
+	}
+}
+
+func TestEvaluate_HTTPScanner400_BelowThreshold(t *testing.T) {
+	e := mustEngine(t)
+	sample := make([]sdk.Event, 9) // 9 < 10
+	for i := range sample {
+		sample[i] = httpEvent("400", "/path")
+	}
+	agg := makeAgg(ip1, w60, sample)
+
+	verdicts := e.Evaluate(context.Background(), agg)
+	found := findVerdict(verdicts, "scanner")
+	if found != nil && found.Score == 60 {
+		t.Errorf("expected no 400 scanner below threshold, got %v", found)
+	}
+}
+
+// ---- http_scanner_503 ----
+
+func TestEvaluate_HTTPScanner503_Triggers(t *testing.T) {
+	e := mustEngine(t)
+	sample := make([]sdk.Event, 15)
+	for i := range sample {
+		sample[i] = httpEvent("503", "/path")
+	}
+	agg := makeAgg(ip1, w60, sample)
+
+	verdicts := e.Evaluate(context.Background(), agg)
+	found := findVerdict(verdicts, "scanner")
+	if found == nil {
+		t.Fatalf("expected scanner verdict for 15 503s, got %v", verdicts)
+	}
+	if found.Score != 65 {
+		t.Errorf("Score = %d, want 65", found.Score)
+	}
+}
+
+func TestEvaluate_HTTPScanner503_BelowThreshold(t *testing.T) {
+	e := mustEngine(t)
+	sample := make([]sdk.Event, 14) // 14 < 15
+	for i := range sample {
+		sample[i] = httpEvent("503", "/path")
+	}
+	agg := makeAgg(ip1, w60, sample)
+
+	verdicts := e.Evaluate(context.Background(), agg)
+	found := findVerdict(verdicts, "scanner")
+	if found != nil && found.Score == 65 {
+		t.Errorf("expected no 503 scanner below threshold, got %v", found)
+	}
+}
+
+// ---- http_env_probe expanded ----
+
+func TestEvaluate_EnvProbe_ExpandedVariants(t *testing.T) {
+	e := mustEngine(t)
+	// Test all env variants trigger
+	cases := []string{".env", ".env.local", ".env.production", ".env.staging"}
+	for _, path := range cases {
+		sample := []sdk.Event{
+			httpEvent("200", "/"+path),
+		}
+		agg := makeAgg(ip1, w60, sample)
+
+		verdicts := e.Evaluate(context.Background(), agg)
+		if v := findVerdict(verdicts, "scanner"); v == nil || v.Score != 90 {
+			t.Errorf("expected env_probe for %q, got %v", path, v)
+		}
+	}
+}
+
 // ---- context cancellation ----
 
 func TestEvaluate_ContextCancelled(t *testing.T) {

@@ -37,9 +37,64 @@ deduplicação, `total_strikes` conta episódios distintos de ataque — o núme
 de vezes que um IP retornou e atacou após um período de resfriamento. Isso
 torna o campo um indicador significativo de reincidência.
 
+## Camadas de Detecção: Burst vs Sustentado
+
+O EzyShield usa um modelo de detecção em duas camadas para capturar tanto atacantes rápidos quanto scanners "baixo e lento" (low & slow):
+
+### Camada Burst (janela de 60 segundos)
+
+**Objetivo**: Capturar ataques rápidos em rajadas concentradas.
+
+**Exemplos**:
+- Scanner WordPress atingindo `/wp-login.php` 3+ vezes em 60 segundos
+- Brute force SSH: 5+ falhas de login em 60 segundos
+- Scanner HTTP: 20+ respostas 404 em 60 segundos
+
+**Ajuste**: Limiares conservadores otimizados para alta confiança. Falsos positivos são raros.
+
+### Camada Sustentada (janela de 1 hora)
+
+**Objetivo**: Capturar atacantes que distribuem suas sondagens ao longo de horas (estratégia "low & slow").
+
+**Exemplo real** (Issue #48): Um atacante mirando WordPress com 30 tentativas de login distribuídas ao longo de 6 horas em rajadas de 2–3 hits. Cada rajada fica abaixo do limiar da camada burst (3 hits/min), mas acumula 10+ hits em 1 hora, acionando a detecção sustentada.
+
+**Exemplos**:
+- WordPress: 10+ hits em `/wp-login` distribuídos ao longo de 1 hora
+- Abuso XML-RPC: 8+ sondagens em `/xmlrpc.php` ao longo de 1 hora
+- Scanning HTTP: 60+ 404s distintos ao longo de 1 hora
+- SSH: 15+ logins falhados ao longo de 1 hora
+
+**Ajuste**: Limiares definidos conservadoramente para evitar atividade de usuários legítimos:
+- Um administrador que faz login no WordPress 3–4 vezes por hora não acionará a regra
+- Um script de backup automatizado fazendo requisições periódicas não acionará
+- Crawlers legítimos com 404 ocasionais não acionarão
+
+### Como Funcionam Juntas
+
+1. **Regra burst ativa primeiro**: Captura sondadores agressivos imediatamente
+2. **Regra sustentada ativa depois**: Captura atacantes pacientes que escapam
+3. **Deduplicação previne duplo-banimento**: Uma vez que um IP está em `bans_active`, hits sustentados são suprimidos (veja Deduplicação de Banimentos Ativos acima)
+
+### Ajustando Limiares
+
+Para customizar os limiares, edite `configs/rules.yaml` e ajuste os campos `window` e `threshold`:
+
+```yaml
+- name: http_wp_probe_sustained
+  window: 3600s        # 1 hora
+  threshold: 10        # ajuste para seu ambiente
+  score: 75
+```
+
+**Diretrizes**:
+- Aumente o limiar se usuários legítimos estão acionando a regra
+- Diminua o limiar se você está vendo ataques low & slow escapando da detecção
+- Mantenha limiares burst e sustentado separados; eles capturam padrões diferentes
+
 ## Referências
 
 - Issue #28: implementação e evidências do kylian-s (03–04/07/2026)
+- Issue #48: regras sustentadas para detecção low & slow (08/07/2026)
 - `internal/decision/engine.go`: `Engine.Decide` — guard de banimento ativo
 - `internal/store/store.go`: `HasActiveBan`, `BumpLastSeen`
 - `docs/QUICKSTART.md`: tabela de strikes e semântica de deduplicação

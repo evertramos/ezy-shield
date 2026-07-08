@@ -109,6 +109,7 @@ still escalates today.
 - **Notifications** — Telegram, Email (SMTP), Slack, Discord, generic webhook
 - **Service & port discovery** — `ezyshield scan` inventories what's actually listening on the host
 - **Audit trail** — every action recorded in SQLite; export to JSON/CSV
+- **Localhost-only dashboard** — small web UI over 127.0.0.1 with status, active bans, allowlist, event log, live WebSocket updates and a strike timeline; CSRF-protected manual ban/unban/allow; access remotely via SSH tunnel or Cloudflare Tunnel (see [docs](docs/content/en/reference/dashboard.md) and the [remote-access guide](docs/content/en/guides/dashboard-remote-access.md))
 - **Scriptable** — `--json` on commands; unix-socket control, no TCP port ever
 
 ---

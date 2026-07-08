@@ -190,6 +190,42 @@ EzyShield aplica um limite de 4 requisições/segundo nas chamadas de API da Clo
 - Restrinja as permissões do token e endereços IP nas configurações da Cloudflare quando possível
 - O token account-level pode modificar suas Custom IP Lists — restrinja o acesso conforme necessário
 
+## Validando sua Configuração
+
+### Usando `test-enforce cloudflare`
+
+Após configurar, valide seu setup com:
+
+```bash
+ezyshield test-enforce cloudflare --config-dir /etc/ezyshield/
+```
+
+Este comando irá:
+- Verificar se o token de API é válido e ativo
+- Verificar acesso à conta e zones
+- Validar permissões da Cloudflare para seu token
+- Relatar o que funciona e o que está faltando
+- Fornecer sugestões claras de correção
+
+**Exemplo de saída (modo lists com zone_ids):**
+
+```
+Cloudflare enforcer (mode: lists): pass
+────────────────────────────────────
+✓ Token validity: Token ID: abc...def, status: active
+✓ Account access: Account ID: 0123456789abcdef
+✓ List access (read): List "ezyshield_blocked" found (147 items, ID: lstxxxxx)
+✓ Zone WAF access: Zone unaids.org.br (zone_id: aaa111) — WAF rule access OK
+✗ Zone WAF access: Zone deupositivo.org (zone_id: ccc333) — 403 Forbidden
+  └─ Ensure token has Zone:Firewall Services:Edit on this zone
+
+Result: 4/5 checks passed, 1 failed
+```
+
+**Código de saída**: 0 se todos os testes passarem, 1 se algum teste falhar
+
+**Saída JSON**: Use a flag `--json` para saída estruturada apropriada para automação
+
 ## Veja Também
 
 - [ADR-0002: Estratégia de Bloqueio na Cloudflare](../../docs/adr/0002-cloudflare-rulesets-api-over-ip-access-rules.md)

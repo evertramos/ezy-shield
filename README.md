@@ -163,7 +163,7 @@ sudo ezyshield doctor    # validate config, permissions, and dependencies
 
 ```sh
 # Run the pipeline (dry-run until you set armed: true in policy.yaml)
-sudo ezyshield watch
+sudo ezyshield run
 
 # Inspect the running daemon
 ezyshield status

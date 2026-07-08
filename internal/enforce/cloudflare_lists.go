@@ -21,7 +21,6 @@ import (
 const (
 	cfDefaultListName = "ezyshield_blocked"
 	cfListItemTag     = "ezyshield"
-	cfListItemPerPage = 1000 // Cloudflare max page size for list items
 	cfListBatchMax    = 1000 // Cloudflare bulk add/remove limit per request
 )
 
@@ -396,10 +395,10 @@ func (e *CloudflareListsEnforcer) fetchAllItems(ctx context.Context, listID stri
 		if err := e.limiter.wait(ctx); err != nil {
 			return nil, err
 		}
-		url := fmt.Sprintf("%s/accounts/%s/rules/lists/%s/items?per_page=%d",
-			e.baseURL, e.accountID, listID, cfListItemPerPage)
+		url := fmt.Sprintf("%s/accounts/%s/rules/lists/%s/items",
+			e.baseURL, e.accountID, listID)
 		if cursor != "" {
-			url += "&cursor=" + cursor
+			url += "?cursor=" + cursor
 		}
 		resp, err := e.doRequest(ctx, http.MethodGet, url, nil)
 		if err != nil {

@@ -18,9 +18,9 @@ const dialTimeout = 5 * time.Second
 func daemonRPC(ctx context.Context, socketPath string, req daemon.SocketRequest) (*daemon.SocketResponse, error) {
 	conn, err := (&net.Dialer{Timeout: dialTimeout}).DialContext(ctx, "unix", socketPath)
 	if err != nil {
-		return nil, fmt.Errorf("cannot connect to daemon at %s: %w\n(Is 'ezyshield watch' running?)", socketPath, err)
+		return nil, fmt.Errorf("cannot connect to daemon at %s: %w\n(Is 'ezyshield run' running?)", socketPath, err)
 	}
-	defer conn.Close() //nolint:errcheck
+	defer conn.Close() //nolint:errcheck // connection is short-lived; close error is not actionable
 
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
 		return nil, fmt.Errorf("send request: %w", err)

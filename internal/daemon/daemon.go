@@ -53,6 +53,7 @@ type daemonStore interface {
 	RemoveAllow(ctx context.Context, prefix netip.Prefix) (int, error)
 	ListAllow(ctx context.Context) ([]store.AllowEntry, error)
 	ExpireAllows(ctx context.Context, now time.Time) (int, error)
+	ListAuditLog(ctx context.Context, limit int) ([]store.AuditEntry, error)
 }
 
 // geoLookup is the minimal interface consumed from *enrich.Enricher.

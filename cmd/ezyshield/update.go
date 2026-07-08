@@ -251,6 +251,12 @@ func runUpdate(ctx context.Context, opts updateOptions) error {
 		tmpPaths[i] = tmp
 		out.println("done")
 		out.printf("Verifying checksum... OK\n")
+
+		// Make executable before verify step
+		if err := os.Chmod(tmp, 0755); err != nil {
+			return fmt.Errorf("chmod temp binary %s: %w", spec.Name, err)
+		}
+
 		if opts.runVerify != nil {
 			if err := opts.runVerify(ctx, tmp); err != nil {
 				return fmt.Errorf("downloaded %s does not execute: %w", spec.Name, err)

@@ -195,15 +195,16 @@ type NFTablesCfg struct {
 //
 // Two enforcement modes are supported:
 //   - "lists" (default): account-level Custom IP List. One API call propagates
-//     to every zone that references the list (via a WAF Custom Rule the
-//     operator wires up once). Free plan: 1 list, 10 000 items. Requires
-//     account_id; zone_ids are ignored.
+//     to every zone that references the list. When zone_ids is set, WAF Custom
+//     Rules are automatically managed in each zone. Free plan: 1 list, 10 000 items.
+//     Requires account_id; zone_ids are optional (auto-management).
 //   - "rulesets": per-zone WAF Custom Rule that contains an ip.src list. One
 //     API call per zone; ~200 IP cap per rule (auto-split). Requires zone_ids;
 //     account_id is ignored.
 //
 // Token scoping:
-//   - lists mode: Account:Account Filter Lists:Edit on the chosen account.
+//   - lists mode (no zones): Account:Account Filter Lists:Edit on the chosen account.
+//   - lists mode (with zones): Account:Account Filter Lists:Edit + Zone:Firewall Services:Edit on each zone.
 //   - rulesets mode: Zone:Firewall:Edit on each listed zone (least-privilege).
 type CloudflareCfg struct {
 	// Name is a short operator-chosen label used to disambiguate accounts in
@@ -465,6 +466,12 @@ func validateCloudflare(cf CloudflareCfg) error {
 		if cf.ListName != "" {
 			if err := validateCFListName(cf.ListName); err != nil {
 				return fmt.Errorf("'list_name': %w", err)
+			}
+		}
+		// zone_ids are optional in lists mode; when set, WAF rules are auto-managed per zone
+		for i, z := range cf.ZoneIDs {
+			if z == "" {
+				return fmt.Errorf("zone_ids[%d]: must not be empty", i)
 			}
 		}
 	case "rulesets":

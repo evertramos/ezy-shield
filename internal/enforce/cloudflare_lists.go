@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/netip"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -44,8 +45,8 @@ func newListState() *listState {
 
 // CloudflareListsEnforcer maintains a single Cloudflare account-level Custom IP
 // List ("Lists API") containing every ezyshield-banned IP. A single API call
-// per list propagates to all zones that reference the list via a WAF Custom
-// Rule (operator-created, once).
+// per list propagates to all zones that reference the list. When zone_ids is
+// set, WAF Custom Rules are automatically managed in each zone.
 //
 // Only items whose comment starts with cfListItemTag are considered managed —
 // items added manually outside ezyshield are left untouched on Sync/Unban.
@@ -57,6 +58,8 @@ type CloudflareListsEnforcer struct {
 	instanceName     string // operator label for multi-account deployments; "" when single
 	accountID        string
 	listName         string
+	zoneIDs          []string // optional; when set, WAF rules are auto-managed per zone
+	action           string   // rule action: "block" (default), "challenge", "js_challenge"
 	baseURL          string
 	limiter          *cfRateLimiter
 	allowlist        []netip.Prefix
@@ -82,12 +85,18 @@ func NewCloudflareListsEnforcer(ctx context.Context, cfg *config.CloudflareCfg, 
 	if listName == "" {
 		listName = cfDefaultListName
 	}
+	action := cfg.Action
+	if action == "" {
+		action = "block"
+	}
 	return &CloudflareListsEnforcer{
 		client:           &http.Client{Timeout: 10 * time.Second},
 		token:            token,
 		instanceName:     cfg.Name,
 		accountID:        cfg.AccountID,
 		listName:         listName,
+		zoneIDs:          cfg.ZoneIDs,
+		action:           action,
 		baseURL:          cfBaseURL,
 		limiter:          newCFRateLimiter(cfMaxRPS),
 		allowlist:        allowlist,
@@ -104,6 +113,10 @@ func newCFListsEnforcerForTest(token, baseURL, accountID, listName string) *Clou
 }
 
 func newCFListsEnforcerForTestWithCtx(ctx context.Context, token, baseURL, accountID, listName string) *CloudflareListsEnforcer {
+	return newCFListsEnforcerForTestWithZones(ctx, token, baseURL, accountID, listName, nil)
+}
+
+func newCFListsEnforcerForTestWithZones(ctx context.Context, token, baseURL, accountID, listName string, zoneIDs []string) *CloudflareListsEnforcer {
 	if listName == "" {
 		listName = cfDefaultListName
 	}
@@ -112,12 +125,19 @@ func newCFListsEnforcerForTestWithCtx(ctx context.Context, token, baseURL, accou
 		token:            token,
 		accountID:        accountID,
 		listName:         listName,
+		zoneIDs:          zoneIDs,
+		action:           "block",
 		baseURL:          baseURL,
 		limiter:          newCFRateLimiter(1000), // effectively no throttle in tests
 		debounceInterval: 0,
 		svcCtx:           ctx,
 		state:            newListState(),
 	}
+}
+
+// NewCFListsEnforcerForTestWithZones is exported for testing WAF rule management.
+func NewCFListsEnforcerForTestWithZones(ctx context.Context, token, baseURL, accountID, listName string, zoneIDs []string) *CloudflareListsEnforcer {
+	return newCFListsEnforcerForTestWithZones(ctx, token, baseURL, accountID, listName, zoneIDs)
 }
 
 // Name implements sdk.Enforcer. Returns "cloudflare" for the default
@@ -169,7 +189,7 @@ func (e *CloudflareListsEnforcer) Unban(ctx context.Context, t sdk.Target) error
 
 // Sync replaces the desired set with exactly the given targets (modulo
 // allowlist). Push is synchronous. Items not managed by ezyshield are left
-// untouched.
+// untouched. If zone_ids are configured, WAF rules are also managed per zone.
 func (e *CloudflareListsEnforcer) Sync(ctx context.Context, want []sdk.Target) error {
 	wantSet := make(map[string]struct{}, len(want))
 	for _, t := range want {
@@ -192,6 +212,13 @@ func (e *CloudflareListsEnforcer) Sync(ctx context.Context, want []sdk.Target) e
 	e.state.mu.Unlock()
 	if err := e.push(ctx); err != nil {
 		return fmt.Errorf("enforce/cloudflare-lists Sync: %w", err)
+	}
+	if len(e.zoneIDs) > 0 {
+		for _, zone := range e.zoneIDs {
+			if err := e.syncZoneRule(ctx, zone); err != nil {
+				return fmt.Errorf("enforce/cloudflare-lists Sync zone %s: %w", zone, err)
+			}
+		}
 	}
 	return nil
 }
@@ -532,6 +559,213 @@ func (e *CloudflareListsEnforcer) removeItems(ctx context.Context, listID string
 			"count", len(batch), "list_id", listID)
 	}
 	return nil
+}
+
+// ── WAF rule management (lists mode with zone_ids) ──────────────────────────
+
+const cfListRuleDescPattern = "ezyshield-list-block"
+
+// syncZoneRule ensures the zone has a WAF Custom Rule pointing to the list.
+// On first call, discovers the ruleset and any existing ezyshield rule. On
+// subsequent calls, creates or updates the rule as needed.
+func (e *CloudflareListsEnforcer) syncZoneRule(ctx context.Context, zone string) error {
+	// Get the current list ID (may still be discovering).
+	e.state.mu.Lock()
+	listID := e.state.listID
+	e.state.mu.Unlock()
+	if listID == "" {
+		// List not yet discovered/created; can't manage rules without the list ID.
+		slog.WarnContext(ctx, "enforce/cloudflare-lists: zone rule sync deferred (list not yet discovered)",
+			"zone", zone)
+		return nil
+	}
+
+	// Discover or create the ruleset and find existing ezyshield rule.
+	rulesetID, ruleID, err := e.discoverListRuleID(ctx, zone)
+	if err != nil {
+		return err
+	}
+
+	expr := fmt.Sprintf("(ip.src in $%s)", listID)
+	desc := cfListRuleDescPattern
+
+	// If rule doesn't exist yet, create it.
+	if ruleID == "" {
+		if rulesetID == "" {
+			// No ruleset at all; create one with the rule inline.
+			if err := e.createListRulesetWithRule(ctx, zone, desc, expr); err != nil {
+				return err
+			}
+			return nil
+		}
+		// Ruleset exists but no ezyshield rule; create the rule.
+		if err := e.createListRule(ctx, zone, rulesetID, desc, expr); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	// Rule exists; check if action matches config.
+	if err := e.updateListRule(ctx, zone, rulesetID, ruleID, desc, expr); err != nil {
+		return err
+	}
+	return nil
+}
+
+// discoverListRuleID finds the zone's custom-firewall ruleset and any ezyshield
+// list rule within it. Returns ("", "", nil) if the ruleset doesn't exist yet.
+func (e *CloudflareListsEnforcer) discoverListRuleID(ctx context.Context, zone string) (rulesetID, ruleID string, err error) {
+	// GET /zones/{zone}/rulesets to find the http_request_firewall_custom phase.
+	if err := e.limiter.wait(ctx); err != nil {
+		return "", "", err
+	}
+	url := fmt.Sprintf("%s/zones/%s/rulesets", e.baseURL, zone)
+	resp, err := e.doRequest(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	var ls cfListRulesetsResp
+	if err := json.NewDecoder(resp.Body).Decode(&ls); err != nil {
+		return "", "", fmt.Errorf("decode list rulesets: %w", err)
+	}
+	if !ls.Success {
+		return "", "", fmt.Errorf("cloudflare list rulesets: %s", cfErrMsg(ls.Errors))
+	}
+	for _, rs := range ls.Result {
+		if rs.Phase == cfRulePhase {
+			rulesetID = rs.ID
+			break
+		}
+	}
+	if rulesetID == "" {
+		return "", "", nil
+	}
+
+	// GET /zones/{zone}/rulesets/{ruleset_id} to find our managed rule.
+	if err := e.limiter.wait(ctx); err != nil {
+		return "", "", err
+	}
+	url2 := fmt.Sprintf("%s/zones/%s/rulesets/%s", e.baseURL, zone, rulesetID)
+	resp2, err := e.doRequest(ctx, http.MethodGet, url2, nil)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp2.Body.Close() //nolint:errcheck
+	var gr cfGetRulesetResp
+	if err := json.NewDecoder(resp2.Body).Decode(&gr); err != nil {
+		return "", "", fmt.Errorf("decode ruleset: %w", err)
+	}
+	if !gr.Success {
+		return "", "", fmt.Errorf("cloudflare get ruleset: %s", cfErrMsg(gr.Errors))
+	}
+	for _, rule := range gr.Result.Rules {
+		if isManagedListRule(rule.Description) {
+			ruleID = rule.ID
+			break
+		}
+	}
+	return rulesetID, ruleID, nil
+}
+
+// createListRulesetWithRule creates the http_request_firewall_custom ruleset
+// with the initial ezyshield rule inline.
+func (e *CloudflareListsEnforcer) createListRulesetWithRule(ctx context.Context, zone, desc, expr string) error {
+	body, err := json.Marshal(cfCreateRulesetReq{
+		Name:  "Custom rules",
+		Kind:  "zone",
+		Phase: cfRulePhase,
+		Rules: []cfRuleReq{{Action: e.action, Expression: expr, Description: desc}},
+	})
+	if err != nil {
+		return fmt.Errorf("marshal create ruleset: %w", err)
+	}
+	if err := e.limiter.wait(ctx); err != nil {
+		return err
+	}
+	url := fmt.Sprintf("%s/zones/%s/rulesets", e.baseURL, zone)
+	resp, err := e.doRequest(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	var out cfCreateRulesetResp
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return fmt.Errorf("decode create ruleset: %w", err)
+	}
+	if !out.Success {
+		return fmt.Errorf("cloudflare create ruleset: %s", cfErrMsg(out.Errors))
+	}
+	if len(out.Result.Rules) == 0 {
+		return fmt.Errorf("cloudflare create ruleset: no rule in response")
+	}
+	slog.InfoContext(ctx, "enforce/cloudflare-lists: created WAF ruleset+rule",
+		"zone", zone, "ruleset_id", out.Result.ID, "rule_id", out.Result.Rules[0].ID)
+	return nil
+}
+
+// createListRule creates a new ezyshield WAF rule in the existing ruleset.
+func (e *CloudflareListsEnforcer) createListRule(ctx context.Context, zone, rulesetID, desc, expr string) error {
+	body, err := json.Marshal(cfRuleReq{Action: e.action, Expression: expr, Description: desc})
+	if err != nil {
+		return fmt.Errorf("marshal create rule: %w", err)
+	}
+	if err := e.limiter.wait(ctx); err != nil {
+		return err
+	}
+	url := fmt.Sprintf("%s/zones/%s/rulesets/%s/rules", e.baseURL, zone, rulesetID)
+	resp, err := e.doRequest(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	var out cfRuleWriteResp
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return fmt.Errorf("decode create rule: %w", err)
+	}
+	if !out.Success {
+		return fmt.Errorf("cloudflare create rule: %s", cfErrMsg(out.Errors))
+	}
+	if out.Result == nil {
+		return fmt.Errorf("cloudflare create rule: empty response")
+	}
+	slog.InfoContext(ctx, "enforce/cloudflare-lists: created WAF rule",
+		"zone", zone, "ruleset_id", rulesetID, "rule_id", out.Result.ID)
+	return nil
+}
+
+// updateListRule patches the ezyshield rule to ensure the action matches config.
+// The expression is updated to point to the current list ID.
+func (e *CloudflareListsEnforcer) updateListRule(ctx context.Context, zone, rulesetID, ruleID, desc, expr string) error {
+	body, err := json.Marshal(cfRuleReq{Action: e.action, Expression: expr, Description: desc})
+	if err != nil {
+		return fmt.Errorf("marshal patch rule: %w", err)
+	}
+	if err := e.limiter.wait(ctx); err != nil {
+		return err
+	}
+	url := fmt.Sprintf("%s/zones/%s/rulesets/%s/rules/%s", e.baseURL, zone, rulesetID, ruleID)
+	resp, err := e.doRequest(ctx, http.MethodPatch, url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	var out cfRuleWriteResp
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return fmt.Errorf("decode patch rule: %w", err)
+	}
+	if !out.Success {
+		return fmt.Errorf("cloudflare patch rule: %s", cfErrMsg(out.Errors))
+	}
+	slog.InfoContext(ctx, "enforce/cloudflare-lists: updated WAF rule",
+		"zone", zone, "ruleset_id", rulesetID, "rule_id", ruleID)
+	return nil
+}
+
+// isManagedListRule returns true when the rule's description marks it as an
+// ezyshield list-mode rule (contains "ezyshield-list-block").
+func isManagedListRule(desc string) bool {
+	return strings.Contains(desc, cfListRuleDescPattern)
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

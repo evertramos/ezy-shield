@@ -15,18 +15,43 @@ import (
 
 // mockStore is a thread-safe test double for decision.Store.
 type mockStore struct {
-	mu      sync.Mutex
-	strikes map[string]int
-	banned  []sdk.Action // calls to RecordStrike
-	audited []sdk.Action // calls to Audit
+	mu            sync.Mutex
+	strikes       map[string]int
+	activeBans    map[string]bool // ip → active ban present
+	lastSeenBumps []string        // IPs whose last_seen was bumped
+	banned        []sdk.Action    // calls to RecordStrike
+	audited       []sdk.Action    // calls to Audit
 }
 
 func newMock(initial map[string]int) *mockStore {
-	s := &mockStore{strikes: make(map[string]int)}
+	s := &mockStore{
+		strikes:    make(map[string]int),
+		activeBans: make(map[string]bool),
+	}
 	for k, v := range initial {
 		s.strikes[k] = v
 	}
 	return s
+}
+
+// setBanned marks ip as having (true) or not having (false) an active ban.
+func (m *mockStore) setBanned(ip netip.Addr, active bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.activeBans[ip.String()] = active
+}
+
+func (m *mockStore) HasActiveBan(_ context.Context, ip netip.Addr) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.activeBans[ip.String()], nil
+}
+
+func (m *mockStore) BumpLastSeen(_ context.Context, ip netip.Addr) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lastSeenBumps = append(m.lastSeenBumps, ip.String())
+	return nil
 }
 
 func (m *mockStore) GetStrikeCount(_ context.Context, ip netip.Addr) (int, error) {
@@ -39,6 +64,7 @@ func (m *mockStore) RecordStrike(_ context.Context, a sdk.Action) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.strikes[a.IP.String()]++
+	m.activeBans[a.IP.String()] = true // mirror what real store does
 	m.banned = append(m.banned, a)
 	return nil
 }
@@ -392,6 +418,214 @@ func TestNew_InvalidAllowlist(t *testing.T) {
 	_, err := decision.New(pol, newMock(nil))
 	if err == nil {
 		t.Fatal("expected error for invalid allowlist entry, got nil")
+	}
+}
+
+// ── Active-ban guard tests (issue #28, acceptance criteria a–f) ──────────────
+
+// TestActiveBanGuard_FreshIP_Strike1 (a) verifies that a fresh, never-seen IP
+// that crosses ban_threshold receives strike #1 with a 5-minute TTL.
+func TestActiveBanGuard_FreshIP_Strike1(t *testing.T) {
+	st := newMock(nil) // no pre-existing strikes, no active ban
+	engine := mustEngine(t, armedPolicy(), st)
+
+	act, err := engine.Decide(context.Background(), []sdk.Verdict{mkVerdict(ip1, 85, "bruteforce")})
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if act.Op != "ban" {
+		t.Errorf("Op = %q, want ban", act.Op)
+	}
+	if act.Strike != 1 {
+		t.Errorf("Strike = %d, want 1", act.Strike)
+	}
+	if act.TTL != 5*time.Minute {
+		t.Errorf("TTL = %v, want 5m", act.TTL)
+	}
+	if len(st.banned) != 1 {
+		t.Errorf("RecordStrike called %d time(s), want 1", len(st.banned))
+	}
+}
+
+// TestActiveBanGuard_RehitWhileBanned (b) verifies that re-hitting an already
+// active-banned IP suppresses the strike, does not call RecordStrike or Audit,
+// and only bumps offenders.last_seen.
+func TestActiveBanGuard_RehitWhileBanned(t *testing.T) {
+	st := newMock(map[string]int{ip1.String(): 1})
+	st.setBanned(ip1, true) // 5-minute ban already active
+	engine := mustEngine(t, armedPolicy(), st)
+
+	act, err := engine.Decide(context.Background(), []sdk.Verdict{mkVerdict(ip1, 85, "bruteforce")})
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if act.Op != "already_banned" {
+		t.Errorf("Op = %q, want already_banned", act.Op)
+	}
+	// No new strike row.
+	if len(st.banned) != 0 {
+		t.Errorf("RecordStrike called %d time(s), want 0 (suppressed)", len(st.banned))
+	}
+	// No audit entry (Audit is only called for allowlist/anti-lockout/score-band paths).
+	if len(st.audited) != 0 {
+		t.Errorf("Audit called %d time(s), want 0 (suppressed)", len(st.audited))
+	}
+	// last_seen must have been bumped.
+	if len(st.lastSeenBumps) != 1 || st.lastSeenBumps[0] != ip1.String() {
+		t.Errorf("lastSeenBumps = %v, want [%s]", st.lastSeenBumps, ip1)
+	}
+}
+
+// TestActiveBanGuard_BanExpiredThenStrike2 (c) verifies that once the 5-minute
+// ban expires (simulated by removing the active ban entry), the next hit records
+// strike #2 with a 1-hour TTL.
+func TestActiveBanGuard_BanExpiredThenStrike2(t *testing.T) {
+	// After expiry: 1 strike in DB, no active ban.
+	st := newMock(map[string]int{ip1.String(): 1})
+	// No setBanned call → HasActiveBan returns false.
+	engine := mustEngine(t, armedPolicy(), st)
+
+	act, err := engine.Decide(context.Background(), []sdk.Verdict{mkVerdict(ip1, 85, "bruteforce")})
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if act.Op != "ban" {
+		t.Errorf("Op = %q, want ban", act.Op)
+	}
+	if act.Strike != 2 {
+		t.Errorf("Strike = %d, want 2", act.Strike)
+	}
+	if act.TTL != time.Hour {
+		t.Errorf("TTL = %v, want 1h", act.TTL)
+	}
+	if len(st.banned) != 1 {
+		t.Errorf("RecordStrike called %d time(s), want 1", len(st.banned))
+	}
+}
+
+// TestActiveBanGuard_PermanentBanSuppressedForever (d) verifies that an IP
+// holding a permanent ban (strike #5, TTL=0) is suppressed on every subsequent
+// verdict, forever.
+func TestActiveBanGuard_PermanentBanSuppressedForever(t *testing.T) {
+	st := newMock(map[string]int{ip1.String(): 5})
+	st.setBanned(ip1, true) // permanent — expires_at NULL
+	engine := mustEngine(t, armedPolicy(), st)
+
+	for i := range 3 {
+		act, err := engine.Decide(context.Background(), []sdk.Verdict{mkVerdict(ip1, 100, "bruteforce")})
+		if err != nil {
+			t.Fatalf("Decide call %d: %v", i+1, err)
+		}
+		if act.Op != "already_banned" {
+			t.Errorf("call %d: Op = %q, want already_banned", i+1, act.Op)
+		}
+	}
+	if len(st.banned) != 0 {
+		t.Errorf("RecordStrike called %d time(s), want 0", len(st.banned))
+	}
+	if len(st.lastSeenBumps) != 3 {
+		t.Errorf("lastSeenBumps = %d, want 3", len(st.lastSeenBumps))
+	}
+}
+
+// TestActiveBanGuard_StartupReplay (e) verifies that an IP that was permanent
+// in the DB before a daemon restart is still suppressed after the engine is
+// re-created — because the guard reads bans_active, not in-memory state.
+func TestActiveBanGuard_StartupReplay(t *testing.T) {
+	// Simulate restart: re-create the store and engine from scratch.
+	st := newMock(map[string]int{ip1.String(): 5})
+	st.setBanned(ip1, true) // permanent row survived restart (it's in bans_active)
+
+	// New engine — no in-memory state carried over.
+	engine := mustEngine(t, armedPolicy(), st)
+
+	act, err := engine.Decide(context.Background(), []sdk.Verdict{mkVerdict(ip1, 100, "bruteforce")})
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if act.Op != "already_banned" {
+		t.Errorf("Op = %q, want already_banned (startup replay must read bans_active)", act.Op)
+	}
+	if len(st.banned) != 0 {
+		t.Errorf("RecordStrike called despite permanent ban in bans_active")
+	}
+}
+
+// TestActiveBanGuard_TwoConcurrentIPs_NoContamination (f) verifies that
+// concurrent verdicts for two different IPs do not cross-contaminate the
+// bansInWin rate-limit counter or the active-ban suppression logic.
+func TestActiveBanGuard_TwoConcurrentIPs_NoContamination(t *testing.T) {
+	st := newMock(nil)
+	st.setBanned(ip1, true) // ip1 already banned
+	// ip2 is fresh (no ban, no strikes)
+	engine := mustEngine(t, armedPolicy(), st)
+
+	// Process both IPs concurrently.
+	var wg sync.WaitGroup
+	results := make([]sdk.Action, 2)
+	errs := make([]error, 2)
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		results[0], errs[0] = engine.Decide(context.Background(), []sdk.Verdict{mkVerdict(ip1, 85, "bruteforce")})
+	}()
+	go func() {
+		defer wg.Done()
+		results[1], errs[1] = engine.Decide(context.Background(), []sdk.Verdict{mkVerdict(ip2, 85, "bruteforce")})
+	}()
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("Decide[%d]: %v", i, err)
+		}
+	}
+
+	// ip1 must be suppressed.
+	if results[0].Op != "already_banned" {
+		t.Errorf("ip1: Op = %q, want already_banned", results[0].Op)
+	}
+	// ip2 must get strike #1.
+	if results[1].Op != "ban" {
+		t.Errorf("ip2: Op = %q, want ban", results[1].Op)
+	}
+	if results[1].Strike != 1 {
+		t.Errorf("ip2: Strike = %d, want 1", results[1].Strike)
+	}
+	// Only ip2 should have called RecordStrike.
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if len(st.banned) != 1 || st.banned[0].IP != ip2 {
+		t.Errorf("RecordStrike calls = %v, want exactly ip2", st.banned)
+	}
+}
+
+// TestActiveBanGuard_DryRunSkipsGuard verifies that the active-ban guard is
+// NOT applied in dry-run mode (armed=false): the engine still emits dry_ban
+// even when the IP has an active ban, because dry-run never writes anything.
+func TestActiveBanGuard_DryRunSkipsGuard(t *testing.T) {
+	pol := armedPolicy()
+	pol.Armed = false
+
+	st := newMock(map[string]int{ip1.String(): 1})
+	st.setBanned(ip1, true)
+	engine := mustEngine(t, pol, st)
+
+	act, err := engine.Decide(context.Background(), []sdk.Verdict{mkVerdict(ip1, 85, "bruteforce")})
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	// Dry-run still computes the escalation path, not suppressed.
+	if act.Op != "dry_ban" {
+		t.Errorf("dry-run Op = %q, want dry_ban", act.Op)
+	}
+	// Must not call RecordStrike or BumpLastSeen.
+	if len(st.banned) > 0 {
+		t.Errorf("dry-run: RecordStrike called %d time(s)", len(st.banned))
+	}
+	if len(st.lastSeenBumps) > 0 {
+		t.Errorf("dry-run: BumpLastSeen called %d time(s)", len(st.lastSeenBumps))
 	}
 }
 

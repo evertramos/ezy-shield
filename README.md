@@ -129,7 +129,7 @@ The installer fetches the latest signed binaries (`ezyshield` and
 To install a specific version or release candidate, set `EZYSHIELD_VERSION`:
 
 ```sh
-curl -sfL https://get.ezyshield.com | EZYSHIELD_VERSION=v0.3.0-rc.1 sudo sh
+curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=v0.3.0-rc.1 sh
 ```
 
 See [docs/content/en/guides/install.md](docs/content/en/guides/install.md) for complete installation options.

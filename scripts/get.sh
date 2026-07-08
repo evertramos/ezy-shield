@@ -1,6 +1,7 @@
 #!/bin/sh
 # get.ezyshield.com — EzyShield installer
 # Usage: curl -sfL https://get.ezyshield.com | sudo sh
+# For a specific version: curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=vX.Y.Z sh
 #
 # Environment variables:
 #   EZYSHIELD_VERSION    Install a specific release (e.g., v0.3.0-rc.1). Must start with 'v'.

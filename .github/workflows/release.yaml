@@ -140,16 +140,6 @@ jobs:
           cd dist
           sha256sum * > checksums.txt
 
-      - name: Detect pre-release
-        id: prerelease
-        run: |
-          TAG="${{ needs.tag.outputs.new_tag || github.ref_name }}"
-          if echo "$TAG" | grep -qE '-(rc|alpha|beta)'; then
-            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:

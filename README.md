@@ -122,7 +122,7 @@ To install a specific version or release candidate, set `EZYSHIELD_VERSION`:
 curl -sfL https://get.ezyshield.com | EZYSHIELD_VERSION=v0.3.0-rc.1 sudo sh
 ```
 
-See [docs/guides/install.md](docs/guides/install.md) for complete installation options.
+See [docs/content/en/guides/install.md](docs/content/en/guides/install.md) for complete installation options.
 
 ### From source (works today)
 
@@ -213,7 +213,7 @@ notify:
 
 Start in dry-run (`armed: false` in `policy.yaml`), watch what it *would* block,
 then arm it. The full setup walkthrough — collectors, AI, notifications, custom
-rules — is in [docs/QUICKSTART.md](docs/QUICKSTART.md).
+rules — is in [docs/content/en/getting-started/index.md](docs/content/en/getting-started/index.md).
 
 ---
 

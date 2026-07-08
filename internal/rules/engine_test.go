@@ -2,6 +2,7 @@ package rules_test
 
 import (
 	"context"
+	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -425,6 +426,429 @@ func TestNew_ValidationErrors(t *testing.T) {
 				t.Errorf("expected validation error for %q", tc.name)
 			}
 		})
+	}
+}
+
+// ---- sustained rules (low & slow detection) ----
+
+func TestEvaluate_WPProbeSustained_Triggers(t *testing.T) {
+	e := mustEngine(t)
+	w3600 := 3600 * time.Second
+	// 10 wp-login hits in 1h window triggers http_wp_probe_sustained
+	sample := make([]sdk.Event, 10)
+	for i := range sample {
+		sample[i] = httpEvent("200", "/wp-login.php?action=login")
+	}
+	agg := makeAgg(ip1, w3600, sample)
+
+	verdicts := e.Evaluate(context.Background(), agg)
+	found := findVerdict(verdicts, "bruteforce")
+	if found == nil {
+		t.Fatalf("expected sustained bruteforce verdict, got %v", verdicts)
+	}
+	if found.Score != 75 {
+		t.Errorf("Score = %d, want 75", found.Score)
+	}
+}
+
+func TestEvaluate_WPProbeSustained_BelowThreshold(t *testing.T) {
+	e := mustEngine(t)
+	w3600 := 3600 * time.Second
+	// 9 hits (below threshold of 10) must not trigger
+	sample := make([]sdk.Event, 9)
+	for i := range sample {
+		sample[i] = httpEvent("200", "/wp-login.php")
+	}
+	agg := makeAgg(ip1, w3600, sample)
+
+	verdicts := e.Evaluate(context.Background(), agg)
+	if v := findVerdict(verdicts, "bruteforce"); v != nil && v.Score == 75 {
+		t.Errorf("expected no sustained bruteforce verdict below threshold, got %v", v)
+	}
+}
+
+func TestEvaluate_WPProbeSustained_LegitimateUserDoesNotTrigger(t *testing.T) {
+	e := mustEngine(t)
+	w3600 := 3600 * time.Second
+	// 3 wp-login hits in 1h (normal admin login behavior)
+	sample := make([]sdk.Event, 3)
+	for i := range sample {
+		sample[i] = httpEvent("200", "/wp-login.php?action=login")
+	}
+	agg := makeAgg(ip1, w3600, sample)
+
+	verdicts := e.Evaluate(context.Background(), agg)
+	if v := findVerdict(verdicts, "bruteforce"); v != nil && v.Score == 75 {
+		t.Errorf("expected no sustained bruteforce for legitimate user, got %v", v)
+	}
+}
+
+func TestEvaluate_XMLRPCSustained_Triggers(t *testing.T) {
+	e := mustEngine(t)
+	w3600 := 3600 * time.Second
+	// 8 xmlrpc hits in 1h window triggers http_xmlrpc_sustained
+	sample := make([]sdk.Event, 8)
+	for i := range sample {
+		sample[i] = httpEvent("200", "/xmlrpc.php")
+	}
+	agg := makeAgg(ip1, w3600, sample)
+
+	verdicts := e.Evaluate(context.Background(), agg)
+	found := findVerdict(verdicts, "bruteforce")
+	if found == nil {
+		t.Fatalf("expected sustained xmlrpc bruteforce verdict, got %v", verdicts)
+	}
+	if found.Score != 75 {
+		t.Errorf("Score = %d, want 75", found.Score)
+	}
+}
+
+func TestEvaluate_ScannerSustained_Triggers(t *testing.T) {
+	e := mustEngine(t)
+	w3600 := 3600 * time.Second
+	// 60 distinct 404s in 1h window triggers http_scanner_sustained
+	sample := make([]sdk.Event, 60)
+	for i := range sample {
+		sample[i] = httpEvent("404", fmt.Sprintf("/path/%d", i))
+	}
+	agg := makeAgg(ip1, w3600, sample)
+
+	verdicts := e.Evaluate(context.Background(), agg)
+	found := findVerdict(verdicts, "scanner")
+	if found == nil {
+		t.Fatalf("expected sustained scanner verdict, got %v", verdicts)
+	}
+	if found.Score != 70 {
+		t.Errorf("Score = %d, want 70", found.Score)
+	}
+}
+
+func TestEvaluate_SSHBruteforceSustained_Triggers(t *testing.T) {
+	e := mustEngine(t)
+	w3600 := 3600 * time.Second
+	// 15 ssh_fail events in 1h window triggers ssh_bruteforce_sustained
+	sample := make([]sdk.Event, 15)
+	for i := range sample {
+		sample[i] = sshEvent("ssh_fail")
+	}
+	agg := makeAgg(ip1, w3600, sample)
+
+	verdicts := e.Evaluate(context.Background(), agg)
+	found := findVerdict(verdicts, "bruteforce")
+	if found == nil {
+		t.Fatalf("expected sustained ssh bruteforce verdict, got %v", verdicts)
+	}
+	if found.Score != 80 {
+		t.Errorf("Score = %d, want 80", found.Score)
+	}
+}
+
+// ---- contains_any ----
+
+func TestEvaluate_ContainsAny_Triggers(t *testing.T) {
+	content := `
+rules:
+  - name: test_contains_any
+    kinds: [http_request]
+    field: path
+    contains_any: [phpunit, shell.php, .git]
+    window: 60s
+    threshold: 2
+    score: 90
+    category: exploit_probe
+`
+	tmp := filepath.Join(t.TempDir(), "rules.yaml")
+	if err := os.WriteFile(tmp, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	e, err := rules.New(tmp)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Two matches: one with phpunit, one with .git
+	sample := []sdk.Event{
+		httpEvent("200", "/admin/phpunit"),
+		httpEvent("200", "/repo/.git/config"),
+	}
+	agg := makeAgg(ip1, w60, sample)
+
+	verdicts := e.Evaluate(context.Background(), agg)
+	if v := findVerdict(verdicts, "exploit_probe"); v == nil {
+		t.Fatal("expected exploit_probe verdict from contains_any")
+	}
+}
+
+func TestEvaluate_ContainsAny_NoMatch(t *testing.T) {
+	content := `
+rules:
+  - name: test_contains_any
+    kinds: [http_request]
+    field: path
+    contains_any: [phpunit, shell.php, .git]
+    window: 60s
+    threshold: 2
+    score: 90
+    category: exploit_probe
+`
+	tmp := filepath.Join(t.TempDir(), "rules.yaml")
+	if err := os.WriteFile(tmp, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	e, err := rules.New(tmp)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// No matches: legitimate paths
+	sample := []sdk.Event{
+		httpEvent("200", "/index.html"),
+		httpEvent("200", "/api/users"),
+	}
+	agg := makeAgg(ip1, w60, sample)
+
+	verdicts := e.Evaluate(context.Background(), agg)
+	if v := findVerdict(verdicts, "exploit_probe"); v != nil {
+		t.Errorf("expected no exploit_probe, got %v", v)
+	}
+}
+
+func TestEvaluate_ContainsAny_PartialMatch(t *testing.T) {
+	content := `
+rules:
+  - name: test_contains_any
+    kinds: [http_request]
+    field: path
+    contains_any: [phpunit, shell.php, .git]
+    window: 60s
+    threshold: 2
+    score: 90
+    category: exploit_probe
+`
+	tmp := filepath.Join(t.TempDir(), "rules.yaml")
+	if err := os.WriteFile(tmp, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	e, err := rules.New(tmp)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Only one match, threshold is 2 — must not fire
+	sample := []sdk.Event{
+		httpEvent("200", "/admin/phpunit"),
+		httpEvent("200", "/index.html"),
+	}
+	agg := makeAgg(ip1, w60, sample)
+
+	verdicts := e.Evaluate(context.Background(), agg)
+	if v := findVerdict(verdicts, "exploit_probe"); v != nil {
+		t.Errorf("expected no verdict below threshold, got %v", v)
+	}
+}
+
+func TestNew_ContainsAndContainsAny_MutualExclusion(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+	}{
+		{
+			name: "value and contains_any both set",
+			content: `rules:
+  - name: test
+    kinds: [http_request]
+    field: path
+    value: "/foo"
+    contains_any: ["bar", "baz"]
+    window: 60s
+    threshold: 1
+    score: 70
+    category: scanner`,
+		},
+		{
+			name: "contains and contains_any both set",
+			content: `rules:
+  - name: test
+    kinds: [http_request]
+    field: path
+    contains: "bar"
+    contains_any: ["foo", "baz"]
+    window: 60s
+    threshold: 1
+    score: 70
+    category: scanner`,
+		},
+		{
+			name: "value, contains, and contains_any all set",
+			content: `rules:
+  - name: test
+    kinds: [http_request]
+    field: path
+    value: "/foo"
+    contains: "bar"
+    contains_any: ["baz", "qux"]
+    window: 60s
+    threshold: 1
+    score: 70
+    category: scanner`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := filepath.Join(t.TempDir(), "rules.yaml")
+			if err := os.WriteFile(tmp, []byte(tc.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := rules.New(tmp); err == nil {
+				t.Errorf("expected validation error for %q", tc.name)
+			}
+		})
+	}
+}
+
+// ---- http_rce_probe ----
+
+func TestEvaluate_RCEProbe_Triggers(t *testing.T) {
+	e := mustEngine(t)
+	// Single RCE probe path must trigger (threshold=1, score=95)
+	sample := []sdk.Event{
+		httpEvent("404", "/.git/config"),
+	}
+	agg := makeAgg(ip1, w60, sample)
+
+	verdicts := e.Evaluate(context.Background(), agg)
+	found := findVerdict(verdicts, "exploit_probe")
+	if found == nil {
+		t.Fatalf("expected exploit_probe verdict, got %v", verdicts)
+	}
+	if found.Score != 95 {
+		t.Errorf("Score = %d, want 95", found.Score)
+	}
+}
+
+func TestEvaluate_RCEProbe_MultipleExploitPaths(t *testing.T) {
+	e := mustEngine(t)
+	// Multiple different RCE paths
+	sample := []sdk.Event{
+		httpEvent("500", "/admin.php"),
+		httpEvent("200", "/phpunit"),
+		httpEvent("404", "/.aws/credentials"),
+	}
+	agg := makeAgg(ip1, w60, sample)
+
+	verdicts := e.Evaluate(context.Background(), agg)
+	found := findVerdict(verdicts, "exploit_probe")
+	if found == nil {
+		t.Fatalf("expected exploit_probe verdict for multiple probes, got %v", verdicts)
+	}
+}
+
+func TestEvaluate_RCEProbe_NoFalsePositives(t *testing.T) {
+	e := mustEngine(t)
+	// Legitimate paths must not trigger
+	sample := []sdk.Event{
+		httpEvent("200", "/index.html"),
+		httpEvent("200", "/api/users"),
+		httpEvent("200", "/config/app.json"),
+	}
+	agg := makeAgg(ip1, w60, sample)
+
+	verdicts := e.Evaluate(context.Background(), agg)
+	if v := findVerdict(verdicts, "exploit_probe"); v != nil {
+		t.Errorf("expected no exploit_probe for legitimate paths, got %v", v)
+	}
+}
+
+// ---- http_scanner_400 ----
+
+func TestEvaluate_HTTPScanner400_Triggers(t *testing.T) {
+	e := mustEngine(t)
+	sample := make([]sdk.Event, 10)
+	for i := range sample {
+		sample[i] = httpEvent("400", "/path")
+	}
+	agg := makeAgg(ip1, w60, sample)
+
+	verdicts := e.Evaluate(context.Background(), agg)
+	found := findVerdict(verdicts, "scanner")
+	if found == nil {
+		t.Fatalf("expected scanner verdict for 10 400s, got %v", verdicts)
+	}
+	if found.Score != 60 {
+		t.Errorf("Score = %d, want 60", found.Score)
+	}
+}
+
+func TestEvaluate_HTTPScanner400_BelowThreshold(t *testing.T) {
+	e := mustEngine(t)
+	sample := make([]sdk.Event, 9) // 9 < 10
+	for i := range sample {
+		sample[i] = httpEvent("400", "/path")
+	}
+	agg := makeAgg(ip1, w60, sample)
+
+	verdicts := e.Evaluate(context.Background(), agg)
+	found := findVerdict(verdicts, "scanner")
+	if found != nil && found.Score == 60 {
+		t.Errorf("expected no 400 scanner below threshold, got %v", found)
+	}
+}
+
+// ---- http_scanner_503 ----
+
+func TestEvaluate_HTTPScanner503_Triggers(t *testing.T) {
+	e := mustEngine(t)
+	sample := make([]sdk.Event, 15)
+	for i := range sample {
+		sample[i] = httpEvent("503", "/path")
+	}
+	agg := makeAgg(ip1, w60, sample)
+
+	verdicts := e.Evaluate(context.Background(), agg)
+	found := findVerdict(verdicts, "scanner")
+	if found == nil {
+		t.Fatalf("expected scanner verdict for 15 503s, got %v", verdicts)
+	}
+	if found.Score != 65 {
+		t.Errorf("Score = %d, want 65", found.Score)
+	}
+}
+
+func TestEvaluate_HTTPScanner503_BelowThreshold(t *testing.T) {
+	e := mustEngine(t)
+	sample := make([]sdk.Event, 14) // 14 < 15
+	for i := range sample {
+		sample[i] = httpEvent("503", "/path")
+	}
+	agg := makeAgg(ip1, w60, sample)
+
+	verdicts := e.Evaluate(context.Background(), agg)
+	found := findVerdict(verdicts, "scanner")
+	if found != nil && found.Score == 65 {
+		t.Errorf("expected no 503 scanner below threshold, got %v", found)
+	}
+}
+
+// ---- http_env_probe expanded ----
+
+func TestEvaluate_EnvProbe_ExpandedVariants(t *testing.T) {
+	e := mustEngine(t)
+	// Test all env variants trigger
+	cases := []string{".env", ".env.local", ".env.production", ".env.staging"}
+	for _, path := range cases {
+		sample := []sdk.Event{
+			httpEvent("200", "/"+path),
+		}
+		agg := makeAgg(ip1, w60, sample)
+
+		verdicts := e.Evaluate(context.Background(), agg)
+		if v := findVerdict(verdicts, "scanner"); v == nil || v.Score != 90 {
+			t.Errorf("expected env_probe for %q, got %v", path, v)
+		}
 	}
 }
 

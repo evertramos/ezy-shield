@@ -1,7 +1,12 @@
+---
+title: Getting Started
+description: Quick start guide to install and run EzyShield
+order: 1
+---
+
 # EzyShield Quick Start
 
 > ⚠️ Pre-alpha project. Run in dry-run mode and report bugs via issues.
-> Portuguese translation: [docs/QUICKSTART.pt-BR.md](QUICKSTART.pt-BR.md)
 
 ---
 

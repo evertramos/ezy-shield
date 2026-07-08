@@ -15,7 +15,7 @@ Após a instalação, você configurou o EzyShield com pelo menos uma fonte de l
 Por padrão, o EzyShield roda em modo **dry-run** — analisa logs e toma decisões, mas nunca bloqueia nada. Isto é intencional: observe primeiro, arme depois.
 
 ```bash
-sudo ezyshield watch
+sudo ezyshield run
 ```
 
 [Traduções adicionais a seguir...]

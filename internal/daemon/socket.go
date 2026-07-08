@@ -171,6 +171,8 @@ func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
 		resp = d.handleList(ctx)
 	case "list_allow":
 		resp = d.handleListAllow(ctx)
+	case "events":
+		resp = d.handleEvents(ctx, req)
 	case "ban":
 		resp = d.handleBan(ctx, req)
 	case "unban":
@@ -178,7 +180,7 @@ func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
 	case "allow":
 		resp = d.handleAllow(ctx, req)
 	default:
-		resp = SocketResponse{Error: fmt.Sprintf("unknown verb %q; valid: status list list_allow ban unban allow", req.Verb)}
+		resp = SocketResponse{Error: fmt.Sprintf("unknown verb %q; valid: status list list_allow events ban unban allow", req.Verb)}
 	}
 
 	writeResponse(conn, resp)
@@ -438,6 +440,34 @@ func (d *Daemon) handleAllow(ctx context.Context, req SocketRequest) SocketRespo
 	)
 
 	return SocketResponse{OK: true}
+}
+
+// handleEvents returns the last N audit_log rows in reverse chronological
+// order. It is read-only; the append-only invariant on audit_log is
+// unaffected. Limit defaults to 100 and is capped at 1000 by the store.
+func (d *Daemon) handleEvents(ctx context.Context, req SocketRequest) SocketResponse {
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := d.store.ListAuditLog(ctx, limit)
+	if err != nil {
+		return SocketResponse{Error: fmt.Sprintf("list audit_log: %v", err)}
+	}
+	out := make([]EventEntry, 0, len(rows))
+	for _, e := range rows {
+		out = append(out, EventEntry{
+			ID:         e.ID,
+			RecordedAt: e.RecordedAt,
+			Op:         e.Op,
+			IP:         e.IP,
+			TTLSeconds: e.TTLSeconds,
+			Strike:     e.Strike,
+			Reason:     e.Reason,
+		})
+	}
+	raw, _ := json.Marshal(out)
+	return SocketResponse{OK: true, Data: raw}
 }
 
 // handleListAllow returns every persisted allowlist entry with display-ready

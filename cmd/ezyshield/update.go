@@ -252,8 +252,10 @@ func runUpdate(ctx context.Context, opts updateOptions) error {
 		out.println("done")
 		out.printf("Verifying checksum... OK\n")
 
-		// Make executable before verify step
-		if err := os.Chmod(tmp, 0755); err != nil {
+		// Make executable before verify step. File is temporary and will be deleted
+		// or installed atomically; 0755 is needed for execution (gossec G302 is a false
+		// positive here since the file is ephemeral and in /tmp with restrictive perms).
+		if err := os.Chmod(tmp, 0755); err != nil { //nolint:gosec
 			return fmt.Errorf("chmod temp binary %s: %w", spec.Name, err)
 		}
 

@@ -132,7 +132,8 @@ jobs:
           # Fail only if there are vulnerabilities with fixes available (meaning we should update)
           if grep -q "Fixed in:" /tmp/vulncheck.out; then
             # Check if ALL fixes are stdlib (Go version upgrade needed, not actionable now)
-            if grep "Fixed in:" /tmp/vulncheck.out | grep -qvE "^Fixed in: go"; then
+            # Matches patterns like "Fixed in: go1.26.5" or "Fixed in: crypto/tls@go1.26.5"
+            if grep "Fixed in:" /tmp/vulncheck.out | grep -qvE "(Fixed in: go[0-9]|@go[0-9])"; then
               echo "::error::Vulnerabilities with available fixes in dependencies. Run: go get -u && go mod tidy"
               exit 1
             fi

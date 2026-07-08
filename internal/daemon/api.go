@@ -30,6 +30,10 @@ type SocketRequest struct {
 	// Reason is an operator-supplied free-text note, surfaced in list output
 	// and the audit log.
 	Reason string `json:"reason,omitempty"`
+	// Limit caps the number of rows returned by list-shaped verbs (currently
+	// "events"). Zero or negative means "server default" (100 for events).
+	// The daemon also enforces an upper bound to avoid ballooning memory.
+	Limit int `json:"limit,omitempty"`
 }
 
 // SocketResponse is returned by the daemon for every request.
@@ -68,6 +72,21 @@ type BanEntry struct {
 	// ASN is the autonomous system number string (e.g. "AS12345"), or "" when
 	// enrichment is not configured.
 	ASN string `json:"asn,omitempty"`
+}
+
+// EventEntry is one element in the array returned by the "events" verb.
+// It mirrors the audit_log row in the store; recorded_at is an RFC 3339
+// UTC timestamp string, ttl_seconds is 0 for verbs that carry no TTL
+// (unban, allow_expire, etc.). ID is the monotonic audit_log primary key
+// used by consumers (dashboard bus, future CLI --since flag) to dedupe.
+type EventEntry struct {
+	ID         int64  `json:"id"`
+	RecordedAt string `json:"recorded_at"`
+	Op         string `json:"op"`
+	IP         string `json:"ip"`
+	TTLSeconds int64  `json:"ttl_seconds"`
+	Strike     int    `json:"strike"`
+	Reason     string `json:"reason,omitempty"`
 }
 
 // AllowEntry is one element in the array returned by the "list_allow" verb.

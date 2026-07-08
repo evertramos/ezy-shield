@@ -55,6 +55,28 @@ func (s *Server) fetchBans(ctx context.Context) ([]daemon.BanEntry, error) {
 	return entries, nil
 }
 
+// fetchEvents pulls the most recent audit_log rows (up to `limit`) from
+// the daemon. It powers both the events page and the event bus poll
+// loop. A non-positive limit falls back to the daemon default.
+func (s *Server) fetchEvents(ctx context.Context) ([]daemon.EventEntry, error) {
+	return s.fetchEventsN(ctx, 100)
+}
+
+func (s *Server) fetchEventsN(ctx context.Context, limit int) ([]daemon.EventEntry, error) {
+	resp, err := s.callDaemon(ctx, daemon.SocketRequest{Verb: "events", Limit: limit})
+	if err != nil {
+		return nil, err
+	}
+	if len(resp.Data) == 0 {
+		return nil, nil
+	}
+	var entries []daemon.EventEntry
+	if err := json.Unmarshal(resp.Data, &entries); err != nil {
+		return nil, fmt.Errorf("parse events response: %w", err)
+	}
+	return entries, nil
+}
+
 func (s *Server) fetchAllows(ctx context.Context) ([]daemon.AllowEntry, error) {
 	resp, err := s.callDaemon(ctx, daemon.SocketRequest{Verb: "list_allow"})
 	if err != nil {

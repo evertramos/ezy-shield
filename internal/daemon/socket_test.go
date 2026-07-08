@@ -258,3 +258,56 @@ func TestHandleAllow_Permanent_LogsCLIAction(t *testing.T) {
 		"source=cli",
 	)
 }
+
+// TestHandleEvents_RoundTrip verifies the "events" verb returns the audit
+// rows written by previous CLI verbs in newest-first order and honours the
+// per-request Limit.
+func TestHandleEvents_RoundTrip(t *testing.T) {
+	_ = captureSlog(t)
+	d := newTestDaemonForSocket(t, true /* armed */)
+
+	// Seed the audit_log via ban/unban/allow verbs so we exercise the real
+	// audit path (not a raw store.Audit call).
+	for _, req := range []SocketRequest{
+		{Verb: "ban", IP: "203.0.113.1", TTL: "5m", Reason: "sshd"},
+		{Verb: "unban", IP: "203.0.113.1"},
+		{Verb: "allow", IP: "192.0.2.0/24", Reason: "office"},
+	} {
+		resp := callSocket(t, d, req)
+		if !resp.OK {
+			t.Fatalf("seed %q failed: %s", req.Verb, resp.Error)
+		}
+	}
+
+	// Default limit (100) → all seeded rows visible.
+	resp := callSocket(t, d, SocketRequest{Verb: "events"})
+	if !resp.OK {
+		t.Fatalf("events verb failed: %s", resp.Error)
+	}
+	var entries []EventEntry
+	if err := json.Unmarshal(resp.Data, &entries); err != nil {
+		t.Fatalf("decode events: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("expected at least one audit row, got 0")
+	}
+	// Newest first.
+	for i := 1; i < len(entries); i++ {
+		if entries[i-1].ID <= entries[i].ID {
+			t.Errorf("rows not DESC: %d then %d", entries[i-1].ID, entries[i].ID)
+		}
+	}
+
+	// Limit=1 → single row.
+	resp2 := callSocket(t, d, SocketRequest{Verb: "events", Limit: 1})
+	if !resp2.OK {
+		t.Fatalf("events limit=1 failed: %s", resp2.Error)
+	}
+	var one []EventEntry
+	if err := json.Unmarshal(resp2.Data, &one); err != nil {
+		t.Fatalf("decode limit=1: %v", err)
+	}
+	if len(one) != 1 {
+		t.Errorf("limit=1 returned %d rows, want 1", len(one))
+	}
+}

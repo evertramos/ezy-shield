@@ -62,7 +62,59 @@ const pageStyles = `<style>
   .pill.dryrun  { background: #fff8e0; color: #6b4c00; }
   .pill.up      { background: #e6f4ea; color: #14532d; }
   .pill.down    { background: #fdecea; color: #611a15; }
+  #live-dot { display: inline-flex; align-items: center; gap: 0.3rem;
+              color: #b7bec8; font-size: 0.8rem; }
+  #live-dot .dot { width: 0.5rem; height: 0.5rem; border-radius: 50%;
+                   background: #6b7580; transition: background 0.2s ease; }
+  #live-dot.on .dot { background: #40c463; box-shadow: 0 0 0 0 rgba(64,196,99,.5);
+                      animation: livepulse 2s ease-out infinite; }
+  #live-dot.on { color: #dfe4eb; }
+  @keyframes livepulse {
+    0%   { box-shadow: 0 0 0 0 rgba(64,196,99,.55); }
+    70%  { box-shadow: 0 0 0 6px rgba(64,196,99,0); }
+    100% { box-shadow: 0 0 0 0 rgba(64,196,99,0); }
+  }
 </style>`
+
+// liveScript wires the shared /dashboard/ws socket. It exposes a small
+// window.EzyLive API that per-page scripts hook into to react to events
+// (e.g. prepend a row to the events table, reload the bans page).
+// Kept intentionally small: no external JS libraries; ~1 KB minified.
+const liveScript = `
+(function () {
+  var dot = document.getElementById('live-dot');
+  function setLive(on) { if (dot) dot.classList.toggle('on', !!on); }
+  setLive(false);
+  var scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  var url = scheme + '//' + window.location.host + '/dashboard/ws';
+  var handlers = { audit: [], refresh: [] };
+  window.EzyLive = {
+    on: function (kind, fn) { (handlers[kind] || (handlers[kind] = [])).push(fn); }
+  };
+  var backoff = 1000;
+  function connect() {
+    var ws;
+    try { ws = new WebSocket(url); } catch (e) { return schedule(); }
+    ws.onopen = function () { setLive(true); backoff = 1000; };
+    ws.onclose = function () { setLive(false); schedule(); };
+    ws.onerror = function () { setLive(false); };
+    ws.onmessage = function (ev) {
+      var msg;
+      try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      if (msg.type === 'refresh') { window.location.reload(); return; }
+      var list = handlers[msg.type] || [];
+      for (var i = 0; i < list.length; i++) {
+        try { list[i](msg); } catch (e) { /* ignore per-handler errors */ }
+      }
+    };
+  }
+  function schedule() {
+    setTimeout(connect, backoff);
+    backoff = Math.min(backoff * 2, 30000);
+  }
+  connect();
+})();
+`
 
 // dashPagesRoot defines every named template shared by Phase 2 dashboard
 // pages. Each concrete page (status, bans, allowlist) is cloned from this
@@ -84,11 +136,17 @@ var dashPagesRoot = template.Must(template.New("root").Parse(`
         <a href="/dashboard" class="{{if eq .Active "status"}}active{{end}}">Status</a>
         <a href="/dashboard/bans" class="{{if eq .Active "bans"}}active{{end}}">Bans</a>
         <a href="/dashboard/allowlist" class="{{if eq .Active "allowlist"}}active{{end}}">Allowlist</a>
+        <a href="/dashboard/events" class="{{if eq .Active "events"}}active{{end}}">Events</a>
       </nav>
     </div>
-    <form method="post" action="/logout">
-      <button type="submit">Sign out</button>
-    </form>
+    <div style="display:flex;align-items:center;gap:1rem;">
+      <span id="live-dot" title="Live updates" aria-label="Live updates">
+        <span class="dot"></span><span class="live-label">live</span>
+      </span>
+      <form method="post" action="/logout">
+        <button type="submit">Sign out</button>
+      </form>
+    </div>
   </header>
   <main>
     {{if .Error}}<div class="banner err">{{.Error}}</div>{{end}}
@@ -96,6 +154,8 @@ var dashPagesRoot = template.Must(template.New("root").Parse(`
     {{if .Offline}}<div class="banner warn">Daemon is offline. Live data is not available until <code>ezyshield watch</code> is running.</div>{{end}}
     {{block "content" .}}{{end}}
   </main>
+  <script>` + liveScript + `</script>
+  {{block "extraScript" .}}{{end}}
 </body>
 </html>{{end}}
 `))
@@ -115,6 +175,7 @@ type pageEnvelope struct {
 // startup rather than the first request.
 var (
 	statusPage = mustCompilePage(`
+{{define "content"}}
 <div class="card">
   <h2>Daemon</h2>
   {{if .Data.Offline}}
@@ -141,9 +202,11 @@ var (
   </table>
 </div>
 {{end}}
+{{end}}
 `)
 
 	bansPage = mustCompilePage(`
+{{define "content"}}
 <div class="card">
   <h2>Manual ban</h2>
   <form class="stacked" method="post" action="/dashboard/ban">
@@ -187,9 +250,23 @@ var (
     <p class="muted">No active bans.</p>
   {{end}}
 </div>
+{{end}}
+{{define "extraScript"}}<script>
+  // Any new audit event that touches the ban surface triggers a full
+  // reload — cheap in Phase 3 and keeps the row shape identical to the
+  // server-rendered page. A burst larger than the bus coalesces already
+  // arrives as a "refresh" and is handled globally by liveScript.
+  window.EzyLive && window.EzyLive.on('audit', function (msg) {
+    var op = msg.entry && msg.entry.op;
+    if (op && (op.indexOf('ban') === 0 || op === 'unban' || op === 'dry_ban')) {
+      window.location.reload();
+    }
+  });
+</script>{{end}}
 `)
 
 	allowlistPage = mustCompilePage(`
+{{define "content"}}
 <div class="card">
   <h2>Add to allowlist</h2>
   <form class="stacked" method="post" action="/dashboard/allow">
@@ -224,14 +301,91 @@ var (
     <p class="muted">No allowlist entries.</p>
   {{end}}
 </div>
+{{end}}
+{{define "extraScript"}}<script>
+  window.EzyLive && window.EzyLive.on('audit', function (msg) {
+    var op = msg.entry && msg.entry.op;
+    if (op && op.indexOf('allow') === 0) {
+      window.location.reload();
+    }
+  });
+</script>{{end}}
+`)
+
+	eventsPage = mustCompilePage(`
+{{define "content"}}
+<div class="card">
+  <h2>Recent events (last 100)</h2>
+  {{if .Data.Offline}}
+    <p class="muted">Live data unavailable while the daemon is offline.</p>
+  {{else}}
+    <table id="events-table">
+      <thead><tr>
+        <th>Time (UTC)</th><th>Operation</th><th>IP</th><th>Strike</th><th>TTL</th><th>Reason</th>
+      </tr></thead>
+      <tbody id="events-tbody">
+      {{if .Data.Entries}}
+        {{range .Data.Entries}}
+        <tr data-audit-id="{{.ID}}">
+          <td>{{.RecordedAt}}</td>
+          <td>{{.Op}}</td>
+          <td>{{.IP}}</td>
+          <td>{{.Strike}}</td>
+          <td>{{if gt .TTLSeconds 0}}{{.TTLSeconds}}s{{else}}<span class="muted">—</span>{{end}}</td>
+          <td>{{if .Reason}}{{.Reason}}{{else}}<span class="muted">—</span>{{end}}</td>
+        </tr>
+        {{end}}
+      {{else}}
+        <tr id="events-empty"><td colspan="6" class="muted">No events recorded yet.</td></tr>
+      {{end}}
+      </tbody>
+    </table>
+  {{end}}
+</div>
+{{end}}
+{{define "extraScript"}}<script>
+  (function () {
+    var tbody = document.getElementById('events-tbody');
+    if (!tbody) return;
+    function esc(s) {
+      var d = document.createElement('div');
+      d.textContent = s == null ? '' : String(s);
+      return d.innerHTML;
+    }
+    window.EzyLive && window.EzyLive.on('audit', function (msg) {
+      var e = msg.entry;
+      if (!e || tbody.querySelector('tr[data-audit-id="' + esc(e.id) + '"]')) return;
+      var empty = document.getElementById('events-empty');
+      if (empty) empty.remove();
+      var tr = document.createElement('tr');
+      tr.setAttribute('data-audit-id', String(e.id));
+      var reason = e.reason ? esc(e.reason) : '<span class="muted">—</span>';
+      var ttl = e.ttl_seconds > 0 ? esc(e.ttl_seconds) + 's' : '<span class="muted">—</span>';
+      tr.innerHTML =
+        '<td>' + esc(e.recorded_at) + '</td>' +
+        '<td>' + esc(e.op) + '</td>' +
+        '<td>' + esc(e.ip) + '</td>' +
+        '<td>' + esc(e.strike) + '</td>' +
+        '<td>' + ttl + '</td>' +
+        '<td>' + reason + '</td>';
+      tbody.insertBefore(tr, tbody.firstChild);
+      // Cap at 100 rendered rows so the DOM doesn't grow unbounded.
+      while (tbody.children.length > 100) {
+        tbody.removeChild(tbody.lastElementChild);
+      }
+    });
+  })();
+</script>{{end}}
 `)
 )
 
 // mustCompilePage returns a template ready to Execute against a
-// pageRenderData value with Data set to the concrete page payload.
-func mustCompilePage(contentSrc string) *template.Template {
+// pageRenderData value. bundle must contain a `{{define "content"}}…{{end}}`
+// block and may optionally define `{{define "extraScript"}}…{{end}}` for
+// per-page JavaScript that hooks into the shared window.EzyLive API.
+func mustCompilePage(bundle string) *template.Template {
 	t := template.Must(dashPagesRoot.Clone())
-	template.Must(t.New("content").Parse(contentSrc))
+	template.Must(t.Parse(bundle))
 	return t.Lookup("layout")
 }
 
@@ -264,6 +418,17 @@ func renderBansPage(w io.Writer, data bansPageData) error {
 		Offline: data.Offline,
 	}
 	return bansPage.Execute(w, pageRenderData{pageEnvelope: env, Data: data})
+}
+
+func renderEventsPage(w io.Writer, data eventsPageData) error {
+	env := pageEnvelope{
+		Title:   "Events",
+		Active:  "events",
+		Error:   data.Error,
+		Info:    data.Info,
+		Offline: data.Offline,
+	}
+	return eventsPage.Execute(w, pageRenderData{pageEnvelope: env, Data: data})
 }
 
 func renderAllowlistPage(w io.Writer, data allowlistPageData) error {

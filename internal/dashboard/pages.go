@@ -129,6 +129,31 @@ type allowlistPageData struct {
 	Info    string
 }
 
+type eventsPageData struct {
+	Entries []daemon.EventEntry
+	Offline bool
+	Error   string
+	Info    string
+}
+
+func (s *Server) handleEventsPage(w http.ResponseWriter, r *http.Request) {
+	data := eventsPageData{}
+	entries, err := s.fetchEvents(r.Context())
+	switch {
+	case err == nil:
+		data.Entries = entries
+	case isOffline(err):
+		data.Offline = true
+	default:
+		s.logger.Error("dashboard events rpc", "err", err)
+		data.Error = "Daemon returned an error. See the daemon log."
+	}
+	if err := renderEventsPage(w, data); err != nil {
+		s.logger.Error("render events", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	}
+}
+
 func (s *Server) handleAllowlistPage(w http.ResponseWriter, r *http.Request) {
 	data := allowlistPageData{}
 	entries, err := s.fetchAllows(r.Context())

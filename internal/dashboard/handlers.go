@@ -19,9 +19,14 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("GET /dashboard", s.requireAuth(s.handleStatusPage))
 	mux.HandleFunc("GET /dashboard/bans", s.requireAuth(s.handleBansPage))
 	mux.HandleFunc("GET /dashboard/allowlist", s.requireAuth(s.handleAllowlistPage))
+	mux.HandleFunc("GET /dashboard/events", s.requireAuth(s.handleEventsPage))
 	mux.HandleFunc("POST /dashboard/ban", s.requireAuth(s.handleBanPost))
 	mux.HandleFunc("POST /dashboard/unban", s.requireAuth(s.handleUnbanPost))
 	mux.HandleFunc("POST /dashboard/allow", s.requireAuth(s.handleAllowPost))
+	// WebSocket endpoint for live-update pushes. The upgrade is auth-
+	// gated by the same session cookie check as every /dashboard route,
+	// so an unauthenticated browser cannot open the socket.
+	mux.HandleFunc("GET /dashboard/ws", s.requireAuth(s.handleWebSocket))
 	return mux
 }
 

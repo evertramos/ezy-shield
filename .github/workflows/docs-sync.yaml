@@ -1,6 +1,7 @@
-name: Sync docs to site
+name: 📃 Sync docs to site
 
 on:
+  workflow_dispatch: 
   push:
     branches: [main]
     paths: ['docs/content/**']

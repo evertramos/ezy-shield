@@ -2,38 +2,22 @@ package main
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
-	"net"
-	"time"
 
 	"github.com/evertramos/ezy-shield/internal/daemon"
 )
 
-const dialTimeout = 5 * time.Second
-
-// daemonRPC opens a connection to the daemon unix socket, sends req, and
-// returns the parsed SocketResponse.  It returns a non-nil error if the
-// connection fails or the daemon reports an error.
+// daemonRPC is a thin wrapper around daemon.Call that keeps the CLI's
+// friendly "is 'ezyshield watch' running?" hint when the socket refuses
+// the connection. New callers should use daemon.Call directly.
 func daemonRPC(ctx context.Context, socketPath string, req daemon.SocketRequest) (*daemon.SocketResponse, error) {
-	conn, err := (&net.Dialer{Timeout: dialTimeout}).DialContext(ctx, "unix", socketPath)
+	resp, err := daemon.Call(ctx, socketPath, req)
 	if err != nil {
-		return nil, fmt.Errorf("cannot connect to daemon at %s: %w\n(Is 'ezyshield watch' running?)", socketPath, err)
+		if errors.Is(err, daemon.ErrDaemonUnreachable) {
+			return nil, fmt.Errorf("cannot connect to daemon at %s: %w\n(Is 'ezyshield watch' running?)", socketPath, err)
+		}
+		return resp, err
 	}
-	defer conn.Close() //nolint:errcheck
-
-	if err := json.NewEncoder(conn).Encode(req); err != nil {
-		return nil, fmt.Errorf("send request: %w", err)
-	}
-
-	var resp daemon.SocketResponse
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
-	}
-
-	if !resp.OK {
-		return &resp, fmt.Errorf("daemon error: %s", resp.Error)
-	}
-
-	return &resp, nil
+	return resp, nil
 }

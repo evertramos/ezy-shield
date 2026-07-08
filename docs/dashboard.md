@@ -4,8 +4,9 @@ The EzyShield dashboard is a small web UI that runs alongside the daemon and
 gives operators a browser view of daemon state, active bans, strike history,
 allowlist and logs.
 
-**Status:** Phase 1 — authentication scaffold only. The live views, manual
-ban/unban and WebSocket log tail land in later phases (issue #56).
+**Status:** Phase 2 — authentication, live status, active-bans and
+allowlist pages, plus manual ban / unban / allow POST actions. Real-time
+WebSocket log tail lands in Phase 3 (issue #56).
 
 ---
 
@@ -78,6 +79,11 @@ The dashboard is opt-in via the `dashboard:` block in `config.yaml`:
 ```yaml
 data_dir: /var/lib/ezyshield
 
+# Daemon control socket — reused by CLI verbs (status, ban, list, ...)
+# and by the dashboard when it needs live data. Defaults to
+# /run/ezyshield/ezyshield.sock.
+socket_path: /run/ezyshield/ezyshield.sock
+
 dashboard:
   # Bind address. Must resolve to a loopback address; anything else
   # is refused at startup.
@@ -91,36 +97,66 @@ dashboard:
 CLI flags override config values:
 
 ```bash
-ezyshield dashboard --addr 127.0.0.1:9091 --auth-db /tmp/auth.db
+ezyshield dashboard \
+  --addr 127.0.0.1:9091 \
+  --auth-db /tmp/auth.db \
+  --socket /run/ezyshield/ezyshield.sock
 ```
 
-If `config.yaml` is missing, the dashboard falls back to `127.0.0.1:9090`
-and `/var/lib/ezyshield/dashboard.db` so operators can dogfood before the
-daemon is fully initialised.
+If `config.yaml` is missing, the dashboard falls back to `127.0.0.1:9090`,
+`/var/lib/ezyshield/dashboard.db`, and the default daemon socket path so
+operators can dogfood before the daemon is fully initialised. When the
+daemon socket is unreachable the dashboard still renders — every page
+shows a graceful "Daemon is offline" banner instead of live data.
 
 ---
 
 ## Routes
 
-| Method | Path      | Auth      | Notes                                       |
-|--------|-----------|-----------|---------------------------------------------|
-| GET    | `/login`  | none      | Login form                                  |
-| POST   | `/login`  | none      | Form submit; sets session cookie on success |
-| POST   | `/logout` | none      | Clears session cookie                       |
-| GET    | `/`       | required  | Placeholder index (Phase 2 will replace)    |
+| Method | Path                     | Auth       | Notes                                                        |
+|--------|--------------------------|------------|--------------------------------------------------------------|
+| GET    | `/login`                 | none       | Login form                                                   |
+| POST   | `/login`                 | none       | Form submit; sets session cookie on success                  |
+| POST   | `/logout`                | none       | Clears session cookie                                        |
+| GET    | `/`                      | required   | Redirects authed sessions to `/dashboard`                    |
+| GET    | `/dashboard`             | required   | Status overview: daemon state, mode, uptime, version, active-ban count, per-strike breakdown |
+| GET    | `/dashboard/bans`        | required   | Table of active bans with per-row unban action + manual ban form |
+| GET    | `/dashboard/allowlist`   | required   | Table of allowlist entries + add-entry form                  |
+| POST   | `/dashboard/ban`         | required   | Manual ban action; redirects to `/dashboard/bans`             |
+| POST   | `/dashboard/unban`       | required   | Manual unban action; redirects to `/dashboard/bans`           |
+| POST   | `/dashboard/allow`       | required   | Add-to-allowlist action; redirects to `/dashboard/allowlist`  |
 
-Unauthenticated requests to `/` receive a `303 See Other` to `/login`.
+Unauthenticated requests to any authed route receive a `303 See Other` to
+`/login`.
+
+Every write action returns a `303` back to the source page with an `ok=…`
+or `err=…` query-string flash code. Only the codes listed below are
+rendered; anything else is silently ignored so crafted URLs cannot inject
+arbitrary strings into the UI.
+
+| Flash code       | Meaning                                                       |
+|------------------|---------------------------------------------------------------|
+| `ban-queued`     | Ban was accepted by the daemon                                |
+| `unban-queued`   | Unban was accepted by the daemon                              |
+| `allow-added`    | Allowlist entry was accepted by the daemon                    |
+| `missing-ip`     | The `ip` field was empty                                      |
+| `invalid-ip`     | The `ip` field could not be parsed as an IP or CIDR (`netip`) |
+| `bad-form`       | Malformed form submission                                     |
+| `daemon-error`   | Daemon reachable but returned a non-OK response               |
+| `daemon-offline` | Daemon unix socket did not accept the connection              |
 
 Session cookies:
 - name `ezyshield_dashboard`,
 - 32-byte hex token from `crypto/rand` (256 bits of entropy),
-- `HttpOnly`, `SameSite=Strict`,
+- `HttpOnly`, `Secure`, `SameSite=Strict`,
 - sliding 30-minute inactivity timeout,
 - stored **in memory only** — daemon restart forces re-login.
 
-Cookies are not marked `Secure` because the dashboard is served over plain
-HTTP on loopback; TLS, if required, terminates in the operator-managed
-tunnel (Cloudflare, SSH, reverse proxy).
+`Secure` is set even though the default loopback deployment is plain HTTP:
+modern browsers treat `http://localhost` as a secure context and still
+deliver the cookie, while operators fronting the dashboard with TLS
+through a reverse proxy or Cloudflare Tunnel benefit from browser refusal
+on plaintext downgrade.
 
 ---
 
@@ -129,14 +165,28 @@ tunnel (Cloudflare, SSH, reverse proxy).
 - **Bind guard:** loopback-only, enforced twice (construction and start).
 - **Password storage:** PBKDF2-SHA256, 600 000 iterations, per-hash random
   salt, constant-time comparison.
-- **Enumeration guard:** the login handler returns the same 401 response
-  and message for unknown username and wrong password.
+- **Enumeration guard:** the login handler runs the same PBKDF2 work
+  against a decoy hash on the unknown-username path, so unknown-user and
+  wrong-password requests are indistinguishable by wall-clock time
+  (CWE-208).
 - **Session store:** in-memory, mutex-protected, opaque token, sliding
   expiry.
-- **Templates:** rendered with `html/template`; any operator-supplied string
-  goes through auto-escaping.
+- **Templates:** rendered with `html/template`; every operator-supplied
+  string — reason notes, IP inputs echoed on error — goes through
+  auto-escaping.
+- **Input validation on write actions:** the `ip` form field is parsed
+  with `netip.ParsePrefix` (falling back to `netip.ParseAddr`) *before*
+  any daemon RPC is issued, so hostnames, oversized strings and invalid
+  characters are rejected at the dashboard edge (`SECURITY-REVIEW.md §1`).
 - **Auth DB permissions:** parent dir created with `0700`, file `chmod 0600`
   after schema apply.
+- **RPC budget:** dashboard-initiated daemon calls run with a 2-second
+  context timeout so a hung daemon does not stall the browser.
+- **Daemon-offline handling:** every page and every write handler
+  differentiates `daemon.ErrDaemonUnreachable` from a daemon-level error,
+  rendering an offline banner (reads) or a `daemon-offline` flash code
+  (writes) instead of surfacing a raw dial error.
 
-Phase 2 additions (not yet implemented): CSRF token on state-changing routes,
-audit log for every write operation, session limits per account.
+Phase 3 additions (not yet implemented): CSRF token on state-changing
+routes, audit log for every write operation, session limits per account,
+WebSocket log tail with server-side redaction.

@@ -13,7 +13,15 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("GET /login", s.handleLoginGet)
 	mux.HandleFunc("POST /login", s.handleLoginPost)
 	mux.HandleFunc("POST /logout", s.handleLogout)
-	mux.HandleFunc("GET /", s.requireAuth(s.handleIndex))
+	// Root redirects authed sessions to the Phase 2 status page and drops
+	// unauthed callers on /login.
+	mux.HandleFunc("GET /", s.requireAuth(s.handleRootRedirect))
+	mux.HandleFunc("GET /dashboard", s.requireAuth(s.handleStatusPage))
+	mux.HandleFunc("GET /dashboard/bans", s.requireAuth(s.handleBansPage))
+	mux.HandleFunc("GET /dashboard/allowlist", s.requireAuth(s.handleAllowlistPage))
+	mux.HandleFunc("POST /dashboard/ban", s.requireAuth(s.handleBanPost))
+	mux.HandleFunc("POST /dashboard/unban", s.requireAuth(s.handleUnbanPost))
+	mux.HandleFunc("POST /dashboard/allow", s.requireAuth(s.handleAllowPost))
 	return mux
 }
 
@@ -109,9 +117,6 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 
-func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {
-	if err := renderIndex(w); err != nil {
-		s.logger.Error("render index", "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-	}
+func (s *Server) handleRootRedirect(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 }

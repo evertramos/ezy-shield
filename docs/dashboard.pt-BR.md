@@ -4,9 +4,9 @@ O dashboard do EzyShield é uma pequena UI web que roda ao lado do daemon e
 oferece aos operadores uma visão via navegador do estado do daemon, banimentos
 ativos, histórico de strikes, allowlist e logs.
 
-**Status:** Fase 1 — apenas o esqueleto de autenticação. As visões em tempo
-real, o ban/unban manual e o log-tail via WebSocket entram em fases seguintes
-(issue #56).
+**Status:** Fase 2 — autenticação, páginas de status, banimentos ativos
+e allowlist, mais ações de ban / unban / allow via POST. O log-tail em
+tempo real via WebSocket entra na Fase 3 (issue #56).
 
 ---
 
@@ -80,6 +80,11 @@ O dashboard é opt-in via o bloco `dashboard:` no `config.yaml`:
 ```yaml
 data_dir: /var/lib/ezyshield
 
+# Socket de controle do daemon — reaproveitado pelos verbos da CLI
+# (status, ban, list, ...) e pelo dashboard quando precisa de dados
+# em tempo real. O padrão é /run/ezyshield/ezyshield.sock.
+socket_path: /run/ezyshield/ezyshield.sock
+
 dashboard:
   # Endereço de bind. Precisa resolver para um endereço de loopback;
   # qualquer outra coisa é recusada no start.
@@ -93,37 +98,67 @@ dashboard:
 Flags da CLI sobrescrevem valores do config:
 
 ```bash
-ezyshield dashboard --addr 127.0.0.1:9091 --auth-db /tmp/auth.db
+ezyshield dashboard \
+  --addr 127.0.0.1:9091 \
+  --auth-db /tmp/auth.db \
+  --socket /run/ezyshield/ezyshield.sock
 ```
 
 Se o `config.yaml` estiver ausente, o dashboard cai para
-`127.0.0.1:9090` e `/var/lib/ezyshield/dashboard.db` — assim o operador
-consegue experimentar a UI antes mesmo do daemon estar totalmente
-inicializado.
+`127.0.0.1:9090`, `/var/lib/ezyshield/dashboard.db` e o socket padrão do
+daemon — assim o operador consegue experimentar a UI antes mesmo do
+daemon estar totalmente inicializado. Quando o socket do daemon não
+responde, o dashboard continua renderizando: cada página mostra um
+banner "Daemon offline" no lugar dos dados ao vivo.
 
 ---
 
 ## Rotas
 
-| Método | Path      | Auth       | Notas                                             |
-|--------|-----------|------------|---------------------------------------------------|
-| GET    | `/login`  | dispensada | Formulário de login                               |
-| POST   | `/login`  | dispensada | Submit do form; grava cookie de sessão no sucesso |
-| POST   | `/logout` | dispensada | Limpa o cookie de sessão                          |
-| GET    | `/`       | obrigatória | Placeholder do índice (Fase 2 substitui)         |
+| Método | Path                     | Auth        | Notas                                                          |
+|--------|--------------------------|-------------|----------------------------------------------------------------|
+| GET    | `/login`                 | dispensada  | Formulário de login                                            |
+| POST   | `/login`                 | dispensada  | Submit do form; grava cookie de sessão no sucesso              |
+| POST   | `/logout`                | dispensada  | Limpa o cookie de sessão                                       |
+| GET    | `/`                      | obrigatória | Redireciona sessões autenticadas para `/dashboard`             |
+| GET    | `/dashboard`             | obrigatória | Overview de status: estado do daemon, modo, uptime, versão, contagem de bans ativos, distribuição por strike |
+| GET    | `/dashboard/bans`        | obrigatória | Tabela de bans ativos com botão de unban por linha + form de ban manual |
+| GET    | `/dashboard/allowlist`   | obrigatória | Tabela de entradas da allowlist + form de adicionar entrada    |
+| POST   | `/dashboard/ban`         | obrigatória | Ação de ban manual; redireciona para `/dashboard/bans`         |
+| POST   | `/dashboard/unban`       | obrigatória | Ação de unban manual; redireciona para `/dashboard/bans`       |
+| POST   | `/dashboard/allow`       | obrigatória | Ação de adicionar à allowlist; redireciona para `/dashboard/allowlist` |
 
-Requests não autenticados em `/` recebem `303 See Other` para `/login`.
+Requests não autenticados em qualquer rota protegida recebem `303 See
+Other` para `/login`.
+
+Toda ação de escrita devolve `303` para a página de origem com um flash
+code em query-string (`ok=…` ou `err=…`). Só os códigos abaixo são
+renderizados; qualquer outra coisa é silenciosamente ignorada para que
+URLs forjadas não injetem strings arbitrárias na UI.
+
+| Flash code       | Significado                                                     |
+|------------------|-----------------------------------------------------------------|
+| `ban-queued`     | Ban aceito pelo daemon                                          |
+| `unban-queued`   | Unban aceito pelo daemon                                        |
+| `allow-added`    | Entrada de allowlist aceita pelo daemon                         |
+| `missing-ip`     | O campo `ip` veio vazio                                         |
+| `invalid-ip`     | O campo `ip` não passou no parser `netip` (IP ou CIDR)          |
+| `bad-form`       | Submit malformado                                               |
+| `daemon-error`   | Daemon acessível mas devolveu resposta não-OK                   |
+| `daemon-offline` | Socket unix do daemon não aceitou a conexão                     |
 
 Cookies de sessão:
 - nome `ezyshield_dashboard`,
 - token hex de 32 bytes do `crypto/rand` (256 bits de entropia),
-- `HttpOnly`, `SameSite=Strict`,
+- `HttpOnly`, `Secure`, `SameSite=Strict`,
 - expiração deslizante de 30 minutos ociosos,
 - guardados **apenas em memória** — reiniciar o daemon força novo login.
 
-O cookie **não** vem com `Secure`, porque o dashboard é servido em HTTP puro
-via loopback; se você precisa de TLS, ele deve terminar no túnel gerenciado
-pelo operador (Cloudflare, SSH, reverse proxy).
+O flag `Secure` é setado mesmo no deploy padrão em HTTP loopback:
+navegadores modernos tratam `http://localhost` como contexto seguro e
+entregam o cookie normalmente, ao mesmo tempo em que operadores que
+colocam TLS na frente (reverse proxy, Cloudflare Tunnel) ganham a
+recusa do navegador em downgrade para plaintext.
 
 ---
 
@@ -132,14 +167,29 @@ pelo operador (Cloudflare, SSH, reverse proxy).
 - **Bind guard:** só loopback, verificado duas vezes (construção e start).
 - **Armazenamento de senha:** PBKDF2-SHA256, 600 000 iterações, sal
   aleatório por hash, comparação em tempo constante.
-- **Guarda contra enumeração:** o handler de login devolve a mesma resposta
-  401 e a mesma mensagem para “usuário inexistente” e “senha errada”.
+- **Guarda contra enumeração:** o handler de login roda o mesmo trabalho
+  PBKDF2 contra um hash isca no caminho de "usuário inexistente", então
+  requests com usuário desconhecido e senha errada ficam
+  indistinguíveis em wall-clock (CWE-208).
 - **Session store:** em memória, protegido por mutex, token opaco, expiração
   deslizante.
-- **Templates:** renderizados com `html/template`; qualquer string vinda do
-  operador passa pelo auto-escape.
+- **Templates:** renderizados com `html/template`; toda string vinda do
+  operador — reason das ações, IP ecoado em erro — passa pelo auto-escape.
+- **Validação de entrada nas ações de escrita:** o campo `ip` é parseado
+  com `netip.ParsePrefix` (com fallback para `netip.ParseAddr`) *antes*
+  de qualquer RPC ao daemon, então hostnames, strings gigantes e
+  caracteres inválidos são recusados na borda do dashboard
+  (`SECURITY-REVIEW.md §1`).
 - **Permissões do DB de auth:** diretório pai criado com `0700`, arquivo em
   `chmod 0600` após aplicar o schema.
+- **Budget de RPC:** chamadas ao daemon partindo do dashboard rodam com
+  timeout de contexto de 2 segundos, então um daemon travado não trava
+  o navegador.
+- **Tratamento de daemon offline:** cada página e cada handler de escrita
+  distingue `daemon.ErrDaemonUnreachable` de erro do daemon, renderizando
+  banner de offline (nas leituras) ou flash code `daemon-offline` (nas
+  escritas) no lugar de um erro cru de dial.
 
-Adições da Fase 2 (ainda não implementadas): token CSRF em rotas que mudam
-estado, audit log para toda operação de escrita, limite de sessões por conta.
+Adições da Fase 3 (ainda não implementadas): token CSRF em rotas que mudam
+estado, audit log para toda operação de escrita, limite de sessões por
+conta, log-tail via WebSocket com redação server-side.

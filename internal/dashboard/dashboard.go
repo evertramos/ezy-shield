@@ -39,6 +39,11 @@ type Config struct {
 	// Created with mode 0600 on first use; the parent directory is created
 	// with mode 0700 if missing.
 	AuthDBPath string
+	// DaemonSocketPath is the unix socket where the EzyShield daemon
+	// listens for control RPCs. Empty means "no daemon wired"; pages that
+	// need live data still render, but with a graceful "daemon offline"
+	// panel instead of a raw dial error.
+	DaemonSocketPath string
 	// SessionTimeout is the idle timeout after which sessions expire.
 	SessionTimeout time.Duration
 	// Logger is the structured logger for server events. If nil,

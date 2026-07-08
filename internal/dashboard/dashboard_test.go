@@ -276,15 +276,27 @@ func TestLogin_SuccessGrantsAccess(t *testing.T) {
 		t.Errorf("Location = %q, want /", loc)
 	}
 
-	// The cookie jar picked up the session cookie on the login response;
-	// the follow-up GET should reach the index directly.
+	// The cookie jar picked up the session cookie on the login response.
+	// GET / now redirects the authed session to /dashboard (Phase 2 root
+	// redirect), so the follow-up asserts one hop through the status page.
 	resp2 := doGet(t, client, base+"/")
-	body := readBody(t, resp2)
-	if resp2.StatusCode != http.StatusOK {
-		t.Errorf("authenticated GET / status = %d, want 200", resp2.StatusCode)
+	closeBody(t, resp2)
+	if resp2.StatusCode != http.StatusSeeOther {
+		t.Fatalf("authenticated GET / status = %d, want 303", resp2.StatusCode)
 	}
-	if !strings.Contains(body, "Dashboard scaffold") {
-		t.Errorf("body should render index, got: %s", body)
+	if loc := resp2.Header.Get("Location"); loc != "/dashboard" {
+		t.Errorf("Location = %q, want /dashboard", loc)
+	}
+
+	resp3 := doGet(t, client, base+"/dashboard")
+	body := readBody(t, resp3)
+	if resp3.StatusCode != http.StatusOK {
+		t.Errorf("authenticated GET /dashboard status = %d, want 200", resp3.StatusCode)
+	}
+	// No daemon socket is configured on the test server, so the status
+	// page renders with the graceful "daemon offline" banner.
+	if !strings.Contains(body, "Daemon is offline") {
+		t.Errorf("body should render status page with offline banner, got: %s", body)
 	}
 }
 

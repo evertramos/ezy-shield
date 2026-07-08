@@ -314,7 +314,7 @@ sudo ezyshield test-notify email
 ## 9. Rodar o daemon
 
 ```bash
-sudo ezyshield watch
+sudo ezyshield run
 ```
 
 Enquanto `armed: false`, o EzyShield opera em **dry-run**: processa tudo e

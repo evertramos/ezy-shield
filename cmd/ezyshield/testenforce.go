@@ -83,7 +83,18 @@ func runTestEnforce(cmd *cobra.Command, configDir, backend string) error {
 		return writeJSON(cmd.OutOrStdout(), results)
 	}
 
-	return printEnforceResults(cmd.OutOrStdout(), results)
+	if err := printEnforceResults(cmd.OutOrStdout(), results); err != nil {
+		return err
+	}
+
+	// Check if any backend failed and return error for non-zero exit code
+	for _, result := range results.Backends {
+		if result.Status == "fail" {
+			return fmt.Errorf("one or more checks failed")
+		}
+	}
+
+	return nil
 }
 
 type testEnforceResults struct {
@@ -411,8 +422,7 @@ func checkZoneWAFAccess(ctx context.Context, token, baseURL, zoneID string) (boo
 	if err != nil {
 		return false, fmt.Sprintf("network error: %v", err)
 	}
-	defer io.ReadAll(resp.Body)
-	resp.Body.Close()
+	defer resp.Body.Close()
 
 	switch resp.StatusCode {
 	case 200, 404:
@@ -436,8 +446,7 @@ func checkAPIAccess(ctx context.Context, token, url string) error {
 	if err != nil {
 		return fmt.Errorf("network error: %w", err)
 	}
-	defer io.ReadAll(resp.Body)
-	resp.Body.Close()
+	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("HTTP %d", resp.StatusCode)

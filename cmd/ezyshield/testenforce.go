@@ -390,7 +390,7 @@ func checkListAccess(ctx context.Context, token, baseURL, accountID, listName st
 	if err != nil {
 		return listID, 0, nil
 	}
-	defer itemResp.Body.Close()
+	defer func() { _ = itemResp.Body.Close() }()
 
 	var itemData struct {
 		ResultInfo struct {

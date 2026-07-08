@@ -158,8 +158,8 @@ jobs:
           # Overwrite any pre-existing notes instead of appending to them,
           # so notes are not duplicated if the release already exists.
           append_body: false
-          prerelease: ${{ steps.prerelease.outputs.is_prerelease == 'true' }}
-          make_latest: ${{ steps.prerelease.outputs.is_prerelease != 'true' }}
+          prerelease: ${{ contains(needs.tag.outputs.new_tag || github.ref_name, '-rc') || contains(needs.tag.outputs.new_tag || github.ref_name, '-alpha') || contains(needs.tag.outputs.new_tag || github.ref_name, '-beta') }}
+          make_latest: ${{ !contains(needs.tag.outputs.new_tag || github.ref_name, '-rc') && !contains(needs.tag.outputs.new_tag || github.ref_name, '-alpha') && !contains(needs.tag.outputs.new_tag || github.ref_name, '-beta') }}
           files: |
             dist/ezyshield-*
             dist/checksums.txt

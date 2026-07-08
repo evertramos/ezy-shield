@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // newTestServer builds a Server with a per-test SQLite file. It bootstraps
@@ -222,6 +223,42 @@ func TestLogin_UnknownUser(t *testing.T) {
 	defer closeBody(t, resp)
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401", resp.StatusCode)
+	}
+}
+
+// TestLogin_ConstantTimeAgainstEnumeration asserts that the unknown-username
+// path actually runs PBKDF2 against the decoy hash (CWE-208 regression). A
+// naive implementation short-circuits when the admin row is missing and
+// returns in ~1 ms, which distinguishes real from unknown usernames by
+// wall-clock time. Because PBKDF2 with 600 000 iterations of SHA-256 takes
+// >100 ms on every CI target we run against, the threshold below survives
+// slow runners while still catching a regression that skipped the KDF work.
+func TestLogin_ConstantTimeAgainstEnumeration(t *testing.T) {
+	_, client, base, cleanup := newTestServer(t, "correct-horse-battery-staple")
+	defer cleanup()
+
+	measure := func(username string) time.Duration {
+		form := url.Values{"username": {username}, "password": {"irrelevant"}}
+		start := time.Now()
+		resp := doPostForm(t, client, base+"/login", form)
+		closeBody(t, resp)
+		return time.Since(start)
+	}
+	// Warm up: the very first PBKDF2 call after process start can be
+	// slower on some runners; discard the reading.
+	_ = measure("warmup")
+
+	unknownDur := measure("ghost")
+	knownDur := measure("admin")
+
+	const minPBKDF2Time = 100 * time.Millisecond
+	if unknownDur < minPBKDF2Time {
+		t.Errorf("unknown-user path returned in %s (< %s); PBKDF2 was probably skipped, enabling username enumeration (CWE-208)",
+			unknownDur, minPBKDF2Time)
+	}
+	if knownDur < minPBKDF2Time {
+		t.Errorf("known-user path returned in %s (< %s); PBKDF2 iterations may have been lowered",
+			knownDur, minPBKDF2Time)
 	}
 }
 

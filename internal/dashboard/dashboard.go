@@ -54,6 +54,12 @@ type Server struct {
 	sessions *sessionStore
 	mux      *http.ServeMux
 	srv      *http.Server
+	// decoyHash is a valid PBKDF2 hash of a random string, computed once at
+	// server construction. When a login POST references an unknown user,
+	// the handler runs verifyPassword against this decoy so both paths pay
+	// the same ~300 ms PBKDF2 cost — the enumeration guard becomes
+	// constant-time (CWE-208).
+	decoyHash string
 }
 
 // New constructs a Server and opens the auth store. It rejects non-loopback
@@ -79,11 +85,22 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dashboard: open auth store: %w", err)
 	}
+	decoyPw, err := generatePassword()
+	if err != nil {
+		_ = store.close() //nolint:errcheck // best-effort close on construction failure
+		return nil, fmt.Errorf("dashboard: generate decoy password: %w", err)
+	}
+	decoyHash, err := hashPassword(decoyPw)
+	if err != nil {
+		_ = store.close() //nolint:errcheck // best-effort close on construction failure
+		return nil, fmt.Errorf("dashboard: hash decoy password: %w", err)
+	}
 	s := &Server{
-		cfg:      cfg,
-		logger:   cfg.Logger,
-		store:    store,
-		sessions: newSessionStore(cfg.SessionTimeout),
+		cfg:       cfg,
+		logger:    cfg.Logger,
+		store:     store,
+		sessions:  newSessionStore(cfg.SessionTimeout),
+		decoyHash: decoyHash,
 	}
 	s.mux = s.routes()
 	return s, nil

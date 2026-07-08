@@ -49,18 +49,20 @@ func (s *Server) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 	password := r.FormValue("password")
 
 	hash, err := s.store.getAdminHash(r.Context(), username)
-	ok := false
 	switch {
 	case err == nil:
-		ok = verifyPassword(hash, password)
 	case errors.Is(err, errAdminNotFound):
-		// Fall through to the invalid-credentials response so the login
-		// page cannot be used to enumerate valid usernames.
+		// Substitute a valid-format decoy hash so verifyPassword still
+		// pays the full ~300 ms PBKDF2 cost. Without this substitution
+		// an attacker could distinguish existing usernames from
+		// unknown ones by response time (CWE-208).
+		hash = s.decoyHash
 	default:
 		s.logger.Error("auth lookup", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	ok := verifyPassword(hash, password)
 	if !ok {
 		w.WriteHeader(http.StatusUnauthorized)
 		if err := renderLogin(w, "Invalid credentials."); err != nil {

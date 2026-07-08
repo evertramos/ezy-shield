@@ -96,8 +96,8 @@ jobs:
       - name: Validate example configs against JSON schemas
         run: |
           pip install check-jsonschema --quiet
-          check-jsonschema --schemafile docs/schemas/config/config.schema.json configs/config.yaml
-          check-jsonschema --schemafile docs/schemas/config/policy.schema.json configs/policy.yaml
+          check-jsonschema --schemafile docs/internal/schemas/config/config.schema.json configs/config.yaml
+          check-jsonschema --schemafile docs/internal/schemas/config/policy.schema.json configs/policy.yaml
 
   fuzz:
     needs: detect

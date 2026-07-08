@@ -448,6 +448,57 @@ func (s *DB) AuditOp(ctx context.Context, op string, prefix netip.Prefix, ttl ti
 	return nil
 }
 
+// AuditEntry is one row of the audit_log table. It mirrors the schema in
+// migrations/001_initial.sql. Timestamps are RFC 3339 strings as stored
+// (recorded_at is always in UTC). ID is the auto-increment primary key,
+// exposed so callers (dashboard bus, CLI) can dedupe or checkpoint.
+type AuditEntry struct {
+	ID         int64
+	RecordedAt string
+	Op         string
+	IP         string
+	TTLSeconds int64
+	Strike     int
+	Reason     string
+}
+
+// ListAuditLog returns the last `limit` audit_log rows in reverse
+// chronological order (newest first). It is a read-only query; the
+// append-only invariant on audit_log is preserved.
+//
+// A non-positive limit is clamped to 1 so operators cannot accidentally
+// request an unbounded scan through a stale UI or misconfigured client.
+// An upper bound of 1000 is applied so a single call cannot balloon the
+// process memory.
+func (s *DB) ListAuditLog(ctx context.Context, limit int) ([]AuditEntry, error) {
+	switch {
+	case limit <= 0:
+		limit = 1
+	case limit > 1000:
+		limit = 1000
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, recorded_at, op, ip, ttl_seconds, strike_num, reason
+		FROM audit_log
+		ORDER BY id DESC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: ListAuditLog: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make([]AuditEntry, 0, limit)
+	for rows.Next() {
+		var e AuditEntry
+		if err := rows.Scan(&e.ID, &e.RecordedAt, &e.Op, &e.IP, &e.TTLSeconds, &e.Strike, &e.Reason); err != nil {
+			return nil, fmt.Errorf("store: ListAuditLog scan: %w", err)
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 // AllowEntry is one row of the allowlist table.
 type AllowEntry struct {
 	Prefix    netip.Prefix

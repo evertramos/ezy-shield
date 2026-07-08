@@ -39,6 +39,11 @@ type Config struct {
 	// Created with mode 0600 on first use; the parent directory is created
 	// with mode 0700 if missing.
 	AuthDBPath string
+	// DaemonSocketPath is the unix socket where the EzyShield daemon
+	// listens for control RPCs. Empty means "no daemon wired"; pages that
+	// need live data still render, but with a graceful "daemon offline"
+	// panel instead of a raw dial error.
+	DaemonSocketPath string
 	// SessionTimeout is the idle timeout after which sessions expire.
 	SessionTimeout time.Duration
 	// Logger is the structured logger for server events. If nil,
@@ -52,8 +57,10 @@ type Server struct {
 	logger   *slog.Logger
 	store    *authStore
 	sessions *sessionStore
+	throttle *loginThrottle
 	mux      *http.ServeMux
 	srv      *http.Server
+	bus      *eventBus
 	// decoyHash is a valid PBKDF2 hash of a random string, computed once at
 	// server construction. When a login POST references an unknown user,
 	// the handler runs verifyPassword against this decoy so both paths pay
@@ -100,8 +107,10 @@ func New(cfg Config) (*Server, error) {
 		logger:    cfg.Logger,
 		store:     store,
 		sessions:  newSessionStore(cfg.SessionTimeout),
+		throttle:  newLoginThrottle(),
 		decoyHash: decoyHash,
 	}
+	s.bus = newEventBus(s.fetchEvents, cfg.Logger)
 	s.mux = s.routes()
 	return s, nil
 }
@@ -158,13 +167,20 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 }
 
 func (s *Server) serve(ctx context.Context, ln net.Listener) error {
+	// WriteTimeout must be zero for long-lived websocket connections.
+	// Reads are still bounded by ReadHeaderTimeout + per-frame deadlines
+	// enforced by the websocket handler.
 	s.srv = &http.Server{
 		Handler:           s.mux,
 		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      15 * time.Second,
+		ReadTimeout:       0,
+		WriteTimeout:      0,
 		IdleTimeout:       60 * time.Second,
 	}
+	// Start the event bus alongside the HTTP server so live updates flow
+	// while there is at least one subscriber. The bus honours ctx and
+	// exits when serve returns.
+	go s.bus.Run(ctx)
 	errCh := make(chan error, 1)
 	go func() {
 		s.logger.Info("dashboard listening", "addr", ln.Addr().String())

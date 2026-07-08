@@ -102,13 +102,13 @@ type testEnforceResults struct {
 }
 
 type backendResult struct {
-	Status  string                     `json:"status"`
-	Mode    string                     `json:"mode,omitempty"`
-	Checks  []checkResult              `json:"checks,omitempty"`
-	Notes   string                     `json:"notes,omitempty"`
-	Passed  int                        `json:"passed,omitempty"`
-	Failed  int                        `json:"failed,omitempty"`
-	Message string                     `json:"message,omitempty"`
+	Status  string        `json:"status"`
+	Mode    string        `json:"mode,omitempty"`
+	Checks  []checkResult `json:"checks,omitempty"`
+	Notes   string        `json:"notes,omitempty"`
+	Passed  int           `json:"passed,omitempty"`
+	Failed  int           `json:"failed,omitempty"`
+	Message string        `json:"message,omitempty"`
 }
 
 type checkResult struct {

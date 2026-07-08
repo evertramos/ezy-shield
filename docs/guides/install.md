@@ -7,7 +7,7 @@ This guide covers all ways to install EzyShield: from a pre-built release, a spe
 ## Quick install (latest stable)
 
 ```bash
-curl -sfL https://get.ezyshield.com | sh
+curl -sfL https://get.ezyshield.com | sudo sh
 ```
 
 This downloads the latest stable release, verifies checksums, and installs binaries to `/usr/local/bin/`.
@@ -19,7 +19,7 @@ This downloads the latest stable release, verifies checksums, and installs binar
 If you want a specific version (including release candidates like `v0.3.0-rc.1`), set `EZYSHIELD_VERSION`:
 
 ```bash
-curl -sfL https://get.ezyshield.com | EZYSHIELD_VERSION=v0.3.0-rc.1 sh
+curl -sfL https://get.ezyshield.com | EZYSHIELD_VERSION=v0.3.0-rc.1 sudo sh
 ```
 
 The version must start with `v`. Available versions are listed at [github.com/evertramos/ezy-shield/releases](https://github.com/evertramos/ezy-shield/releases).
@@ -31,7 +31,7 @@ The version must start with `v`. Available versions are listed at [github.com/ev
 For air-gapped installs or CI environments, point the installer at a custom mirror with both the binaries and `checksums.txt`:
 
 ```bash
-curl -sfL https://get.ezyshield.com | EZYSHIELD_BASE_URL=https://mirror.internal.com/ezyshield/v0.3.0 sh
+curl -sfL https://get.ezyshield.com | EZYSHIELD_BASE_URL=https://mirror.internal.com/ezyshield/v0.3.0 sudo sh
 ```
 
 The script will:
@@ -44,7 +44,7 @@ The script will:
 When using `EZYSHIELD_BASE_URL`, you can also set `EZYSHIELD_VERSION` for your own versioning:
 
 ```bash
-EZYSHIELD_VERSION=internal-rc1 EZYSHIELD_BASE_URL=https://mirror.internal.com/ezyshield/v0.3.0 sh
+curl -sfL https://get.ezyshield.com | EZYSHIELD_VERSION=internal-rc1 EZYSHIELD_BASE_URL=https://mirror.internal.com/ezyshield/v0.3.0 sudo sh
 ```
 
 ---
@@ -72,10 +72,10 @@ To upgrade an existing installation:
 sudo rm /usr/local/bin/ezyshield /usr/local/bin/ezyshield-enforcer
 
 # Reinstall (latest)
-curl -sfL https://get.ezyshield.com | sh
+curl -sfL https://get.ezyshield.com | sudo sh
 
 # Or specific version
-curl -sfL https://get.ezyshield.com | EZYSHIELD_VERSION=v0.4.0 sh
+curl -sfL https://get.ezyshield.com | EZYSHIELD_VERSION=v0.4.0 sudo sh
 ```
 
 ---

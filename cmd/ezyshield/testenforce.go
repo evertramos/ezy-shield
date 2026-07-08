@@ -160,9 +160,10 @@ func testCloudflareBackend(ctx context.Context, cfcfg *config.CloudflareCfg) *ba
 		result.Passed++
 	}
 
-	if result.Mode == "lists" {
+	switch result.Mode {
+	case "lists":
 		testCloudflareListsMode(ctx, token, cfcfg, result)
-	} else if result.Mode == "rulesets" {
+	case "rulesets":
 		testCloudflareRulesetsMode(ctx, token, cfcfg, result)
 	}
 

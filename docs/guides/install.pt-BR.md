@@ -7,7 +7,7 @@ Este guia cobre todas as formas de instalar EzyShield: a partir de uma versão p
 ## Instalação rápida (última versão estável)
 
 ```bash
-curl -sfL https://get.ezyshield.com | sh
+curl -sfL https://get.ezyshield.com | sudo sh
 ```
 
 Isso faz download da última versão estável, verifica checksums e instala os binários em `/usr/local/bin/`.
@@ -19,7 +19,7 @@ Isso faz download da última versão estável, verifica checksums e instala os b
 Se você quer uma versão específica (incluindo candidatos a lançamento como `v0.3.0-rc.1`), configure `EZYSHIELD_VERSION`:
 
 ```bash
-curl -sfL https://get.ezyshield.com | EZYSHIELD_VERSION=v0.3.0-rc.1 sh
+curl -sfL https://get.ezyshield.com | EZYSHIELD_VERSION=v0.3.0-rc.1 sudo sh
 ```
 
 A versão deve começar com `v`. As versões disponíveis estão listadas em [github.com/evertramos/ezy-shield/releases](https://github.com/evertramos/ezy-shield/releases).
@@ -31,7 +31,7 @@ A versão deve começar com `v`. As versões disponíveis estão listadas em [gi
 Para instalações em ambientes isolados ou CI, aponte o instalador para um espelho customizado com ambos os binários e `checksums.txt`:
 
 ```bash
-curl -sfL https://get.ezyshield.com | EZYSHIELD_BASE_URL=https://mirror.interno.com/ezyshield/v0.3.0 sh
+curl -sfL https://get.ezyshield.com | EZYSHIELD_BASE_URL=https://mirror.interno.com/ezyshield/v0.3.0 sudo sh
 ```
 
 O script irá:
@@ -44,7 +44,7 @@ O script irá:
 Ao usar `EZYSHIELD_BASE_URL`, você também pode configurar `EZYSHIELD_VERSION` para sua própria versão:
 
 ```bash
-EZYSHIELD_VERSION=internal-rc1 EZYSHIELD_BASE_URL=https://mirror.interno.com/ezyshield/v0.3.0 sh
+curl -sfL https://get.ezyshield.com | EZYSHIELD_VERSION=internal-rc1 EZYSHIELD_BASE_URL=https://mirror.interno.com/ezyshield/v0.3.0 sudo sh
 ```
 
 ---
@@ -72,10 +72,10 @@ Para atualizar uma instalação existente:
 sudo rm /usr/local/bin/ezyshield /usr/local/bin/ezyshield-enforcer
 
 # Reinstalar (última versão)
-curl -sfL https://get.ezyshield.com | sh
+curl -sfL https://get.ezyshield.com | sudo sh
 
 # Ou versão específica
-curl -sfL https://get.ezyshield.com | EZYSHIELD_VERSION=v0.4.0 sh
+curl -sfL https://get.ezyshield.com | EZYSHIELD_VERSION=v0.4.0 sudo sh
 ```
 
 ---

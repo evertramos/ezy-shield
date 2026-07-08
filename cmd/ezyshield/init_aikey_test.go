@@ -351,14 +351,14 @@ func TestInit_KeySource_Option2_ValidName(t *testing.T) {
 	})
 
 	input := strings.Join([]string{
-		"",            // admin IP
-		"",            // CDN question
-		"y",           // enable AI
-		"anthropic",   // provider
-		"",            // model default
-		"2",           // choice: existing env var
-		"MY_ANT_KEY",  // custom env var name
-		"",            // armed default
+		"",
+		"",
+		"y",
+		"anthropic",
+		"",
+		"2",
+		"MY_ANT_KEY",
+		"",
 	}, "\n") + "\n"
 
 	state, out := runAskQuestionsWithAI(t, input)
@@ -389,16 +389,16 @@ func TestInit_KeySource_Option2_RejectsSecretShape(t *testing.T) {
 	// Provide three invalid names (secret-shaped), then no more input → after
 	// 3 retries the wizard keeps the canonical name.
 	input := strings.Join([]string{
-		"",                               // admin IP
-		"",                               // CDN question
-		"y",                              // enable AI
-		"anthropic",                      // provider
-		"",                               // model default
-		"2",                              // choice: existing env var
-		"sk-ant-this-looks-like-a-key",   // invalid: secret-shaped
-		"sk-ant-another-bad-one",          // invalid
-		"also not a valid identifier!!!",  // invalid
-		"",                               // armed default
+		"",
+		"",
+		"y",
+		"anthropic",
+		"",
+		"2",
+		"sk-ant-this-looks-like-a-key",
+		"sk-ant-another-bad-one",
+		"also not a valid identifier!!!",
+		"",
 	}, "\n") + "\n"
 
 	state, out := runAskQuestionsWithAI(t, input)
@@ -451,7 +451,7 @@ func TestInit_WriteSystemdDropIn(t *testing.T) {
 	// unit test, but we can exercise the MkdirAll + WriteFile branch via a
 	// temp dir by temporarily substituting the target.
 	dropInDir2 := filepath.Join(dir, "ezyshield.service.d")
-	if err := os.MkdirAll(dropInDir2, 0o755); err != nil {
+	if err := os.MkdirAll(dropInDir2, 0o750); err != nil { //nolint:gosec // test file
 		t.Fatalf("mkdir: %v", err)
 	}
 	dst2 := filepath.Join(dropInDir2, "env.conf")

@@ -584,7 +584,7 @@ func askKeySource(ask func(string, string) string, state *wizardState) {
 // older service file that predates this directive (issue #22). Idempotent: if
 // the file already contains the exact content no write occurs.
 func writeSystemdEnvDropIn() (wrote bool, err error) {
-	if err := os.MkdirAll(systemdDropInDir, 0o755); err != nil {
+	if err := os.MkdirAll(systemdDropInDir, 0o750); err != nil {
 		return false, fmt.Errorf("creating drop-in dir %s: %w", systemdDropInDir, err)
 	}
 	content := "[Service]\nEnvironmentFile=-" + defaultConfigDir + "/" + envFileName + "\n"

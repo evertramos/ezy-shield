@@ -25,7 +25,7 @@ This downloads the latest stable release, verifies checksums, and installs binar
 If you want a specific version (including release candidates like `v0.3.0-rc.1`), set `EZYSHIELD_VERSION`:
 
 ```bash
-curl -sfL https://get.ezyshield.com | EZYSHIELD_VERSION=v0.3.0-rc.1 sudo sh
+curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=v0.3.0-rc.1 sh
 ```
 
 The version must start with `v`. Available versions are listed at [github.com/evertramos/ezy-shield/releases](https://github.com/evertramos/ezy-shield/releases).
@@ -50,7 +50,7 @@ The script will:
 When using `EZYSHIELD_BASE_URL`, you can also set `EZYSHIELD_VERSION` for your own versioning:
 
 ```bash
-curl -sfL https://get.ezyshield.com | EZYSHIELD_VERSION=internal-rc1 EZYSHIELD_BASE_URL=https://mirror.internal.com/ezyshield/v0.3.0 sudo sh
+curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=internal-rc1 EZYSHIELD_BASE_URL=https://mirror.internal.com/ezyshield/v0.3.0 sh
 ```
 
 ---
@@ -81,7 +81,7 @@ sudo rm /usr/local/bin/ezyshield /usr/local/bin/ezyshield-enforcer
 curl -sfL https://get.ezyshield.com | sudo sh
 
 # Or specific version
-curl -sfL https://get.ezyshield.com | EZYSHIELD_VERSION=v0.4.0 sudo sh
+curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=v0.4.0 sh
 ```
 
 ---

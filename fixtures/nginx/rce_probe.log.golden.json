@@ -1,0 +1,17 @@
+[
+  {"kind": "http_request", "source_ip": "203.0.113.5",  "fields": {"method": "GET",  "path": "/phpunit",                          "status": "404", "bytes": "0",   "ua": "curl/7.68.0"}},
+  {"kind": "http_request", "source_ip": "203.0.113.5",  "fields": {"method": "GET",  "path": "/admin.php",                        "status": "500", "bytes": "162", "ua": "curl/7.68.0"}},
+  {"kind": "http_request", "source_ip": "203.0.113.5",  "fields": {"method": "GET",  "path": "/.git/config",                     "status": "404", "bytes": "0",   "ua": "curl/7.68.0"}},
+  {"kind": "http_request", "source_ip": "203.0.113.6",  "fields": {"method": "GET",  "path": "/.aws/credentials",                 "status": "404", "bytes": "0",   "ua": "python-requests/2.25.1"}},
+  {"kind": "http_request", "source_ip": "203.0.113.6",  "fields": {"method": "GET",  "path": "/wp-content/plugins/shell.php",     "status": "404", "bytes": "0",   "ua": "python-requests/2.25.1"}},
+  {"kind": "http_request", "source_ip": "203.0.113.7",  "fields": {"method": "POST", "path": "/actuator/metrics",                 "status": "401", "bytes": "0",   "ua": "Java/11.0.10"}},
+  {"kind": "http_request", "source_ip": "203.0.113.7",  "fields": {"method": "GET",  "path": "/cgi-bin/../../../../etc/passwd",   "status": "404", "bytes": "0",   "ua": "Java/11.0.10"}},
+  {"kind": "http_request", "source_ip": "203.0.113.8",  "fields": {"method": "GET",  "path": "/config.php",                       "status": "404", "bytes": "0",   "ua": "masscan/1.0"}},
+  {"kind": "http_request", "source_ip": "203.0.113.8",  "fields": {"method": "GET",  "path": "/install.php",                      "status": "404", "bytes": "0",   "ua": "masscan/1.0"}},
+  {"kind": "http_request", "source_ip": "203.0.113.9",  "fields": {"method": "GET",  "path": "/.terraform/terraform.tfstate",    "status": "404", "bytes": "0",   "ua": "zgrab/0.x"}},
+  {"kind": "http_request", "source_ip": "203.0.113.9",  "fields": {"method": "GET",  "path": "/database.yml",                     "status": "404", "bytes": "0",   "ua": "zgrab/0.x"}},
+  {"kind": "http_request", "source_ip": "203.0.113.10", "fields": {"method": "GET",  "path": "/web.config",                       "status": "404", "bytes": "0",   "ua": "Go-http-client/1.1"}},
+  {"kind": "http_request", "source_ip": "203.0.113.10", "fields": {"method": "GET",  "path": "/composer.json",                    "status": "200", "bytes": "489", "ua": "Go-http-client/1.1"}},
+  {"kind": "http_request", "source_ip": "203.0.113.11", "fields": {"method": "GET",  "path": "/.env",                             "status": "404", "bytes": "0",   "ua": "python-requests/2.27.1"}},
+  {"kind": "http_request", "source_ip": "203.0.113.11", "fields": {"method": "GET",  "path": "/index.html",                       "status": "200", "bytes": "1024", "ua": "Mozilla/5.0"}}
+]

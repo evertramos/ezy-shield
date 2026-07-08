@@ -96,9 +96,38 @@ To customize thresholds, edit `configs/rules.yaml` and adjust the `window` and `
 - Decrease threshold if you're seeing low & slow attacks bypassing detection
 - Keep burst and sustained thresholds separate; they catch different patterns
 
+## Exploit Probe Detection (Immediate Verdict)
+
+EzyShield includes a third detection tier for known RCE and exploit paths that have **zero legitimate use**:
+
+### http_rce_probe Rule
+
+**Purpose**: Immediate detection of known-exploit paths.
+
+**Threshold**: 1 (single request triggers)  
+**Score**: 95 (bypasses ambiguous band; rules always win)  
+**Category**: `exploit_probe`
+
+**Detected paths**: `phpunit`, `.git`, `.aws`, `cgi-bin`, actuator endpoints, `.env` variants, WordPress plugin shells, Terraform state, database configs, etc.
+
+**Why threshold=1**: These paths have zero legitimate use in production. A single request to `/.git/config` or `/admin.php` is always suspicious.
+
+**Why score=95**: Placed above the ambiguous band (0–90), so the decision engine never consults AI — rules verdict is final.
+
+**No double-ban risk**: Exploit probes trigger instantly with score=95, so they enter `bans_active` before any burst-tier rule. Subsequent hits are suppressed by deduplication.
+
+### Related exploit detection
+
+Other rules targeting low-frequency errors that may indicate scanning:
+- `http_scanner_400`: 10+ malformed requests (threshold=10, score=60)
+- `http_scanner_503`: 15+ service unavailable responses (threshold=15, score=65)
+
+These operate on the burst tier and allow more requests before triggering, since occasional 400/503 is legitimate.
+
 ## Related
 
 - Issue #28: implementation and live evidence from kylian-s (2026-07-03/04)
+- Issue #47: contains_any support and exploit probe detection (2026-07-08)
 - Issue #48: sustained-tier rules for low & slow detection (2026-07-08)
 - `internal/decision/engine.go`: `Engine.Decide` — active-ban guard
 - `internal/store/store.go`: `HasActiveBan`, `BumpLastSeen`

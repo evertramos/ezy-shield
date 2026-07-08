@@ -97,9 +97,38 @@ Para customizar os limiares, edite `configs/rules.yaml` e ajuste os campos `wind
 - Diminua o limiar se você está vendo ataques low & slow escapando da detecção
 - Mantenha limiares burst e sustentado separados; eles capturam padrões diferentes
 
+## Detecção de Sondagens Exploit (Veredicto Imediato)
+
+O EzyShield inclui uma terceira camada de detecção para caminhos RCE e exploit conhecidos que têm **uso legítimo zero**:
+
+### Regra http_rce_probe
+
+**Objetivo**: Detecção imediata de caminhos de exploit conhecidos.
+
+**Limiar**: 1 (uma única requisição dispara)  
+**Score**: 95 (ultrapassa a faixa ambígua; regras sempre vençam)  
+**Categoria**: `exploit_probe`
+
+**Caminhos detectados**: `phpunit`, `.git`, `.aws`, `cgi-bin`, endpoints actuator, variantes `.env`, shells de plugins WordPress, estado Terraform, configs de banco de dados, etc.
+
+**Por que limiar=1**: Estes caminhos têm zero uso legítimo em produção. Uma única requisição a `/.git/config` ou `/admin.php` é sempre suspeita.
+
+**Por que score=95**: Colocado acima da faixa ambígua (0–90), então o motor de decisão nunca consulta IA — o veredicto de regras é final.
+
+**Sem risco de duplo-banimento**: Sondagens exploit disparam instantaneamente com score=95, então entram em `bans_active` antes de qualquer regra de burst. Hits subsequentes são suprimidos por deduplicação.
+
+### Detecção relacionada a exploits
+
+Outras regras visando erros de baixa frequência que podem indicar scanning:
+- `http_scanner_400`: 10+ requisições malformadas (limiar=10, score=60)
+- `http_scanner_503`: 15+ respostas de serviço indisponível (limiar=15, score=65)
+
+Estas operam na camada burst e permitem mais requisições antes de disparar, já que ocasionais 400/503 são legítimas.
+
 ## Referências
 
 - Issue #28: implementação e evidências do kylian-s (03–04/07/2026)
+- Issue #47: suporte contains_any e detecção de sondagens exploit (08/07/2026)
 - Issue #48: regras sustentadas para detecção low & slow (08/07/2026)
 - `internal/decision/engine.go`: `Engine.Decide` — guard de banimento ativo
 - `internal/store/store.go`: `HasActiveBan`, `BumpLastSeen`

@@ -122,7 +122,7 @@ To install a specific version or release candidate, set `EZYSHIELD_VERSION`:
 curl -sfL https://get.ezyshield.com | EZYSHIELD_VERSION=v0.3.0-rc.1 sudo sh
 ```
 
-See [docs/guides/install.md](docs/guides/install.md) for complete installation options including custom mirrors and building from source.
+See [docs/guides/install.md](docs/guides/install.md) for complete installation options.
 
 ### From source (works today)
 

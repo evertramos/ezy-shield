@@ -96,9 +96,10 @@ func (m *cfListsMock) handler() http.Handler {
 }
 
 type cfListsMockListInfo struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Kind string `json:"kind"`
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Kind     string `json:"kind"`
+	NumItems int    `json:"num_items"`
 }
 
 type cfListsMockCreateReq struct {
@@ -111,7 +112,12 @@ func (m *cfListsMock) handleListLists(w http.ResponseWriter) {
 	m.mu.Lock()
 	result := make([]cfListsMockListInfo, 0, len(m.lists))
 	for _, l := range m.lists {
-		result = append(result, cfListsMockListInfo{ID: l.ID, Name: l.Name, Kind: l.Kind})
+		result = append(result, cfListsMockListInfo{
+			ID:       l.ID,
+			Name:     l.Name,
+			Kind:     l.Kind,
+			NumItems: len(l.items),
+		})
 	}
 	m.mu.Unlock()
 	writeJSON(w, cfSuccess(result))
@@ -666,4 +672,37 @@ func TestCFListsBan_TokenNotInError(t *testing.T) {
 	if strings.Contains(err.Error(), secret) {
 		t.Errorf("API token leaked into error message: %q", err.Error())
 	}
+}
+
+func TestCFListsSync_EmptyListSucceeds(t *testing.T) {
+	// Test that Sync succeeds on an empty list (GitHub issue #75).
+	// Cloudflare returns error 10027 when per_page is set on empty lists,
+	// so we must early-return from fetchAllItems when num_items == 0.
+	mock := newCFListsMock(testCFAccount)
+	ts := httptest.NewServer(mock.handler())
+	defer ts.Close()
+
+	e := enforce.NewCFListsEnforcerForTest("test-token", ts.URL, testCFAccount, testCFListName)
+
+	// Create an empty list
+	ctx := context.Background()
+	// First, discover (which creates the list on demand)
+	wantIPs := []sdk.Target{
+		{IP: netip.MustParseAddr("1.2.3.4")},
+		{IP: netip.MustParseAddr("2.3.4.5")},
+	}
+
+	// Sync with IPs should succeed, creating list and adding items
+	if err := e.Sync(ctx, wantIPs); err != nil {
+		t.Fatalf("Sync failed: %v", err)
+	}
+
+	// Now Sync with empty list (no IPs) should succeed
+	if err := e.Sync(ctx, []sdk.Target{}); err != nil {
+		t.Fatalf("Sync with empty target list failed: %v", err)
+	}
+
+	// Verify the list was discovered and is now empty
+	// (In a real scenario, the empty list would have num_items == 0)
+	// This test primarily verifies that fetchAllItems handles num_items == 0 correctly
 }

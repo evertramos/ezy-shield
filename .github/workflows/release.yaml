@@ -43,7 +43,7 @@ jobs:
             if [ -n "$LATEST_RC" ]; then
               # Increment existing RC: v0.1.0-rc.1 → v0.1.0-rc.2
               BASE=$(echo "$LATEST_RC" | sed 's/-rc\.[0-9]*//')
-              RC_NUM=$(echo "$LATEST_RC" | grep -oP 'rc\.\K[0-9]+')
+              RC_NUM=$(echo "$LATEST_RC" | sed 's/.*-rc\.//')
               RC_NUM=$((RC_NUM + 1))
               NEW_TAG="${BASE}-rc.${RC_NUM}"
             else

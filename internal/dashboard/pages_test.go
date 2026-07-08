@@ -80,6 +80,37 @@ func (m *mockDaemon) history() []daemon.SocketRequest {
 	return out
 }
 
+// sessionCSRF returns the CSRF token bound to the client's live session on
+// srv. Tests use it to attach the token to POST forms so the CSRF gate
+// (Phase 4) does not reject legitimate assertions.
+func sessionCSRF(t *testing.T, srv *Server, client *http.Client, baseURL string) string {
+	t.Helper()
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		t.Fatalf("parse base: %v", err)
+	}
+	for _, c := range client.Jar.Cookies(u) {
+		if c.Name != sessionCookieName {
+			continue
+		}
+		info, ok := srv.sessions.Lookup(c.Value)
+		if !ok {
+			t.Fatalf("session cookie %s not found in store", c.Value)
+		}
+		return info.CSRF
+	}
+	t.Fatalf("no session cookie in jar for %s", baseURL)
+	return ""
+}
+
+// authedPostForm wraps doPostForm to append the current session's CSRF
+// token to form so Phase 4 POST handlers accept the request.
+func authedPostForm(t *testing.T, srv *Server, client *http.Client, baseURL, path string, form url.Values) *http.Response {
+	t.Helper()
+	form.Set(csrfFormField, sessionCSRF(t, srv, client, baseURL))
+	return doPostForm(t, client, baseURL+path, form)
+}
+
 // newAuthedTestServer builds a dashboard Server wired to the given daemon
 // socket path, bootstraps an admin account, and returns an authed client
 // (session cookie already stored in the jar) plus the base URL.
@@ -288,7 +319,7 @@ func TestPages_RequireAuth(t *testing.T) {
 
 func TestBanPost_ValidatesIP(t *testing.T) {
 	md := newMockDaemon(t, nil)
-	_, client, base, cleanup := newAuthedTestServer(t, md.sockPath)
+	srv, client, base, cleanup := newAuthedTestServer(t, md.sockPath)
 	defer cleanup()
 
 	cases := []struct {
@@ -307,7 +338,7 @@ func TestBanPost_ValidatesIP(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			before := len(md.history())
-			resp := doPostForm(t, client, base+"/dashboard/ban", tc.form)
+			resp := authedPostForm(t, srv, client, base, "/dashboard/ban", tc.form)
 			closeBody(t, resp)
 			if resp.StatusCode != http.StatusSeeOther {
 				t.Fatalf("status = %d, want 303", resp.StatusCode)
@@ -339,11 +370,11 @@ func TestBanPost_ValidatesIP(t *testing.T) {
 
 func TestUnbanPost_ValidatesAndDispatches(t *testing.T) {
 	md := newMockDaemon(t, nil)
-	_, client, base, cleanup := newAuthedTestServer(t, md.sockPath)
+	srv, client, base, cleanup := newAuthedTestServer(t, md.sockPath)
 	defer cleanup()
 
 	// invalid IP → no daemon hit
-	resp := doPostForm(t, client, base+"/dashboard/unban", url.Values{"ip": {"garbage"}})
+	resp := authedPostForm(t, srv, client, base, "/dashboard/unban", url.Values{"ip": {"garbage"}})
 	closeBody(t, resp)
 	if !strings.Contains(resp.Header.Get("Location"), "invalid-ip") {
 		t.Errorf("Location = %q, want invalid-ip", resp.Header.Get("Location"))
@@ -353,7 +384,7 @@ func TestUnbanPost_ValidatesAndDispatches(t *testing.T) {
 	}
 
 	// valid IP → daemon receives unban verb
-	resp2 := doPostForm(t, client, base+"/dashboard/unban", url.Values{"ip": {"203.0.113.9"}})
+	resp2 := authedPostForm(t, srv, client, base, "/dashboard/unban", url.Values{"ip": {"203.0.113.9"}})
 	closeBody(t, resp2)
 	if !strings.Contains(resp2.Header.Get("Location"), "unban-queued") {
 		t.Errorf("Location = %q, want unban-queued", resp2.Header.Get("Location"))
@@ -366,11 +397,11 @@ func TestUnbanPost_ValidatesAndDispatches(t *testing.T) {
 
 func TestAllowPost_ValidatesAndDispatches(t *testing.T) {
 	md := newMockDaemon(t, nil)
-	_, client, base, cleanup := newAuthedTestServer(t, md.sockPath)
+	srv, client, base, cleanup := newAuthedTestServer(t, md.sockPath)
 	defer cleanup()
 
 	// invalid CIDR → no daemon hit
-	resp := doPostForm(t, client, base+"/dashboard/allow", url.Values{"ip": {"999.999.999.999"}})
+	resp := authedPostForm(t, srv, client, base, "/dashboard/allow", url.Values{"ip": {"999.999.999.999"}})
 	closeBody(t, resp)
 	if !strings.Contains(resp.Header.Get("Location"), "invalid-ip") {
 		t.Errorf("Location = %q, want invalid-ip", resp.Header.Get("Location"))
@@ -379,8 +410,8 @@ func TestAllowPost_ValidatesAndDispatches(t *testing.T) {
 		t.Errorf("daemon should not have been called; history: %+v", md.history())
 	}
 
-	// valid CIDR → daemon receives allow verb + reason
-	resp2 := doPostForm(t, client, base+"/dashboard/allow", url.Values{
+	// valid CIDR → daemon receives allow verb + tagged reason ("dashboard:admin: office").
+	resp2 := authedPostForm(t, srv, client, base, "/dashboard/allow", url.Values{
 		"ip":     {"192.0.2.0/24"},
 		"reason": {"office"},
 	})
@@ -389,8 +420,8 @@ func TestAllowPost_ValidatesAndDispatches(t *testing.T) {
 		t.Errorf("Location = %q, want allow-added", resp2.Header.Get("Location"))
 	}
 	hist := md.history()
-	if len(hist) != 1 || hist[0].Verb != "allow" || hist[0].Reason != "office" {
-		t.Fatalf("expected 1 allow call with reason=office, got %+v", hist)
+	if len(hist) != 1 || hist[0].Verb != "allow" || hist[0].Reason != "dashboard:admin: office" {
+		t.Fatalf("expected 1 allow call with reason=dashboard:admin: office, got %+v", hist)
 	}
 }
 
@@ -398,10 +429,10 @@ func TestBanPost_DaemonOffline(t *testing.T) {
 	// Empty daemon socket path → the RPC layer returns
 	// daemon.ErrDaemonUnreachable and the handler must render the
 	// daemon-offline flash on the redirect target.
-	_, client, base, cleanup := newAuthedTestServer(t, "")
+	srv, client, base, cleanup := newAuthedTestServer(t, "")
 	defer cleanup()
 
-	resp := doPostForm(t, client, base+"/dashboard/ban", url.Values{"ip": {"203.0.113.7"}})
+	resp := authedPostForm(t, srv, client, base, "/dashboard/ban", url.Values{"ip": {"203.0.113.7"}})
 	closeBody(t, resp)
 	loc := resp.Header.Get("Location")
 	if !strings.Contains(loc, "daemon-offline") {

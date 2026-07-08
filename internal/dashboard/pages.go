@@ -35,6 +35,16 @@ func flashFor(r *http.Request, key string) (string, bool) {
 	return "", false
 }
 
+// csrfOf returns the CSRF token attached to r by requireAuth. If the
+// middleware chain was misconfigured the empty string is returned — the
+// template still renders but any subsequent POST will fail the CSRF check.
+func csrfOf(r *http.Request) string {
+	if info, ok := sessionFromContext(r.Context()); ok {
+		return info.CSRF
+	}
+	return ""
+}
+
 // statusPageData is the concrete payload rendered by the status template.
 type statusPageData struct {
 	Daemon       string
@@ -85,7 +95,7 @@ func (s *Server) handleStatusPage(w http.ResponseWriter, r *http.Request) {
 		data.Info = flash
 	}
 
-	if err := renderStatusPage(w, data); err != nil {
+	if err := renderStatusPage(w, csrfOf(r), data); err != nil {
 		s.logger.Error("render status", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
@@ -116,7 +126,7 @@ func (s *Server) handleBansPage(w http.ResponseWriter, r *http.Request) {
 	if flash, ok := flashFor(r, "ok"); ok {
 		data.Info = flash
 	}
-	if err := renderBansPage(w, data); err != nil {
+	if err := renderBansPage(w, csrfOf(r), data); err != nil {
 		s.logger.Error("render bans", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
@@ -136,6 +146,107 @@ type eventsPageData struct {
 	Info    string
 }
 
+// timelineEntry is one row in the /dashboard/timeline view — one card
+// per currently-banned IP, showing where the address sits on the
+// 5-strike ladder plus the reconstructed timestamps of each step.
+type timelineEntry struct {
+	IP          string
+	Country     string
+	ASN         string
+	CurrentTTL  string
+	CurrentTier int
+	Steps       []timelineStep
+}
+
+// timelineStep is one point on the ladder. Reached is true when the IP
+// has hit that strike number, false when the step is still ahead.
+type timelineStep struct {
+	Strike     int
+	Reached    bool
+	RecordedAt string
+	Reason     string
+}
+
+type timelinePageData struct {
+	Entries []timelineEntry
+	Offline bool
+	Error   string
+	Info    string
+}
+
+// handleTimelinePage renders the strike-ladder view. It combines the
+// list of currently-active bans with the recent audit_log rows so each
+// IP shows where it sits on the 1→5 ladder plus the timestamps of the
+// prior steps. Read-only: no daemon writes, no store mutations.
+func (s *Server) handleTimelinePage(w http.ResponseWriter, r *http.Request) {
+	data := timelinePageData{}
+	bans, err := s.fetchBans(r.Context())
+	switch {
+	case err == nil:
+	case isOffline(err):
+		data.Offline = true
+	default:
+		s.logger.Error("dashboard list rpc (timeline)", "err", err)
+		data.Error = "Daemon returned an error. See the daemon log."
+	}
+	if !data.Offline && data.Error == "" && len(bans) > 0 {
+		events, evErr := s.fetchEventsN(r.Context(), 500)
+		if evErr != nil && !isOffline(evErr) {
+			s.logger.Debug("dashboard events for timeline", "err", evErr)
+		}
+		data.Entries = buildTimeline(bans, events)
+	}
+	if err := renderTimelinePage(w, csrfOf(r), data); err != nil {
+		s.logger.Error("render timeline", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	}
+}
+
+// buildTimeline turns the raw list + events pair into one card per IP
+// with 5 ladder steps. Only ban / dry_ban ops count as escalations; a
+// row without a matching audit entry still renders the current tier.
+func buildTimeline(bans []daemon.BanEntry, events []daemon.EventEntry) []timelineEntry {
+	perIP := map[string]map[int]daemon.EventEntry{}
+	for _, e := range events {
+		switch e.Op {
+		case "ban", "dry_ban":
+		default:
+			continue
+		}
+		if _, ok := perIP[e.IP]; !ok {
+			perIP[e.IP] = map[int]daemon.EventEntry{}
+		}
+		prev, seen := perIP[e.IP][e.Strike]
+		if !seen || e.ID > prev.ID {
+			perIP[e.IP][e.Strike] = e
+		}
+	}
+	out := make([]timelineEntry, 0, len(bans))
+	for _, b := range bans {
+		steps := make([]timelineStep, 0, 5)
+		for tier := 1; tier <= 5; tier++ {
+			step := timelineStep{Strike: tier}
+			if hit, ok := perIP[b.IP][tier]; ok {
+				step.Reached = true
+				step.RecordedAt = hit.RecordedAt
+				step.Reason = hit.Reason
+			} else if tier <= b.Strike {
+				step.Reached = true
+			}
+			steps = append(steps, step)
+		}
+		out = append(out, timelineEntry{
+			IP:          b.IP,
+			Country:     b.Country,
+			ASN:         b.ASN,
+			CurrentTTL:  b.TTL,
+			CurrentTier: b.Strike,
+			Steps:       steps,
+		})
+	}
+	return out
+}
+
 func (s *Server) handleEventsPage(w http.ResponseWriter, r *http.Request) {
 	data := eventsPageData{}
 	entries, err := s.fetchEvents(r.Context())
@@ -148,7 +259,7 @@ func (s *Server) handleEventsPage(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("dashboard events rpc", "err", err)
 		data.Error = "Daemon returned an error. See the daemon log."
 	}
-	if err := renderEventsPage(w, data); err != nil {
+	if err := renderEventsPage(w, csrfOf(r), data); err != nil {
 		s.logger.Error("render events", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
@@ -172,7 +283,7 @@ func (s *Server) handleAllowlistPage(w http.ResponseWriter, r *http.Request) {
 	if flash, ok := flashFor(r, "ok"); ok {
 		data.Info = flash
 	}
-	if err := renderAllowlistPage(w, data); err != nil {
+	if err := renderAllowlistPage(w, csrfOf(r), data); err != nil {
 		s.logger.Error("render allowlist", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
@@ -180,16 +291,22 @@ func (s *Server) handleAllowlistPage(w http.ResponseWriter, r *http.Request) {
 
 // handleBanPost validates the IP form field, dispatches "ban" via the
 // daemon RPC, and redirects back to /dashboard/bans with a flash code.
-// Reason is passed through untouched (rendered via html/template only, so
-// auto-escaping handles any hostile content).
+// The operator-supplied reason is prefixed with "dashboard:admin" so the
+// daemon's audit_log distinguishes dashboard-originated writes from CLI
+// verbs (Phase 4 spec). html/template auto-escapes hostile content when
+// the reason is rendered back.
 func (s *Server) handleBanPost(w http.ResponseWriter, r *http.Request) {
+	if !s.requireCSRF(w, r) {
+		return
+	}
 	target, reason, code := parseTargetForm(r)
 	if code != "" {
 		redirectFlash(w, r, "/dashboard/bans", "err", code)
 		return
 	}
+	tagged := dashboardActionReason(reason)
 	code = s.doWrite(r.Context(), func(ctx context.Context) error {
-		return s.callBan(ctx, target, reason)
+		return s.callBan(ctx, target, tagged)
 	})
 	if code != "" {
 		redirectFlash(w, r, "/dashboard/bans", "err", code)
@@ -199,6 +316,9 @@ func (s *Server) handleBanPost(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUnbanPost(w http.ResponseWriter, r *http.Request) {
+	if !s.requireCSRF(w, r) {
+		return
+	}
 	target, _, code := parseTargetForm(r)
 	if code != "" {
 		redirectFlash(w, r, "/dashboard/bans", "err", code)
@@ -215,19 +335,46 @@ func (s *Server) handleUnbanPost(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAllowPost(w http.ResponseWriter, r *http.Request) {
+	if !s.requireCSRF(w, r) {
+		return
+	}
 	target, reason, code := parseTargetForm(r)
 	if code != "" {
 		redirectFlash(w, r, "/dashboard/allowlist", "err", code)
 		return
 	}
+	tagged := dashboardActionReason(reason)
 	code = s.doWrite(r.Context(), func(ctx context.Context) error {
-		return s.callAllow(ctx, target, reason)
+		return s.callAllow(ctx, target, tagged)
 	})
 	if code != "" {
 		redirectFlash(w, r, "/dashboard/allowlist", "err", code)
 		return
 	}
 	redirectFlash(w, r, "/dashboard/allowlist", "ok", "allow-added")
+}
+
+// requireCSRF fetches the expected token from the session context and
+// delegates to checkCSRF, which writes 403 and returns an error on
+// mismatch. Callers exit early when this returns false.
+func (s *Server) requireCSRF(w http.ResponseWriter, r *http.Request) bool {
+	info, ok := sessionFromContext(r.Context())
+	if !ok {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return false
+	}
+	return checkCSRF(w, r, info.CSRF) == nil
+}
+
+// dashboardActionReason tags an operator-supplied reason so audit_log
+// consumers can tell dashboard writes apart from CLI verbs. When the
+// operator left the field blank the tag stands alone; otherwise operator
+// text is preserved after the tag for the paper trail.
+func dashboardActionReason(userReason string) string {
+	if userReason == "" {
+		return "dashboard:admin"
+	}
+	return "dashboard:admin: " + userReason
 }
 
 // parseTargetForm parses a POST form and returns the canonicalised target

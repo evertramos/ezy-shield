@@ -57,6 +57,7 @@ type Server struct {
 	logger   *slog.Logger
 	store    *authStore
 	sessions *sessionStore
+	throttle *loginThrottle
 	mux      *http.ServeMux
 	srv      *http.Server
 	bus      *eventBus
@@ -106,6 +107,7 @@ func New(cfg Config) (*Server, error) {
 		logger:    cfg.Logger,
 		store:     store,
 		sessions:  newSessionStore(cfg.SessionTimeout),
+		throttle:  newLoginThrottle(),
 		decoyHash: decoyHash,
 	}
 	s.bus = newEventBus(s.fetchEvents, cfg.Logger)

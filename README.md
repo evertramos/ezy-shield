@@ -1,7 +1,13 @@
-[![CI](https://github.com/evertramos/ezy-shield/actions/workflows/ci.yaml/badge.svg)](https://github.com/evertramos/ezy-shield/actions/workflows/ci.yaml)
-[![CodeQL](https://github.com/evertramos/ezy-shield/actions/workflows/codeql.yaml/badge.svg)](https://github.com/evertramos/ezy-shield/actions/workflows/codeql.yaml)
-[![Go 1.24+](https://img.shields.io/badge/go-1.24+-00ADD8.svg)](https://go.dev)
-[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL%203.0-blue.svg)](LICENSE)
+<p align="center">
+  <img src="assets/logo/ezyshield-lockup-mono-dark.svg" alt="EzyShield" width="400">
+</p>
+
+<p align="center">
+  <a href="https://github.com/evertramos/ezy-shield/actions/workflows/ci.yaml"><img src="https://github.com/evertramos/ezy-shield/actions/workflows/ci.yaml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/evertramos/ezy-shield/actions/workflows/codeql.yaml"><img src="https://github.com/evertramos/ezy-shield/actions/workflows/codeql.yaml/badge.svg" alt="CodeQL"></a>
+  <a href="https://go.dev"><img src="https://img.shields.io/badge/go-1.24+-00ADD8.svg" alt="Go 1.24+"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL%203.0-blue.svg" alt="License: AGPL-3.0"></a>
+</p>
 
 # EzyShield
 

@@ -29,12 +29,15 @@ collectors: []
 #     #
 #     # Mode "lists" (default, recommended; works on the free plan).
 #     # One Custom IP List at the account level — a single API call propagates
-#     # to every zone that references the list via a WAF Custom Rule (you
-#     # create that rule once per zone in the Cloudflare dashboard).
-#     # Token scope: Account → Account Filter Lists → Edit.
+#     # to every zone that references the list. When zone_ids is set, WAF Custom
+#     # Rules are automatically managed in each zone (no manual setup needed).
+#     # Token scope: Account → Account Filter Lists → Edit (+ Zone → Firewall Services → Edit if using zone_ids).
 #     # mode: lists
 #     # account_id: 0123456789abcdef0123456789abcdef
 #     # list_name: ezyshield_blocked      # default; auto-created if missing
+#     # zone_ids:                          # optional; when set, WAF rules are auto-created per zone
+#     #   - abc123def456                  # Cloudflare zone ID (Dashboard → Overview)
+#     #   - xyz789uvw012
 #     #
 #     # Mode "rulesets" (legacy; one WAF rule per zone, ~200 IP cap auto-split).
 #     # Token scope: Zone → Firewall → Edit on each listed zone.

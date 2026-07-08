@@ -102,4 +102,4 @@ To customize thresholds, edit `configs/rules.yaml` and adjust the `window` and `
 - Issue #48: sustained-tier rules for low & slow detection (2026-07-08)
 - `internal/decision/engine.go`: `Engine.Decide` — active-ban guard
 - `internal/store/store.go`: `HasActiveBan`, `BumpLastSeen`
-- `docs/QUICKSTART.md`: strike table and deduplication semantics (PT-BR)
+- `docs/content/en/getting-started/index.md`: strike table and deduplication semantics

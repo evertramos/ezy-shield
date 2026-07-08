@@ -103,4 +103,4 @@ Para customizar os limiares, edite `configs/rules.yaml` e ajuste os campos `wind
 - Issue #48: regras sustentadas para detecção low & slow (08/07/2026)
 - `internal/decision/engine.go`: `Engine.Decide` — guard de banimento ativo
 - `internal/store/store.go`: `HasActiveBan`, `BumpLastSeen`
-- `docs/QUICKSTART.md`: tabela de strikes e semântica de deduplicação
+- `docs/content/pt-br/getting-started/index.md`: tabela de strikes e semântica de deduplicação

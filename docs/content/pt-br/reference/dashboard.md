@@ -24,7 +24,7 @@ pública, etc.) é recusado na inicialização, tanto em
 `internal/dashboard.New()` quanto em `Server.Run()`.
 
 Essa é uma regra dura do `AGENTS.md §2` (“No new listeners on 0.0.0.0”) e do
-`docs/SECURITY-REVIEW.md §6` (superfícies de controle). Portanto o dashboard
+`docs/internal/SECURITY-REVIEW.md §6` (superfícies de controle). Portanto o dashboard
 só é alcançável a partir do próprio host, e acesso remoto é, por design, uma
 *preocupação do operador* — resolvida fora do daemon.
 

@@ -86,7 +86,7 @@ jobs:
       - uses: actions/checkout@v7
       - name: Required docs present
         run: |
-          for f in SECURITY.md LICENSE docs/SECURITY-REVIEW.md; do
+          for f in SECURITY.md LICENSE docs/internal/SECURITY-REVIEW.md; do
             [ -f "$f" ] || { echo "missing $f"; exit 1; }
           done
       - name: Shell scripts pass shellcheck
@@ -159,14 +159,14 @@ jobs:
           if echo "$changed" | grep -Eq '^internal/(parser|rules|decision|enforce|ai|plugin)/|^cmd/ezyshield-enforcer/'; then
             echo "::notice::PR touches a 🔴 critical area — security review required."
             # crude but effective: the template's section markers must be present and not all empty
-            if ! echo "$BODY" | grep -q 'Security review (per docs/SECURITY-REVIEW.md)'; then
-              echo "::error::PR touches a critical area but the security-review section is missing from the description. See docs/SECURITY-REVIEW.md."
+            if ! echo "$BODY" | grep -q 'Security review (per docs/internal/SECURITY-REVIEW.md)'; then
+              echo "::error::PR touches a critical area but the security-review section is missing from the description. See docs/internal/SECURITY-REVIEW.md."
               exit 1
             fi
             # require at least one section line to be filled beyond the label
             filled=$(echo "$BODY" | grep -E '^- §[0-9]+ .*: .+' | grep -vEi ': *(TODO|TBD)? *$' | wc -l)
             if [ "$filled" -lt 1 ]; then
-              echo "::error::Security-review section is present but empty. Fill in FINDING/OK/N/A per section (docs/SECURITY-REVIEW.md)."
+              echo "::error::Security-review section is present but empty. Fill in FINDING/OK/N/A per section (docs/internal/SECURITY-REVIEW.md)."
               exit 1
             fi
             echo "Security review section present and filled."

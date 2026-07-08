@@ -7,7 +7,7 @@ order: 1
 # Guia de Início Rápido — EzyShield
 
 > ⚠️ Projeto em pré-alpha. Use em modo dry-run e reporte bugs via issues.
-> English version: [docs/QUICKSTART.md](QUICKSTART.md)
+> English version: [docs/content/en/getting-started/index.md](../../en/getting-started/)
 
 ---
 

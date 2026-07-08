@@ -3,7 +3,7 @@
 // The dashboard binds exclusively to loopback addresses (127.0.0.1 or ::1).
 // Any attempt to bind elsewhere is refused before net.Listen is called, in
 // line with the "no new network listeners" hard rule in AGENTS.md §2 and the
-// control-surface doctrine in docs/SECURITY-REVIEW.md §6.
+// control-surface doctrine in docs/internal/SECURITY-REVIEW.md §6.
 //
 // Phase 1 scope: authentication scaffold — first-run admin bootstrap, login
 // page, session cookie, placeholder index. Real-time views, WebSockets and

@@ -94,7 +94,7 @@ func New(cfg Config) (*Server, error) {
 // once — the store persists only the PBKDF2 hash — and the caller is
 // responsible for presenting it to the operator before it is discarded.
 func (s *Server) EnsureAdmin(ctx context.Context) (password string, created bool, err error) {
-	exists, err := s.store.HasAdmin(ctx)
+	exists, err := s.store.hasAdmin(ctx)
 	if err != nil {
 		return "", false, err
 	}
@@ -109,7 +109,7 @@ func (s *Server) EnsureAdmin(ctx context.Context) (password string, created bool
 	if err != nil {
 		return "", false, err
 	}
-	if err := s.store.SetAdmin(ctx, "admin", hash); err != nil {
+	if err := s.store.setAdmin(ctx, "admin", hash); err != nil {
 		return "", false, err
 	}
 	return pw, true, nil
@@ -172,7 +172,7 @@ func (s *Server) serve(ctx context.Context, ln net.Listener) error {
 
 // Close releases the underlying auth store handle.
 func (s *Server) Close() error {
-	return s.store.Close()
+	return s.store.close()
 }
 
 // Handler exposes the mux for tests that exercise routes without a listener.

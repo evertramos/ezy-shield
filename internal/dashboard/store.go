@@ -39,7 +39,7 @@ func openAuthStore(path string) (*authStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
-	if _, err := db.Exec(authSchema); err != nil {
+	if _, err := db.ExecContext(context.Background(), authSchema); err != nil {
 		_ = db.Close() //nolint:errcheck // best-effort close on failed open
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
@@ -53,7 +53,7 @@ func openAuthStore(path string) (*authStore, error) {
 	return &authStore{db: db}, nil
 }
 
-func (s *authStore) HasAdmin(ctx context.Context) (bool, error) {
+func (s *authStore) hasAdmin(ctx context.Context) (bool, error) {
 	var n int
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM dashboard_admin`).Scan(&n); err != nil {
 		return false, fmt.Errorf("count admins: %w", err)
@@ -61,7 +61,7 @@ func (s *authStore) HasAdmin(ctx context.Context) (bool, error) {
 	return n > 0, nil
 }
 
-func (s *authStore) SetAdmin(ctx context.Context, username, hash string) error {
+func (s *authStore) setAdmin(ctx context.Context, username, hash string) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO dashboard_admin (username, password_hash) VALUES (?, ?)
 		 ON CONFLICT(username) DO UPDATE
@@ -74,7 +74,7 @@ func (s *authStore) SetAdmin(ctx context.Context, username, hash string) error {
 	return nil
 }
 
-func (s *authStore) GetAdminHash(ctx context.Context, username string) (string, error) {
+func (s *authStore) getAdminHash(ctx context.Context, username string) (string, error) {
 	var h string
 	err := s.db.QueryRowContext(ctx,
 		`SELECT password_hash FROM dashboard_admin WHERE username = ?`, username).Scan(&h)
@@ -87,6 +87,6 @@ func (s *authStore) GetAdminHash(ctx context.Context, username string) (string, 
 	return h, nil
 }
 
-func (s *authStore) Close() error {
+func (s *authStore) close() error {
 	return s.db.Close()
 }

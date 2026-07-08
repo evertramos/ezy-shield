@@ -13,8 +13,13 @@ import (
 )
 
 // newTestServer builds a Server with a per-test SQLite file. It bootstraps
-// the "admin" account with a caller-supplied password and returns the ready-
-// to-use server plus the http.Client + base URL wired via httptest.
+// the "admin" account with a caller-supplied password and returns the
+// ready-to-use server plus the http.Client + base URL wired via httptest.
+//
+// httptest.NewTLSServer is used so that Secure cookies set by the login
+// handler round-trip through the cookie jar; the production dashboard runs
+// over plain HTTP on loopback (browsers treat localhost as a secure
+// context), but tests need TLS to exercise the Secure flag.
 func newTestServer(t *testing.T, adminPassword string) (*Server, *http.Client, string, func()) {
 	t.Helper()
 	dir := t.TempDir()
@@ -29,18 +34,17 @@ func newTestServer(t *testing.T, adminPassword string) (*Server, *http.Client, s
 	if err != nil {
 		t.Fatalf("hashPassword: %v", err)
 	}
-	if err := srv.store.SetAdmin(context.Background(), "admin", hash); err != nil {
-		t.Fatalf("SetAdmin: %v", err)
+	if err := srv.store.setAdmin(context.Background(), "admin", hash); err != nil {
+		t.Fatalf("setAdmin: %v", err)
 	}
 
-	ts := httptest.NewServer(srv.Handler())
+	ts := httptest.NewTLSServer(srv.Handler())
 	jar, err := cookiejar.New(nil)
 	if err != nil {
 		t.Fatalf("cookiejar: %v", err)
 	}
 	client := ts.Client()
 	client.Jar = jar
-	// Do not follow redirects — tests inspect each hop.
 	client.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
@@ -51,6 +55,55 @@ func newTestServer(t *testing.T, adminPassword string) (*Server, *http.Client, s
 		}
 	}
 	return srv, client, ts.URL, cleanup
+}
+
+func doGet(t *testing.T, client *http.Client, target string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, target, nil)
+	if err != nil {
+		t.Fatalf("build GET %s: %v", target, err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", target, err)
+	}
+	return resp
+}
+
+func doPostForm(t *testing.T, client *http.Client, target string, form url.Values) *http.Response {
+	t.Helper()
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, target, strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatalf("build POST %s: %v", target, err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("POST %s: %v", target, err)
+	}
+	return resp
+}
+
+func closeBody(t *testing.T, resp *http.Response) {
+	t.Helper()
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		t.Logf("drain body: %v", err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Logf("close body: %v", err)
+	}
+}
+
+func readBody(t *testing.T, resp *http.Response) string {
+	t.Helper()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Logf("close body: %v", err)
+	}
+	return string(b)
 }
 
 func TestCheckLoopback(t *testing.T) {
@@ -99,8 +152,9 @@ func TestNew_RefusesNonLoopback(t *testing.T) {
 
 func TestRun_RefusesNonLoopback(t *testing.T) {
 	dir := t.TempDir()
-	// Bypass New's guard by constructing the Server directly, then mutating
-	// cfg.Addr. This proves Run has its own defence-in-depth check.
+	// Bypass New's guard by constructing the Server through the normal path,
+	// then mutating cfg.Addr. This proves Run has its own defence-in-depth
+	// loopback check.
 	srv, err := New(Config{
 		Addr:       "127.0.0.1:0",
 		AuthDBPath: filepath.Join(dir, "dashboard.db"),
@@ -108,7 +162,11 @@ func TestRun_RefusesNonLoopback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer srv.Close() //nolint:errcheck // test cleanup
+	defer func() {
+		if err := srv.Close(); err != nil {
+			t.Logf("close: %v", err)
+		}
+	}()
 	srv.cfg.Addr = "0.0.0.0:9090"
 	err = srv.Run(context.Background())
 	if err == nil {
@@ -123,11 +181,8 @@ func TestIndex_RequiresAuth(t *testing.T) {
 	_, client, base, cleanup := newTestServer(t, "correct-horse-battery-staple")
 	defer cleanup()
 
-	resp, err := client.Get(base + "/")
-	if err != nil {
-		t.Fatalf("GET /: %v", err)
-	}
-	defer resp.Body.Close() //nolint:errcheck // test cleanup
+	resp := doGet(t, client, base+"/")
+	defer closeBody(t, resp)
 	if resp.StatusCode != http.StatusSeeOther {
 		t.Errorf("status = %d, want 303", resp.StatusCode)
 	}
@@ -140,19 +195,13 @@ func TestLogin_WrongPassword(t *testing.T) {
 	_, client, base, cleanup := newTestServer(t, "correct-horse-battery-staple")
 	defer cleanup()
 
-	form := url.Values{}
-	form.Set("username", "admin")
-	form.Set("password", "wrong")
-	resp, err := client.PostForm(base+"/login", form)
-	if err != nil {
-		t.Fatalf("POST /login: %v", err)
-	}
-	defer resp.Body.Close() //nolint:errcheck // test cleanup
+	form := url.Values{"username": {"admin"}, "password": {"wrong"}}
+	resp := doPostForm(t, client, base+"/login", form)
+	body := readBody(t, resp)
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401", resp.StatusCode)
 	}
-	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "Invalid credentials") {
+	if !strings.Contains(body, "Invalid credentials") {
 		t.Errorf("body should contain 'Invalid credentials', got: %s", body)
 	}
 	for _, c := range resp.Cookies() {
@@ -168,14 +217,9 @@ func TestLogin_UnknownUser(t *testing.T) {
 	_, client, base, cleanup := newTestServer(t, "correct-horse-battery-staple")
 	defer cleanup()
 
-	form := url.Values{}
-	form.Set("username", "ghost")
-	form.Set("password", "irrelevant")
-	resp, err := client.PostForm(base+"/login", form)
-	if err != nil {
-		t.Fatalf("POST /login: %v", err)
-	}
-	defer resp.Body.Close() //nolint:errcheck // test cleanup
+	form := url.Values{"username": {"ghost"}, "password": {"irrelevant"}}
+	resp := doPostForm(t, client, base+"/login", form)
+	defer closeBody(t, resp)
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401", resp.StatusCode)
 	}
@@ -185,20 +229,9 @@ func TestLogin_SuccessGrantsAccess(t *testing.T) {
 	_, client, base, cleanup := newTestServer(t, "correct-horse-battery-staple")
 	defer cleanup()
 
-	form := url.Values{}
-	form.Set("username", "admin")
-	form.Set("password", "correct-horse-battery-staple")
-	resp, err := client.PostForm(base+"/login", form)
-	if err != nil {
-		t.Fatalf("POST /login: %v", err)
-	}
-	// Read + close the redirect body so the connection is reusable.
-	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
-		t.Fatalf("drain: %v", err)
-	}
-	if err := resp.Body.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
+	form := url.Values{"username": {"admin"}, "password": {"correct-horse-battery-staple"}}
+	resp := doPostForm(t, client, base+"/login", form)
+	closeBody(t, resp)
 	if resp.StatusCode != http.StatusSeeOther {
 		t.Fatalf("login status = %d, want 303", resp.StatusCode)
 	}
@@ -206,18 +239,14 @@ func TestLogin_SuccessGrantsAccess(t *testing.T) {
 		t.Errorf("Location = %q, want /", loc)
 	}
 
-	// The httptest cookie jar picked up the session cookie on the previous
-	// response; the next request should reach the index without redirect.
-	resp2, err := client.Get(base + "/")
-	if err != nil {
-		t.Fatalf("GET /: %v", err)
-	}
-	defer resp2.Body.Close() //nolint:errcheck // test cleanup
+	// The cookie jar picked up the session cookie on the login response;
+	// the follow-up GET should reach the index directly.
+	resp2 := doGet(t, client, base+"/")
+	body := readBody(t, resp2)
 	if resp2.StatusCode != http.StatusOK {
 		t.Errorf("authenticated GET / status = %d, want 200", resp2.StatusCode)
 	}
-	body, _ := io.ReadAll(resp2.Body)
-	if !strings.Contains(string(body), "Dashboard scaffold") {
+	if !strings.Contains(body, "Dashboard scaffold") {
 		t.Errorf("body should render index, got: %s", body)
 	}
 }
@@ -226,33 +255,15 @@ func TestLogout_ClearsSession(t *testing.T) {
 	_, client, base, cleanup := newTestServer(t, "correct-horse-battery-staple")
 	defer cleanup()
 
-	form := url.Values{}
-	form.Set("username", "admin")
-	form.Set("password", "correct-horse-battery-staple")
-	loginResp, err := client.PostForm(base+"/login", form)
-	if err != nil {
-		t.Fatalf("login: %v", err)
-	}
-	if _, err := io.Copy(io.Discard, loginResp.Body); err != nil {
-		t.Fatalf("drain: %v", err)
-	}
-	loginResp.Body.Close() //nolint:errcheck // test cleanup
+	form := url.Values{"username": {"admin"}, "password": {"correct-horse-battery-staple"}}
+	loginResp := doPostForm(t, client, base+"/login", form)
+	closeBody(t, loginResp)
 
-	logoutResp, err := client.PostForm(base+"/logout", nil)
-	if err != nil {
-		t.Fatalf("logout: %v", err)
-	}
-	if _, err := io.Copy(io.Discard, logoutResp.Body); err != nil {
-		t.Fatalf("drain: %v", err)
-	}
-	logoutResp.Body.Close() //nolint:errcheck // test cleanup
+	logoutResp := doPostForm(t, client, base+"/logout", url.Values{})
+	closeBody(t, logoutResp)
 
-	// After logout, / must redirect to /login again.
-	resp, err := client.Get(base + "/")
-	if err != nil {
-		t.Fatalf("GET /: %v", err)
-	}
-	defer resp.Body.Close() //nolint:errcheck // test cleanup
+	resp := doGet(t, client, base+"/")
+	defer closeBody(t, resp)
 	if resp.StatusCode != http.StatusSeeOther {
 		t.Errorf("post-logout GET / status = %d, want 303", resp.StatusCode)
 	}
@@ -267,7 +278,11 @@ func TestEnsureAdmin_IdempotentBootstrap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer srv.Close() //nolint:errcheck // test cleanup
+	defer func() {
+		if err := srv.Close(); err != nil {
+			t.Logf("close: %v", err)
+		}
+	}()
 
 	pw, created, err := srv.EnsureAdmin(context.Background())
 	if err != nil {
@@ -280,7 +295,6 @@ func TestEnsureAdmin_IdempotentBootstrap(t *testing.T) {
 		t.Errorf("generated password too short: %q (len=%d)", pw, len(pw))
 	}
 
-	// Second call must NOT re-generate a password or overwrite the hash.
 	pw2, created2, err := srv.EnsureAdmin(context.Background())
 	if err != nil {
 		t.Fatalf("second EnsureAdmin: %v", err)

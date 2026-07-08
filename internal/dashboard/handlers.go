@@ -48,7 +48,7 @@ func (s *Server) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 	username := strings.TrimSpace(r.FormValue("username"))
 	password := r.FormValue("password")
 
-	hash, err := s.store.GetAdminHash(r.Context(), username)
+	hash, err := s.store.getAdminHash(r.Context(), username)
 	ok := false
 	switch {
 	case err == nil:
@@ -75,16 +75,18 @@ func (s *Server) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	// Secure is set so that operators fronting the dashboard with TLS
+	// through a reverse proxy or Cloudflare Tunnel get browser refusal on
+	// plaintext downgrade. Modern browsers treat http://localhost as a
+	// secure context, so Secure=true still delivers the cookie on the
+	// default loopback deployment.
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
+		Secure:   true,
 		SameSite: http.SameSiteStrictMode,
-		// Secure is intentionally false: the dashboard is bound to
-		// loopback only, so plaintext HTTP is the expected transport.
-		// Operators fronting the dashboard with TLS via a reverse
-		// proxy should terminate outside the dashboard process.
 	})
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
@@ -99,6 +101,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
+		Secure:   true,
 		SameSite: http.SameSiteStrictMode,
 	})
 	http.Redirect(w, r, "/login", http.StatusSeeOther)

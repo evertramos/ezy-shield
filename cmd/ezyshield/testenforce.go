@@ -75,7 +75,7 @@ func runTestEnforce(cmd *cobra.Command, configDir, backend string) error {
 	}
 
 	if len(results.Backends) == 0 {
-		fmt.Fprintf(cmd.OutOrStdout(), "No %s enforcer configured in %s\n", backend, cfgPath)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "No %s enforcer configured in %s\n", backend, cfgPath)
 		return nil
 	}
 
@@ -310,7 +310,7 @@ func checkTokenValidity(ctx context.Context, token string) (string, string, erro
 	if err != nil {
 		return "", "", fmt.Errorf("network error: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var data struct {
 		Result struct {
@@ -353,7 +353,7 @@ func checkListAccess(ctx context.Context, token, baseURL, accountID, listName st
 	if err != nil {
 		return "", 0, fmt.Errorf("network error: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var data struct {
 		Result []struct {
@@ -423,7 +423,7 @@ func checkZoneWAFAccess(ctx context.Context, token, baseURL, zoneID string) (boo
 	if err != nil {
 		return false, fmt.Sprintf("network error: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case 200, 404:
@@ -447,7 +447,7 @@ func checkAPIAccess(ctx context.Context, token, url string) error {
 	if err != nil {
 		return fmt.Errorf("network error: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("HTTP %d", resp.StatusCode)
@@ -461,16 +461,16 @@ func printEnforceResults(w io.Writer, results *testEnforceResults) error {
 		if result.Mode != "" {
 			mode = fmt.Sprintf(" (mode: %s)", result.Mode)
 		}
-		fmt.Fprintf(w, "\nCloudflare enforcer%s: %s\n", mode, result.Status)
-		fmt.Fprintf(w, "%s\n", repeatStr("─", 40))
+		_, _ = fmt.Fprintf(w, "\nCloudflare enforcer%s: %s\n", mode, result.Status)
+		_, _ = fmt.Fprintf(w, "%s\n", repeatStr("─", 40))
 
 		if result.Message != "" {
-			fmt.Fprintf(w, "✗ Error: %s\n", result.Message)
+			_, _ = fmt.Fprintf(w, "✗ Error: %s\n", result.Message)
 			return nil
 		}
 
 		if result.Notes != "" {
-			fmt.Fprintf(w, "%s\n", result.Notes)
+			_, _ = fmt.Fprintf(w, "%s\n", result.Notes)
 			return nil
 		}
 
@@ -479,18 +479,18 @@ func printEnforceResults(w io.Writer, results *testEnforceResults) error {
 			if check.Status == "fail" {
 				symbol = "✗"
 			}
-			fmt.Fprintf(w, "%s %s: %s\n", symbol, check.Name, check.Details)
+			_, _ = fmt.Fprintf(w, "%s %s: %s\n", symbol, check.Name, check.Details)
 			if check.Fix != "" {
-				fmt.Fprintf(w, "  └─ %s\n", check.Fix)
+				_, _ = fmt.Fprintf(w, "  └─ %s\n", check.Fix)
 			}
 		}
 
 		if result.Passed > 0 || result.Failed > 0 {
-			fmt.Fprintf(w, "\nResult: %d/%d checks passed", result.Passed, result.Passed+result.Failed)
+			_, _ = fmt.Fprintf(w, "\nResult: %d/%d checks passed", result.Passed, result.Passed+result.Failed)
 			if result.Failed > 0 {
-				fmt.Fprintf(w, ", %d failed", result.Failed)
+				_, _ = fmt.Fprintf(w, ", %d failed", result.Failed)
 			}
-			fmt.Fprintln(w)
+			_, _ = fmt.Fprintln(w)
 		}
 	}
 	return nil

@@ -52,10 +52,10 @@ func TestCheckTokenValidity(t *testing.T) {
 				w.Header().Set("Content-Type", "application/json")
 				if tt.status != 200 {
 					w.WriteHeader(tt.status)
-					json.NewEncoder(w).Encode(map[string]any{"success": false})
+					_ = json.NewEncoder(w).Encode(map[string]any{"success": false})
 					return
 				}
-				json.NewEncoder(w).Encode(map[string]any{
+				_ = json.NewEncoder(w).Encode(map[string]any{
 					"success": true,
 					"result": map[string]string{
 						"id":     tt.tokenID,
@@ -80,7 +80,7 @@ func TestCheckTokenValidity(t *testing.T) {
 func TestCheckListAccess_NotFound(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"success": true,
 			"result":  []any{},
 		})
@@ -244,7 +244,7 @@ func TestCheckZoneWAFAccess(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(tt.status)
 				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(map[string]any{"success": false})
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false})
 			}))
 			defer server.Close()
 
@@ -268,7 +268,7 @@ func TestTestCloudflareBackend_ListsMode(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 
 		if strings.Contains(r.URL.Path, "/user/tokens/verify") {
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"success": true,
 				"result": map[string]string{
 					"id":     "token-abc123",
@@ -279,7 +279,7 @@ func TestTestCloudflareBackend_ListsMode(t *testing.T) {
 		}
 
 		if strings.Contains(r.URL.Path, "/accounts/") && strings.Contains(r.URL.Path, "/rules/lists") {
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"success": true,
 				"result": []map[string]string{
 					{"id": "list-123", "name": "ezyshield_blocked", "kind": "ip"},
@@ -290,7 +290,7 @@ func TestTestCloudflareBackend_ListsMode(t *testing.T) {
 
 		// Default to 200 OK for other endpoints
 		w.WriteHeader(200)
-		json.NewEncoder(w).Encode(map[string]any{"success": true})
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
 	}))
 	defer server.Close()
 

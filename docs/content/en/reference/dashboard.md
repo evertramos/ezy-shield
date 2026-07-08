@@ -1,3 +1,9 @@
+---
+title: Dashboard
+description: Web dashboard for monitoring and control
+order: 1
+---
+
 # Dashboard
 
 The EzyShield dashboard is a small web UI that runs alongside the daemon and
@@ -17,7 +23,7 @@ etc.) is refused at startup, both in `internal/dashboard.New()` and again in
 `Server.Run()`.
 
 This is a hard rule from `AGENTS.md §2` (“No new listeners on 0.0.0.0”) and
-from `docs/SECURITY-REVIEW.md §6` (control surfaces). The dashboard is
+from `docs/internal/SECURITY-REVIEW.md §6` (control surfaces). The dashboard is
 therefore reachable only from the same host, and remote access is by design
 an *operator concern* handled outside the daemon.
 

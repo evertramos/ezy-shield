@@ -1,3 +1,9 @@
+---
+title: Instalando EzyShield
+description: Instale a partir de release, source ou espelho air-gapped
+order: 2
+---
+
 # Instalando EzyShield
 
 Este guia cobre todas as formas de instalar EzyShield: a partir de uma versão pré-compilada, uma versão específica ou candidata a lançamento, um espelho customizado, ou a partir do código-fonte.

@@ -5,7 +5,7 @@ same rules, so all tools and people follow one source of truth.
 
 ## Project Context
 
-EzyShield is a CLI-first Linux security tool: detects malicious IPs from logs, escalates bans by strikes (5min → 1h → 24h → 7d → permanent), enforces locally (nftables) and at the edge (Cloudflare/Bunny/AWS), uses AI providers for ambiguous cases with a rule-engine fallback. Interface contracts must not change without an ADR in `docs/adr/`.
+EzyShield is a CLI-first Linux security tool: detects malicious IPs from logs, escalates bans by strikes (5min → 1h → 24h → 7d → permanent), enforces locally (nftables) and at the edge (Cloudflare/Bunny/AWS), uses AI providers for ambiguous cases with a rule-engine fallback. Interface contracts must not change without an ADR in `docs/internal/adr/`.
 
 ## Hard Rules
 
@@ -41,7 +41,7 @@ print correctly.
 ## Security review (mandatory)
 
 EzyShield is a root-capable security daemon, so **every PR gets a security pass
-against `docs/SECURITY-REVIEW.md`** — by the authoring agent before opening the
+against `docs/internal/SECURITY-REVIEW.md`** — by the authoring agent before opening the
 PR, and by the reviewing agent before approving. In the PR description, include
 the per-section output that file specifies (FINDING / OK / N/A per §). A PR that
 touches a 🔴 area (input parsing, decision engine, enforcer/privilege, secrets,
@@ -51,10 +51,10 @@ addressed. "Looks fine" is not a review — cite file:line, why, and the fix.
 ## Workflow for Agents
 
 1. Read the GitHub issue; restate acceptance criteria in the PR description.
-2. Check `docs/adr/` for relevant decisions before proposing design changes.
+2. Check `docs/internal/adr/` for relevant decisions before proposing design changes.
 3. Write/extend tests first when fixing bugs (reproduce, then fix).
 4. Run locally before pushing: `make lint test` (must be green).
-5. **Before opening the PR**: walk `docs/SECURITY-REVIEW.md §10` (code quality self-review) on every function you wrote or modified. This is mandatory — PRs that skip this step will be rejected.
+5. **Before opening the PR**: walk `docs/internal/SECURITY-REVIEW.md §10` (code quality self-review) on every function you wrote or modified. This is mandatory — PRs that skip this step will be rejected.
 6. If a task seems to require breaking a Hard Rule, stop and open a discussion issue instead.
 
 ## Commit / PR Style

@@ -44,8 +44,104 @@ rules:
     description: "Sensitive file probing (.env, wp-config, etc)"
     kinds: [http_request]
     field: path
-    contains: .env
+    contains_any: [.env, wp-config, .env.local, .env.production, .env.staging]
     window: 60s
     threshold: 1
     score: 90
     category: scanner
+
+  - name: http_rce_probe
+    description: "Known RCE exploit paths (zero legitimate use)"
+    kinds: [http_request]
+    field: path
+    contains_any:
+      - phpunit
+      - eval-stdin.php
+      - ".%2e"
+      - "%%32"
+      - allow_url_include
+      - auto_prepend_file
+      - ".git/config"
+      - ".git/HEAD"
+      - ".aws/credentials"
+      - ".ssh/id_rsa"
+      - private_key
+      - shell.php
+      - actuator/env
+      - actuator/health
+      - /_ignition/execute-solution
+      - /solr/admin
+      - /boaform/admin
+      - /server-status
+      - /telescope/requests
+      - /wp-content/debug.log
+      - error.log
+      - access.log
+      - .htaccess
+      - .terraform
+      - ssh-key
+      - vault/token
+    window: 60s
+    threshold: 1
+    score: 95
+    category: exploit_probe
+
+  - name: http_scanner_400
+    description: "Client error responses — malformed request scanner"
+    kinds: [http_request]
+    field: status
+    value: "400"
+    window: 60s
+    threshold: 10
+    score: 60
+    category: scanner
+
+  - name: http_scanner_503
+    description: "Service unavailable responses — application scanner"
+    kinds: [http_request]
+    field: status
+    value: "503"
+    window: 60s
+    threshold: 15
+    score: 65
+    category: scanner
+
+  # ── Sustained-tier rules (low & slow detection) ─────────────────────────
+
+  - name: http_wp_probe_sustained
+    description: "Sustained wp-login attempts (low & slow bruteforce)"
+    kinds: [http_request]
+    field: path
+    contains: wp-login
+    window: 3600s
+    threshold: 10
+    score: 75
+    category: bruteforce
+
+  - name: http_xmlrpc_sustained
+    description: "Sustained xmlrpc abuse"
+    kinds: [http_request]
+    field: path
+    contains: xmlrpc.php
+    window: 3600s
+    threshold: 8
+    score: 75
+    category: bruteforce
+
+  - name: http_scanner_sustained
+    description: "Sustained 404 scanner (directory/endpoint enumeration)"
+    kinds: [http_request]
+    field: status
+    value: "404"
+    window: 3600s
+    threshold: 60
+    score: 70
+    category: scanner
+
+  - name: ssh_bruteforce_sustained
+    description: "Sustained SSH brute force (low & slow)"
+    kinds: [ssh_fail, ssh_invalid_user]
+    window: 3600s
+    threshold: 15
+    score: 80
+    category: bruteforce

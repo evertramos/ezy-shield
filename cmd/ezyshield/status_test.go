@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net"
 	"os"
@@ -19,7 +20,7 @@ import (
 func mockDaemonServer(t *testing.T, dir string, statusResp daemon.SocketResponse, listResp daemon.SocketResponse) string {
 	t.Helper()
 	sockPath := filepath.Join(dir, "daemon.sock")
-	ln, err := net.Listen("unix", sockPath)
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", sockPath)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -58,7 +59,7 @@ func mockDaemonServer(t *testing.T, dir string, statusResp daemon.SocketResponse
 func mockEnforcerServer(t *testing.T, dir string) string {
 	t.Helper()
 	sockPath := filepath.Join(dir, "enforcer.sock")
-	ln, err := net.Listen("unix", sockPath)
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", sockPath)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}

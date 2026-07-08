@@ -428,6 +428,120 @@ func TestNew_ValidationErrors(t *testing.T) {
 	}
 }
 
+// ---- sustained rules (low & slow detection) ----
+
+func TestEvaluate_WPProbeSustained_Triggers(t *testing.T) {
+	e := mustEngine(t)
+	w3600 := 3600 * time.Second
+	// 10 wp-login hits in 1h window triggers http_wp_probe_sustained
+	sample := make([]sdk.Event, 10)
+	for i := range sample {
+		sample[i] = httpEvent("200", "/wp-login.php?action=login")
+	}
+	agg := makeAgg(ip1, w3600, sample)
+
+	verdicts := e.Evaluate(context.Background(), agg)
+	found := findVerdict(verdicts, "bruteforce")
+	if found == nil {
+		t.Fatalf("expected sustained bruteforce verdict, got %v", verdicts)
+	}
+	if found.Score != 75 {
+		t.Errorf("Score = %d, want 75", found.Score)
+	}
+}
+
+func TestEvaluate_WPProbeSustained_BelowThreshold(t *testing.T) {
+	e := mustEngine(t)
+	w3600 := 3600 * time.Second
+	// 9 hits (below threshold of 10) must not trigger
+	sample := make([]sdk.Event, 9)
+	for i := range sample {
+		sample[i] = httpEvent("200", "/wp-login.php")
+	}
+	agg := makeAgg(ip1, w3600, sample)
+
+	verdicts := e.Evaluate(context.Background(), agg)
+	if v := findVerdict(verdicts, "bruteforce"); v != nil && v.Score == 75 {
+		t.Errorf("expected no sustained bruteforce verdict below threshold, got %v", v)
+	}
+}
+
+func TestEvaluate_WPProbeSustained_LegitimateUserDoesNotTrigger(t *testing.T) {
+	e := mustEngine(t)
+	w3600 := 3600 * time.Second
+	// 3 wp-login hits in 1h (normal admin login behavior)
+	sample := make([]sdk.Event, 3)
+	for i := range sample {
+		sample[i] = httpEvent("200", "/wp-login.php?action=login")
+	}
+	agg := makeAgg(ip1, w3600, sample)
+
+	verdicts := e.Evaluate(context.Background(), agg)
+	if v := findVerdict(verdicts, "bruteforce"); v != nil && v.Score == 75 {
+		t.Errorf("expected no sustained bruteforce for legitimate user, got %v", v)
+	}
+}
+
+func TestEvaluate_XMLRPCSustained_Triggers(t *testing.T) {
+	e := mustEngine(t)
+	w3600 := 3600 * time.Second
+	// 8 xmlrpc hits in 1h window triggers http_xmlrpc_sustained
+	sample := make([]sdk.Event, 8)
+	for i := range sample {
+		sample[i] = httpEvent("200", "/xmlrpc.php")
+	}
+	agg := makeAgg(ip1, w3600, sample)
+
+	verdicts := e.Evaluate(context.Background(), agg)
+	found := findVerdict(verdicts, "bruteforce")
+	if found == nil {
+		t.Fatalf("expected sustained xmlrpc bruteforce verdict, got %v", verdicts)
+	}
+	if found.Score != 75 {
+		t.Errorf("Score = %d, want 75", found.Score)
+	}
+}
+
+func TestEvaluate_ScannerSustained_Triggers(t *testing.T) {
+	e := mustEngine(t)
+	w3600 := 3600 * time.Second
+	// 60 distinct 404s in 1h window triggers http_scanner_sustained
+	sample := make([]sdk.Event, 60)
+	for i := range sample {
+		sample[i] = httpEvent("404", "/path/"+string(rune(i)))
+	}
+	agg := makeAgg(ip1, w3600, sample)
+
+	verdicts := e.Evaluate(context.Background(), agg)
+	found := findVerdict(verdicts, "scanner")
+	if found == nil {
+		t.Fatalf("expected sustained scanner verdict, got %v", verdicts)
+	}
+	if found.Score != 70 {
+		t.Errorf("Score = %d, want 70", found.Score)
+	}
+}
+
+func TestEvaluate_SSHBruteforceSustained_Triggers(t *testing.T) {
+	e := mustEngine(t)
+	w3600 := 3600 * time.Second
+	// 15 ssh_fail events in 1h window triggers ssh_bruteforce_sustained
+	sample := make([]sdk.Event, 15)
+	for i := range sample {
+		sample[i] = sshEvent("ssh_fail")
+	}
+	agg := makeAgg(ip1, w3600, sample)
+
+	verdicts := e.Evaluate(context.Background(), agg)
+	found := findVerdict(verdicts, "bruteforce")
+	if found == nil {
+		t.Fatalf("expected sustained ssh bruteforce verdict, got %v", verdicts)
+	}
+	if found.Score != 80 {
+		t.Errorf("Score = %d, want 80", found.Score)
+	}
+}
+
 // ---- context cancellation ----
 
 func TestEvaluate_ContextCancelled(t *testing.T) {

@@ -1,3 +1,9 @@
+---
+title: Installing EzyShield
+description: Install from release, source, or air-gapped mirror
+order: 2
+---
+
 # Installing EzyShield
 
 This guide covers all ways to install EzyShield: from a pre-built release, a specific version or release candidate, a custom mirror, or from source.

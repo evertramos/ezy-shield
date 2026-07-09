@@ -100,7 +100,7 @@ Passos em alto nível:
 
    ```yaml
    tunnel: ezyshield
-   credentials-file: /root/.cloudflared/<tunnel-uuid>.json
+   credentials-file: /root/.cloudflared/`<tunnel-uuid>`.json
    ingress:
      - hostname: dashboard.seu-dominio.exemplo
        service: http://127.0.0.1:9090
@@ -126,7 +126,7 @@ o `cloudflared` fala com ele, e só o Cloudflare fala com o
 
 Boa quando você já tem uma mesh Tailscale ligando time e máquinas.
 Instale Tailscale no servidor e no laptop, logue na mesma tailnet,
-depois abra <http://<nome-tailnet-do-servidor>:9090> pelo laptop.
+depois abra `http://<nome-tailnet-do-servidor>:9090` pelo laptop.
 
 Como o Tailscale não precisa de IP público nem DNS público — o
 tráfego é peer-to-peer via mesh, cifrado com WireGuard — o dashboard

@@ -234,6 +234,6 @@ Result: 4/5 checks passed, 1 failed
 
 ## Veja Também
 
-- [ADR-0002: Estratégia de Bloqueio na Cloudflare](../../internal/adr/0002-cloudflare-rulesets-api-over-ip-access-rules.md)
+- ADR-0002: Estratégia de Bloqueio na Cloudflare (ver repositório ezy-shield `docs/internal/adr/`)
 - [Documentação da API Cloudflare: Custom IP Lists](https://developers.cloudflare.com/api/operations/lists-list-lists)
 - [Painel da Cloudflare](https://dash.cloudflare.com)

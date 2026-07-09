@@ -33,7 +33,7 @@ verifies checksums, and installs them to `/usr/local/bin/`.
 To install a specific version:
 
 ```bash
-curl -sfL https://get.ezyshield.com | EZYSHIELD_VERSION=v0.1.0 sudo sh
+curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=v0.1.0 sh
 ```
 
 ### Build from source
@@ -312,7 +312,7 @@ sudo ezyshield test-notify email
 ## 9. Run the daemon
 
 ```bash
-sudo ezyshield watch
+sudo ezyshield run
 ```
 
 While `armed: false`, EzyShield runs in **dry-run**: it processes everything and

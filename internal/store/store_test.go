@@ -233,6 +233,54 @@ func TestAudit(t *testing.T) {
 	}
 }
 
+func TestListAuditLog_OrderAndLimit(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	for i, op := range []string{"ban", "unban", "allow_add", "unban", "allow_del"} {
+		a := sdk.Action{IP: ip1, Op: op, TTL: 0, Strike: i, Reason: op}
+		if err := db.Audit(ctx, a); err != nil {
+			t.Fatalf("Audit %d: %v", i, err)
+		}
+	}
+
+	// Full read → 5 rows in DESC id order.
+	rows, err := db.ListAuditLog(ctx, 100)
+	if err != nil {
+		t.Fatalf("ListAuditLog: %v", err)
+	}
+	if len(rows) != 5 {
+		t.Fatalf("len = %d, want 5", len(rows))
+	}
+	// Highest id first.
+	for i := 1; i < len(rows); i++ {
+		if rows[i-1].ID <= rows[i].ID {
+			t.Errorf("rows not DESC by id: %d then %d", rows[i-1].ID, rows[i].ID)
+		}
+	}
+	// The most recent op we wrote was "allow_del".
+	if rows[0].Op != "allow_del" {
+		t.Errorf("top row op = %q, want allow_del", rows[0].Op)
+	}
+
+	// Limit clamping: 0 → 1 row, >1000 → capped.
+	one, err := db.ListAuditLog(ctx, 0)
+	if err != nil {
+		t.Fatalf("ListAuditLog(0): %v", err)
+	}
+	if len(one) != 1 {
+		t.Errorf("len with limit 0 = %d, want 1", len(one))
+	}
+
+	huge, err := db.ListAuditLog(ctx, 100_000)
+	if err != nil {
+		t.Fatalf("ListAuditLog(huge): %v", err)
+	}
+	if len(huge) != 5 {
+		t.Errorf("len with huge limit = %d, want 5 (all rows)", len(huge))
+	}
+}
+
 // TestRecordStrike_OffenderKeptAfterExpiry verifies that offender rows are
 // preserved even after the ban expires (total_strikes never decremented).
 func TestRecordStrike_OffenderKeptAfterExpiry(t *testing.T) {

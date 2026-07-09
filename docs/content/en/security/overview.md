@@ -6,7 +6,7 @@ order: 1
 
 # Security Overview
 
-This page describes EzyShield's security model from a user's perspective. For detailed threat analysis, see [docs/internal/SECURITY-REVIEW.md](/docs/internal/SECURITY-REVIEW.md).
+This page describes EzyShield's security model from a user's perspective. For detailed threat analysis, see the internal SECURITY-REVIEW (available in the ezy-shield repository).
 
 ## Architecture
 

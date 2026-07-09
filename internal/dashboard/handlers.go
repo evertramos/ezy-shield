@@ -13,11 +13,28 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("GET /login", s.handleLoginGet)
 	mux.HandleFunc("POST /login", s.handleLoginPost)
 	mux.HandleFunc("POST /logout", s.handleLogout)
-	mux.HandleFunc("GET /", s.requireAuth(s.handleIndex))
+	// Root redirects authed sessions to the Phase 2 status page and drops
+	// unauthed callers on /login.
+	mux.HandleFunc("GET /", s.requireAuth(s.handleRootRedirect))
+	mux.HandleFunc("GET /dashboard", s.requireAuth(s.handleStatusPage))
+	mux.HandleFunc("GET /dashboard/bans", s.requireAuth(s.handleBansPage))
+	mux.HandleFunc("GET /dashboard/allowlist", s.requireAuth(s.handleAllowlistPage))
+	mux.HandleFunc("GET /dashboard/events", s.requireAuth(s.handleEventsPage))
+	mux.HandleFunc("GET /dashboard/timeline", s.requireAuth(s.handleTimelinePage))
+	mux.HandleFunc("POST /dashboard/ban", s.requireAuth(s.handleBanPost))
+	mux.HandleFunc("POST /dashboard/unban", s.requireAuth(s.handleUnbanPost))
+	mux.HandleFunc("POST /dashboard/allow", s.requireAuth(s.handleAllowPost))
+	// WebSocket endpoint for live-update pushes. The upgrade is auth-
+	// gated by the same session cookie check as every /dashboard route,
+	// so an unauthenticated browser cannot open the socket.
+	mux.HandleFunc("GET /dashboard/ws", s.requireAuth(s.handleWebSocket))
 	return mux
 }
 
 // requireAuth wraps h so unauthenticated requests are redirected to /login.
+// On success it also attaches the sessionInfo (username + CSRF) to the
+// request context so downstream handlers can validate CSRF and embed the
+// token in server-rendered forms without a second store lookup.
 func (s *Server) requireAuth(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		c, err := r.Cookie(sessionCookieName)
@@ -25,11 +42,12 @@ func (s *Server) requireAuth(h http.HandlerFunc) http.HandlerFunc {
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
 		}
-		if _, ok := s.sessions.Get(c.Value); !ok {
+		info, ok := s.sessions.Lookup(c.Value)
+		if !ok {
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
 		}
-		h(w, r)
+		h(w, r.WithContext(withSession(r.Context(), info)))
 	}
 }
 
@@ -48,6 +66,17 @@ func (s *Server) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 	username := strings.TrimSpace(r.FormValue("username"))
 	password := r.FormValue("password")
 
+	// Check the throttle before doing any store work. A locked-out
+	// account cannot burn PBKDF2 CPU on brute-force attempts, and the
+	// response is a fixed banner so the operator learns why.
+	if !s.throttle.Allow(username) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		if err := renderLogin(w, "Too many failed attempts. Try again in a minute."); err != nil {
+			s.logger.Error("render login", "err", err)
+		}
+		return
+	}
+
 	hash, err := s.store.getAdminHash(r.Context(), username)
 	switch {
 	case err == nil:
@@ -64,14 +93,16 @@ func (s *Server) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 	}
 	ok := verifyPassword(hash, password)
 	if !ok {
+		s.throttle.RecordFailure(username)
 		w.WriteHeader(http.StatusUnauthorized)
 		if err := renderLogin(w, "Invalid credentials."); err != nil {
 			s.logger.Error("render login", "err", err)
 		}
 		return
 	}
+	s.throttle.Clear(username)
 
-	token, err := s.sessions.Create(username)
+	token, _, err := s.sessions.Create(username)
 	if err != nil {
 		s.logger.Error("session create", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -109,9 +140,6 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 
-func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {
-	if err := renderIndex(w); err != nil {
-		s.logger.Error("render index", "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-	}
+func (s *Server) handleRootRedirect(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 }

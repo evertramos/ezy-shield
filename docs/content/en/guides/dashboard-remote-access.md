@@ -129,7 +129,7 @@ The dashboard on the server still binds only to `127.0.0.1` — only
 
 Good when you already have a Tailscale mesh across your team and
 machines. Install Tailscale on the server and on your laptop, log in
-to the same tailnet, then open <http://<server-tailnet-name>:9090>
+to the same tailnet, then open `http://<server-tailnet-name>:9090`
 from the laptop.
 
 Since Tailscale doesn't need a public IP or DNS entry — traffic goes

@@ -24,7 +24,7 @@ local machine:
 ssh -L 9090:127.0.0.1:9090 operator@server.example.com
 ```
 
-Then open <http://localhost:9090> in your browser. Traffic is
+Then open `http://localhost:9090` in your browser. Traffic is
 tunneled through the SSH channel; the dashboard on the server sees a
 local connection.
 
@@ -77,7 +77,7 @@ your account is set up with a forced command.
 
 - If port 9090 is already in use locally, pick any free port and
   change the first number: `-L 9091:127.0.0.1:9090` maps
-  <http://localhost:9091> to the server-side 9090.
+  `http://localhost:9091` to the server-side 9090.
 - The tunnel gives you exactly what a local session gives — no
   extra multi-user story, no team access controls, one login at a
   time. That's fine for the current single-admin scope.
@@ -129,7 +129,7 @@ The dashboard on the server still binds only to `127.0.0.1` — only
 
 Good when you already have a Tailscale mesh across your team and
 machines. Install Tailscale on the server and on your laptop, log in
-to the same tailnet, then open <http://<server-tailnet-name>:9090>
+to the same tailnet, then open `http://<server-tailnet-name>:9090`
 from the laptop.
 
 Since Tailscale doesn't need a public IP or DNS entry — traffic goes

@@ -23,7 +23,7 @@ A opção mais simples. Nada extra roda no servidor. Do seu laptop:
 ssh -L 9090:127.0.0.1:9090 operador@servidor.exemplo.com
 ```
 
-Depois abra <http://localhost:9090> no navegador. O tráfego passa
+Depois abra `http://localhost:9090` no navegador. O tráfego passa
 pelo canal SSH; o dashboard no servidor vê uma conexão local.
 
 ### Túnel em background
@@ -74,7 +74,7 @@ Junte `-fN` para mandar para background, junte
 
 - Se a porta 9090 já estiver ocupada localmente, escolha qualquer
   porta livre e mude o primeiro número: `-L 9091:127.0.0.1:9090`
-  mapeia <http://localhost:9091> para a 9090 do lado do servidor.
+  mapeia `http://localhost:9091` para a 9090 do lado do servidor.
 - O túnel te dá exatamente o que uma sessão local dá — sem multi-
   usuário, sem controle de acesso por time, um login por vez. Isso
   é ok para o escopo single-admin atual.
@@ -100,7 +100,7 @@ Passos em alto nível:
 
    ```yaml
    tunnel: ezyshield
-   credentials-file: /root/.cloudflared/`<tunnel-uuid>`.json
+   credentials-file: /root/.cloudflared/<tunnel-uuid>.json
    ingress:
      - hostname: dashboard.seu-dominio.exemplo
        service: http://127.0.0.1:9090

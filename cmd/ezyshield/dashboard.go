@@ -13,13 +13,14 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/evertramos/ezy-shield/internal/config"
+	"github.com/evertramos/ezy-shield/internal/daemon"
 	"github.com/evertramos/ezy-shield/internal/dashboard"
 )
 
 const defaultConfigPath = "/etc/ezyshield/config.yaml"
 
 func newDashboardCmd() *cobra.Command {
-	var configPath, addr, authDB string
+	var configPath, addr, authDB, daemonSock string
 
 	cmd := &cobra.Command{
 		Use:   "dashboard",
@@ -29,20 +30,25 @@ func newDashboardCmd() *cobra.Command {
 The dashboard binds exclusively to a loopback address (127.0.0.1 or ::1).
 Any non-loopback bind — including 0.0.0.0 — is refused at startup.
 
+The dashboard reads live data (status, active bans, allowlist) from the
+daemon over its unix socket. If the daemon is not running, pages still
+render but show an "offline" banner.
+
 For remote access, use an operator-managed tunnel such as an SSH port
 forward or a Cloudflare Tunnel. See docs/dashboard.md.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runDashboard(cmd.Context(), cmd.OutOrStderr(), configPath, addr, authDB)
+			return runDashboard(cmd.Context(), cmd.OutOrStderr(), configPath, addr, authDB, daemonSock)
 		},
 	}
 	cmd.Flags().StringVar(&configPath, "config", defaultConfigPath, "path to config.yaml")
 	cmd.Flags().StringVar(&addr, "addr", "", "override bind address (defaults to config, else 127.0.0.1:9090)")
 	cmd.Flags().StringVar(&authDB, "auth-db", "", "override auth DB path (defaults to <data_dir>/dashboard.db)")
+	cmd.Flags().StringVar(&daemonSock, "socket", "", "override daemon control socket path (defaults to config, else "+daemon.DefaultSocketPath+")")
 	return cmd
 }
 
-func runDashboard(ctx context.Context, stderr io.Writer, configPath, addrOverride, authDBOverride string) error {
+func runDashboard(ctx context.Context, stderr io.Writer, configPath, addrOverride, authDBOverride, daemonSockOverride string) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -77,11 +83,19 @@ func runDashboard(ctx context.Context, stderr io.Writer, configPath, addrOverrid
 	if authDBOverride != "" {
 		authDB = authDBOverride
 	}
+	daemonSock := daemon.DefaultSocketPath
+	if cfg.SocketPath != "" {
+		daemonSock = cfg.SocketPath
+	}
+	if daemonSockOverride != "" {
+		daemonSock = daemonSockOverride
+	}
 
 	srv, err := dashboard.New(dashboard.Config{
-		Addr:       addr,
-		AuthDBPath: authDB,
-		Logger:     slog.Default(),
+		Addr:             addr,
+		AuthDBPath:       authDB,
+		DaemonSocketPath: daemonSock,
+		Logger:           slog.Default(),
 	})
 	if err != nil {
 		return err

@@ -109,6 +109,7 @@ still escalates today.
 - **Notifications** — Telegram, Email (SMTP), Slack, Discord, generic webhook
 - **Service & port discovery** — `ezyshield scan` inventories what's actually listening on the host
 - **Audit trail** — every action recorded in SQLite; export to JSON/CSV
+- **Localhost-only dashboard** — small web UI over 127.0.0.1 with status, active bans, allowlist, event log, live WebSocket updates and a strike timeline; CSRF-protected manual ban/unban/allow; access remotely via SSH tunnel or Cloudflare Tunnel (see [docs](docs/content/en/reference/dashboard.md) and the [remote-access guide](docs/content/en/guides/dashboard-remote-access.md))
 - **Scriptable** — `--json` on commands; unix-socket control, no TCP port ever
 
 ---
@@ -129,7 +130,7 @@ The installer fetches the latest signed binaries (`ezyshield` and
 To install a specific version or release candidate, set `EZYSHIELD_VERSION`:
 
 ```sh
-curl -sfL https://get.ezyshield.com | EZYSHIELD_VERSION=v0.3.0-rc.1 sudo sh
+curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=v0.3.0-rc.1 sh
 ```
 
 See [docs/content/en/guides/install.md](docs/content/en/guides/install.md) for complete installation options.
@@ -162,7 +163,7 @@ sudo ezyshield doctor    # validate config, permissions, and dependencies
 
 ```sh
 # Run the pipeline (dry-run until you set armed: true in policy.yaml)
-sudo ezyshield watch
+sudo ezyshield run
 
 # Inspect the running daemon
 ezyshield status

@@ -267,6 +267,42 @@ func TestRunUpdate_UnsupportedArch(t *testing.T) {
 	}
 }
 
+func TestRunUpdate_TempBinaryIsExecutable(t *testing.T) {
+	f := newFixture(t, "v0.2.0")
+	tmpDir := t.TempDir()
+	opts := f.optsFor(t, tmpDir, "v0.1.0")
+
+	// Track whether verify was called and what permissions the file had at that time
+	var permChecked bool
+	var permAtCheck os.FileMode
+	opts.runVerify = func(_ context.Context, path string) error {
+		fi, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
+		permChecked = true
+		permAtCheck = fi.Mode()
+		return nil
+	}
+
+	buf := &bytes.Buffer{}
+	opts.out = buf
+	withTestClient(t, f)
+
+	if err := runUpdate(context.Background(), opts); err != nil {
+		t.Fatalf("runUpdate: %v\nout: %s", err, buf.String())
+	}
+
+	if !permChecked {
+		t.Fatal("verify callback was not called")
+	}
+
+	// Check that the file was executable (0755 mode includes owner execute bit 0o100)
+	if permAtCheck&0o111 == 0 {
+		t.Errorf("temp binary was not executable at verify time; mode was %o", permAtCheck)
+	}
+}
+
 func TestResolveUpdateSource(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

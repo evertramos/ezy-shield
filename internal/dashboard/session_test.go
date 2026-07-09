@@ -7,7 +7,7 @@ import (
 
 func TestSessionStore_CreateGet(t *testing.T) {
 	s := newSessionStore(time.Hour)
-	tok, err := s.Create("admin")
+	tok, _, err := s.Create("admin")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -31,7 +31,7 @@ func TestSessionStore_Expiry(t *testing.T) {
 	s := newSessionStore(30 * time.Minute)
 	s.now = func() time.Time { return now }
 
-	tok, err := s.Create("admin")
+	tok, _, err := s.Create("admin")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestSessionStore_SlidingRenewal(t *testing.T) {
 	s := newSessionStore(30 * time.Minute)
 	s.now = func() time.Time { return now }
 
-	tok, err := s.Create("admin")
+	tok, _, err := s.Create("admin")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestSessionStore_SlidingRenewal(t *testing.T) {
 
 func TestSessionStore_Delete(t *testing.T) {
 	s := newSessionStore(time.Hour)
-	tok, err := s.Create("admin")
+	tok, _, err := s.Create("admin")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

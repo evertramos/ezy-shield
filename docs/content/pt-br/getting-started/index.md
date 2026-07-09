@@ -33,7 +33,7 @@ verifica checksums e instala em `/usr/local/bin/`.
 Para instalar uma versão específica:
 
 ```bash
-curl -sfL https://get.ezyshield.com | EZYSHIELD_VERSION=v0.1.0 sudo sh
+curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=v0.1.0 sh
 ```
 
 ### Build from source
@@ -314,7 +314,7 @@ sudo ezyshield test-notify email
 ## 9. Rodar o daemon
 
 ```bash
-sudo ezyshield watch
+sudo ezyshield run
 ```
 
 Enquanto `armed: false`, o EzyShield opera em **dry-run**: processa tudo e

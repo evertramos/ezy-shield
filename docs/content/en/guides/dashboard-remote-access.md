@@ -103,7 +103,7 @@ High-level steps:
 
    ```yaml
    tunnel: ezyshield
-   credentials-file: /root/.cloudflared/`<tunnel-uuid>`.json
+   credentials-file: /root/.cloudflared/<tunnel-uuid>.json
    ingress:
      - hostname: dashboard.your-domain.example
        service: http://127.0.0.1:9090

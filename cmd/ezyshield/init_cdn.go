@@ -357,7 +357,33 @@ func printLoudSkipWarning(p *wPrinter, results []cdndetect.DomainResult) {
 			f.domain, strings.Join(f.providers, ", "), addrsList(f.addrs))
 	}
 	p.println("")
-	p.println("      Re-run 'ezyshield init --add-cloudflare' later to configure it.")
+	p.println("      To retry: delete /etc/ezyshield/config.yaml + policy.yaml")
+	p.println("      and re-run 'sudo ezyshield init'.")
+	p.println("  ─────────────────────────────────────────────────────────────")
+	p.println("")
+}
+
+// printCFSetupAbortedBanner is emitted when the operator explicitly opted
+// into the Cloudflare subflow (auto-detect happy-path OR the generic "behind
+// a CDN?" prompt) but the subflow returned before setting cfEnabled=true —
+// invalid account_id, invalid list_name, dryValidateCFToken failure, etc.
+//
+// Without this banner (issue #93) the specific error line printed inside
+// runCloudflareSubflow scrolls past under the AI prompts and the "[3/5]
+// Writing configuration files..." output, leaving the operator with a
+// config.yaml that silently lacks the enforce.cloudflare section they asked
+// for. The banner sits at the end of the CDN step so it's the last thing
+// visible before the wizard moves on.
+func printCFSetupAbortedBanner(p *wPrinter) {
+	p.println("")
+	p.println("  ─────────────────────────────────────────────────────────────")
+	p.println("  [!] Cloudflare enforcer setup did NOT complete.")
+	p.println("      config.yaml will NOT contain enforce.cloudflare, and .env")
+	p.println("      will NOT contain CLOUDFLARE_API_TOKEN. See the specific")
+	p.println("      reason printed above (invalid input, or token validation).")
+	p.println("")
+	p.println("      To retry: delete /etc/ezyshield/config.yaml + policy.yaml")
+	p.println("      and re-run 'sudo ezyshield init'.")
 	p.println("  ─────────────────────────────────────────────────────────────")
 	p.println("")
 }
@@ -389,6 +415,20 @@ func runCloudflareSubflow(
 	deps cdnDeps,
 	detectedCFDomains []string,
 ) {
+	// Every early-return path below leaves step.cfEnabled=false. Without a
+	// tail-banner the per-line reason ("invalid account_id", "token
+	// validation failed", …) scrolls past under the AI prompts and the
+	// "[3/5] Writing configuration files..." output, and the operator ends
+	// up with a config.yaml silently missing enforce.cloudflare — issue #93.
+	// The defer fires on every exit, including the happy-path where it's a
+	// no-op because cfEnabled has been flipped to true just before the
+	// function returns naturally.
+	defer func() {
+		if !step.cfEnabled {
+			printCFSetupAbortedBanner(p)
+		}
+	}()
+
 	if len(detectedCFDomains) > 0 {
 		p.printf("  Configuring Cloudflare enforcer for detected domain(s): %s\n",
 			strings.Join(detectedCFDomains, ", "))
@@ -624,7 +664,7 @@ func dryValidateCFToken(ctx context.Context, deps cdnDeps, cfg *config.Cloudflar
 		}
 		return fmt.Errorf("token lacks scope %q (HTTP %d: %s)", scopeHint, resp.StatusCode, msg)
 	case resp.StatusCode >= 400:
-		return fmt.Errorf("cloudflare API returned HTTP %d validating %s (transient?) — retry with `ezyshield init --add-cloudflare`",
+		return fmt.Errorf("cloudflare API returned HTTP %d validating %s (transient?) — delete config.yaml and re-run `sudo ezyshield init` to retry",
 			resp.StatusCode, cfg.Mode)
 	}
 	return nil

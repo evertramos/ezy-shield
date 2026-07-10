@@ -211,6 +211,11 @@ func TestRunCDNStep_HappyPath_Lists(t *testing.T) {
 	if got := httpc.requests[0].Header.Get("Authorization"); got != "Bearer cf-test-token" {
 		t.Errorf("auth header wrong: %q", got)
 	}
+	// The abort banner (#93) must NOT fire on the happy path — it exists
+	// only to make silent bails visible.
+	if strings.Contains(out, "Cloudflare enforcer setup did NOT complete") {
+		t.Errorf("abort banner fired on happy path: %q", out)
+	}
 }
 
 // ── Happy path: rulesets mode ────────────────────────────────────────────────
@@ -330,6 +335,12 @@ func TestRunCDNStep_ScopeMismatch401(t *testing.T) {
 	if !strings.Contains(out, "CDN detected but no edge enforcer configured") {
 		t.Errorf("loud-skip warning missing after CF setup failure: %q", out)
 	}
+	// Issue #93: the abort banner must ALSO fire so the operator sees a
+	// clear "CF setup did NOT complete" message even on paths where the
+	// domain-level loud-skip warning wouldn't apply.
+	if !strings.Contains(out, "Cloudflare enforcer setup did NOT complete") {
+		t.Errorf("abort banner missing after CF setup failure: %q", out)
+	}
 	// The token itself must NEVER appear.
 	if strings.Contains(out, "bad-scope-token") {
 		t.Error("token leaked on failure path")
@@ -375,6 +386,163 @@ func TestRunCDNStep_TransientError(t *testing.T) {
 	if !strings.Contains(out, "unreachable") {
 		t.Errorf("transient-error message missing 'unreachable': %q", out)
 	}
+	// Issue #93: the abort banner must fire so the operator doesn't lose
+	// the transient-error message under later wizard output.
+	if !strings.Contains(out, "Cloudflare enforcer setup did NOT complete") {
+		t.Errorf("abort banner missing after transient CF API error: %q", out)
+	}
+}
+
+// ── Silent-bail scenarios (issue #93) ────────────────────────────────────────
+
+// TestRunCDNStep_Issue93_InvalidAccountIDShowsBanner covers the specific
+// path that produced the original bug report: the operator was prompted for
+// the CF token and pasted it, but then hit ENTER (or a typo) at the
+// account_id prompt. The single "must be 32 lowercase hex" line scrolled
+// past under the later AI + systemd output, and config.yaml silently lacked
+// enforce.cloudflare. The banner must fire so this can't happen again.
+func TestRunCDNStep_Issue93_InvalidAccountIDShowsBanner(t *testing.T) {
+	t.Parallel()
+
+	docker := &dockerFake{
+		ps: "app\tcompany/app",
+		inspect: map[string]string{
+			"app": "VIRTUAL_HOST=one.example.com\n",
+		},
+	}
+	resolver := &resolverFake{
+		answers: map[string][]netip.Addr{
+			"one.example.com": {mustAddr(t, "104.21.13.183")},
+		},
+	}
+	prompt := &scriptedPrompter{
+		strings: []string{
+			"lists", // mode
+			"block", // action
+			"",      // account_id — operator hits ENTER
+		},
+		bools: []bool{true}, // "Configure the CF enforcer now?" → yes
+	}
+	step := &cdnStep{}
+	out := captureStep(t, func(p *wPrinter) {
+		runCDNStep(context.Background(), p, prompt, step, cdnDeps{
+			DockerCLI:   docker,
+			Resolver:    resolver,
+			TokenReader: func(string) (string, error) { return "opt-in-token", nil },
+			// No HTTPClient — dry-validate should never be reached.
+		})
+	})
+	if step.cfEnabled {
+		t.Fatal("cfEnabled=true despite invalid account_id")
+	}
+	if !strings.Contains(out, "account_id must be 32 lowercase hex") {
+		t.Errorf("per-line reason missing: %q", out)
+	}
+	if !strings.Contains(out, "Cloudflare enforcer setup did NOT complete") {
+		t.Errorf("abort banner missing on invalid account_id: %q", out)
+	}
+	// The token itself must NEVER appear on stdout.
+	if strings.Contains(out, "opt-in-token") {
+		t.Error("token leaked on abort path")
+	}
+}
+
+// TestRunCDNStep_Issue93_InvalidListNameShowsBanner covers the sibling
+// silent-bail path: valid account_id but a list_name that fails the
+// [A-Za-z0-9_]+ Cloudflare constraint.
+func TestRunCDNStep_Issue93_InvalidListNameShowsBanner(t *testing.T) {
+	t.Parallel()
+
+	docker := &dockerFake{
+		ps: "app\tcompany/app",
+		inspect: map[string]string{
+			"app": "VIRTUAL_HOST=one.example.com\n",
+		},
+	}
+	resolver := &resolverFake{
+		answers: map[string][]netip.Addr{
+			"one.example.com": {mustAddr(t, "104.21.13.183")},
+		},
+	}
+	prompt := &scriptedPrompter{
+		strings: []string{
+			"lists",
+			"block",
+			"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"has-dashes-not-allowed",
+		},
+		bools: []bool{true},
+	}
+	step := &cdnStep{}
+	out := captureStep(t, func(p *wPrinter) {
+		runCDNStep(context.Background(), p, prompt, step, cdnDeps{
+			DockerCLI:   docker,
+			Resolver:    resolver,
+			TokenReader: func(string) (string, error) { return "opt-in-token", nil },
+		})
+	})
+	if step.cfEnabled {
+		t.Fatal("cfEnabled=true despite invalid list_name")
+	}
+	if !strings.Contains(out, "list_name must match") {
+		t.Errorf("per-line reason missing: %q", out)
+	}
+	if !strings.Contains(out, "Cloudflare enforcer setup did NOT complete") {
+		t.Errorf("abort banner missing on invalid list_name: %q", out)
+	}
+}
+
+// TestRunCDNStep_Issue93_GenericPathBailShowsBanner covers the path where
+// no CDN was auto-detected (DNS didn't resolve to a known CF range, CF
+// Tunnel, etc.) but the operator said "yes, this server IS behind a CDN"
+// on the generic follow-up prompt and then bailed inside the subflow.
+// printLoudSkipWarning is a no-op in this branch because there are no
+// matched domains to warn about — so the new abort banner is the ONLY
+// signal the operator has that config.yaml won't get the CF section.
+func TestRunCDNStep_Issue93_GenericPathBailShowsBanner(t *testing.T) {
+	t.Parallel()
+
+	docker := &dockerFake{
+		ps: "app\tcompany/app",
+		inspect: map[string]string{
+			"app": "VIRTUAL_HOST=behind-tunnel.example.com\n",
+		},
+	}
+	// Resolves to a non-CF IP so no auto-detect matches.
+	resolver := &resolverFake{
+		answers: map[string][]netip.Addr{
+			"behind-tunnel.example.com": {mustAddr(t, "203.0.113.4")},
+		},
+	}
+	prompt := &scriptedPrompter{
+		strings: []string{
+			"lists",
+			"block",
+			"", // account_id → empty → subflow bails
+		},
+		bools: []bool{
+			true, // "Does this server sit behind a CDN?" → yes (generic path)
+		},
+	}
+	step := &cdnStep{}
+	out := captureStep(t, func(p *wPrinter) {
+		runCDNStep(context.Background(), p, prompt, step, cdnDeps{
+			DockerCLI:   docker,
+			Resolver:    resolver,
+			TokenReader: func(string) (string, error) { return "opt-in-token", nil },
+		})
+	})
+	if step.cfEnabled {
+		t.Fatal("cfEnabled=true despite subflow bail")
+	}
+	// The domain-level loud-skip warning specifically MUST NOT fire here
+	// (nothing to warn about), so the abort banner is our only defense.
+	if strings.Contains(out, "CDN detected but no edge enforcer configured") {
+		t.Errorf("domain-level loud-skip warning fired on no-detection path: %q", out)
+	}
+	if !strings.Contains(out, "Cloudflare enforcer setup did NOT complete") {
+		t.Errorf("abort banner missing on generic-path silent bail: %q", out)
+	}
 }
 
 // ── Loud-skip when user says no ──────────────────────────────────────────────
@@ -418,6 +586,13 @@ func TestRunCDNStep_LoudSkipWhenCDNDetected(t *testing.T) {
 	}
 	if !strings.Contains(out, "Cloudflare") {
 		t.Errorf("loud-skip warning missing the provider name: %q", out)
+	}
+	// Issue #93: the abort banner exists to catch bail-outs mid-subflow,
+	// NOT the "operator declined the CF setup" case. When the operator
+	// explicitly said no, runCloudflareSubflow is never entered, so the
+	// banner must stay silent.
+	if strings.Contains(out, "Cloudflare enforcer setup did NOT complete") {
+		t.Errorf("abort banner fired when operator declined CF setup: %q", out)
 	}
 }
 

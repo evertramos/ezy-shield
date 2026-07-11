@@ -136,6 +136,41 @@ Checks:
 - AI provider connectivity (if configured)
 - Notification channels (Telegram, Slack, etc.)
 
+## ezyshield config
+
+Inspect and validate configuration.
+
+### ezyshield config show
+
+Render the effective configuration — after parsing, strict validation, and defaults — as YAML, or JSON with `--json`. Secret values never appear in the output: credential fields hold `env:VARNAME` references by design, and webhook header values (which may carry raw tokens) are shown as `<redacted>`.
+
+```bash
+ezyshield config show
+
+# JSON output
+ezyshield config show --json
+
+# Non-default file locations
+ezyshield config show --config ./config.yaml --policy ./policy.yaml
+```
+
+Exit codes: `0` rendered, `1` configuration invalid, `2` file not found / unreadable.
+
+### ezyshield config validate
+
+Validate `config.yaml` and `policy.yaml` without starting the daemon: strict YAML parsing, field constraints, strike-table monotonicity, allowlist CIDRs, and warnings for unreadable log paths or unset env vars.
+
+```bash
+ezyshield config validate
+
+# Non-default file locations
+ezyshield config validate --config ./config.yaml --policy ./policy.yaml
+```
+
+The top-level `ezyshield validate` is kept as an alias and behaves identically.
+
+Exit codes: `0` valid (may have warnings), `1` errors found, `2` file not found / unreadable.
+
 ## ezyshield scan
 
 Discover listening services on this host.

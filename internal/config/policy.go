@@ -90,6 +90,16 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 	}
 }
 
+// MarshalYAML renders the duration in a form UnmarshalYAML accepts — the Go
+// duration string ("5m0s"), or integer 0 for the permanent-ban marker — so a
+// `config show` dump round-trips through LoadPolicyReader unchanged.
+func (d Duration) MarshalYAML() (any, error) {
+	if d == 0 {
+		return 0, nil
+	}
+	return time.Duration(d).String(), nil
+}
+
 // LoadPolicy reads and strictly validates policy.yaml at path.
 // Unknown keys are rejected; default values are applied where the policy omits them.
 func LoadPolicy(path string) (*Policy, error) {

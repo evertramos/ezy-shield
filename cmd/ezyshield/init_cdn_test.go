@@ -296,20 +296,16 @@ func TestRunCDNStep_HappyPath_Rulesets(t *testing.T) {
 			"one.example.com": {mustAddr(t, "104.21.13.183")},
 		},
 	}
-	// Rulesets happy path: identity probe still hits the account verify
-	// endpoint (that's how CF binds tokens to accounts, regardless of
-	// mode); scope probe hits the first zone's rulesets endpoint.
-	//
-	// The account_id in rulesets mode is derived by askQuestions from the
-	// zone metadata — for this test we don't set it explicitly, so
-	// dryValidateCFToken sees an empty AccountID and calls
-	// /accounts//tokens/verify. That's fine (the byPath map keys off
-	// req.URL.Path verbatim), but we route both possible identity-probe
-	// paths so the test is robust to future work that fills AccountID in.
+	// Rulesets mode never collects an account ID, so the identity probe
+	// (Phase 1) is SKIPPED: /accounts//tokens/verify would be a broken
+	// URL and /user/tokens/verify rejects account-owned (cfat_) tokens —
+	// running it here would misreport valid tokens as expired. The scope
+	// probe against the first zone's rulesets endpoint is the single
+	// source of truth: 200 proves the token is both alive and scoped.
+	// Only that route exists in the fake; any verify request would 404
+	// and fail the exact-request-count assertion below.
 	httpc := &httpFake{
 		byPath: map[string]httpFakeResp{
-			"/accounts//tokens/verify":                         {status: 200, bodyJSON: `{"success":true}`},
-			"/user/tokens/verify":                              {status: 200, bodyJSON: `{"success":true}`},
 			"/zones/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/rulesets": {status: 200, bodyJSON: `{"success":true,"result":[]}`},
 		},
 	}
@@ -349,17 +345,100 @@ func TestRunCDNStep_HappyPath_Rulesets(t *testing.T) {
 	if strings.Contains(out, "Custom Rules") {
 		t.Errorf("rulesets mode leaked lists-mode instructions: %q", out)
 	}
-	// Two-phase probe in rulesets mode: (1) account tokens/verify,
-	// (2) zones/{first_zone}/rulesets?per_page=1.
-	if len(httpc.requests) != 2 {
-		t.Fatalf("http calls=%d, want 2 (identity + scope); paths=%v",
+	// Rulesets mode = scope probe ONLY: exactly one request, against
+	// zones/{first_zone}/rulesets?per_page=1. No identity probe may run
+	// (no account ID exists to verify against, and /user/tokens/verify
+	// would falsely reject cfat_ account tokens).
+	if len(httpc.requests) != 1 {
+		t.Fatalf("http calls=%d, want 1 (scope probe only); paths=%v",
 			len(httpc.requests), reqPaths(httpc.requests))
 	}
-	if got := httpc.requests[1].URL.Path; got != "/zones/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/rulesets" {
-		t.Errorf("phase-2 URL path = %q (want /zones/{first_zone}/rulesets)", got)
+	for _, r := range httpc.requests {
+		if strings.Contains(r.URL.Path, "/tokens/verify") {
+			t.Errorf("identity probe ran in rulesets mode (no account ID available): %s", r.URL.Path)
+		}
 	}
-	if got := httpc.requests[1].URL.RawQuery; got != "per_page=1" {
-		t.Errorf("phase-2 query = %q, want per_page=1", got)
+	if got := httpc.requests[0].URL.Path; got != "/zones/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/rulesets" {
+		t.Errorf("scope-probe URL path = %q (want /zones/{first_zone}/rulesets)", got)
+	}
+	if got := httpc.requests[0].URL.RawQuery; got != "per_page=1" {
+		t.Errorf("scope-probe query = %q, want per_page=1", got)
+	}
+}
+
+// ── Rulesets mode failure — scope probe rejects, message covers both causes ─
+
+// TestRunCDNStep_Rulesets_TokenRejected covers the cfat_/rulesets edge
+// case: with no account ID, the wizard cannot run an identity probe, so a
+// 403 on the zone rulesets read is ambiguous — dead token OR missing
+// Zone:Firewall Services:Edit. The message must name both possibilities
+// (not just "lacks scope") and the abort banner must fire.
+func TestRunCDNStep_Rulesets_TokenRejected(t *testing.T) {
+	t.Parallel()
+
+	docker := &dockerFake{
+		ps: "app\tcompany/app",
+		inspect: map[string]string{
+			"app": "VIRTUAL_HOST=one.example.com\n",
+		},
+	}
+	resolver := &resolverFake{
+		answers: map[string][]netip.Addr{
+			"one.example.com": {mustAddr(t, "104.21.13.183")},
+		},
+	}
+	httpc := &httpFake{
+		byPath: map[string]httpFakeResp{
+			"/zones/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/rulesets": {
+				status:   403,
+				bodyJSON: `{"success":false,"errors":[{"code":10000,"message":"insufficient permissions"}]}`,
+			},
+		},
+	}
+	prompt := &scriptedPrompter{
+		strings: []string{
+			"rulesets", "block",
+			"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		},
+		bools: []bool{true},
+	}
+	step := &cdnStep{}
+	out := captureStep(t, func(p *wPrinter) {
+		runCDNStep(context.Background(), p, prompt, step, cdnDeps{
+			DockerCLI:    docker,
+			Resolver:     resolver,
+			HTTPClient:   httpc,
+			TokenReader:  func(string) (string, error) { return "cfat_rejected-token", nil },
+			CFAPIBaseURL: "http://cf.example",
+		})
+	})
+
+	if step.cfEnabled {
+		t.Fatal("cfEnabled=true despite 403 on scope probe")
+	}
+	if step.cfCfg != nil {
+		t.Errorf("cfCfg was populated on failure: %+v", step.cfCfg)
+	}
+	// No identity probe: rulesets mode has no account ID, and the user
+	// verify endpoint rejects cfat_ tokens (the very bug this guards).
+	for _, r := range httpc.requests {
+		if strings.Contains(r.URL.Path, "/tokens/verify") {
+			t.Errorf("identity probe ran in rulesets mode: %s", r.URL.Path)
+		}
+	}
+	// Without an identity check the 403 is ambiguous — the message must
+	// admit it could be a dead token, not blame only the scope.
+	if !strings.Contains(out, "invalid, expired, or lacks scope") {
+		t.Errorf("rulesets rejection message must cover dead-token AND scope: %q", out)
+	}
+	if !strings.Contains(out, "Zone:Firewall Services:Edit") {
+		t.Errorf("wizard didn't tell the operator which scope to enable: %q", out)
+	}
+	if !strings.Contains(out, "Cloudflare enforcer setup did NOT complete") {
+		t.Errorf("abort banner missing on rulesets token rejection: %q", out)
+	}
+	if strings.Contains(out, "cfat_rejected-token") {
+		t.Error("token leaked on failure path")
 	}
 }
 

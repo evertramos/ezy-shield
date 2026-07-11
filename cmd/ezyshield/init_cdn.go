@@ -615,6 +615,14 @@ func buildCFWAFRuleExpression(listName string) string {
 //     We try the account path first (recommended for service accounts)
 //     and fall back to the user path. If neither returns 200 the token
 //     is genuinely invalid or expired.
+//     This phase REQUIRES an account ID: account-owned (cfat_) tokens
+//     are rejected by /user/tokens/verify, and without an ID the account
+//     URL degenerates to /accounts//tokens/verify. Rulesets mode never
+//     collects an account ID (it only needs zone IDs), so running the
+//     identity probe there would misreport a perfectly valid cfat_
+//     token as "invalid or expired". When cfg.AccountID is empty we
+//     skip Phase 1 entirely and let Phase 2 prove the token is alive —
+//     a 200 on the zone rulesets read implies both identity and scope.
 //
 //  2. Scope probe — does the token actually have the permission needed
 //     for the operational mode? We hit the read-side of the endpoint the
@@ -635,10 +643,14 @@ func dryValidateCFToken(ctx context.Context, deps cdnDeps, cfg *config.Cloudflar
 	if base == "" {
 		base = "https://api.cloudflare.com/client/v4"
 	}
-	if err := verifyCFTokenIdentity(ctx, deps, base, cfg.AccountID, token); err != nil {
-		return err
+	identityVerified := false
+	if cfg.AccountID != "" {
+		if err := verifyCFTokenIdentity(ctx, deps, base, cfg.AccountID, token); err != nil {
+			return err
+		}
+		identityVerified = true
 	}
-	return probeCFTokenScope(ctx, deps, base, cfg, token)
+	return probeCFTokenScope(ctx, deps, base, cfg, token, identityVerified)
 }
 
 // verifyCFTokenIdentity implements Phase 1. Returns nil as soon as either
@@ -678,10 +690,12 @@ func verifyCFTokenIdentity(ctx context.Context, deps cdnDeps, base, accountID, t
 		accountID, acctStatus, userStatus)
 }
 
-// probeCFTokenScope implements Phase 2. The token is already known to be
-// alive (Phase 1 passed); this call answers "can it actually operate on
-// the target resource?"
-func probeCFTokenScope(ctx context.Context, deps cdnDeps, base string, cfg *config.CloudflareCfg, token string) error {
+// probeCFTokenScope implements Phase 2: "can this token actually operate
+// on the target resource?". identityVerified says whether Phase 1 ran and
+// passed; when it did NOT (rulesets mode has no account ID to verify
+// against), a 401/403 here is ambiguous — the token may be dead, not just
+// under-scoped — and the error message must say so.
+func probeCFTokenScope(ctx context.Context, deps cdnDeps, base string, cfg *config.CloudflareCfg, token string, identityVerified bool) error {
 	var url, scopeHint string
 	switch cfg.Mode {
 	case "lists":
@@ -706,11 +720,17 @@ func probeCFTokenScope(ctx context.Context, deps cdnDeps, base string, cfg *conf
 	case http.StatusOK:
 		return nil
 	case http.StatusUnauthorized, http.StatusForbidden:
-		if msg == "" {
-			return fmt.Errorf("token lacks scope %q (HTTP %d) — see https://developers.cloudflare.com/fundamentals/api/reference/permissions/",
-				scopeHint, status)
+		reason := fmt.Sprintf("token lacks scope %q", scopeHint)
+		if !identityVerified {
+			// No Phase-1 identity check ran, so we cannot distinguish a
+			// dead token from an under-scoped one — name both.
+			reason = fmt.Sprintf("token is invalid, expired, or lacks scope %q", scopeHint)
 		}
-		return fmt.Errorf("token lacks scope %q (HTTP %d: %s)", scopeHint, status, msg)
+		if msg == "" {
+			return fmt.Errorf("%s (HTTP %d) — see https://developers.cloudflare.com/fundamentals/api/reference/permissions/",
+				reason, status)
+		}
+		return fmt.Errorf("%s (HTTP %d: %s)", reason, status, msg)
 	default:
 		return fmt.Errorf("cloudflare API returned HTTP %d validating %s (transient?) — delete config.yaml and re-run `sudo ezyshield init` to retry",
 			status, cfg.Mode)

@@ -153,3 +153,36 @@ jobs:
           files: |
             dist/ezyshield-*
             dist/checksums.txt
+
+      - name: Release summary
+        run: |
+          TAG="${{ needs.tag.outputs.new_tag || github.ref_name }}"
+          RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/${TAG}"
+          RELEASED_BY="${{ github.actor }}"
+          RELEASED_AT="$(date -u +%Y-%m-%d\ %H:%M:%S\ UTC)"
+          IS_PRERELEASE="${{ contains(needs.tag.outputs.new_tag || github.ref_name, '-rc') || contains(needs.tag.outputs.new_tag || github.ref_name, '-alpha') || contains(needs.tag.outputs.new_tag || github.ref_name, '-beta') }}"
+
+          {
+            echo "## 🎉 Release Summary"
+            echo ""
+            echo "**Version:** \`${TAG}\`"
+            echo ""
+            echo "**Release URL:** [${TAG}](${RELEASE_URL})"
+            echo ""
+            echo "**Released by:** @${RELEASED_BY}"
+            echo ""
+            echo "**Released at:** ${RELEASED_AT}"
+            echo ""
+            if [ "$IS_PRERELEASE" = "true" ]; then
+              echo "**Status:** ⚠️ Pre-release"
+            else
+              echo "**Status:** ✅ Stable"
+            fi
+            echo ""
+            echo "**Artifacts:**"
+            echo "- ezyshield-linux-amd64"
+            echo "- ezyshield-linux-arm64"
+            echo "- ezyshield-enforcer-linux-amd64"
+            echo "- ezyshield-enforcer-linux-arm64"
+            echo "- checksums.txt"
+          } >> "$GITHUB_STEP_SUMMARY"

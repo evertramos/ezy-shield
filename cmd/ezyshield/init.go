@@ -439,41 +439,10 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 
 // askQuestions fills state from interactive prompts or uses defaults.
 // sc is nil when yes=true; every prompt returns its default in that case.
+// The ask/askBool closures are shared with the `config <kind> <name>`
+// wizards (see newAskFuncs in configwizard.go).
 func askQuestions(sc *bufio.Scanner, state *wizardState, yes bool) {
-	ask := func(question, def string) string {
-		if yes {
-			return def
-		}
-		if def != "" {
-			fmt.Printf("  %s [%s]: ", question, def)
-		} else {
-			fmt.Printf("  %s: ", question)
-		}
-		if sc.Scan() {
-			if line := strings.TrimSpace(sc.Text()); line != "" {
-				return line
-			}
-		}
-		return def
-	}
-
-	askBool := func(question string, def bool) bool {
-		if yes {
-			return def
-		}
-		choices := "y/N"
-		if def {
-			choices = "Y/n"
-		}
-		fmt.Printf("  %s [%s]: ", question, choices)
-		if sc.Scan() {
-			lower := strings.ToLower(strings.TrimSpace(sc.Text()))
-			if lower != "" {
-				return lower == "y" || lower == "yes"
-			}
-		}
-		return def
-	}
+	ask, askBool := newAskFuncs(sc, os.Stdout, yes)
 
 	// Per-server collector confirmation (replaces the old single proxy prompt).
 	state.webCollectors = confirmWebServerCollectors(ask, askBool, state.webServers)

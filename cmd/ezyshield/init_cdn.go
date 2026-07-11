@@ -598,44 +598,137 @@ func buildCFWAFRuleExpression(listName string) string {
 	return fmt.Sprintf("(ip.src in $%s)", listName)
 }
 
-// dryValidateCFToken makes a single GET request to the Cloudflare API to
-// verify the token is scoped correctly for the chosen mode. On 401/403 it
-// returns a scope-specific message; on any other non-2xx it returns a
-// generic error including the status code but NOT the response body (which
-// could contain rate-limit correlation IDs or other Cloudflare-internal
-// data we don't need to surface).
+// dryValidateCFToken checks that the token the operator pasted is (a) a
+// real, active Cloudflare API token and (b) actually usable for the mode
+// the operator chose. It never hits an endpoint that requires a scope the
+// enforcer itself would not need — that was the original bug: probing
+// GET /accounts/{id} demanded Account Settings:Read, so a correctly
+// Account-Filter-Lists:Edit-scoped token failed here with 403 even though
+// nothing else was wrong with it.
 //
-// The token is never appended to the error message — the CF API only
-// accepts it in the Authorization header, and %w/%v wrapping is scoped to
-// the request URL (built with req.URL.Query()) which never carries the
-// token.
+// The check runs in two phases:
+//
+//  1. Identity probe — is this token alive at all? Cloudflare exposes
+//     two verify endpoints depending on who OWNS the token:
+//     - Account-owned tokens: GET /accounts/{account_id}/tokens/verify
+//     - User-owned  tokens:   GET /user/tokens/verify
+//     We try the account path first (recommended for service accounts)
+//     and fall back to the user path. If neither returns 200 the token
+//     is genuinely invalid or expired.
+//
+//  2. Scope probe — does the token actually have the permission needed
+//     for the operational mode? We hit the read-side of the endpoint the
+//     enforcer will write to. Read implies Edit succeeds too (Edit is a
+//     superset), so we accept 200 as evidence of "at least Read on the
+//     right object" and rely on the scope-hint text to tell the operator
+//     which Edit scope to enable if this fails with 403.
+//     - lists    → GET /accounts/{account_id}/rules/lists?per_page=1
+//     - rulesets → GET /zones/{zone_id}/rulesets?per_page=1
+//
+// The token is only ever sent as an Authorization header — never in a URL
+// path or query — so %w wrapping of transport errors and status-code
+// echoes cannot leak it. All error bodies are read through
+// readCFErrorMessage, which caps the read and strips ANSI (§1
+// SECURITY-REVIEW.md).
 func dryValidateCFToken(ctx context.Context, deps cdnDeps, cfg *config.CloudflareCfg, token string) error {
 	base := deps.CFAPIBaseURL
 	if base == "" {
 		base = "https://api.cloudflare.com/client/v4"
 	}
+	if err := verifyCFTokenIdentity(ctx, deps, base, cfg.AccountID, token); err != nil {
+		return err
+	}
+	return probeCFTokenScope(ctx, deps, base, cfg, token)
+}
+
+// verifyCFTokenIdentity implements Phase 1. Returns nil as soon as either
+// verify endpoint reports 200; otherwise returns an "invalid or expired"
+// error that echoes both status codes so the operator can distinguish
+// "wrong account_id" (accounts verify 404 / 401 with `invalid account`)
+// from "token expired" (both verify 401).
+func verifyCFTokenIdentity(ctx context.Context, deps cdnDeps, base, accountID, token string) error {
+	// Account-owned path first — this is what CI/service tokens use, and
+	// what the wizard steers operators toward.
+	acctURL := fmt.Sprintf("%s/accounts/%s/tokens/verify", base, accountID)
+	acctStatus, acctMsg, err := doCFGet(ctx, deps, acctURL, token)
+	if err != nil {
+		return err
+	}
+	if acctStatus == http.StatusOK {
+		return nil
+	}
+	// User-owned fallback for personal API tokens.
+	userURL := base + "/user/tokens/verify"
+	userStatus, _, err := doCFGet(ctx, deps, userURL, token)
+	if err != nil {
+		return err
+	}
+	if userStatus == http.StatusOK {
+		return nil
+	}
+	// Both verify endpoints rejected the token. Prefer the account
+	// endpoint's error message when available — it's the more specific
+	// diagnostic ("wrong account" vs "expired token"). We deliberately
+	// do NOT surface the user-endpoint body: it can only add noise here.
+	if acctMsg != "" {
+		return fmt.Errorf("cloudflare token is invalid, expired, or not authorised for account %s (accounts verify HTTP %d: %s; user verify HTTP %d) — see https://developers.cloudflare.com/fundamentals/api/get-started/create-token/",
+			accountID, acctStatus, acctMsg, userStatus)
+	}
+	return fmt.Errorf("cloudflare token is invalid, expired, or not authorised for account %s (accounts verify HTTP %d; user verify HTTP %d) — see https://developers.cloudflare.com/fundamentals/api/get-started/create-token/",
+		accountID, acctStatus, userStatus)
+}
+
+// probeCFTokenScope implements Phase 2. The token is already known to be
+// alive (Phase 1 passed); this call answers "can it actually operate on
+// the target resource?"
+func probeCFTokenScope(ctx context.Context, deps cdnDeps, base string, cfg *config.CloudflareCfg, token string) error {
 	var url, scopeHint string
 	switch cfg.Mode {
 	case "lists":
-		url = fmt.Sprintf("%s/accounts/%s", base, cfg.AccountID)
+		// per_page=1 keeps the response tiny even on accounts with
+		// thousands of Custom Lists.
+		url = fmt.Sprintf("%s/accounts/%s/rules/lists?per_page=1", base, cfg.AccountID)
 		scopeHint = "Account:Account Filter Lists:Edit on account " + cfg.AccountID
 	case "rulesets":
 		if len(cfg.ZoneIDs) == 0 {
 			return fmt.Errorf("internal: rulesets mode with no zone_ids")
 		}
-		url = fmt.Sprintf("%s/zones/%s", base, cfg.ZoneIDs[0])
-		scopeHint = "Zone:Firewall:Edit on zone " + cfg.ZoneIDs[0]
+		url = fmt.Sprintf("%s/zones/%s/rulesets?per_page=1", base, cfg.ZoneIDs[0])
+		scopeHint = "Zone:Firewall Services:Edit on zone " + cfg.ZoneIDs[0]
 	default:
 		return fmt.Errorf("internal: unknown mode %q", cfg.Mode)
 	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil) //nolint:gosec // G107: url is built from compile-time constant base + operator-typed ID validated to [a-f0-9]{32}
+	status, msg, err := doCFGet(ctx, deps, url, token)
 	if err != nil {
-		// This can only happen for a malformed URL (would indicate an
-		// internal bug, not operator error). Report without echoing the
-		// URL — which is fine here since the URL doesn't contain the
-		// token, but stays defensive.
-		return fmt.Errorf("building validation request: %w", err)
+		return err
+	}
+	switch status {
+	case http.StatusOK:
+		return nil
+	case http.StatusUnauthorized, http.StatusForbidden:
+		if msg == "" {
+			return fmt.Errorf("token lacks scope %q (HTTP %d) — see https://developers.cloudflare.com/fundamentals/api/reference/permissions/",
+				scopeHint, status)
+		}
+		return fmt.Errorf("token lacks scope %q (HTTP %d: %s)", scopeHint, status, msg)
+	default:
+		return fmt.Errorf("cloudflare API returned HTTP %d validating %s (transient?) — delete config.yaml and re-run `sudo ezyshield init` to retry",
+			status, cfg.Mode)
+	}
+}
+
+// doCFGet issues one GET against the Cloudflare API and returns the HTTP
+// status, a best-effort parsed error message on non-2xx, and any
+// transport-layer error. The token is passed exclusively as an
+// Authorization header; the response body is bounded via readCFErrorMessage.
+//
+// On 2xx the response body is closed but NOT parsed — we don't need any
+// verify-endpoint payload, and skipping the parse avoids exposing us to a
+// giant success response.
+func doCFGet(ctx context.Context, deps cdnDeps, url, token string) (int, string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil) //nolint:gosec // G107: url is built from compile-time constant base + operator-typed IDs validated to [a-f0-9]{32}
+	if err != nil {
+		return 0, "", fmt.Errorf("building validation request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
@@ -647,27 +740,15 @@ func dryValidateCFToken(ctx context.Context, deps cdnDeps, cfg *config.Cloudflar
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("cloudflare API unreachable: %w", err)
+		return 0, "", fmt.Errorf("cloudflare API unreachable: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	switch {
-	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
-		// Best-effort read of the CF error struct so we can echo the
-		// most useful hint. Bounded to keep the message reasonable —
-		// even a runaway CF response shouldn't ever be more than a few
-		// hundred bytes for these endpoints.
-		msg := readCFErrorMessage(resp.Body)
-		if msg == "" {
-			return fmt.Errorf("token lacks scope %q (HTTP %d) — see https://developers.cloudflare.com/fundamentals/api/reference/permissions/",
-				scopeHint, resp.StatusCode)
-		}
-		return fmt.Errorf("token lacks scope %q (HTTP %d: %s)", scopeHint, resp.StatusCode, msg)
-	case resp.StatusCode >= 400:
-		return fmt.Errorf("cloudflare API returned HTTP %d validating %s (transient?) — delete config.yaml and re-run `sudo ezyshield init` to retry",
-			resp.StatusCode, cfg.Mode)
+	var msg string
+	if resp.StatusCode != http.StatusOK {
+		msg = readCFErrorMessage(resp.Body)
 	}
-	return nil
+	return resp.StatusCode, msg, nil
 }
 
 // cfErrorResponse mirrors the Cloudflare v4 error envelope. We only look at

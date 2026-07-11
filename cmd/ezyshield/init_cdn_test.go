@@ -51,19 +51,55 @@ func (s *scriptedPrompter) askBool(q string, def bool) bool {
 	return v
 }
 
-// httpFake is a cfClient implementation that returns a canned response.
+// httpFake is a cfClient implementation that returns canned responses.
+//
+// Since dryValidateCFToken now runs a two-phase probe (identity + scope),
+// most tests need to serve more than one response per run. The fake
+// supports two modes:
+//
+//   - Legacy single-response: set `status` + `bodyJSON`. Every Do() call
+//     returns the same tuple. Kept so tests that don't care which endpoint
+//     was hit (e.g. TransientError, where err is set) stay minimal.
+//   - URL-routed: set `byPath` keyed on req.URL.Path. The fake looks up
+//     the response by path; unknown paths return 404 so tests fail loudly
+//     if the production code drifts to a new endpoint they didn't stub.
 type httpFake struct {
 	status   int
 	bodyJSON string
 	err      error
+	byPath   map[string]httpFakeResp
 	// requests captures every Do() call for assertions on URL / headers.
 	requests []*http.Request
+}
+
+// httpFakeResp is one canned response in the byPath map.
+type httpFakeResp struct {
+	status   int
+	bodyJSON string
 }
 
 func (h *httpFake) Do(req *http.Request) (*http.Response, error) {
 	h.requests = append(h.requests, req)
 	if h.err != nil {
 		return nil, h.err
+	}
+	if h.byPath != nil {
+		r, ok := h.byPath[req.URL.Path]
+		if !ok {
+			// Loud 404 with a body pointing at the unstubbed path so
+			// the test failure names the endpoint the caller forgot.
+			return &http.Response{
+				StatusCode: http.StatusNotFound,
+				Body: io.NopCloser(bytes.NewBufferString(
+					`{"success":false,"errors":[{"code":7003,"message":"httpFake: no stub for ` + req.URL.Path + `"}]}`)),
+				Header: make(http.Header),
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: r.status,
+			Body:       io.NopCloser(bytes.NewBufferString(r.bodyJSON)),
+			Header:     make(http.Header),
+		}, nil
 	}
 	return &http.Response{
 		StatusCode: h.status,
@@ -141,7 +177,14 @@ func TestRunCDNStep_HappyPath_Lists(t *testing.T) {
 			"shop.example.com":     {mustAddr(t, "172.67.132.246")},
 		},
 	}
-	httpc := &httpFake{status: 200, bodyJSON: `{"success":true}`}
+	// Account-token happy path: identity probe hits the account verify
+	// endpoint (200), then the scope probe hits rules/lists (200).
+	httpc := &httpFake{
+		byPath: map[string]httpFakeResp{
+			"/accounts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/tokens/verify": {status: 200, bodyJSON: `{"success":true}`},
+			"/accounts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/rules/lists":   {status: 200, bodyJSON: `{"success":true,"result":[]}`},
+		},
+	}
 
 	prompt := &scriptedPrompter{
 		strings: []string{
@@ -201,12 +244,21 @@ func TestRunCDNStep_HappyPath_Lists(t *testing.T) {
 	if !strings.Contains(out, "(ip.src in $ezyshield_blocked)") {
 		t.Errorf("stdout missing WAF rule expression; out=%q", out)
 	}
-	// Validation call must have hit /accounts/<id>.
-	if len(httpc.requests) != 1 {
-		t.Fatalf("http calls=%d, want 1", len(httpc.requests))
+	// Two-phase probe: (1) account tokens/verify, (2) rules/lists?per_page=1.
+	// No user/tokens/verify request should happen — the account verify
+	// returned 200 on the first shot, so the fallback is skipped.
+	if len(httpc.requests) != 2 {
+		t.Fatalf("http calls=%d, want 2 (identity + scope); paths=%v",
+			len(httpc.requests), reqPaths(httpc.requests))
 	}
-	if got := httpc.requests[0].URL.Path; got != "/accounts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
-		t.Errorf("validation URL path = %q", got)
+	if got := httpc.requests[0].URL.Path; got != "/accounts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/tokens/verify" {
+		t.Errorf("phase-1 URL path = %q", got)
+	}
+	if got := httpc.requests[1].URL.Path; got != "/accounts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/rules/lists" {
+		t.Errorf("phase-2 URL path = %q", got)
+	}
+	if got := httpc.requests[1].URL.RawQuery; got != "per_page=1" {
+		t.Errorf("phase-2 query = %q, want per_page=1", got)
 	}
 	if got := httpc.requests[0].Header.Get("Authorization"); got != "Bearer cf-test-token" {
 		t.Errorf("auth header wrong: %q", got)
@@ -216,6 +268,16 @@ func TestRunCDNStep_HappyPath_Lists(t *testing.T) {
 	if strings.Contains(out, "Cloudflare enforcer setup did NOT complete") {
 		t.Errorf("abort banner fired on happy path: %q", out)
 	}
+}
+
+// reqPaths returns the URL paths from a captured request list — used in
+// test failure messages so the reader sees which endpoints were hit.
+func reqPaths(rs []*http.Request) []string {
+	out := make([]string, len(rs))
+	for i, r := range rs {
+		out[i] = r.URL.Path
+	}
+	return out
 }
 
 // ── Happy path: rulesets mode ────────────────────────────────────────────────
@@ -234,7 +296,23 @@ func TestRunCDNStep_HappyPath_Rulesets(t *testing.T) {
 			"one.example.com": {mustAddr(t, "104.21.13.183")},
 		},
 	}
-	httpc := &httpFake{status: 200, bodyJSON: `{"success":true}`}
+	// Rulesets happy path: identity probe still hits the account verify
+	// endpoint (that's how CF binds tokens to accounts, regardless of
+	// mode); scope probe hits the first zone's rulesets endpoint.
+	//
+	// The account_id in rulesets mode is derived by askQuestions from the
+	// zone metadata — for this test we don't set it explicitly, so
+	// dryValidateCFToken sees an empty AccountID and calls
+	// /accounts//tokens/verify. That's fine (the byPath map keys off
+	// req.URL.Path verbatim), but we route both possible identity-probe
+	// paths so the test is robust to future work that fills AccountID in.
+	httpc := &httpFake{
+		byPath: map[string]httpFakeResp{
+			"/accounts//tokens/verify":                         {status: 200, bodyJSON: `{"success":true}`},
+			"/user/tokens/verify":                              {status: 200, bodyJSON: `{"success":true}`},
+			"/zones/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/rulesets": {status: 200, bodyJSON: `{"success":true,"result":[]}`},
+		},
+	}
 
 	prompt := &scriptedPrompter{
 		strings: []string{
@@ -271,15 +349,30 @@ func TestRunCDNStep_HappyPath_Rulesets(t *testing.T) {
 	if strings.Contains(out, "Custom Rules") {
 		t.Errorf("rulesets mode leaked lists-mode instructions: %q", out)
 	}
-	// Validation hit the first zone.
-	if got := httpc.requests[0].URL.Path; got != "/zones/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {
-		t.Errorf("validation URL path = %q", got)
+	// Two-phase probe in rulesets mode: (1) account tokens/verify,
+	// (2) zones/{first_zone}/rulesets?per_page=1.
+	if len(httpc.requests) != 2 {
+		t.Fatalf("http calls=%d, want 2 (identity + scope); paths=%v",
+			len(httpc.requests), reqPaths(httpc.requests))
+	}
+	if got := httpc.requests[1].URL.Path; got != "/zones/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/rulesets" {
+		t.Errorf("phase-2 URL path = %q (want /zones/{first_zone}/rulesets)", got)
+	}
+	if got := httpc.requests[1].URL.RawQuery; got != "per_page=1" {
+		t.Errorf("phase-2 query = %q, want per_page=1", got)
 	}
 }
 
-// ── Scope mismatch (401) ─────────────────────────────────────────────────────
+// ── Invalid / expired token — both verify endpoints reject ─────────────────
 
-func TestRunCDNStep_ScopeMismatch401(t *testing.T) {
+// TestRunCDNStep_InvalidToken_BothVerifyFail is the exact scenario the
+// old dryValidateCFToken conflated with "wrong scope": every call to the
+// CF API returns 401. Under the two-phase design, the identity probe
+// hits BOTH /accounts/{id}/tokens/verify and /user/tokens/verify, and
+// only when both reject does the wizard report the token as
+// invalid/expired. The message must NOT falsely blame the scope — that's
+// what the historical 403 on GET /accounts/{id} did.
+func TestRunCDNStep_InvalidToken_BothVerifyFail(t *testing.T) {
 	t.Parallel()
 
 	docker := &dockerFake{
@@ -293,9 +386,18 @@ func TestRunCDNStep_ScopeMismatch401(t *testing.T) {
 			"one.example.com": {mustAddr(t, "104.21.13.183")},
 		},
 	}
+	// Both verify endpoints reject. The scope probe is never reached.
 	httpc := &httpFake{
-		status:   401,
-		bodyJSON: `{"success":false,"errors":[{"code":10000,"message":"Invalid API token"}]}`,
+		byPath: map[string]httpFakeResp{
+			"/accounts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/tokens/verify": {
+				status:   401,
+				bodyJSON: `{"success":false,"errors":[{"code":10000,"message":"Invalid API token"}]}`,
+			},
+			"/user/tokens/verify": {
+				status:   401,
+				bodyJSON: `{"success":false,"errors":[{"code":10000,"message":"Invalid API token"}]}`,
+			},
+		},
 	}
 	prompt := &scriptedPrompter{
 		strings: []string{
@@ -311,39 +413,212 @@ func TestRunCDNStep_ScopeMismatch401(t *testing.T) {
 			DockerCLI:    docker,
 			Resolver:     resolver,
 			HTTPClient:   httpc,
-			TokenReader:  func(string) (string, error) { return "bad-scope-token", nil },
+			TokenReader:  func(string) (string, error) { return "expired-token", nil },
 			CFAPIBaseURL: "http://cf.example",
 		})
 	})
 
 	if step.cfEnabled {
-		t.Fatal("cfEnabled=true despite 401 scope mismatch")
+		t.Fatal("cfEnabled=true despite invalid token")
 	}
 	if step.cfCfg != nil {
 		t.Errorf("cfCfg was populated on failure: %+v", step.cfCfg)
 	}
-	if !strings.Contains(out, "scope") {
-		t.Errorf("scope-mismatch message missing 'scope': %q", out)
+	// Both verify endpoints must have been probed, in order.
+	if len(httpc.requests) < 2 {
+		t.Fatalf("expected >= 2 requests (account+user verify); got %d, paths=%v",
+			len(httpc.requests), reqPaths(httpc.requests))
 	}
-	if !strings.Contains(out, "401") {
-		t.Errorf("scope-mismatch message missing HTTP 401: %q", out)
+	if got := httpc.requests[0].URL.Path; got != "/accounts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/tokens/verify" {
+		t.Errorf("first probe should be account verify, got %q", got)
 	}
-	if !strings.Contains(out, "Account:Account Filter Lists:Edit") {
-		t.Errorf("wizard didn't tell the operator which scope to enable: %q", out)
+	if got := httpc.requests[1].URL.Path; got != "/user/tokens/verify" {
+		t.Errorf("second probe should be user verify, got %q", got)
 	}
-	// The loud-skip warning should also fire.
+	// The scope probe must NOT have been reached — Phase 2 is gated on
+	// Phase 1 success.
+	for _, r := range httpc.requests {
+		if strings.HasSuffix(r.URL.Path, "/rules/lists") || strings.HasSuffix(r.URL.Path, "/rulesets") {
+			t.Errorf("scope probe reached despite failed identity probe: %s", r.URL.Path)
+		}
+	}
+	// The message must name the failure honestly — the historical
+	// "token lacks scope" was a bug for this input.
+	if !strings.Contains(out, "invalid, expired") {
+		t.Errorf("invalid-token message missing 'invalid, expired': %q", out)
+	}
+	if strings.Contains(out, "token lacks scope") {
+		t.Errorf("wizard blamed scope on an identity failure — regression on the original bug: %q", out)
+	}
+	// The loud-skip warning should still fire.
 	if !strings.Contains(out, "CDN detected but no edge enforcer configured") {
 		t.Errorf("loud-skip warning missing after CF setup failure: %q", out)
 	}
-	// Issue #93: the abort banner must ALSO fire so the operator sees a
-	// clear "CF setup did NOT complete" message even on paths where the
-	// domain-level loud-skip warning wouldn't apply.
+	// Issue #93: the abort banner must ALSO fire.
 	if !strings.Contains(out, "Cloudflare enforcer setup did NOT complete") {
 		t.Errorf("abort banner missing after CF setup failure: %q", out)
 	}
 	// The token itself must NEVER appear.
-	if strings.Contains(out, "bad-scope-token") {
+	if strings.Contains(out, "expired-token") {
 		t.Error("token leaked on failure path")
+	}
+}
+
+// ── Wrong scope — identity OK, but Account Filter Lists is missing ─────────
+
+// TestRunCDNStep_WrongScope_ListsForbidden is the case the original
+// dryValidateCFToken pretended to test but couldn't distinguish from an
+// invalid token. The identity probe succeeds (token is real and belongs
+// to the account), then the rules/lists probe returns 403 because the
+// operator forgot to add "Account Filter Lists:Edit" to the token.
+// The scope-hint text must name that exact scope so the operator can fix
+// it without hunting through CF docs.
+func TestRunCDNStep_WrongScope_ListsForbidden(t *testing.T) {
+	t.Parallel()
+
+	docker := &dockerFake{
+		ps: "app\tcompany/app",
+		inspect: map[string]string{
+			"app": "VIRTUAL_HOST=one.example.com\n",
+		},
+	}
+	resolver := &resolverFake{
+		answers: map[string][]netip.Addr{
+			"one.example.com": {mustAddr(t, "104.21.13.183")},
+		},
+	}
+	httpc := &httpFake{
+		byPath: map[string]httpFakeResp{
+			"/accounts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/tokens/verify": {
+				status: 200, bodyJSON: `{"success":true}`,
+			},
+			"/accounts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/rules/lists": {
+				status:   403,
+				bodyJSON: `{"success":false,"errors":[{"code":10000,"message":"insufficient permissions"}]}`,
+			},
+		},
+	}
+	prompt := &scriptedPrompter{
+		strings: []string{
+			"lists", "block",
+			"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"ezyshield_blocked",
+		},
+		bools: []bool{true},
+	}
+	step := &cdnStep{}
+	out := captureStep(t, func(p *wPrinter) {
+		runCDNStep(context.Background(), p, prompt, step, cdnDeps{
+			DockerCLI:    docker,
+			Resolver:     resolver,
+			HTTPClient:   httpc,
+			TokenReader:  func(string) (string, error) { return "narrow-scope-token", nil },
+			CFAPIBaseURL: "http://cf.example",
+		})
+	})
+
+	if step.cfEnabled {
+		t.Fatal("cfEnabled=true despite 403 wrong-scope")
+	}
+	if !strings.Contains(out, "token lacks scope") {
+		t.Errorf("scope-mismatch message missing 'token lacks scope': %q", out)
+	}
+	if !strings.Contains(out, "403") {
+		t.Errorf("scope-mismatch message missing HTTP 403: %q", out)
+	}
+	if !strings.Contains(out, "Account:Account Filter Lists:Edit") {
+		t.Errorf("wizard didn't tell the operator which scope to enable: %q", out)
+	}
+	if !strings.Contains(out, "Cloudflare enforcer setup did NOT complete") {
+		t.Errorf("abort banner missing on wrong-scope failure: %q", out)
+	}
+	if strings.Contains(out, "narrow-scope-token") {
+		t.Error("token leaked on failure path")
+	}
+}
+
+// ── User-owned token happy path (personal token) ───────────────────────────
+
+// TestRunCDNStep_HappyPath_UserToken_Lists covers the class of tokens
+// that live under a Cloudflare USER (personal API tokens), rather than
+// under an account. The account verify endpoint rejects these ("token
+// isn't a member of this account's token pool"), but the user verify
+// endpoint accepts them, and if the user has been granted Account Filter
+// Lists:Edit on the target account the scope probe succeeds. The bug
+// this test guards against: the old validation used a single account
+// endpoint that would 403 personal tokens even when they were perfectly
+// configured.
+func TestRunCDNStep_HappyPath_UserToken_Lists(t *testing.T) {
+	t.Parallel()
+
+	docker := &dockerFake{
+		ps: "app\tcompany/app",
+		inspect: map[string]string{
+			"app": "VIRTUAL_HOST=one.example.com\n",
+		},
+	}
+	resolver := &resolverFake{
+		answers: map[string][]netip.Addr{
+			"one.example.com": {mustAddr(t, "104.21.13.183")},
+		},
+	}
+	httpc := &httpFake{
+		byPath: map[string]httpFakeResp{
+			// Account verify rejects — this token doesn't live in the
+			// account's token pool.
+			"/accounts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/tokens/verify": {
+				status:   401,
+				bodyJSON: `{"success":false,"errors":[{"code":1001,"message":"invalid API token for account"}]}`,
+			},
+			// User verify accepts — it's a personal token.
+			"/user/tokens/verify": {status: 200, bodyJSON: `{"success":true}`},
+			// Scope probe succeeds — the operator granted Account
+			// Filter Lists:Edit to the personal token.
+			"/accounts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/rules/lists": {
+				status: 200, bodyJSON: `{"success":true,"result":[]}`,
+			},
+		},
+	}
+	prompt := &scriptedPrompter{
+		strings: []string{
+			"lists", "block",
+			"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"ezyshield_blocked",
+		},
+		bools: []bool{true},
+	}
+	step := &cdnStep{}
+	out := captureStep(t, func(p *wPrinter) {
+		runCDNStep(context.Background(), p, prompt, step, cdnDeps{
+			DockerCLI:    docker,
+			Resolver:     resolver,
+			HTTPClient:   httpc,
+			TokenReader:  func(string) (string, error) { return "personal-cf-token", nil },
+			CFAPIBaseURL: "http://cf.example",
+		})
+	})
+
+	if !step.cfEnabled {
+		t.Fatalf("cfEnabled false on user-token happy path; out=%q", out)
+	}
+	if len(httpc.requests) != 3 {
+		t.Fatalf("http calls=%d, want 3 (account verify + user verify + scope); paths=%v",
+			len(httpc.requests), reqPaths(httpc.requests))
+	}
+	if got := httpc.requests[0].URL.Path; got != "/accounts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/tokens/verify" {
+		t.Errorf("phase-1a URL = %q", got)
+	}
+	if got := httpc.requests[1].URL.Path; got != "/user/tokens/verify" {
+		t.Errorf("phase-1b URL = %q", got)
+	}
+	if got := httpc.requests[2].URL.Path; got != "/accounts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/rules/lists" {
+		t.Errorf("phase-2 URL = %q", got)
+	}
+	if strings.Contains(out, "personal-cf-token") {
+		t.Error("token leaked on happy path")
+	}
+	if strings.Contains(out, "Cloudflare enforcer setup did NOT complete") {
+		t.Errorf("abort banner fired on user-token happy path: %q", out)
 	}
 }
 

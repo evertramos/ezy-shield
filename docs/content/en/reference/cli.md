@@ -18,15 +18,51 @@ sudo ezyshield init
 
 Creates `/etc/ezyshield/config.yaml` and `/etc/ezyshield/policy.yaml` with secure permissions (0600).
 
-## ezyshield watch
+## ezyshield run
 
 Start the daemon in the foreground. Reads logs, makes decisions, enforces bans.
 
 ```bash
-sudo ezyshield watch
+sudo ezyshield run
 ```
 
 Runs in dry-run mode by default (`armed: false` in policy.yaml).
+
+## ezyshield watch
+
+Stream live security events from the running daemon: detections, strike
+escalations, bans, dry-run bans, unbans, and allowlist changes. This is a live
+view — for a point-in-time snapshot of active bans, use `list`.
+
+```bash
+# Stream everything
+ezyshield watch
+
+# Only bans and dry-run bans
+ezyshield watch --kind ban,dry_ban
+
+# Only events for one address or CIDR block
+ezyshield watch --ip 203.0.113.0/24
+
+# NDJSON: one JSON object per line, for jq or a log shipper
+ezyshield watch --json | jq .kind
+```
+
+Flags:
+- `--kind` — filter by event kind: `detection`, `record`, `notify_only`,
+  `dry_ban`, `ban`, `already_banned`, `unban`, `allow` (repeatable or
+  comma-separated)
+- `--ip` — filter by IP address or CIDR block
+- `--socket` — daemon control socket path
+
+Each event carries a timestamp, kind, IP, and context fields (score, category,
+rule, strike, TTL, enforcer, reason, source). Event text derived from log
+lines is sanitized before display — ANSI escape sequences and control
+characters are stripped so hostile log content cannot spoof your terminal.
+
+If the daemon connection drops (e.g. a restart), `watch` reconnects
+automatically with backoff. Press `Ctrl-C` to exit. The daemon must be running
+(`ezyshield run` or `sudo systemctl start ezyshield`).
 
 ## ezyshield status
 
@@ -320,10 +356,10 @@ The pre-1.0 verbs `test-enforce <name>` and `test-notify <name>` keep working as
 
 ## Examples
 
-**Monitor daemon activity:**
+**Monitor daemon activity live:**
 
 ```bash
-watch ezyshield status
+ezyshield watch --kind ban,dry_ban
 ```
 
 **Export audit log to JSON for analysis:**

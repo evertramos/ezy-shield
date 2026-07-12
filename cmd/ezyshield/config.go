@@ -25,9 +25,14 @@ func newConfigCmd() *cobra.Command {
 
 Subcommands:
   show      render the effective configuration (secrets redacted)
-  validate  check config.yaml and policy.yaml without starting the daemon`,
+  validate  check config.yaml and policy.yaml without starting the daemon
+  enforcer  interactive wizard for one enforcer (e.g. cloudflare)`,
 	}
-	cmd.AddCommand(newConfigShowCmd(), newValidateCmd())
+	cmd.AddCommand(
+		newConfigShowCmd(),
+		newValidateCmd(),
+		newConfigComponentCmd("enforcer", "Configure an enforcer interactively"),
+	)
 	return cmd
 }
 

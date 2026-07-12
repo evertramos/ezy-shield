@@ -179,7 +179,7 @@ sudo ezyshield allow 198.51.100.0/24
 ezyshield list
 
 # Test a notification channel without waiting for a real event
-sudo ezyshield test-notify telegram
+sudo ezyshield test notifier telegram
 
 # See what's listening on this host
 sudo ezyshield scan

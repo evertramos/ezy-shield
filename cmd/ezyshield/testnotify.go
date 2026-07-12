@@ -14,32 +14,8 @@ import (
 	"github.com/evertramos/ezy-shield/pkg/sdk"
 )
 
-func newTestNotifyCmd() *cobra.Command {
-	var configDir string
-
-	cmd := &cobra.Command{
-		Use:   "test-notify <channel>",
-		Short: "Send a test notification to a configured channel",
-		Long: `Send a synthetic EzyShield alert to verify that a notification channel
-is correctly configured.
-
-<channel> must be one of: telegram, email, all
-
-The command loads notify configuration from --config-dir/config.yaml,
-resolves secrets from the environment variables declared in bot_token/password,
-and sends a test ban notification. Exit code is non-zero on failure.`,
-		Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return runTestNotify(cmd, configDir, args[0])
-		},
-	}
-
-	cmd.Flags().StringVar(&configDir, "config-dir", "/etc/ezyshield",
-		"directory containing config.yaml")
-
-	return cmd
-}
-
+// runTestNotify backs `test notifier <name>` (and its deprecated
+// `test-notify` alias); the cobra wiring lives in testcmd.go.
 func runTestNotify(cmd *cobra.Command, configDir, channel string) error {
 	switch channel {
 	case "telegram", "email", "all":
@@ -56,7 +32,7 @@ func runTestNotify(cmd *cobra.Command, configDir, channel string) error {
 		return fmt.Errorf("no notify section in %s — add a notify: block to enable notifications", cfgPath)
 	}
 
-	testMsg := buildTestNotification()
+	testMsg := buildTestNotification(cmd.CommandPath())
 	ctx := context.Background()
 	sent := 0
 
@@ -120,13 +96,15 @@ func sendTestEmail(ctx context.Context, cmd *cobra.Command, ecfg *config.EmailCf
 	return nil
 }
 
-// buildTestNotification creates a synthetic alert that exercises all message fields.
-func buildTestNotification() sdk.Notification {
+// buildTestNotification creates a synthetic alert that exercises all message
+// fields. source is the invoking command path (derived, never hardcoded —
+// e.g. "ezyshield test notifier").
+func buildTestNotification(source string) sdk.Notification {
 	ip := netip.MustParseAddr("192.0.2.1") // TEST-NET-1 per RFC 5737, safe for docs/tests
 	return sdk.Notification{
 		Severity: "warn",
 		Title:    "EzyShield test notification",
-		Body:     "This is a test notification from 'ezyshield test-notify'. No action required.",
+		Body:     fmt.Sprintf("This is a test notification from '%s'. No action required.", source),
 		Action: &sdk.Action{
 			IP:     ip,
 			Op:     "ban",

@@ -271,18 +271,43 @@ ezyshield version
 ezyshield version --json
 ```
 
-## ezyshield test-notify
+## ezyshield test
 
-Test notification channels without waiting for a real event.
+Run connectivity tests against configured components. Like `config`, the group follows the `<kind> <name>` pattern, so future component kinds plug into the same verbs.
+
+### ezyshield test enforcer <name>
+
+Test the configuration and permissions of an enforcer backend: token validity, account/zone access, and the exact API permissions the enforcer needs — with a fix suggestion for every failing check.
 
 ```bash
-sudo ezyshield test-notify telegram
+sudo ezyshield test enforcer cloudflare
 
-# Test all channels
-sudo ezyshield test-notify all
+# Test all configured enforcer backends
+sudo ezyshield test enforcer all
 ```
 
-Sends a test message to each configured channel.
+Available names: `all`, `cloudflare`, `nftables`.
+
+Exit code is `0` if all checks pass, non-zero if any check fails.
+
+### ezyshield test notifier <name>
+
+Send a synthetic alert to verify a notification channel end to end (secrets resolved from the environment, message actually delivered).
+
+```bash
+sudo ezyshield test notifier telegram
+
+# Test all configured channels
+sudo ezyshield test notifier all
+```
+
+Available names: `all`, `email`, `telegram`.
+
+Exit code is non-zero on failure.
+
+### Deprecated aliases
+
+The pre-1.0 verbs `test-enforce <name>` and `test-notify <name>` keep working as hidden aliases of `test enforcer` / `test notifier` — same flags, same behavior — and print a one-line migration notice on stderr. They will be removed in 1.0.
 
 ## Global flags
 

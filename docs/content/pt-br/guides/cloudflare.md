@@ -198,12 +198,12 @@ EzyShield aplica um limite de 4 requisições/segundo nas chamadas de API da Clo
 
 ## Validando sua Configuração
 
-### Usando `test-enforce cloudflare`
+### Usando `test enforcer cloudflare`
 
 Após configurar, valide seu setup com:
 
 ```bash
-ezyshield test-enforce cloudflare --config-dir /etc/ezyshield/
+ezyshield test enforcer cloudflare --config-dir /etc/ezyshield/
 ```
 
 Este comando irá:

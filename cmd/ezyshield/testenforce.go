@@ -15,31 +15,8 @@ import (
 	"github.com/evertramos/ezy-shield/internal/config"
 )
 
-func newTestEnforceCmd() *cobra.Command {
-	var configDir string
-
-	cmd := &cobra.Command{
-		Use:   "test-enforce <backend>",
-		Short: "Test enforcer backend connectivity and permissions",
-		Long: `Test the configuration and permissions of an enforcer backend.
-
-<backend> must be one of: cloudflare, nftables, all
-
-The command loads the enforce configuration from --config-dir/config.yaml,
-validates API tokens and permissions, and reports what's working and what's missing.
-Exit code is 0 if all checks pass, 1 if any check fails.`,
-		Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return runTestEnforce(cmd, configDir, args[0])
-		},
-	}
-
-	cmd.Flags().StringVar(&configDir, "config-dir", "/etc/ezyshield",
-		"directory containing config.yaml")
-
-	return cmd
-}
-
+// runTestEnforce backs `test enforcer <name>` (and its deprecated
+// `test-enforce` alias); the cobra wiring lives in testcmd.go.
 func runTestEnforce(cmd *cobra.Command, configDir, backend string) error {
 	switch backend {
 	case "cloudflare", "nftables", "all":

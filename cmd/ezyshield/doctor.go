@@ -124,7 +124,7 @@ func checkFileExists(path, label string) CheckResult {
 		return CheckResult{
 			Name:   label + ": exists",
 			Status: statusFail,
-			Hint:   fmt.Sprintf("file not found -- run 'ezyshield init' to create %s", path),
+			Hint:   fmt.Sprintf("file not found -- run '%s init' to create %s", progName, path),
 		}
 	}
 	if err != nil {
@@ -147,7 +147,7 @@ func checkFileParses(path, label string) CheckResult {
 	data, err := os.ReadFile(path) //nolint:gosec
 	if os.IsNotExist(err) {
 		return CheckResult{Name: label + ": parses", Status: statusNA,
-			Hint: "file absent -- run 'ezyshield init' first"}
+			Hint: "file absent -- run '" + progName + " init' first"}
 	}
 	if err != nil {
 		return CheckResult{Name: label + ": parses", Status: statusFail, Hint: err.Error()}
@@ -170,7 +170,7 @@ func checkFilePerms(path, label string) CheckResult {
 	info, err := os.Stat(path)
 	if os.IsNotExist(err) {
 		return CheckResult{Name: label + ": permissions", Status: statusNA,
-			Hint: "file absent -- run 'ezyshield init' first"}
+			Hint: "file absent -- run '" + progName + " init' first"}
 	}
 	if err != nil {
 		return CheckResult{Name: label + ": permissions", Status: statusFail, Hint: err.Error()}

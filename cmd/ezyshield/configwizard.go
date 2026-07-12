@@ -5,8 +5,8 @@ package main
 // installation: it reuses the same interactive sub-flow the init wizard
 // runs, then merges the answers into the loaded config and commits them
 // atomically (temp + rename, .bak backup, re-validation before save).
-// The prompt/validation logic lives ONLY in the sub-flows (init_cdn.go);
-// this file owns the registry, the merge, and the write path.
+// The prompt/validation logic lives ONLY in the sub-flows (init_cdn.go,
+// init_ai.go); this file owns the registry, the merge, and the write path.
 
 import (
 	"bufio"
@@ -34,10 +34,15 @@ type componentWizard func(ctx context.Context, p *wPrinter, pr prompter, deps cd
 
 // componentWizards is the single kind → name → wizard registry (issue #96).
 // New components plug in here without further CLI changes; the
-// notifier/ai/collector kinds arrive with the next slice using this table.
+// notifier/collector kinds arrive with the next slice using this table.
 var componentWizards = map[string]map[string]componentWizard{
 	"enforcer": {
 		"cloudflare": wizardEnforcerCloudflare,
+	},
+	"ai": {
+		"anthropic": wizardAIProvider("anthropic"),
+		"openai":    wizardAIProvider("openai"),
+		"ollama":    wizardAIProvider("ollama"),
 	},
 }
 
@@ -276,4 +281,70 @@ func wizardEnforcerCloudflare(ctx context.Context, p *wPrinter, pr prompter, dep
 		return nil
 	}
 	return changed, postSave, nil
+}
+
+// wizardAIProvider adapts the init AI sub-flow (init_ai.go) to post-install
+// reconfiguration for one provider: same model + key-source prompts, same
+// no-echo token read and placeholder semantics — merged into the existing
+// Config's ai: section instead of a freshly generated file. Skipping the
+// paste is a valid outcome (placeholder path, issue #13 §5), so unlike the
+// Cloudflare wizard this one never aborts.
+func wizardAIProvider(provider string) componentWizard {
+	return func(_ context.Context, p *wPrinter, pr prompter, deps cdnDeps,
+		cfg *config.Config, configDir string) ([]string, func() error, error) {
+		step := &aiStep{provider: provider}
+		runAIProviderSubflow(p, pr, step, deps.TokenReader, false)
+
+		verb := "added"
+		if cfg.AI != nil && cfg.AI.Provider != "" {
+			verb = "replaced"
+		}
+		if cfg.AI == nil {
+			// Fresh ai: section — same tuning defaults the init wizard emits.
+			cfg.AI = &config.AICfg{
+				AmbiguousBand:    [2]int{30, 75},
+				TokenBudgetDaily: 100000,
+			}
+		}
+		cfg.AI.Provider = step.provider
+		cfg.AI.Model = step.model
+		cfg.AI.APIKey = ""
+		if step.keyEnvVar != "" {
+			cfg.AI.APIKey = config.SecretRef("env:" + step.keyEnvVar)
+		}
+
+		changed := []string{
+			fmt.Sprintf("ai — %s provider (provider=%s, model=%s)", verb, step.provider, step.model),
+		}
+		if step.keyEnvVar != "" {
+			changed = append(changed, "ai.api_key = env:"+step.keyEnvVar)
+		}
+		if len(cfg.AI.Providers) > 0 {
+			p.println("  note: ai.providers (failover chain) is set and takes precedence over" +
+				" the single-provider fields — edit config.yaml manually if that is not intended.")
+		}
+
+		postSave := func() error {
+			if step.keyEnvVar == "" || step.externalKey {
+				// ollama has no key; option-2 keys are managed outside .env.
+				return nil
+			}
+			wrote, kept, err := writeAIEnvFile(configDir, step.keyEnvVar, step.token)
+			if err != nil {
+				return err
+			}
+			envPath := filepath.Join(configDir, envFileName)
+			switch {
+			case kept:
+				p.printf("  kept %s (existing %s preserved)\n", envPath, step.keyEnvVar)
+			case wrote && step.token == "":
+				p.printf("  wrote %s (chmod 600, placeholder — set %s there, then restart the daemon)\n",
+					envPath, step.keyEnvVar)
+			case wrote:
+				p.printf("  wrote %s (chmod 600, %s merged)\n", envPath, step.keyEnvVar)
+			}
+			return nil
+		}
+		return changed, postSave, nil
+	}
 }

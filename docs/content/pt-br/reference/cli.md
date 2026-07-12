@@ -57,8 +57,26 @@ sudo ezyshield config enforcer cloudflare
 - Tokens secretos vão para o arquivo `.env` ao lado do `config.yaml` (modo 0600), nunca para o `config.yaml` em si (`api_token: env:CLOUDFLARE_API_TOKEN`).
 - Em caso de sucesso, o comando imprime as chaves alteradas e os próximos passos (`config validate`, reiniciar o daemon). Se o wizard for abortado, nada é escrito.
 
-Nomes disponíveis: `cloudflare`. Os tipos `notifier`, `ai` e `collector` seguem o mesmo padrão e estão sendo adicionados componente a componente.
+Nomes disponíveis: `cloudflare`. Os tipos `notifier` e `collector` seguem o mesmo padrão e estão sendo adicionados componente a componente.
 
 Códigos de saída: `0` salvo, `1` wizard abortado ou falha de escrita, `2` config.yaml não encontrado (execute `init` primeiro).
+
+### ezyshield config ai <provider>
+
+Wizard interativo para configurar (ou trocar) o provedor de IA em uma instalação existente — os mesmos prompts de modelo e chave de API do wizard de init, sem regenerar mais nada.
+
+```bash
+sudo ezyshield config ai anthropic
+sudo ezyshield config ai openai
+sudo ezyshield config ai ollama
+```
+
+- A chave de API é lida com entrada oculta e oferecida de duas formas: colar a chave (armazenada no arquivo `.env` ao lado do `config.yaml`, modo 0600, mesclada sem tocar nas outras linhas) ou referenciar uma variável de ambiente que você já gerencia (ex.: via sops/vault) — nesse caso o wizard grava `api_key: env:SUA_VAR` e nunca toca o `.env`. Chaves nunca vão para o `config.yaml`.
+- Pressionar ENTER no prompt de colagem é aceitável: uma chave existente no `.env` é mantida como está; caso contrário, um placeholder é gravado para você preencher depois. `ollama` roda localmente e não tem chave.
+- Reconfigurar substitui os campos do provedor (`provider`, `model`, `api_key`) mas preserva seus ajustes (`ambiguous_band`, `token_budget_daily`). A semântica de escrita é a mesma do `config enforcer`: escrita atômica, `config.yaml.bak`, revalidação antes de salvar.
+
+Provedores disponíveis: `anthropic`, `openai`, `ollama`.
+
+Códigos de saída: `0` salvo, `1` falha de escrita, `2` config.yaml não encontrado (execute `init` primeiro).
 
 [Traduções a seguir...]

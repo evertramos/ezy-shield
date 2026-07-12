@@ -48,16 +48,6 @@ const (
 	systemdDropInDir = defaultSystemdDir + "/ezyshield.service.d"
 )
 
-// aiProviderKeyName maps the supported AI provider names to the fixed env var
-// that will hold their API key. Ollama runs locally and has no key. This
-// table is the single source of truth — the wizard never asks the operator
-// for the env var NAME any more (issue #13 §1).
-var aiProviderKeyName = map[string]string{
-	"anthropic": "ANTHROPIC_API_KEY",
-	"openai":    "OPENAI_API_KEY",
-	"ollama":    "",
-}
-
 func newInitCmd() *cobra.Command {
 	var (
 		configDir  string
@@ -474,78 +464,30 @@ func askQuestions(sc *bufio.Scanner, state *wizardState, yes bool) {
 		cdnDeps{Yes: yes},
 	)
 
-	// AI
+	// AI — model + key prompts shared with `config ai <provider>` via the
+	// sub-flow in init_ai.go (issue #96): the logic lives only there.
 	state.enableAI = askBool("Enable AI analysis?", false)
 	if state.enableAI {
 		state.aiProvider = ask("AI provider (anthropic/openai/ollama)", "anthropic")
 		// The env var NAME is fixed per provider (issue #13 §1) — we NEVER
 		// prompt the operator for it. Anything not in the table (typo) falls
 		// through to no key at all; the wizard warns instead of guessing.
-		keyName, known := aiProviderKeyName[state.aiProvider]
-		if !known {
+		if _, known := aiProviderKeyName[state.aiProvider]; !known {
 			fmt.Printf("    unknown provider %q — supported: anthropic, openai, ollama; leaving AI key unset\n",
 				state.aiProvider)
 		}
-		state.aiKeyEnvVar = keyName
-		switch state.aiProvider {
-		case "anthropic":
-			state.aiModel = ask("Model", "claude-haiku-4-5-20251001")
-		case "openai":
-			state.aiModel = ask("Model", "gpt-4o-mini")
-		case "ollama":
-			state.aiModel = ask("Model", "llama3")
-		}
-		// Two-option prompt (issue #22): operator chooses between pasting the
-		// key now (option 1, happy path) or referencing an existing env var
-		// from sops / vault / LoadCredential (option 2, advanced path). Both
-		// options are skipped when yes=true (placeholder path, issue #13 §5).
-		if keyName != "" && !yes {
-			askKeySource(ask, state)
-		}
+		// Key prompts (issue #22 two-option menu) are skipped when yes=true
+		// (placeholder path, issue #13 §5).
+		step := &aiStep{provider: state.aiProvider}
+		runAIProviderSubflow(&wPrinter{w: os.Stdout},
+			closurePrompter{askFn: ask, askBoolFn: askBool}, step, nil, yes)
+		state.aiModel = step.model
+		state.aiKeyEnvVar = step.keyEnvVar
+		state.aiToken = step.token
 	}
 
 	// Dry-run vs armed
 	state.armed = askBool("Start in armed mode? (no = dry-run, recommended for first run)", false)
-}
-
-// askKeySource presents the two-option API-key prompt for issue #22.
-// Option 1 (default): read the actual key value echo-suppressed via
-// tokenReader (/dev/tty); store it in state.aiToken for writeOrKeepEnvFile.
-// Option 2 (advanced): operator supplies their own env var name (validated
-// by config.ValidateEnvVarName, rejecting paste-mistake secrets); state.aiToken
-// stays empty and the placeholder path handles the env file.
-//
-// Never called when yes=true — that path writes a placeholder without prompting.
-func askKeySource(ask func(string, string) string, state *wizardState) {
-	fmt.Printf("\n  How do you want to provide the %s API key?\n", state.aiProvider)
-	fmt.Println("    1) Paste it here — stored in /etc/ezyshield/.env (recommended)")
-	fmt.Println("    2) I already have it in an env var (e.g. from sops / vault / LoadCredential)")
-	choice := ask("Choice", "1")
-	if strings.TrimSpace(choice) == "2" {
-		for attempt := 0; attempt < 3; attempt++ {
-			name := ask(
-				fmt.Sprintf("Env var name holding the %s API key", state.aiProvider),
-				state.aiKeyEnvVar)
-			if err := config.ValidateEnvVarName(name); err != nil {
-				fmt.Printf("    invalid env var name: %v\n", err)
-				continue
-			}
-			state.aiKeyEnvVar = name
-			return
-		}
-		fmt.Println("    Too many invalid attempts; keeping the canonical env var name.")
-		return
-	}
-	// Option 1: read the key echo-suppressed from /dev/tty.
-	tok, err := tokenReader(
-		fmt.Sprintf("  Paste your %s API key (input hidden, ENTER to skip): ", state.aiProvider))
-	if err != nil {
-		// Cannot open /dev/tty (non-interactive / no controlling tty). Fall
-		// through silently — writeOrKeepEnvFile will write the placeholder.
-		state.aiToken = ""
-		return
-	}
-	state.aiToken = tok
 }
 
 // writeSystemdEnvDropIn emits /etc/systemd/system/ezyshield.service.d/env.conf

@@ -2,9 +2,9 @@ package main
 
 // The `config` command group — occasional-management verbs per the frozen CLI
 // taxonomy (config/test as noun groups, short verbs for daily operation).
-// This cut ships `show` and `validate`; the per-component wizards
-// (`config enforcer|notifier|ai|collector <name>`) land in a follow-up that
-// extracts the init sub-flows behind a shared component registry.
+// Ships `show`, `validate`, and the per-component wizards (`config
+// enforcer|ai <name>`) backed by the shared registry in configwizard.go;
+// the notifier/collector kinds follow the same pattern in later slices.
 
 import (
 	"fmt"
@@ -26,12 +26,14 @@ func newConfigCmd() *cobra.Command {
 Subcommands:
   show      render the effective configuration (secrets redacted)
   validate  check config.yaml and policy.yaml without starting the daemon
-  enforcer  interactive wizard for one enforcer (e.g. cloudflare)`,
+  enforcer  interactive wizard for one enforcer (e.g. cloudflare)
+  ai        interactive wizard for an AI provider (anthropic/openai/ollama)`,
 	}
 	cmd.AddCommand(
 		newConfigShowCmd(),
 		newValidateCmd(),
 		newConfigComponentCmd("enforcer", "Configure an enforcer interactively"),
+		newConfigComponentCmd("ai", "Configure an AI provider interactively"),
 	)
 	return cmd
 }

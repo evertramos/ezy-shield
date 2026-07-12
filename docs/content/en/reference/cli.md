@@ -183,7 +183,30 @@ sudo ezyshield config enforcer cloudflare
 - Secret tokens go to the `.env` file next to `config.yaml` (mode 0600), never into `config.yaml` itself (`api_token: env:CLOUDFLARE_API_TOKEN`).
 - On success the command prints the changed keys and next steps (`config validate`, restart the daemon). If the wizard aborts, nothing is written.
 
-Available names: `cloudflare`. The `notifier` kind follows the same pattern and is being added component by component.
+Available names: `cloudflare`.
+
+Exit codes: `0` saved, `1` wizard aborted or write failed, `2` config.yaml not found (run `init` first).
+
+### ezyshield config notifier <name>
+
+Interactive wizard to add, reconfigure, or remove one notification channel on an existing installation.
+
+```bash
+sudo ezyshield config notifier telegram
+sudo ezyshield config notifier email
+sudo ezyshield config notifier slack
+sudo ezyshield config notifier discord
+sudo ezyshield config notifier webhook
+```
+
+- Each channel asks for its own settings (telegram: chat IDs; email: from/to/SMTP host/port/TLS/username; slack: optional channel override; webhook: optional auth header) plus a severity filter (`info,warn,critical`; empty = all).
+- Credential values — bot tokens, webhook URLs (capability URLs are secrets), SMTP passwords, auth header values — are read with input hidden and offered two ways: paste the value (stored in the `.env` file next to `config.yaml`, mode 0600, merged without touching other lines) or reference an env var you already manage (e.g. from sops/vault) — then the wizard writes `env:YOUR_VAR` and never touches `.env`. Secrets never land in `config.yaml`; it only carries references like `bot_token: env:TELEGRAM_BOT_TOKEN`.
+- Pressing ENTER at the paste prompt is fine: an existing value in `.env` is kept as is; otherwise a placeholder is written for you to fill in later.
+- For the generic `webhook` channel the auth header value is a secret too: `config.yaml` gets `Authorization: env:WEBHOOK_AUTH_HEADER` and the daemon resolves the reference at startup. Plain (non-`env:`) header values in hand-written configs keep working unchanged.
+- Reconfiguring replaces that channel's entry; shared tuning (`rate_limit_per_minute`, `dedup_window_sec`) and other channels are preserved. To disable a channel, answer `n` at the configure prompt: the wizard then offers to remove the existing entry (default no). Declining leaves the file untouched.
+- Write semantics match the other wizards: atomic write, `config.yaml.bak`, re-validation before saving, changed-keys summary on success. Verify delivery afterwards with the notification test command shown in the next steps.
+
+Available names: `telegram`, `email`, `slack`, `discord`, `webhook`.
 
 Exit codes: `0` saved, `1` wizard aborted or write failed, `2` config.yaml not found (run `init` first).
 

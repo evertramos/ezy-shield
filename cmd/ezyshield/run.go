@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/netip"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -350,13 +351,42 @@ func buildNotifiers(cfg *config.NotifyCfg, logger *slog.Logger) ([]sdk.Notifier,
 		if err != nil {
 			return nil, nil, fmt.Errorf("webhook: %w", err)
 		}
-		notifiers = append(notifiers, notify.NewWebhook(url, wh.Headers))
+		headers, err := resolveWebhookHeaders(wh.Headers)
+		if err != nil {
+			return nil, nil, err
+		}
+		notifiers = append(notifiers, notify.NewWebhook(url, headers))
 		if len(wh.Severity) > 0 {
 			severities["webhook"] = wh.Severity
 		}
 	}
 
 	return notifiers, severities, nil
+}
+
+// resolveWebhookHeaders resolves "env:VARNAME" references in webhook header
+// values (written by `config notifier webhook`) so the secret lives in .env,
+// never in config.yaml. Values without the env: prefix pass through verbatim
+// for backward compatibility with hand-written configs. Errors carry only
+// the header NAME — never the value (SECURITY-REVIEW §4); the SecretRef
+// resolver already redacts malformed references.
+func resolveWebhookHeaders(in map[string]string) (map[string]string, error) {
+	if len(in) == 0 {
+		return in, nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		if !strings.HasPrefix(v, "env:") {
+			out[k] = v
+			continue
+		}
+		resolved, err := config.SecretRef(v).Resolve()
+		if err != nil {
+			return nil, fmt.Errorf("webhook: header %q: %w", k, err)
+		}
+		out[k] = resolved
+	}
+	return out, nil
 }
 
 // dirOf returns the directory part of path.

@@ -33,8 +33,7 @@ type componentWizard func(ctx context.Context, p *wPrinter, pr prompter, deps cd
 	cfg *config.Config, configDir string) (changed []string, postSave func() error, err error)
 
 // componentWizards is the single kind → name → wizard registry (issue #96).
-// New components plug in here without further CLI changes; the notifier
-// kind arrives with the next slice using this table.
+// New components plug in here without further CLI changes.
 var componentWizards = map[string]map[string]componentWizard{
 	"enforcer": {
 		"cloudflare": wizardEnforcerCloudflare,
@@ -50,6 +49,13 @@ var componentWizards = map[string]map[string]componentWizard{
 		"apache":  wizardCollectorWeb("apache"),
 		"traefik": wizardCollectorWeb("traefik"),
 		"caddy":   wizardCollectorWeb("caddy"),
+	},
+	"notifier": {
+		"telegram": wizardNotifierTelegram,
+		"email":    wizardNotifierEmail,
+		"slack":    wizardNotifierSlack,
+		"discord":  wizardNotifierDiscord,
+		"webhook":  wizardNotifierWebhook,
 	},
 }
 

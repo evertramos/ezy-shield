@@ -183,9 +183,27 @@ sudo ezyshield config enforcer cloudflare
 - Secret tokens go to the `.env` file next to `config.yaml` (mode 0600), never into `config.yaml` itself (`api_token: env:CLOUDFLARE_API_TOKEN`).
 - On success the command prints the changed keys and next steps (`config validate`, restart the daemon). If the wizard aborts, nothing is written.
 
-Available names: `cloudflare`. The `notifier`, `ai`, and `collector` kinds follow the same pattern and are being added component by component.
+Available names: `cloudflare`. The `notifier` and `collector` kinds follow the same pattern and are being added component by component.
 
 Exit codes: `0` saved, `1` wizard aborted or write failed, `2` config.yaml not found (run `init` first).
+
+### ezyshield config ai <provider>
+
+Interactive wizard to configure (or switch) the AI provider on an existing installation — the same model and API-key prompts the init wizard runs, without regenerating anything else.
+
+```bash
+sudo ezyshield config ai anthropic
+sudo ezyshield config ai openai
+sudo ezyshield config ai ollama
+```
+
+- The API key is read with input hidden and offered two ways: paste it (stored in the `.env` file next to `config.yaml`, mode 0600, merged without touching other lines) or reference an env var you already manage (e.g. from sops/vault) — in that case the wizard writes `api_key: env:YOUR_VAR` and never touches `.env`. Keys never land in `config.yaml`.
+- Pressing ENTER at the paste prompt is fine: an existing key in `.env` is kept as is; otherwise a placeholder is written for you to fill in later. `ollama` runs locally and has no key.
+- Reconfiguring replaces the provider fields (`provider`, `model`, `api_key`) but preserves your tuning (`ambiguous_band`, `token_budget_daily`). Write semantics match `config enforcer`: atomic write, `config.yaml.bak`, re-validation before saving.
+
+Available providers: `anthropic`, `openai`, `ollama`.
+
+Exit codes: `0` saved, `1` write failed, `2` config.yaml not found (run `init` first).
 
 ## ezyshield scan
 

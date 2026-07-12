@@ -22,7 +22,7 @@ func checkConfigOwnership(path, label string) CheckResult {
 	info, err := os.Stat(path)
 	if os.IsNotExist(err) {
 		return CheckResult{Name: name, Status: statusNA,
-			Hint: "file absent -- run 'ezyshield init' first"}
+			Hint: "file absent -- run '" + progName + " init' first"}
 	}
 	if err != nil {
 		return CheckResult{Name: name, Status: statusFail, Hint: err.Error()}
@@ -38,8 +38,8 @@ func checkConfigOwnership(path, label string) CheckResult {
 	if err != nil {
 		if errors.Is(err, errDaemonGroupMissing) {
 			return CheckResult{Name: name, Status: statusFail,
-				Hint: fmt.Sprintf("group %q does not exist -- run 'ezyshield init' as root to create it",
-					ownership.Group),
+				Hint: fmt.Sprintf("group %q does not exist -- run '%s init' as root to create it",
+					ownership.Group, progName),
 			}
 		}
 		return CheckResult{Name: name, Status: statusFail, Hint: err.Error()}
@@ -79,7 +79,7 @@ func checkEnvOwnership(path string) string {
 	wantGID, err := lookupDaemonGID()
 	if err != nil {
 		if errors.Is(err, errDaemonGroupMissing) {
-			return fmt.Sprintf("group %q does not exist -- run 'ezyshield init' as root", ownership.Group)
+			return fmt.Sprintf("group %q does not exist -- run '%s init' as root", ownership.Group, progName)
 		}
 		return err.Error()
 	}

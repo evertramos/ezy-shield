@@ -42,6 +42,9 @@ Reads config.yaml and policy.yaml, runs the strict loaders, and reports
 errors and warnings. Does NOT start the daemon, open sockets, or touch
 any state.
 
+'validate' and 'config validate' are equivalent; the top-level form is
+kept as an alias.
+
 Exit codes:
   0  valid (may have warnings)
   1  errors found

@@ -9,7 +9,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"os"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -68,7 +67,7 @@ Exit codes:
 			code := runConfigShow(cmd.OutOrStdout(), cmd.ErrOrStderr(),
 				configPath, policyPath, jsonOutput)
 			if code != validateExitOK {
-				os.Exit(code)
+				return exitCodeError{code}
 			}
 			return nil
 		},

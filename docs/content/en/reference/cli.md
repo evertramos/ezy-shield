@@ -8,6 +8,48 @@ order: 4
 
 Complete command reference for the `ezyshield` CLI.
 
+## Global conventions
+
+### Exit codes
+
+Every command follows the same exit-code contract:
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success |
+| `1` | Runtime error — the command started but failed (invalid config, API error, write failure) |
+| `2` | Usage error — unknown command/flag, bad argument, or an input file that does not exist / cannot be read |
+| `3` | Daemon unreachable — the control socket refused the connection (is the daemon running?) |
+
+Two deliberate exceptions: `status` exits `0` even when the daemon is stopped
+(it successfully reports the state), and `doctor` exits `0` even when
+individual checks fail (its output is the report).
+
+### JSON output (`--json`)
+
+Every read command supports `--json` with stable field names, safe to script
+against:
+
+| Command | Shape |
+|---------|-------|
+| `status` | Object: `daemon`, `enforcer`, `mode`, `uptime`, `version`, `active_bans`, `bans_by_strike`, `message` |
+| `list` | Envelope: `ok`, `error`, `data` (rows under `data`) |
+| `watch` | NDJSON: one event object per line |
+| `scan` | Object: `listeners`, `new_listeners` |
+| `doctor` | Object: `checks` (`name`, `status`, `hint`) and `summary` (`total`, `pass`, `fail`) |
+| `config show` | Object: `config`, `policy` (effective values, secrets redacted) |
+| `version` | Object: `version`, `commit`, `build_date` |
+
+With `--json`, stdout carries only JSON; warnings and connection notices go to
+stderr, so piping into `jq` is always safe.
+
+### Color
+
+Colored/styled output is enabled only when all of these hold: stdout is an
+interactive terminal, the [`NO_COLOR`](https://no-color.org) environment
+variable is unset, and `--no-color` was not passed. Piped or redirected output
+is always plain text, so `ezyshield watch | grep ban` never sees escape codes.
+
 ## ezyshield init
 
 Interactive setup wizard. Configures log sources, enforcement backends, AI providers, and notifications.
@@ -349,7 +391,8 @@ The pre-1.0 verbs `test-enforce <name>` and `test-notify <name>` keep working as
 
 | Flag | Description |
 |------|-------------|
-| `--json` | Output as JSON (not all commands) |
+| `--json` | Output as JSON (see [Global conventions](#global-conventions) for shapes) |
+| `--no-color` | Disable colored output (the `NO_COLOR` env var is also honored) |
 | `--config` | Path to config.yaml (default: `/etc/ezyshield/config.yaml`) |
 | `--policy` | Path to policy.yaml (default: `/etc/ezyshield/policy.yaml`) |
 | `-h, --help` | Show help text |

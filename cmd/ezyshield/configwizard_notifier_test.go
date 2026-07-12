@@ -455,7 +455,7 @@ func TestRunConfigComponent_NotifierUnknownName(t *testing.T) {
 // plain values pass through, and failures never echo a secret — only the
 // header NAME.
 func TestResolveWebhookHeaders(t *testing.T) {
-	const secret = "Bearer wh-resolved-secret"
+	const secret = "Bearer wh-resolved-secret" //nolint:gosec // G101: intentionally fake test value
 	t.Setenv("EZY_TEST_WH_AUTH", secret)
 
 	t.Run("env reference resolved, plain passthrough", func(t *testing.T) {

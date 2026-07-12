@@ -183,7 +183,7 @@ sudo ezyshield config enforcer cloudflare
 - Secret tokens go to the `.env` file next to `config.yaml` (mode 0600), never into `config.yaml` itself (`api_token: env:CLOUDFLARE_API_TOKEN`).
 - On success the command prints the changed keys and next steps (`config validate`, restart the daemon). If the wizard aborts, nothing is written.
 
-Available names: `cloudflare`. The `notifier` and `collector` kinds follow the same pattern and are being added component by component.
+Available names: `cloudflare`. The `notifier` kind follows the same pattern and is being added component by component.
 
 Exit codes: `0` saved, `1` wizard aborted or write failed, `2` config.yaml not found (run `init` first).
 
@@ -204,6 +204,25 @@ sudo ezyshield config ai ollama
 Available providers: `anthropic`, `openai`, `ollama`.
 
 Exit codes: `0` saved, `1` write failed, `2` config.yaml not found (run `init` first).
+
+### ezyshield config collector <name>
+
+Interactive wizard to add, reconfigure, or remove one log collector on an existing installation — the same prompts the init wizard runs for that source, without regenerating anything else.
+
+```bash
+sudo ezyshield config collector sshd
+sudo ezyshield config collector nginx
+sudo ezyshield config collector apache
+```
+
+- `sshd` manages the journald collector (confirm, then optionally override the systemd unit). Web server names (`nginx`, `apache`, `traefik`, `caddy`) first ask for the log source: `file` (host access-log path, default suggested per server) or `docker` (container name, reading its stdout).
+- Reconfiguring replaces the existing entry for that source (matched by parser for web servers, by SSH unit for `sshd`) — the wizard never appends duplicates. Setups with several sources for the same server (e.g. two nginx vhost logs) are edited in `config.yaml` directly.
+- To disable a source, answer `n` at the configure prompt: the wizard then offers to remove the existing entry (default no). Declining leaves the file untouched.
+- Collectors carry no secrets; everything stays in `config.yaml`. Write semantics match the other wizards: atomic write, `config.yaml.bak`, re-validation before saving, changed-keys summary on success.
+
+Available names: `sshd`, `nginx`, `apache`, `traefik`, `caddy`.
+
+Exit codes: `0` saved, `1` wizard aborted or write failed, `2` config.yaml not found (run `init` first).
 
 ## ezyshield scan
 

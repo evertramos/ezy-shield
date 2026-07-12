@@ -3,8 +3,8 @@ package main
 // The `config` command group — occasional-management verbs per the frozen CLI
 // taxonomy (config/test as noun groups, short verbs for daily operation).
 // Ships `show`, `validate`, and the per-component wizards (`config
-// enforcer|ai <name>`) backed by the shared registry in configwizard.go;
-// the notifier/collector kinds follow the same pattern in later slices.
+// enforcer|ai|collector <name>`) backed by the shared registry in
+// configwizard.go; the notifier kind follows the same pattern in a later slice.
 
 import (
 	"fmt"
@@ -24,16 +24,18 @@ func newConfigCmd() *cobra.Command {
 		Long: `Inspect and validate EzyShield configuration files.
 
 Subcommands:
-  show      render the effective configuration (secrets redacted)
-  validate  check config.yaml and policy.yaml without starting the daemon
-  enforcer  interactive wizard for one enforcer (e.g. cloudflare)
-  ai        interactive wizard for an AI provider (anthropic/openai/ollama)`,
+  show       render the effective configuration (secrets redacted)
+  validate   check config.yaml and policy.yaml without starting the daemon
+  enforcer   interactive wizard for one enforcer (e.g. cloudflare)
+  ai         interactive wizard for an AI provider (anthropic/openai/ollama)
+  collector  interactive wizard for a log collector (sshd/nginx/apache/...)`,
 	}
 	cmd.AddCommand(
 		newConfigShowCmd(),
 		newValidateCmd(),
 		newConfigComponentCmd("enforcer", "Configure an enforcer interactively"),
 		newConfigComponentCmd("ai", "Configure an AI provider interactively"),
+		newConfigComponentCmd("collector", "Configure a log collector interactively"),
 	)
 	return cmd
 }

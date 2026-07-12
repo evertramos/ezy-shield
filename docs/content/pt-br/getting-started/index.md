@@ -305,8 +305,8 @@ notify:
 Valide o envio sem precisar de um evento real:
 
 ```bash
-sudo ezyshield test-notify telegram
-sudo ezyshield test-notify email
+sudo ezyshield test notifier telegram
+sudo ezyshield test notifier email
 ```
 
 ---
@@ -332,6 +332,6 @@ sudo systemctl enable --now ezyshield
 1. ✅ `ezyshield doctor` — sem erros
 2. ✅ `allowlist` com seus IPs de acesso
 3. ✅ `admin_cidrs` com seu IP SSH
-4. ✅ Notificações testadas com `test-notify`
+4. ✅ Notificações testadas com `test notifier`
 5. ✅ Rodou em dry-run, revisou os logs
 6. ⬜ Definir `armed: true` no `policy.yaml`

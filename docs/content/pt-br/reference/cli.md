@@ -121,4 +121,42 @@ Nomes disponíveis: `sshd`, `nginx`, `apache`, `traefik`, `caddy`.
 
 Códigos de saída: `0` salvo, `1` wizard abortado ou falha de escrita, `2` config.yaml não encontrado (execute `init` primeiro).
 
+## ezyshield test
+
+Executa testes de conectividade contra os componentes configurados. Como o `config`, o grupo segue o padrão `<kind> <name>`, então tipos de componente futuros se encaixam nos mesmos verbos.
+
+### ezyshield test enforcer <name>
+
+Testa a configuração e as permissões de um backend de enforcement: validade do token, acesso à conta/zones e as permissões exatas de API que o enforcer precisa — com sugestão de correção para cada verificação que falhar.
+
+```bash
+sudo ezyshield test enforcer cloudflare
+
+# Testar todos os backends de enforcement configurados
+sudo ezyshield test enforcer all
+```
+
+Nomes disponíveis: `all`, `cloudflare`, `nftables`.
+
+Código de saída `0` se todas as verificações passarem, diferente de zero se alguma falhar.
+
+### ezyshield test notifier <name>
+
+Envia um alerta sintético para verificar um canal de notificação de ponta a ponta (segredos resolvidos do ambiente, mensagem realmente entregue).
+
+```bash
+sudo ezyshield test notifier telegram
+
+# Testar todos os canais configurados
+sudo ezyshield test notifier all
+```
+
+Nomes disponíveis: `all`, `email`, `telegram`.
+
+Código de saída diferente de zero em caso de falha.
+
+### Aliases descontinuados
+
+Os verbos pré-1.0 `test-enforce <name>` e `test-notify <name>` continuam funcionando como aliases ocultos de `test enforcer` / `test notifier` — mesmas flags, mesmo comportamento — e imprimem um aviso de migração de uma linha no stderr. Serão removidos na 1.0.
+
 [Traduções a seguir...]

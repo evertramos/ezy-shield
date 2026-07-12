@@ -151,6 +151,73 @@ func TestSecretRef_LoadCleanEnvRef(t *testing.T) {
 	}
 }
 
+// TestNotifyChannels_InlineSecretRejected_NoLeak locks in that every
+// secret-bearing notify-channel field (telegram bot_token, email password,
+// slack/discord/webhook URLs) uses SecretRef semantics: an inline credential
+// pasted into config.yaml is rejected at load time and the rejection error
+// never echoes the value back (Hard Rule §3, SECURITY-REVIEW §4).
+func TestNotifyChannels_InlineSecretRejected_NoLeak(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		yaml string
+	}{
+		{"telegram bot_token", "telegram:\n  bot_token: " + fakeToken + "\n  chat_ids: [\"1\"]\n"},
+		{"email password", "email:\n  from: a@b\n  to: [c@d]\n  host: h\n  port: 587\n  password: " + fakeToken + "\n"},
+		{"slack webhook_url", "slack:\n  webhook_url: https://hooks.slack.example/" + fakeToken + "\n"},
+		{"discord webhook_url", "discord:\n  webhook_url: https://discord.example/api/webhooks/" + fakeToken + "\n"},
+		{"webhook url", "webhook:\n  url: https://example.com/hook?key=" + fakeToken + "\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var n config.NotifyCfg
+			err := yaml.Unmarshal([]byte(tc.yaml), &n)
+			if err == nil {
+				t.Fatal("inline secret in notify channel must be rejected at load, got nil error")
+			}
+			if strings.Contains(err.Error(), fakeToken) {
+				t.Errorf("rejection error leaks the inline value: %q", err.Error())
+			}
+		})
+	}
+}
+
+// TestNotifyChannels_EnvRefAccepted sanity-checks that well-formed env:
+// references load for every notify channel after the tightening above.
+func TestNotifyChannels_EnvRefAccepted(t *testing.T) {
+	t.Parallel()
+	input := `
+telegram:
+  bot_token: env:TELEGRAM_BOT_TOKEN
+  chat_ids: ["1"]
+slack:
+  webhook_url: env:SLACK_WEBHOOK_URL
+discord:
+  webhook_url: env:DISCORD_WEBHOOK_URL
+webhook:
+  url: env:WEBHOOK_URL
+  headers:
+    Authorization: env:WEBHOOK_AUTH_HEADER
+email:
+  from: a@b
+  to: [c@d]
+  host: h
+  port: 587
+  password: env:SMTP_PASSWORD
+`
+	var n config.NotifyCfg
+	if err := yaml.Unmarshal([]byte(input), &n); err != nil {
+		t.Fatalf("env: references must load for all notify channels, got: %v", err)
+	}
+	if string(n.Telegram.BotToken) != "env:TELEGRAM_BOT_TOKEN" {
+		t.Errorf("telegram bot_token = %q, want env:TELEGRAM_BOT_TOKEN", n.Telegram.BotToken)
+	}
+	if n.Webhook.Headers["Authorization"] != "env:WEBHOOK_AUTH_HEADER" {
+		t.Errorf("webhook header = %q, want env:WEBHOOK_AUTH_HEADER", n.Webhook.Headers["Authorization"])
+	}
+}
+
 // TestValidateEnvVarName covers the shared identifier check used by both the
 // loader and the init wizard. Table-driven per AGENTS.md Go Conventions.
 func TestValidateEnvVarName(t *testing.T) {

@@ -3,8 +3,8 @@ package main
 // The `config` command group — occasional-management verbs per the frozen CLI
 // taxonomy (config/test as noun groups, short verbs for daily operation).
 // Ships `show`, `validate`, and the per-component wizards (`config
-// enforcer|ai|collector <name>`) backed by the shared registry in
-// configwizard.go; the notifier kind follows the same pattern in a later slice.
+// enforcer|notifier|ai|collector <name>`) backed by the shared registry in
+// configwizard.go.
 
 import (
 	"fmt"
@@ -27,6 +27,7 @@ Subcommands:
   show       render the effective configuration (secrets redacted)
   validate   check config.yaml and policy.yaml without starting the daemon
   enforcer   interactive wizard for one enforcer (e.g. cloudflare)
+  notifier   interactive wizard for a notification channel (telegram/slack/...)
   ai         interactive wizard for an AI provider (anthropic/openai/ollama)
   collector  interactive wizard for a log collector (sshd/nginx/apache/...)`,
 	}
@@ -34,6 +35,7 @@ Subcommands:
 		newConfigShowCmd(),
 		newValidateCmd(),
 		newConfigComponentCmd("enforcer", "Configure an enforcer interactively"),
+		newConfigComponentCmd("notifier", "Configure a notification channel interactively"),
 		newConfigComponentCmd("ai", "Configure an AI provider interactively"),
 		newConfigComponentCmd("collector", "Configure a log collector interactively"),
 	)

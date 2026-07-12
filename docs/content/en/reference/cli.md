@@ -60,6 +60,31 @@ sudo ezyshield init
 
 Creates `/etc/ezyshield/config.yaml` and `/etc/ezyshield/policy.yaml` with secure permissions (0600).
 
+The wizard walks through named sections — **Environment** (what was detected
+on the host), **Collectors**, **Allowlist**, **Edge enforcers**, **AI
+analysis**, **Policy**, **Files**, and **System services** — with `✓`/`✗`/`!`
+status marks per line. Styling follows the global
+[color conventions](#color); piped output stays plain.
+
+At the end it prints a **Summary** section:
+
+- what was configured (collectors, enforcers, AI) and what was skipped, with
+  the reason;
+- every file written (including the `.env` that holds secret tokens, mode
+  0600 — tokens never go into `config.yaml`);
+- the current mode (`DRY-RUN` by default — nothing is blocked until you set
+  `armed: true` in `policy.yaml`);
+- numbered next steps (`doctor`, `status`, `watch`).
+
+The summary complements — never replaces — warnings printed during the run,
+such as the loud banner shown when Cloudflare enforcer setup aborts.
+
+Flags:
+
+- `--yes` — non-interactive: accept every default, skip CDN detection.
+- `--config-dir <dir>` — write files to a different directory; skips systemd
+  unit installation and service start (next steps then use foreground `run`).
+
 ## ezyshield run
 
 Start the daemon in the foreground. Reads logs, makes decisions, enforces bans.

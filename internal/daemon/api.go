@@ -11,8 +11,8 @@ import "encoding/json"
 // ezyshield group (or root) can connect. Mutating verbs (ban, unban, allow)
 // are logged to the append-only audit_log.
 type SocketRequest struct {
-	// Verb selects the operation: "status", "list", "list_allow", "ban",
-	// "unban", "allow".
+	// Verb selects the operation: "status", "list", "list_allow", "events",
+	// "subscribe", "ban", "unban", "allow".
 	Verb string `json:"verb"`
 	// IP is the target for ban/unban/allow. Accepts either a bare address
 	// ("1.2.3.4") or a CIDR ("203.0.113.0/24"). A bare address is treated
@@ -87,6 +87,42 @@ type EventEntry struct {
 	TTLSeconds int64  `json:"ttl_seconds"`
 	Strike     int    `json:"strike"`
 	Reason     string `json:"reason,omitempty"`
+}
+
+// StreamEvent is one live event pushed to "subscribe" clients (`watch`).
+// After the SocketResponse acknowledgement, the daemon writes one StreamEvent
+// JSON object per line until the client disconnects.
+//
+// Security: Category, Rule, and Reason may derive from hostile log content
+// (usernames, request paths, rule descriptions). Consumers MUST strip control
+// characters and ANSI escapes before rendering to a terminal.
+type StreamEvent struct {
+	// Time is an RFC 3339 UTC timestamp of when the event was published.
+	Time string `json:"time"`
+	// Kind is the event kind: "detection" (rule/AI/geo verdict), or a daemon
+	// op — "record", "notify_only", "dry_ban", "ban", "already_banned",
+	// "unban", "allow".
+	Kind string `json:"kind"`
+	// IP is the address (or CIDR for manual prefix ops) the event refers to.
+	IP string `json:"ip,omitempty"`
+	// Score is the verdict score (detection events only).
+	Score int `json:"score,omitempty"`
+	// Category is the verdict category, e.g. "ssh_bruteforce" (detections).
+	Category string `json:"category,omitempty"`
+	// Rule identifies the verdict source, e.g. "rules:ssh_bruteforce" (detections).
+	Rule string `json:"rule,omitempty"`
+	// Strike is the escalation level (1..5) on ban/dry_ban events.
+	Strike int `json:"strike,omitempty"`
+	// TTL is the remaining ban duration as a Go duration string; empty when
+	// the event carries no TTL.
+	TTL string `json:"ttl,omitempty"`
+	// Enforcer names the enforcer backend(s) in effect (e.g. "nftables",
+	// "nftables+cloudflare"); empty when no enforcer is configured.
+	Enforcer string `json:"enforcer,omitempty"`
+	// Reason is free text explaining the event.
+	Reason string `json:"reason,omitempty"`
+	// Source is "pipeline" for automatic events and "cli" for socket verbs.
+	Source string `json:"source,omitempty"`
 }
 
 // AllowEntry is one element in the array returned by the "list_allow" verb.

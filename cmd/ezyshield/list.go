@@ -25,6 +25,9 @@ func newListCmd() *cobra.Command {
 		Short: "List active bans (or allowlist entries) from the running daemon",
 		Long: `Query the daemon and print the current set of active bans.
 
+This is a point-in-time snapshot — to follow events live as they happen
+(detections, strikes, bans) use the 'watch' command instead.
+
 Use --allow to list the persisted allowlist instead, including expiry info.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {

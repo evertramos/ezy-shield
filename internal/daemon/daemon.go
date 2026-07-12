@@ -128,6 +128,11 @@ type Daemon struct {
 	// materialised at enforcer-sync time (see syncEnforcerAllowlist).
 	staticAllowlist []netip.Prefix
 
+	// events fans live pipeline/CLI events out to "subscribe" socket clients
+	// (the `watch` command). Best-effort broadcast: slow subscribers drop
+	// events rather than back-pressuring the pipeline.
+	events *eventBus
+
 	mu               sync.RWMutex
 	runtimeAllowlist []netip.Prefix // dynamically added by the 'allow' socket command
 
@@ -193,6 +198,7 @@ func New(dcfg Config) (*Daemon, error) {
 		aiCache:         dcfg.AICache,
 		enricher:        enricherFrom(dcfg.Enricher),
 		staticAllowlist: staticAllowlistFromPolicy(dcfg.Policy),
+		events:          newEventBus(),
 		socketPath:      socketPath,
 		version:         dcfg.Version,
 		startTime:       time.Now(),
@@ -385,6 +391,11 @@ func (d *Daemon) processRaw(ctx context.Context, raw sdk.RawLine) {
 
 		verdicts = d.maybeConsultAI(ctx, ev.SourceIP, verdicts)
 		verdicts = d.maybeInjectGeoVerdict(ctx, ev.SourceIP, verdicts)
+
+		// Live "detection" events for `watch` subscribers. Published before the
+		// allowlist check on purpose: a detection happened either way, and the
+		// resulting action (or lack of one) is a separate event.
+		d.publishDetections(verdicts)
 
 		// Runtime allowlist (added via 'allow' command) is checked before decision.
 		if d.isRuntimeAllowlisted(ev.SourceIP) {
@@ -590,6 +601,9 @@ func (d *Daemon) dispatch(ctx context.Context, action sdk.Action) {
 		default:
 		}
 	}
+
+	d.publishActionEvent(action.Op, action.IP.String(), action.Strike,
+		action.TTL, action.Reason, "pipeline")
 
 	if action.Op == "ban" && d.enforcer != nil {
 		t := sdk.Target{IP: action.IP, TTL: action.TTL}

@@ -27,6 +27,11 @@ import (
 // that's what the .bak is for. Returns the backup path, or "" when path
 // didn't exist before.
 //
+// If a step after the backup fails (temp write, chmod, or rename), path is
+// left untouched and path+".bak" may remain on disk — it is always a
+// byte-identical copy of the file it backs up, so no inconsistent state is
+// possible and the leftover backup is harmless.
+//
 // SaveConfig never writes secret values: Config carries credentials only as
 // SecretRef env: references, which is exactly what gets marshalled.
 func SaveConfig(path string, cfg *Config, header string) (bakPath string, err error) {

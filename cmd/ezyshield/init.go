@@ -159,20 +159,20 @@ type dockerContainer struct {
 
 func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) error {
 	p := &wPrinter{w: cmd.OutOrStdout()}
+	st := newStyler(cmd.OutOrStdout())
 
 	// Pre-flight: refuse before printing the banner or running detection if the
 	// wizard would clobber an existing config.yaml or policy.yaml. The writers
 	// themselves still guard against overwrite as defense-in-depth (see
 	// writeGeneratedConfig / writeGeneratedPolicy), but doing the check up
 	// front means the operator doesn't burn several minutes of Q&A only to be
-	// told at [3/5] that the run cannot succeed. Issue #5.
+	// told at the Files step that the run cannot succeed. Issue #5.
 	if err := preflightExistingConfigFiles(configDir); err != nil {
 		return err
 	}
 
 	p.println("")
-	p.println("EzyShield setup wizard")
-	p.println("======================")
+	p.println(st.header("EzyShield setup"))
 	if p.err != nil {
 		return fmt.Errorf("writing output: %w", p.err)
 	}
@@ -186,28 +186,30 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 		sc = bufio.NewScanner(os.Stdin)
 	}
 
-	// ── 1. Detect environment ─────────────────────────────────────────────
-	p.println("\n[1/5] Detecting environment...")
+	// ── Environment detection ─────────────────────────────────────────────
+	p.println("")
+	p.println(st.header("Environment"))
 
 	state := &wizardState{}
+	sum := &initSummary{}
 
 	state.osArch = runtime.GOOS + "/" + runtime.GOARCH
-	p.printf("  OS/arch:      %s\n", state.osArch)
+	p.printf("  OS/arch: %s\n", state.osArch)
 
 	state.nftPath = detectNFT()
 	if state.nftPath != "" {
-		p.printf("  nftables:     %s\n", state.nftPath)
+		p.println(st.ok("nftables: " + state.nftPath))
 	} else {
-		p.println("  nftables:     not found")
+		p.println(st.fail("nftables: not found"))
 		if !skipSystem {
 			if p.err != nil {
 				return fmt.Errorf("writing output: %w", p.err)
 			}
 			state.nftPath = offerInstallNFT(sc, yes, p.w)
 			if state.nftPath != "" {
-				p.printf("  nftables:     %s (installed)\n", state.nftPath)
+				p.println(st.ok("nftables: " + state.nftPath + " (installed)"))
 			} else {
-				p.println("  nftables:     skipped — only dry-run and edge enforcement will work")
+				p.println(st.warn("nftables: skipped — only dry-run and edge enforcement will work"))
 			}
 		}
 	}
@@ -215,15 +217,15 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 	state.allContainers = detectDockerContainers()
 	state.hasDocker = len(state.allContainers) > 0
 	if state.hasDocker {
-		p.printf("  docker:       %d container(s) running\n", len(state.allContainers))
+		p.println(st.ok(fmt.Sprintf("docker: %d container(s) running", len(state.allContainers))))
 	} else {
-		p.println("  docker:       not running / no containers")
+		p.println(st.fail("docker: not running / no containers"))
 	}
 
 	state.hasWordPress = hasWordPressContainers(state.allContainers)
 	if state.hasWordPress {
 		state.wpRulesPath = filepath.Join(configDir, "rules.yaml")
-		p.printf("  WordPress detected — will write custom rules: %s\n", state.wpRulesPath)
+		p.println(st.ok("WordPress detected — will write custom rules: " + state.wpRulesPath))
 	}
 
 	p.println("\n  Detecting web servers...")
@@ -231,34 +233,35 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 	renderWebServerSummary(p, state.webServers)
 
 	state.sshUnit = detectSSHUnit()
-	p.printf("  SSH unit:     %s\n", state.sshUnit)
+	p.println(st.ok("SSH unit: " + state.sshUnit))
 
 	state.publicIP = fetchPublicIP()
 	if state.publicIP != "" {
-		p.printf("  public IP:    %s\n", state.publicIP)
+		p.println(st.ok("public IP: " + state.publicIP))
 	} else {
-		p.println("  public IP:    unknown (ifconfig.me unreachable)")
+		p.println(st.warn("public IP: unknown (ifconfig.me unreachable)"))
 	}
 
 	state.sshSourceIP = sshSourceIP()
 	if state.sshSourceIP != "" {
-		p.printf("  SSH source:   %s\n", state.sshSourceIP)
+		p.println(st.ok("SSH source: " + state.sshSourceIP))
 	}
 
 	if p.err != nil {
 		return fmt.Errorf("writing output: %w", p.err)
 	}
 
-	// ── 2. Ask questions ──────────────────────────────────────────────────
-	p.println("\n[2/5] Configuration")
-	if p.err != nil {
-		return fmt.Errorf("writing output: %w", p.err)
-	}
+	// ── Questions (sectioned sub-flows) ───────────────────────────────────
+	askQuestions(p.w, sc, state, yes, st)
 
-	askQuestions(sc, state, yes)
+	// Distill the operator's answers for the final Summary section. Runs
+	// before the writers so a skipped/aborted component is reported even
+	// when a later step fails and the wizard exits early.
+	summarizeChoices(state, sum, yes)
 
-	// ── 3. Write config files ─────────────────────────────────────────────
-	p.println("\n[3/5] Writing configuration files...")
+	// ── Write config files ────────────────────────────────────────────────
+	p.println("")
+	p.println(st.header("Files"))
 	if p.err != nil {
 		return fmt.Errorf("writing output: %w", p.err)
 	}
@@ -294,17 +297,20 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 	if err := writeGeneratedConfig(configPath, state); err != nil {
 		return err
 	}
-	p.printf("  wrote %s\n", configPath)
+	p.println(st.ok("wrote " + configPath))
+	sum.files = append(sum.files, configPath)
 
 	if err := writeGeneratedPolicy(policyPath, state); err != nil {
 		return err
 	}
-	p.printf("  wrote %s\n", policyPath)
+	p.println(st.ok("wrote " + policyPath))
+	sum.files = append(sum.files, fmt.Sprintf("%s (armed: %v)", policyPath, state.armed))
 
 	// AI env file: written whenever the provider expects a key (anthropic /
 	// openai) — even if the operator skipped the paste prompt, in which case
 	// we write the placeholder and print an instruction (issue #13 §5). We
 	// do NOT emit the token or a fingerprint of it here.
+	envTouched := false
 	if state.enableAI && state.aiKeyEnvVar != "" {
 		wrote, kept, err := writeOrKeepEnvFile(envPath, state.aiKeyEnvVar, state.aiToken)
 		if err != nil {
@@ -312,13 +318,14 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 		}
 		switch {
 		case kept:
-			p.printf("  kept %s (existing token preserved)\n", envPath)
+			p.println(st.ok("kept " + envPath + " (existing token preserved)"))
 		case wrote && state.aiToken == "":
-			p.printf("  wrote %s (chmod 600, placeholder — edit and restart the daemon)\n", envPath)
-			p.printf("  AI API key not set. Edit %s to add it, then restart the daemon.\n", envPath)
+			p.println(st.warn("wrote " + envPath + " (chmod 600, placeholder — edit and restart the daemon)"))
+			p.printf("    AI API key not set. Edit %s to add it, then restart the daemon.\n", envPath)
 		case wrote:
-			p.printf("  wrote %s (chmod 600)\n", envPath)
+			p.println(st.ok("wrote " + envPath + " (chmod 600)"))
 		}
+		envTouched = envTouched || wrote || kept
 	}
 
 	// Cloudflare token: written to the same .env file, one line per token.
@@ -331,17 +338,22 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 		}
 		switch {
 		case kept:
-			p.printf("  kept %s (existing Cloudflare token preserved)\n", envPath)
+			p.println(st.ok("kept " + envPath + " (existing Cloudflare token preserved)"))
 		case wrote:
-			p.printf("  wrote %s (chmod 600, Cloudflare token merged)\n", envPath)
+			p.println(st.ok("wrote " + envPath + " (chmod 600, Cloudflare token merged)"))
 		}
+		envTouched = envTouched || wrote || kept
+	}
+	if envTouched {
+		sum.files = append(sum.files, envPath+" (mode 0600 — secret tokens live here, never in config.yaml)")
 	}
 
 	if state.hasWordPress {
 		if err := writeWordPressRules(state.wpRulesPath); err != nil {
 			return err
 		}
-		p.printf("  wrote %s\n", state.wpRulesPath)
+		p.println(st.ok("wrote " + state.wpRulesPath))
+		sum.files = append(sum.files, state.wpRulesPath)
 	}
 
 	if p.err != nil {
@@ -349,12 +361,15 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 	}
 
 	if skipSystem {
-		p.println("\nConfig files written. Skipping systemd/service steps (non-default --config-dir).")
+		sum.skipped = append(sum.skipped,
+			"systemd units and services — skipped (non-default --config-dir)")
+		renderInitSummary(p, st, state, sum, -1, configDir)
 		return p.err
 	}
 
-	// ── 4. Install systemd units ──────────────────────────────────────────
-	p.println("\n[4/5] Installing systemd units...")
+	// ── Install systemd units + start services ────────────────────────────
+	p.println("")
+	p.println(st.header("System services"))
 	if p.err != nil {
 		return fmt.Errorf("writing output: %w", p.err)
 	}
@@ -372,29 +387,23 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 	if err := runSysCmd("systemctl", "daemon-reload"); err != nil {
 		return fmt.Errorf("daemon-reload: %w", err)
 	}
-	p.println("  systemctl daemon-reload OK")
-
-	// ── 5. Start services and verify ──────────────────────────────────────
-	p.println("\n[5/5] Starting services...")
-	if p.err != nil {
-		return fmt.Errorf("writing output: %w", p.err)
-	}
+	p.println(st.ok("systemctl daemon-reload OK"))
 
 	if err := runSysCmd("systemctl", "enable", "--now", "ezyshield-enforcer"); err != nil {
 		return fmt.Errorf("starting ezyshield-enforcer: %w", err)
 	}
-	p.println("  ezyshield-enforcer: enabled and started")
+	p.println(st.ok("ezyshield-enforcer: enabled and started"))
 
 	if err := waitForSocket(enforcerSockPath, 10*time.Second); err != nil {
-		p.printf("  warning: enforcer socket not ready after 10s: %v\n", err)
+		p.println(st.warn(fmt.Sprintf("enforcer socket not ready after 10s: %v", err)))
 	} else {
-		p.printf("  enforcer socket ready: %s\n", enforcerSockPath)
+		p.println(st.ok("enforcer socket ready: " + enforcerSockPath))
 	}
 
 	if err := runSysCmd("systemctl", "enable", "--now", "ezyshield"); err != nil {
 		return fmt.Errorf("starting ezyshield: %w", err)
 	}
-	p.println("  ezyshield: enabled and started")
+	p.println(st.ok("ezyshield: enabled and started"))
 	p.println("  waiting 15s for first detections...")
 	if p.err != nil {
 		return fmt.Errorf("writing output: %w", p.err)
@@ -402,39 +411,154 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 
 	time.Sleep(15 * time.Second)
 
-	detections := checkRecentDetections()
-
-	p.println("")
-	p.println("────────────────────────────────────────")
-	p.println("Setup complete!")
-	p.println("────────────────────────────────────────")
-	p.printf("  Config:   %s\n", configPath)
-	p.printf("  Policy:   %s  (armed=%v)\n", policyPath, state.armed)
-	p.printf("  Mode:     %s\n", modeLabel(state.armed))
-	if detections > 0 {
-		p.printf("  Events:   %d dry-ban(s) detected in first 15s\n", detections)
-	} else {
-		p.println("  Events:   none yet — check back in a few minutes")
-	}
-	p.println("")
-	p.println("Next steps:")
-	p.printf("  sudo %s status        — live view of detections\n", progName)
-	p.printf("  sudo %s doctor        — verify configuration\n", progName)
-	if !state.armed {
-		p.printf("  sudo %s arm           — switch from dry-run to armed (after 24h+ validation)\n", progName)
-	}
+	renderInitSummary(p, st, state, sum, checkRecentDetections(), configDir)
 
 	return p.err
+}
+
+// initSummary accumulates what the wizard configured, skipped, and wrote,
+// for the final Summary section (issue #102). Purely presentational —
+// nothing in here feeds back into wizard decisions.
+type initSummary struct {
+	configured []string // components that were set up
+	skipped    []string // components that were not, with the reason why
+	files      []string // paths written, with short annotations
+}
+
+// summarizeChoices distills the operator's answers into the configured /
+// skipped lines shown by renderInitSummary. It only reads state; every
+// value it prints is either wizard-generated or operator-typed (and was
+// already echoed at its prompt) — no log-derived data flows through here.
+func summarizeChoices(state *wizardState, sum *initSummary, yes bool) {
+	// Collectors.
+	if state.monitorSSH && state.sshUnit != "" {
+		sum.configured = append(sum.configured,
+			fmt.Sprintf("collector: journald (SSH unit %s)", state.sshUnit))
+	} else if state.sshUnit != "" {
+		sum.skipped = append(sum.skipped, "SSH monitoring — declined at prompt")
+	}
+	for _, wc := range state.webCollectors {
+		switch wc.Kind {
+		case "file":
+			sum.configured = append(sum.configured,
+				fmt.Sprintf("collector: %s (%s)", wc.Parser, wc.Path))
+		case "docker":
+			sum.configured = append(sum.configured,
+				fmt.Sprintf("collector: %s (container %s)", wc.Parser, wc.Container))
+		}
+	}
+
+	// Enforcers.
+	if state.nftPath != "" {
+		sum.configured = append(sum.configured, "enforcer: nftables ("+state.nftPath+")")
+	} else {
+		sum.skipped = append(sum.skipped,
+			"nftables — not installed (dry-run and edge enforcement only)")
+	}
+	switch {
+	case state.cdn == nil:
+		// askQuestions always sets cdn; nil only in unit tests.
+	case state.cdn.cfEnabled && state.cdn.cfCfg != nil:
+		sum.configured = append(sum.configured,
+			fmt.Sprintf("enforcer: cloudflare (mode %s, action %s)",
+				state.cdn.cfCfg.Mode, state.cdn.cfCfg.Action))
+	case state.cdn.cfAttempted:
+		// The loud abort banner (issue #93) already printed the specific
+		// reason; this line makes sure the failure also survives into the
+		// summary instead of scrolling away with the banner.
+		sum.skipped = append(sum.skipped,
+			"cloudflare enforcer — setup did NOT complete (see the banner above)")
+	case yes:
+		sum.skipped = append(sum.skipped, "CDN detection — skipped (--yes mode)")
+	case providerDetected(state.cdn.detected, "cloudflare"):
+		sum.skipped = append(sum.skipped,
+			"cloudflare enforcer — declined (CDN detected: bans will not reach real client IPs)")
+	}
+
+	// AI.
+	if state.enableAI && state.aiProvider != "" {
+		sum.configured = append(sum.configured,
+			fmt.Sprintf("AI analysis: %s (model %s)", state.aiProvider, state.aiModel))
+	} else {
+		sum.skipped = append(sum.skipped, "AI analysis — disabled (rule engine only)")
+	}
+
+	// Allowlist.
+	if len(state.adminIPs) > 0 {
+		sum.configured = append(sum.configured,
+			fmt.Sprintf("allowlist: %d admin IP(s)/CIDR(s)", len(state.adminIPs)))
+	}
+}
+
+// renderInitSummary prints the final Summary section: what was configured,
+// what was skipped and why, which files were written, the dry-run reminder,
+// and numbered next steps. detections < 0 means the services step did not
+// run (--config-dir mode). Presentation only (issue #102): the summary
+// complements — never replaces — warnings printed earlier in the run, such
+// as the Cloudflare abort banner (issue #93).
+func renderInitSummary(p *wPrinter, st styler, state *wizardState, sum *initSummary,
+	detections int, configDir string) {
+	p.println("")
+	p.println(st.header("Summary"))
+
+	if len(sum.configured) > 0 {
+		p.println("  Configured:")
+		for _, line := range sum.configured {
+			p.println("  " + st.ok(line))
+		}
+	}
+	if len(sum.skipped) > 0 {
+		p.println("  Skipped:")
+		for _, line := range sum.skipped {
+			p.println("  " + st.warn(line))
+		}
+	}
+	if len(sum.files) > 0 {
+		p.println("  Files written:")
+		for _, f := range sum.files {
+			p.printf("    %s\n", f)
+		}
+	}
+
+	p.println("")
+	p.printf("  Mode: %s\n", modeLabel(state.armed))
+	switch {
+	case detections > 0:
+		p.printf("  Events: %d dry-ban(s) detected in the first 15s\n", detections)
+	case detections == 0:
+		p.println("  Events: none yet — check back in a few minutes")
+	}
+
+	policyPath := filepath.Join(configDir, "policy.yaml")
+	p.println("")
+	p.println("  Next steps:")
+	if detections < 0 {
+		// Config-only run: no services were installed or started.
+		p.printf("    1. %s doctor        — verify the configuration\n", progName)
+		p.printf("    2. %s run           — start in the foreground and observe\n", progName)
+		p.printf("    3. %s watch         — see detections live\n", progName)
+	} else {
+		p.printf("    1. sudo %s doctor   — verify the configuration\n", progName)
+		p.printf("    2. sudo %s status   — daemon and enforcer health\n", progName)
+		p.printf("    3. sudo %s watch    — see detections live\n", progName)
+	}
+	if !state.armed {
+		p.printf("    4. set armed: true in %s when confident (after 24h+ of clean dry-run)\n", policyPath)
+	}
 }
 
 // askQuestions fills state from interactive prompts or uses defaults.
 // sc is nil when yes=true; every prompt returns its default in that case.
 // The ask/askBool closures are shared with the `config <kind> <name>`
-// wizards (see newAskFuncs in configwizard.go).
-func askQuestions(sc *bufio.Scanner, state *wizardState, yes bool) {
-	ask, askBool := newAskFuncs(sc, os.Stdout, yes)
+// wizards (see newAskFuncs in configwizard.go). Prompts and section
+// headers are written to out (the wizard's stdout).
+func askQuestions(out io.Writer, sc *bufio.Scanner, state *wizardState, yes bool, st styler) {
+	p := &wPrinter{w: out}
+	ask, askBool := newAskFuncs(sc, out, yes)
 
 	// Per-server collector confirmation (replaces the old single proxy prompt).
+	p.println("")
+	p.println(st.header("Collectors"))
 	state.webCollectors = confirmWebServerCollectors(ask, askBool, state.webServers)
 
 	// SSH monitoring
@@ -444,6 +568,8 @@ func askQuestions(sc *bufio.Scanner, state *wizardState, yes bool) {
 	}
 
 	// Admin IPs for allowlist
+	p.println("")
+	p.println(st.header("Allowlist"))
 	defaultAdmin := state.sshSourceIP
 	if defaultAdmin == "" {
 		defaultAdmin = state.publicIP
@@ -455,10 +581,12 @@ func askQuestions(sc *bufio.Scanner, state *wizardState, yes bool) {
 	// CDN detection + Cloudflare subflow — runs BEFORE AI so the loud-skip
 	// warning fires before the operator commits to any downstream config.
 	// See init_cdn.go for the flow and issue #43 for the design.
+	p.println("")
+	p.println(st.header("Edge enforcers"))
 	state.cdn = &cdnStep{}
 	runCDNStep(
 		context.Background(),
-		&wPrinter{w: os.Stdout},
+		p,
 		closurePrompter{askFn: ask, askBoolFn: askBool},
 		state.cdn,
 		cdnDeps{Yes: yes},
@@ -466,6 +594,8 @@ func askQuestions(sc *bufio.Scanner, state *wizardState, yes bool) {
 
 	// AI — model + key prompts shared with `config ai <provider>` via the
 	// sub-flow in init_ai.go (issue #96): the logic lives only there.
+	p.println("")
+	p.println(st.header("AI analysis"))
 	state.enableAI = askBool("Enable AI analysis?", false)
 	if state.enableAI {
 		state.aiProvider = ask("AI provider (anthropic/openai/ollama)", "anthropic")
@@ -473,13 +603,13 @@ func askQuestions(sc *bufio.Scanner, state *wizardState, yes bool) {
 		// prompt the operator for it. Anything not in the table (typo) falls
 		// through to no key at all; the wizard warns instead of guessing.
 		if _, known := aiProviderKeyName[state.aiProvider]; !known {
-			fmt.Printf("    unknown provider %q — supported: anthropic, openai, ollama; leaving AI key unset\n",
+			p.printf("    unknown provider %q — supported: anthropic, openai, ollama; leaving AI key unset\n",
 				state.aiProvider)
 		}
 		// Key prompts (issue #22 two-option menu) are skipped when yes=true
 		// (placeholder path, issue #13 §5).
 		step := &aiStep{provider: state.aiProvider}
-		runAIProviderSubflow(&wPrinter{w: os.Stdout},
+		runAIProviderSubflow(p,
 			closurePrompter{askFn: ask, askBoolFn: askBool}, step, nil, yes)
 		state.aiModel = step.model
 		state.aiKeyEnvVar = step.keyEnvVar
@@ -487,6 +617,8 @@ func askQuestions(sc *bufio.Scanner, state *wizardState, yes bool) {
 	}
 
 	// Dry-run vs armed
+	p.println("")
+	p.println(st.header("Policy"))
 	state.armed = askBool("Start in armed mode? (no = dry-run, recommended for first run)", false)
 }
 

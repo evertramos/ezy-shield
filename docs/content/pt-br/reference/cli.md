@@ -53,6 +53,45 @@ o stdout é um terminal interativo, a variável de ambiente
 passado. Saída redirecionada ou encadeada por pipe é sempre texto puro, então
 `ezyshield watch | grep ban` nunca vê códigos de escape.
 
+## ezyshield init
+
+Assistente de configuração interativo. Configura fontes de log, backends de
+enforcement, provedores de IA e notificações.
+
+```bash
+sudo ezyshield init
+```
+
+Cria `/etc/ezyshield/config.yaml` e `/etc/ezyshield/policy.yaml` com
+permissões seguras (0600).
+
+O assistente percorre seções nomeadas — **Environment** (o que foi detectado
+no host), **Collectors**, **Allowlist**, **Edge enforcers**, **AI analysis**,
+**Policy**, **Files** e **System services** — com marcas de status `✓`/`✗`/`!`
+por linha. A estilização segue as [convenções globais de cores](#cores);
+saída por pipe permanece texto puro.
+
+Ao final, imprime uma seção **Summary**:
+
+- o que foi configurado (coletores, enforcers, IA) e o que foi pulado, com o
+  motivo;
+- todos os arquivos escritos (incluindo o `.env` que guarda os tokens
+  secretos, modo 0600 — tokens nunca vão para o `config.yaml`);
+- o modo atual (`DRY-RUN` por padrão — nada é bloqueado até você definir
+  `armed: true` no `policy.yaml`);
+- próximos passos numerados (`doctor`, `status`, `watch`).
+
+O resumo complementa — nunca substitui — avisos impressos durante a execução,
+como o banner destacado exibido quando a configuração do enforcer Cloudflare
+é abortada.
+
+Flags:
+
+- `--yes` — não interativo: aceita todos os padrões e pula a detecção de CDN.
+- `--config-dir <dir>` — escreve os arquivos em outro diretório; pula a
+  instalação das units do systemd e o start dos serviços (os próximos passos
+  passam a usar o `run` em primeiro plano).
+
 ## ezyshield run
 
 Inicia o daemon em primeiro plano. Lê logs, toma decisões e aplica banimentos.

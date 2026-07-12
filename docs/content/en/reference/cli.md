@@ -171,6 +171,22 @@ The top-level `ezyshield validate` is kept as an alias and behaves identically.
 
 Exit codes: `0` valid (may have warnings), `1` errors found, `2` file not found / unreadable.
 
+### ezyshield config enforcer <name>
+
+Interactive wizard to add or reconfigure one enforcer on an existing installation — the same prompts and dry token validation the init wizard runs, without regenerating anything else.
+
+```bash
+sudo ezyshield config enforcer cloudflare
+```
+
+- The write is atomic (temp file + rename); the previous file is kept as `config.yaml.bak` and the merged configuration is re-validated before anything touches disk. Comments are not carried over — recover them from the `.bak` if needed.
+- Secret tokens go to the `.env` file next to `config.yaml` (mode 0600), never into `config.yaml` itself (`api_token: env:CLOUDFLARE_API_TOKEN`).
+- On success the command prints the changed keys and next steps (`config validate`, restart the daemon). If the wizard aborts, nothing is written.
+
+Available names: `cloudflare`. The `notifier`, `ai`, and `collector` kinds follow the same pattern and are being added component by component.
+
+Exit codes: `0` saved, `1` wizard aborted or write failed, `2` config.yaml not found (run `init` first).
+
 ## ezyshield scan
 
 Discover listening services on this host.

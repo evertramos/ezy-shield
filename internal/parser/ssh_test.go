@@ -109,6 +109,26 @@ func TestSSHParser_GoldenJournald(t *testing.T) {
 	)
 }
 
+// TestSSHParser_GoldenAuthLogISO tests modern Debian/Ubuntu auth.log lines
+// (RFC3339/ISO-8601 timestamps + the OpenSSH 9.6+ sshd-session identifier).
+func TestSSHParser_GoldenAuthLogISO(t *testing.T) {
+	runGoldenTest(t,
+		"../../fixtures/ssh/authlog-iso.log",
+		"../../fixtures/ssh/authlog-iso.log.golden.json",
+		"file:/var/log/auth.log",
+	)
+}
+
+// TestSSHParser_GoldenSecure tests RHEL-family /var/log/secure lines
+// (RFC3164 timestamps + the sshd identifier).
+func TestSSHParser_GoldenSecure(t *testing.T) {
+	runGoldenTest(t,
+		"../../fixtures/ssh/secure.log",
+		"../../fixtures/ssh/secure.log.golden.json",
+		"file:/var/log/secure",
+	)
+}
+
 // TestSSHParser_Matches verifies the Matches predicate.
 func TestSSHParser_Matches(t *testing.T) {
 	p := parser.NewSSHParser(discardLogger())
@@ -117,7 +137,11 @@ func TestSSHParser_Matches(t *testing.T) {
 		source string
 		want   bool
 	}{
-		{"journald:sshd", true},
+		{"journald:ssh", true},          // Debian/Ubuntu unit name (ssh.service)
+		{"journald:sshd", true},         // RHEL/CentOS/Fedora/Arch/SUSE unit name
+		{"journald:sshd-session", true}, // OpenSSH 9.6+ split session identifier
+		{"journald:ssh.service", true},  // unit given with explicit .service suffix
+		{"journald:sshd.service", true},
 		{"file:/var/log/auth.log", true},
 		{"file:/var/log/secure", true},
 		{"file:/etc/auth.log", true},
@@ -125,7 +149,9 @@ func TestSSHParser_Matches(t *testing.T) {
 		{"ssh:/custom/auth.log", true},  // file collector with parser: ssh
 		{"file:/var/log/nginx/access.log", false},
 		{"journald:nginx", false},
+		{"journald:sshguard", false}, // must not over-match unrelated units
 		{"nginx:mycontainer", false},
+		{"nginx:/var/log/auth.log", false}, // explicit non-ssh override wins
 		{"", false},
 	}
 	for _, tc := range cases {
@@ -199,6 +225,38 @@ func TestSSHParser_EdgeCases(t *testing.T) {
 			line:      []byte("Jan 15 10:00:04 webserver sshd[12348]: Failed password for invalid user testuser from 192.0.2.4 port 33901 ssh2"),
 			wantCount: 1,
 		},
+		{
+			name:      "not allowed AllowUsers",
+			line:      []byte("User root from 192.0.2.5 not allowed because not listed in AllowUsers"),
+			wantCount: 1,
+		},
+		{
+			name:      "not allowed DenyUsers",
+			line:      []byte("User admin from 192.0.2.6 not allowed because listed in DenyUsers"),
+			wantCount: 1,
+		},
+		{
+			name:      "sshd-session syslog prefix",
+			line:      []byte("Jan 15 10:00:05 webserver sshd-session[12349]: Failed password for root from 192.0.2.7 port 40123 ssh2"),
+			wantCount: 1,
+		},
+		{
+			// Debian 12+/Ubuntu 24.04+ auth.log: ISO-8601 stamp + sshd-session.
+			name:      "iso prefix failed invalid user",
+			line:      []byte("2026-07-13T22:57:35.182105+00:00 fagots sshd-session[1079310]: Failed password for invalid user root from 192.0.2.8 port 58446 ssh2"),
+			wantCount: 1,
+		},
+		{
+			name:      "iso prefix invalid user",
+			line:      []byte("2026-07-13T22:58:44.868083+00:00 fagots sshd-session[1079738]: Invalid user infinity from 192.0.2.9 port 36049"),
+			wantCount: 1,
+		},
+		{
+			// ISO stamp with Z zone and no fractional seconds, legacy sshd identifier.
+			name:      "iso prefix zulu no-frac sshd",
+			line:      []byte("2026-07-13T22:59:11Z host sshd[1079905]: Failed password for root from 192.0.2.10 port 2901 ssh2"),
+			wantCount: 1,
+		},
 	}
 
 	for _, tc := range cases {
@@ -243,6 +301,33 @@ func TestSSHParser_FailedInvalidUserKind(t *testing.T) {
 	}
 }
 
+// TestSSHParser_NotAllowedKind ensures "not allowed" lines produce ssh_invalid_user.
+func TestSSHParser_NotAllowedKind(t *testing.T) {
+	p := parser.NewSSHParser(discardLogger())
+
+	line := sdk.RawLine{
+		Source: "journald:sshd-session",
+		Line:   []byte("User root from 192.0.2.5 not allowed because not listed in AllowUsers"),
+		At:     time.Now(),
+	}
+	evs, err := p.Parse(line)
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	if len(evs) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(evs))
+	}
+	if evs[0].Kind != "ssh_invalid_user" {
+		t.Errorf("kind: got %q, want %q", evs[0].Kind, "ssh_invalid_user")
+	}
+	if evs[0].Fields["username"] != "root" {
+		t.Errorf("username: got %q, want %q", evs[0].Fields["username"], "root")
+	}
+	if evs[0].SourceIP.String() != "192.0.2.5" {
+		t.Errorf("source_ip: got %q, want %q", evs[0].SourceIP.String(), "192.0.2.5")
+	}
+}
+
 // TestSSHParser_SyslogTimestamp verifies that the syslog timestamp is parsed and
 // returned as the event Time (within the same second).
 func TestSSHParser_SyslogTimestamp(t *testing.T) {
@@ -266,5 +351,62 @@ func TestSSHParser_SyslogTimestamp(t *testing.T) {
 	if ev.Time.Month() != 1 || ev.Time.Day() != 15 ||
 		ev.Time.Hour() != 10 || ev.Time.Minute() != 0 || ev.Time.Second() != 1 {
 		t.Errorf("unexpected event time: %v", ev.Time)
+	}
+}
+
+// TestSSHParser_ISOTimestamp verifies that an RFC3339/ISO-8601 syslog prefix
+// (Debian 12+/Ubuntu 24.04+ auth.log) is stripped, parsed into the event Time,
+// and the message body is matched correctly.
+func TestSSHParser_ISOTimestamp(t *testing.T) {
+	p := parser.NewSSHParser(discardLogger())
+
+	line := sdk.RawLine{
+		Source: "file:/var/log/auth.log",
+		Line:   []byte("2026-07-13T22:57:35.182105+00:00 fagots sshd-session[1079310]: Failed password for invalid user root from 192.0.2.8 port 58446 ssh2"),
+		At:     time.Now(),
+	}
+	evs, err := p.Parse(line)
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	if len(evs) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(evs))
+	}
+	ev := evs[0]
+	if ev.Kind != "ssh_invalid_user" {
+		t.Errorf("kind: got %q, want ssh_invalid_user", ev.Kind)
+	}
+	if ev.SourceIP.String() != "192.0.2.8" {
+		t.Errorf("source_ip: got %q, want 192.0.2.8", ev.SourceIP.String())
+	}
+	// Event time must come from the ISO stamp (2026-07-13 22:57:35 UTC), not line.At.
+	want := time.Date(2026, 7, 13, 22, 57, 35, 0, time.UTC)
+	if !ev.Time.UTC().Truncate(time.Second).Equal(want) {
+		t.Errorf("event time: got %v, want %v", ev.Time.UTC(), want)
+	}
+}
+
+// TestSSHParser_SingleEventPerLine locks in the no-duplicate invariant: a single
+// log line yields at most one Event, so one attempt is never counted twice by
+// the parser (the "Failed password for invalid user" line must match only the
+// ssh_invalid_user pattern, not also ssh_fail).
+func TestSSHParser_SingleEventPerLine(t *testing.T) {
+	p := parser.NewSSHParser(discardLogger())
+
+	for _, src := range []string{"journald:ssh", "file:/var/log/auth.log"} {
+		evs, err := p.Parse(sdk.RawLine{
+			Source: src,
+			Line:   []byte("Failed password for invalid user admin from 192.0.2.30 port 40100 ssh2"),
+			At:     time.Now(),
+		})
+		if err != nil {
+			t.Fatalf("[%s] Parse error: %v", src, err)
+		}
+		if len(evs) != 1 {
+			t.Fatalf("[%s] expected exactly 1 event, got %d", src, len(evs))
+		}
+		if evs[0].Kind != "ssh_invalid_user" {
+			t.Errorf("[%s] kind: got %q, want ssh_invalid_user", src, evs[0].Kind)
+		}
 	}
 }

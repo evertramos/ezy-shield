@@ -1,0 +1,8 @@
+[
+  {"kind": "ssh_invalid_user", "source_ip": "192.0.2.40",  "fields": {"username": "root",     "port": "58446"}},
+  {"kind": "ssh_invalid_user", "source_ip": "192.0.2.41",  "fields": {"username": "infinity", "port": "36049"}},
+  {"kind": "ssh_invalid_user", "source_ip": "192.0.2.41",  "fields": {"username": "infinity", "port": "36049"}},
+  {"kind": "ssh_accept",       "source_ip": "192.0.2.42",  "fields": {"username": "evert",    "port": "2901"}},
+  {"kind": "ssh_fail",         "source_ip": "2001:db8::40","fields": {"username": "root",     "port": "44210"}},
+  {"kind": "ssh_invalid_user", "source_ip": "192.0.2.43",  "fields": {"username": "admin"}}
+]

@@ -1,0 +1,4 @@
+Jul 13 22:57:35 rhelhost sshd[4021]: Failed password for invalid user oracle from 192.0.2.50 port 51000 ssh2
+Jul 13 22:57:40 rhelhost sshd[4022]: Invalid user postgres from 192.0.2.51 port 51002
+Jul 13 22:57:45 rhelhost sshd[4023]: Accepted password for centos from 192.0.2.52 port 51004 ssh2
+Jul 13 22:57:50 rhelhost sshd[4024]: Failed password for root from 2001:db8::50 port 51006 ssh2

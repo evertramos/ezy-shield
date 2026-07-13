@@ -35,7 +35,18 @@ collectors:
 | Field | Type | Description |
 |-------|------|-------------|
 | `kind` | "journald" | - |
-| `unit` | string | systemd unit name (e.g., `sshd`, `docker`) |
+| `unit` | string | systemd unit name |
+
+**SSH unit name is distro-specific.** The unit is `ssh` on Debian/Ubuntu and
+`sshd` on RHEL/CentOS/Fedora/Rocky/Alma, Arch and SUSE. Use the name that
+`systemctl status <unit>` resolves on your host — an alias that `journalctl -u`
+does not recognise collects nothing:
+
+```yaml
+collectors:
+  - kind: journald
+    unit: ssh    # Debian/Ubuntu; use "sshd" on RHEL/CentOS/Arch/SUSE
+```
 
 ### file collector
 
@@ -43,6 +54,16 @@ collectors:
 |-------|------|-------------|
 | `kind` | "file" | - |
 | `path` | string | Absolute path to log file |
+
+For SSH via a file instead of journald, point at the auth log for your distro —
+`/var/log/auth.log` (Debian/Ubuntu) or `/var/log/secure` (RHEL family). Both the
+legacy (`Jan  1 12:00:00`) and modern ISO-8601 (`2026-07-13T22:57:35+00:00`)
+syslog timestamp formats are parsed.
+
+> **Configure exactly one SSH collector per host** — journald **or** the file it
+> feeds, not both. Reading both ingests every event twice, which double-counts
+> toward detection thresholds. (An already-banned IP is never banned twice, so
+> this never produces duplicate bans, only earlier detection.)
 
 ## enforce
 

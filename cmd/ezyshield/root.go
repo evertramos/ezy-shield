@@ -53,6 +53,7 @@ Commands read as:  ` + progName + ` <verb>   (equivalent to: ezy shield <verb>)`
 		newBanCmd(),
 		newUnbanCmd(),
 		newListCmd(),
+		newReportCmd(),
 		newAllowCmd(),
 		newScanCmd(),
 		newUpdateCmd(),

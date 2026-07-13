@@ -57,7 +57,30 @@ sudo ezyshield config enforcer cloudflare
 - Tokens secretos vão para o arquivo `.env` ao lado do `config.yaml` (modo 0600), nunca para o `config.yaml` em si (`api_token: env:CLOUDFLARE_API_TOKEN`).
 - Em caso de sucesso, o comando imprime as chaves alteradas e os próximos passos (`config validate`, reiniciar o daemon). Se o wizard for abortado, nada é escrito.
 
-Nomes disponíveis: `cloudflare`. O tipo `notifier` segue o mesmo padrão e está sendo adicionado componente a componente.
+Nomes disponíveis: `cloudflare`.
+
+Códigos de saída: `0` salvo, `1` wizard abortado ou falha de escrita, `2` config.yaml não encontrado (execute `init` primeiro).
+
+### ezyshield config notifier <name>
+
+Wizard interativo para adicionar, reconfigurar ou remover um canal de notificação em uma instalação existente.
+
+```bash
+sudo ezyshield config notifier telegram
+sudo ezyshield config notifier email
+sudo ezyshield config notifier slack
+sudo ezyshield config notifier discord
+sudo ezyshield config notifier webhook
+```
+
+- Cada canal pergunta suas próprias configurações (telegram: chat IDs; email: from/to/host SMTP/porta/TLS/usuário; slack: override opcional de canal; webhook: header de autenticação opcional) mais um filtro de severidade (`info,warn,critical`; vazio = todas).
+- Valores de credencial — tokens de bot, URLs de webhook (capability URLs são segredos), senhas SMTP, valores de headers de autenticação — são lidos com entrada oculta e oferecidos de duas formas: colar o valor (armazenado no arquivo `.env` ao lado do `config.yaml`, modo 0600, mesclado sem tocar nas outras linhas) ou referenciar uma variável de ambiente que você já gerencia (ex.: via sops/vault) — nesse caso o wizard grava `env:SUA_VAR` e nunca toca o `.env`. Segredos nunca vão para o `config.yaml`; ele carrega apenas referências como `bot_token: env:TELEGRAM_BOT_TOKEN`.
+- Pressionar ENTER no prompt de colagem é aceitável: um valor existente no `.env` é mantido como está; caso contrário, um placeholder é gravado para você preencher depois.
+- No canal genérico `webhook`, o valor do header de autenticação também é segredo: o `config.yaml` recebe `Authorization: env:WEBHOOK_AUTH_HEADER` e o daemon resolve a referência na inicialização. Valores de header simples (sem `env:`) em configs escritas à mão continuam funcionando sem mudanças.
+- Reconfigurar substitui a entrada daquele canal; os ajustes compartilhados (`rate_limit_per_minute`, `dedup_window_sec`) e os outros canais são preservados. Para desabilitar um canal, responda `n` no prompt de configuração: o wizard então oferece remover a entrada existente (default não). Recusar deixa o arquivo intocado.
+- A semântica de escrita é a mesma dos outros wizards: escrita atômica, `config.yaml.bak`, revalidação antes de salvar e resumo das chaves alteradas em caso de sucesso. Verifique a entrega depois com o comando de teste de notificação mostrado nos próximos passos.
+
+Nomes disponíveis: `telegram`, `email`, `slack`, `discord`, `webhook`.
 
 Códigos de saída: `0` salvo, `1` wizard abortado ou falha de escrita, `2` config.yaml não encontrado (execute `init` primeiro).
 

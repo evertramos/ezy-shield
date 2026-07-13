@@ -31,6 +31,14 @@ func FuzzSSHParser(f *testing.F) {
 	f.Add([]byte("2026-07-13T22:59:11Z host sshd[1079905]: Accepted publickey for testuser from 192.0.2.10 port 2901 ssh2"))
 	// Malformed ISO prefix (truncated timestamp) must not panic.
 	f.Add([]byte("2026-07-13T99:99 host sshd-session[1]: Failed password for root from 192.0.2.1 port 22 ssh2"))
+	// Connection closed by invalid user
+	f.Add([]byte("Connection closed by invalid user admin 192.0.2.1 port 32792 [preauth]"))
+	// SSH dispatch fatal (invalid user)
+	f.Add([]byte("ssh_dispatch_run_fatal: Connection from invalid user testuser 192.0.2.2 port 32846: Software caused connection abort [preauth]"))
+	// Banner exchange error (no username)
+	f.Add([]byte("banner exchange: Connection from 192.0.2.3 port 50442: invalid format"))
+	// ISO-prefixed banner error
+	f.Add([]byte("2026-07-13T23:30:36.020302+00:00 host sshd-session[1093238]: banner exchange: Connection from 192.0.2.4 port 50442: invalid format"))
 	f.Add([]byte(""))
 	f.Add([]byte("THIS IS GARBAGE"))
 	f.Add([]byte("\x00\x01\x02\x03"))                                                    // binary input

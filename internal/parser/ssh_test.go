@@ -257,6 +257,27 @@ func TestSSHParser_EdgeCases(t *testing.T) {
 			line:      []byte("2026-07-13T22:59:11Z host sshd[1079905]: Failed password for root from 192.0.2.10 port 2901 ssh2"),
 			wantCount: 1,
 		},
+		{
+			name:      "connection closed by invalid user",
+			line:      []byte("Connection closed by invalid user hassanjawaiddts9 91.92.47.53 port 32792 [preauth]"),
+			wantCount: 1,
+		},
+		{
+			name:      "ssh dispatch fatal invalid user",
+			line:      []byte("ssh_dispatch_run_fatal: Connection from invalid user user14 91.92.47.53 port 32846: Software caused connection abort [preauth]"),
+			wantCount: 1,
+		},
+		{
+			name:      "banner exchange error",
+			line:      []byte("banner exchange: Connection from 8.152.209.0 port 50442: invalid format"),
+			wantCount: 1,
+		},
+		{
+			// ISO-prefixed banner error
+			name:      "iso prefix banner error",
+			line:      []byte("2026-07-13T23:30:36.020302+00:00 fagots sshd-session[1093238]: banner exchange: Connection from 8.152.209.0 port 50442: invalid format"),
+			wantCount: 1,
+		},
 	}
 
 	for _, tc := range cases {
@@ -408,5 +429,99 @@ func TestSSHParser_SingleEventPerLine(t *testing.T) {
 		if evs[0].Kind != "ssh_invalid_user" {
 			t.Errorf("[%s] kind: got %q, want ssh_invalid_user", src, evs[0].Kind)
 		}
+	}
+}
+
+// TestSSHParser_ConnectionClosed ensures "Connection closed by invalid user"
+// lines produce ssh_invalid_user events.
+func TestSSHParser_ConnectionClosed(t *testing.T) {
+	p := parser.NewSSHParser(discardLogger())
+
+	line := sdk.RawLine{
+		Source: "journald:sshd-session",
+		Line:   []byte("Connection closed by invalid user hassanjawaiddts9 91.92.47.53 port 32792 [preauth]"),
+		At:     time.Now(),
+	}
+	evs, err := p.Parse(line)
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	if len(evs) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(evs))
+	}
+	if evs[0].Kind != "ssh_invalid_user" {
+		t.Errorf("kind: got %q, want ssh_invalid_user", evs[0].Kind)
+	}
+	if evs[0].SourceIP.String() != "91.92.47.53" {
+		t.Errorf("source_ip: got %q, want 91.92.47.53", evs[0].SourceIP.String())
+	}
+	if evs[0].Fields["username"] != "hassanjawaiddts9" {
+		t.Errorf("username: got %q, want hassanjawaiddts9", evs[0].Fields["username"])
+	}
+	if evs[0].Fields["port"] != "32792" {
+		t.Errorf("port: got %q, want 32792", evs[0].Fields["port"])
+	}
+}
+
+// TestSSHParser_DispatchFatal ensures "ssh_dispatch_run_fatal" lines produce
+// ssh_invalid_user events.
+func TestSSHParser_DispatchFatal(t *testing.T) {
+	p := parser.NewSSHParser(discardLogger())
+
+	line := sdk.RawLine{
+		Source: "journald:sshd-session",
+		Line:   []byte("ssh_dispatch_run_fatal: Connection from invalid user user14 91.92.47.53 port 32846: Software caused connection abort [preauth]"),
+		At:     time.Now(),
+	}
+	evs, err := p.Parse(line)
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	if len(evs) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(evs))
+	}
+	if evs[0].Kind != "ssh_invalid_user" {
+		t.Errorf("kind: got %q, want ssh_invalid_user", evs[0].Kind)
+	}
+	if evs[0].SourceIP.String() != "91.92.47.53" {
+		t.Errorf("source_ip: got %q, want 91.92.47.53", evs[0].SourceIP.String())
+	}
+	if evs[0].Fields["username"] != "user14" {
+		t.Errorf("username: got %q, want user14", evs[0].Fields["username"])
+	}
+	if evs[0].Fields["port"] != "32846" {
+		t.Errorf("port: got %q, want 32846", evs[0].Fields["port"])
+	}
+}
+
+// TestSSHParser_BannerError ensures "banner exchange" error lines produce
+// ssh_banner_error events (without username).
+func TestSSHParser_BannerError(t *testing.T) {
+	p := parser.NewSSHParser(discardLogger())
+
+	line := sdk.RawLine{
+		Source: "journald:sshd-session",
+		Line:   []byte("banner exchange: Connection from 8.152.209.0 port 50442: invalid format"),
+		At:     time.Now(),
+	}
+	evs, err := p.Parse(line)
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	if len(evs) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(evs))
+	}
+	if evs[0].Kind != "ssh_banner_error" {
+		t.Errorf("kind: got %q, want ssh_banner_error", evs[0].Kind)
+	}
+	if evs[0].SourceIP.String() != "8.152.209.0" {
+		t.Errorf("source_ip: got %q, want 8.152.209.0", evs[0].SourceIP.String())
+	}
+	// Banner error should have port but no username
+	if evs[0].Fields["port"] != "50442" {
+		t.Errorf("port: got %q, want 50442", evs[0].Fields["port"])
+	}
+	if evs[0].Fields["username"] != "" {
+		t.Errorf("username: got %q, want empty", evs[0].Fields["username"])
 	}
 }

@@ -52,3 +52,56 @@ func Call(ctx context.Context, socketPath string, req SocketRequest) (*SocketRes
 	}
 	return &resp, nil
 }
+
+// Subscribe opens a long-lived "subscribe" connection to the daemon socket
+// and invokes onEvent for every StreamEvent the daemon pushes. connected (if
+// non-nil) is called once, after the daemon acknowledges the subscription —
+// callers use it to reset reconnect backoff and to distinguish "never got
+// through" from "stream dropped".
+//
+// Subscribe blocks. It returns nil when ctx is cancelled, ErrDaemonUnreachable
+// when the socket refuses the connection, and a descriptive error when an
+// established stream drops (daemon restart) so callers can reconnect.
+func Subscribe(ctx context.Context, socketPath string, connected func(), onEvent func(StreamEvent)) error {
+	dialer := &net.Dialer{Timeout: DefaultDialTimeout}
+	conn, err := dialer.DialContext(ctx, "unix", socketPath)
+	if err != nil {
+		return fmt.Errorf("%w: %s: %v", ErrDaemonUnreachable, socketPath, err)
+	}
+	defer conn.Close() //nolint:errcheck // best-effort close when the stream ends
+
+	// Close the connection when ctx is cancelled so the blocking Decode below
+	// unblocks promptly (clean SIGINT exit for `watch`).
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
+
+	if err := json.NewEncoder(conn).Encode(SocketRequest{Verb: "subscribe"}); err != nil {
+		return fmt.Errorf("daemon: send \"subscribe\": %w", err)
+	}
+
+	dec := json.NewDecoder(conn)
+	var ack SocketResponse
+	if err := dec.Decode(&ack); err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
+		return fmt.Errorf("daemon: read \"subscribe\" ack: %w", err)
+	}
+	if !ack.OK {
+		return fmt.Errorf("daemon \"subscribe\": %s", ack.Error)
+	}
+	if connected != nil {
+		connected()
+	}
+
+	for {
+		var ev StreamEvent
+		if err := dec.Decode(&ev); err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return fmt.Errorf("daemon: event stream closed: %w", err)
+		}
+		onEvent(ev)
+	}
+}

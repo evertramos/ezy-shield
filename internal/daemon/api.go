@@ -39,6 +39,10 @@ type SocketRequest struct {
 	// returns every offender, "permanent" only those with a permanent active
 	// ban. Other values are rejected.
 	Filter string `json:"filter,omitempty"`
+	// Evidence asks the per-IP report verb to also extract matching raw log
+	// lines from the configured log sources (bounded, read-only, never
+	// persisted). Ignored by every other verb and by the listing mode.
+	Evidence bool `json:"evidence,omitempty"`
 }
 
 // SocketResponse is returned by the daemon for every request.

@@ -44,7 +44,7 @@ func (d *Daemon) handleReport(ctx context.Context, req SocketRequest) SocketResp
 		return SocketResponse{Error: fmt.Sprintf("invalid ip %q: report takes a single address, not a range", req.IP)}
 	}
 
-	rep, err := d.buildAbuseReport(ctx, addr, limit)
+	rep, err := d.buildAbuseReport(ctx, addr, limit, req.Evidence)
 	if err != nil {
 		return SocketResponse{Error: err.Error()}
 	}
@@ -93,8 +93,10 @@ func (d *Daemon) handleReportList(ctx context.Context, filter string, limit int)
 
 // buildAbuseReport aggregates everything the store and enricher know about
 // addr into a versioned sdk.AbuseReport. It returns an error when the IP has
-// no offender history and no active ban.
-func (d *Daemon) buildAbuseReport(ctx context.Context, addr netip.Addr, limit int) (*sdk.AbuseReport, error) {
+// no offender history and no active ban. With evidence set it additionally
+// extracts matching raw log lines from the configured sources (bounded,
+// read-only — see evidence.go).
+func (d *Daemon) buildAbuseReport(ctx context.Context, addr netip.Addr, limit int, evidence bool) (*sdk.AbuseReport, error) {
 	offender, err := d.store.GetOffender(ctx, addr)
 	if err != nil {
 		return nil, fmt.Errorf("offender lookup: %w", err)
@@ -143,6 +145,9 @@ func (d *Daemon) buildAbuseReport(ctx context.Context, addr netip.Addr, limit in
 	}
 	rep.Strikes = reportStrikes(strikes)
 	rep.Actions = reportActions(actions)
+	if evidence {
+		rep.Evidence = d.collectEvidence(ctx, addr)
+	}
 	return rep, nil
 }
 

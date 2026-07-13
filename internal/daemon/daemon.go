@@ -54,6 +54,12 @@ type daemonStore interface {
 	ListAllow(ctx context.Context) ([]store.AllowEntry, error)
 	ExpireAllows(ctx context.Context, now time.Time) (int, error)
 	ListAuditLog(ctx context.Context, limit int) ([]store.AuditEntry, error)
+	// Read-only queries backing the "report" verb (issue #54).
+	GetOffender(ctx context.Context, ip netip.Addr) (*store.OffenderRecord, error)
+	ActiveBanForIP(ctx context.Context, ip netip.Addr) (*store.BanRecord, error)
+	StrikesForIP(ctx context.Context, ip netip.Addr, limit int) ([]store.StrikeRecord, error)
+	AuditLogForIP(ctx context.Context, ip netip.Addr, limit int) ([]store.AuditEntry, error)
+	ListOffenders(ctx context.Context, permanentOnly bool, limit int) ([]store.OffenderSummary, error)
 }
 
 // geoLookup is the minimal interface consumed from *enrich.Enricher.

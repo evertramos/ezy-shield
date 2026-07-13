@@ -123,6 +123,27 @@ func fixtureReport() sdk.AbuseReport {
 	}
 }
 
+// fixtureReportWithEvidence extends fixtureReport with hostile evidence:
+// ANSI escapes and a markdown fence-injection attempt.
+func fixtureReportWithEvidence() sdk.AbuseReport {
+	rep := fixtureReport()
+	rep.Evidence = []sdk.AbuseReportEvidence{
+		{
+			Source: "file:/var/log/auth.log",
+			Lines: []string{
+				"Failed password for root from 203.0.113.7 port 51544 ssh2",
+				"```\x1b[31m# Fake heading injected from log\x1b[0m",
+			},
+			Truncated: true,
+		},
+		{
+			Source: "journald:sshd",
+			Note:   "journald sources do not support on-demand extraction yet; use: journalctl -u sshd --grep 203.0.113.7",
+		},
+	}
+	return rep
+}
+
 func TestReport_TextOutput(t *testing.T) {
 	sock, reqs := mockReportServer(t, dataResp(t, fixtureReport()))
 
@@ -156,9 +177,73 @@ func TestReport_TextOutput(t *testing.T) {
 		t.Errorf("ANSI escape from hostile reason leaked into output:\n%q", out)
 	}
 
-	// Wire shape: single per-IP request.
+	// Wire shape: single per-IP request, evidence not requested by default.
 	if len(*reqs) != 1 || (*reqs)[0].Verb != "report" || (*reqs)[0].IP != "203.0.113.7" {
 		t.Errorf("request: want one report req for the IP, got %+v", *reqs)
+	}
+	if (*reqs)[0].Evidence {
+		t.Errorf("request: evidence must be false without --evidence, got %+v", (*reqs)[0])
+	}
+}
+
+func TestReport_EvidenceText(t *testing.T) {
+	sock, reqs := mockReportServer(t, dataResp(t, fixtureReportWithEvidence()))
+
+	out, err := runReportCmd(t, false, "203.0.113.7", "--evidence", "--socket", sock)
+	if err != nil {
+		t.Fatalf("report --evidence: %v\n%s", err, out)
+	}
+
+	for _, want := range []string{
+		"Evidence — file:/var/log/auth.log",
+		"    Failed password for root from 203.0.113.7 port 51544 ssh2",
+		"(excerpt truncated by size caps)",
+		"Evidence — journald:sshd",
+		"note: journald sources do not support on-demand extraction yet",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "\x1b[31m") {
+		t.Errorf("ANSI escape from hostile evidence line leaked:\n%q", out)
+	}
+	if len(*reqs) != 1 || !(*reqs)[0].Evidence {
+		t.Errorf("request: want Evidence=true on the wire, got %+v", *reqs)
+	}
+}
+
+func TestReport_EvidenceMarkdown(t *testing.T) {
+	sock, _ := mockReportServer(t, dataResp(t, fixtureReportWithEvidence()))
+
+	out, err := runReportCmd(t, false, "203.0.113.7", "--evidence", "-o", "md", "--socket", sock)
+	if err != nil {
+		t.Fatalf("report --evidence -o md: %v\n%s", err, out)
+	}
+
+	for _, want := range []string{
+		"## Evidence (log excerpts)",
+		"### file:/var/log/auth.log",
+		"    Failed password for root from 203.0.113.7 port 51544 ssh2",
+		"_(excerpt truncated by size caps)_",
+		"### journald:sshd",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("markdown missing %q:\n%s", want, out)
+		}
+	}
+	// Fence-injection attempt: the hostile ``` line must stay indented (part
+	// of the code block) and never start a line at column 0.
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "```") {
+			t.Errorf("unindented fence leaked into markdown: %q", line)
+		}
+	}
+	if !strings.Contains(out, "    ```") {
+		t.Errorf("hostile fence line must be kept, indented as code:\n%s", out)
+	}
+	if strings.Contains(out, "\x1b") {
+		t.Errorf("ANSI escape leaked into markdown evidence:\n%q", out)
 	}
 }
 
@@ -289,6 +374,7 @@ func TestReport_ArgValidation(t *testing.T) {
 		{"garbage rejected", false, []string{"not-an-ip"}},
 		{"ip with --permanent", false, []string{"203.0.113.7", "--permanent"}},
 		{"md without ip", false, []string{"-o", "md"}},
+		{"evidence without ip", false, []string{"--evidence"}},
 		{"invalid output", false, []string{"203.0.113.7", "-o", "pdf"}},
 		{"json with md", true, []string{"203.0.113.7", "-o", "md"}},
 	}

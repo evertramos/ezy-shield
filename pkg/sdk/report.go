@@ -34,6 +34,11 @@ type AbuseReport struct {
 	// Actions is the audit trail for this IP (bans, unbans, expiries),
 	// newest first.
 	Actions []AbuseReportAction `json:"actions,omitempty"`
+	// Evidence holds raw log excerpts mentioning the IP, extracted on demand
+	// from the configured log sources at report time (never persisted). Only
+	// present when evidence was requested. Lines are hostile input — see the
+	// type doc.
+	Evidence []AbuseReportEvidence `json:"evidence,omitempty"`
 }
 
 // AbuseReportBan describes the active ban on the reported IP.
@@ -66,6 +71,27 @@ type AbuseReportVerdict struct {
 	Confidence float64 `json:"confidence,omitempty"`
 	Reason     string  `json:"reason,omitempty"`
 	Source     string  `json:"source,omitempty"`
+}
+
+// AbuseReportEvidence is one log source's excerpt in an AbuseReport. Lines
+// are copied verbatim from log files and are therefore hostile input:
+// terminal consumers MUST strip control characters and ANSI escapes before
+// rendering, and markdown consumers must neutralize formatting (EzyShield's
+// own CLI renders them as indented code blocks after sanitizing).
+type AbuseReportEvidence struct {
+	// Source identifies the log source, e.g. "file:/var/log/nginx/access.log"
+	// or "journald:sshd". The value comes from the operator's own config,
+	// not from log content.
+	Source string `json:"source"`
+	// Lines are the matching raw log lines, oldest first (the tail of the
+	// file), capped in count and per-line length.
+	Lines []string `json:"lines,omitempty"`
+	// Truncated is true when any cap was applied (scan window, line count,
+	// or line length).
+	Truncated bool `json:"truncated,omitempty"`
+	// Note explains degraded extraction in plain words, e.g. the log was
+	// rotated away or the source kind does not support on-demand reads.
+	Note string `json:"note,omitempty"`
 }
 
 // AbuseReportAction is one audit-log row scoped to the reported IP.

@@ -74,7 +74,7 @@ type AbuseReportVerdict struct {
 }
 
 // AbuseReportEvidence is one log source's excerpt in an AbuseReport. Lines
-// are copied verbatim from log files and are therefore hostile input:
+// are copied verbatim from log sources and are therefore hostile input:
 // terminal consumers MUST strip control characters and ANSI escapes before
 // rendering, and markdown consumers must neutralize formatting (EzyShield's
 // own CLI renders them as indented code blocks after sanitizing).
@@ -90,7 +90,8 @@ type AbuseReportEvidence struct {
 	// or line length).
 	Truncated bool `json:"truncated,omitempty"`
 	// Note explains degraded extraction in plain words, e.g. the log was
-	// rotated away or the source kind does not support on-demand reads.
+	// rotated away, the journal has no matching entries, or the Docker
+	// engine socket was unreachable.
 	Note string `json:"note,omitempty"`
 }
 

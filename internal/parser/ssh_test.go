@@ -118,6 +118,7 @@ func TestSSHParser_Matches(t *testing.T) {
 		want   bool
 	}{
 		{"journald:sshd", true},
+		{"journald:sshd-session", true}, // OpenSSH 8.9+ with systemd session tracking
 		{"file:/var/log/auth.log", true},
 		{"file:/var/log/secure", true},
 		{"file:/etc/auth.log", true},
@@ -199,6 +200,21 @@ func TestSSHParser_EdgeCases(t *testing.T) {
 			line:      []byte("Jan 15 10:00:04 webserver sshd[12348]: Failed password for invalid user testuser from 192.0.2.4 port 33901 ssh2"),
 			wantCount: 1,
 		},
+		{
+			name:      "not allowed AllowUsers",
+			line:      []byte("User root from 192.0.2.5 not allowed because not listed in AllowUsers"),
+			wantCount: 1,
+		},
+		{
+			name:      "not allowed DenyUsers",
+			line:      []byte("User admin from 192.0.2.6 not allowed because listed in DenyUsers"),
+			wantCount: 1,
+		},
+		{
+			name:      "sshd-session syslog prefix",
+			line:      []byte("Jan 15 10:00:05 webserver sshd-session[12349]: Failed password for root from 192.0.2.7 port 40123 ssh2"),
+			wantCount: 1,
+		},
 	}
 
 	for _, tc := range cases {
@@ -240,6 +256,33 @@ func TestSSHParser_FailedInvalidUserKind(t *testing.T) {
 	}
 	if evs[0].Fields["username"] != "testuser" {
 		t.Errorf("username: got %q, want %q", evs[0].Fields["username"], "testuser")
+	}
+}
+
+// TestSSHParser_NotAllowedKind ensures "not allowed" lines produce ssh_invalid_user.
+func TestSSHParser_NotAllowedKind(t *testing.T) {
+	p := parser.NewSSHParser(discardLogger())
+
+	line := sdk.RawLine{
+		Source: "journald:sshd-session",
+		Line:   []byte("User root from 192.0.2.5 not allowed because not listed in AllowUsers"),
+		At:     time.Now(),
+	}
+	evs, err := p.Parse(line)
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	if len(evs) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(evs))
+	}
+	if evs[0].Kind != "ssh_invalid_user" {
+		t.Errorf("kind: got %q, want %q", evs[0].Kind, "ssh_invalid_user")
+	}
+	if evs[0].Fields["username"] != "root" {
+		t.Errorf("username: got %q, want %q", evs[0].Fields["username"], "root")
+	}
+	if evs[0].SourceIP.String() != "192.0.2.5" {
+		t.Errorf("source_ip: got %q, want %q", evs[0].SourceIP.String(), "192.0.2.5")
 	}
 }
 

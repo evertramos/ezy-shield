@@ -142,6 +142,6 @@ rules:
     description: "Sustained SSH brute force (low & slow)"
     kinds: [ssh_fail, ssh_invalid_user]
     window: 3600s
-    threshold: 15
+    threshold: 10
     score: 80
     category: bruteforce

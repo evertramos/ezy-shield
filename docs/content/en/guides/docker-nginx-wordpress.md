@@ -249,7 +249,7 @@ sudo chmod 600 /etc/ezyshield/ezyshield.env
 
 ```bash
 sudo ezyshield doctor          # 🚧 checks config, perms, nft, log readability
-sudo ezyshield test-notify telegram
+sudo ezyshield test notifier telegram
 ```
 
 Then watch what it *would* do, without blocking anything:
@@ -375,7 +375,7 @@ blocks your active SSH session — but the panic command is there regardless.
 | It's banning `172.x.x.x` / Docker IPs | proxy logs container IP, not client | configure `real_ip` (§3b) + `trusted_proxies` (§4) |
 | Nothing is detected | wrong log path or format | `ezyshield doctor`; check `format: json` vs `combined` |
 | Got briefly locked out | allowlist missing your IP | anti-lockout should prevent it; add your IP to `allowlist` |
-| Telegram silent | token/chat_id or env not loaded | `ezyshield test-notify telegram`; check `ezyshield.env` perms |
+| Telegram silent | token/chat_id or env not loaded | `ezyshield test notifier telegram`; check `ezyshield.env` perms |
 | Real visitors blocked | trusting XFF from untrusted source | tighten `trusted_proxies` to upstreams you control |
 | Warned "this might be a Cloudflare IP" | logs show CDN edge, not visitor | fix `real_ip`/`trusted_proxies`; never hard-ban a CDN range |
 | Warned "source is internal/private" | attack from inside the LAN | real possibility (insider/compromised host) — investigate the box, don't just ban |

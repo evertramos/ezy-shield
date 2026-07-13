@@ -303,8 +303,8 @@ notify:
 Validate delivery without waiting for a real event:
 
 ```bash
-sudo ezyshield test-notify telegram
-sudo ezyshield test-notify email
+sudo ezyshield test notifier telegram
+sudo ezyshield test notifier email
 ```
 
 ---
@@ -330,6 +330,6 @@ sudo systemctl enable --now ezyshield
 1. ✅ `ezyshield doctor` — no errors
 2. ✅ `allowlist` includes your access IPs
 3. ✅ `admin_cidrs` includes your SSH IP
-4. ✅ Notifications tested with `test-notify`
+4. ✅ Notifications tested with `test notifier`
 5. ✅ Ran in dry-run, reviewed the logs
 6. ⬜ Set `armed: true` in `policy.yaml`

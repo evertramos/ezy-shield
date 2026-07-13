@@ -57,7 +57,7 @@ sudo ezyshield config enforcer cloudflare
 - Tokens secretos vão para o arquivo `.env` ao lado do `config.yaml` (modo 0600), nunca para o `config.yaml` em si (`api_token: env:CLOUDFLARE_API_TOKEN`).
 - Em caso de sucesso, o comando imprime as chaves alteradas e os próximos passos (`config validate`, reiniciar o daemon). Se o wizard for abortado, nada é escrito.
 
-Nomes disponíveis: `cloudflare`. Os tipos `notifier` e `collector` seguem o mesmo padrão e estão sendo adicionados componente a componente.
+Nomes disponíveis: `cloudflare`. O tipo `notifier` segue o mesmo padrão e está sendo adicionado componente a componente.
 
 Códigos de saída: `0` salvo, `1` wizard abortado ou falha de escrita, `2` config.yaml não encontrado (execute `init` primeiro).
 
@@ -78,5 +78,24 @@ sudo ezyshield config ai ollama
 Provedores disponíveis: `anthropic`, `openai`, `ollama`.
 
 Códigos de saída: `0` salvo, `1` falha de escrita, `2` config.yaml não encontrado (execute `init` primeiro).
+
+### ezyshield config collector <name>
+
+Wizard interativo para adicionar, reconfigurar ou remover um coletor de logs em uma instalação existente — os mesmos prompts que o wizard de init executa para aquela fonte, sem regenerar mais nada.
+
+```bash
+sudo ezyshield config collector sshd
+sudo ezyshield config collector nginx
+sudo ezyshield config collector apache
+```
+
+- `sshd` gerencia o coletor journald (confirmação e, opcionalmente, troca da unidade systemd). Nomes de servidores web (`nginx`, `apache`, `traefik`, `caddy`) perguntam primeiro a fonte de log: `file` (caminho do access-log no host, com default sugerido por servidor) ou `docker` (nome do container, lendo o stdout dele).
+- Reconfigurar substitui a entrada existente daquela fonte (identificada pelo parser nos servidores web e pela unidade SSH no `sshd`) — o wizard nunca acrescenta duplicatas. Configurações com várias fontes para o mesmo servidor (ex.: dois logs de vhost do nginx) são editadas diretamente no `config.yaml`.
+- Para desabilitar uma fonte, responda `n` no prompt de configuração: o wizard então oferece remover a entrada existente (default não). Recusar deixa o arquivo intocado.
+- Coletores não carregam segredos; tudo fica no `config.yaml`. A semântica de escrita é a mesma dos outros wizards: escrita atômica, `config.yaml.bak`, revalidação antes de salvar e resumo das chaves alteradas em caso de sucesso.
+
+Nomes disponíveis: `sshd`, `nginx`, `apache`, `traefik`, `caddy`.
+
+Códigos de saída: `0` salvo, `1` wizard abortado ou falha de escrita, `2` config.yaml não encontrado (execute `init` primeiro).
 
 [Traduções a seguir...]

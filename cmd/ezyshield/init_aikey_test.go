@@ -56,7 +56,7 @@ func runAskQuestionsWithAI(t *testing.T, input string) (*wizardState, string) {
 	}
 	sc := bufio.NewScanner(strings.NewReader(input))
 	out := captureStdout(t, func() {
-		askQuestions(sc, state, false)
+		askQuestions(os.Stdout, sc, state, false, styler{})
 	})
 	return state, out
 }
@@ -484,7 +484,7 @@ func TestInit_YesMode_NoKeyPrompt(t *testing.T) {
 	}
 	out := captureStdout(t, func() {
 		// yes=true — askQuestions skips the key prompt entirely.
-		askQuestions(nil, state, true)
+		askQuestions(os.Stdout, nil, state, true, styler{})
 	})
 
 	if tokenReaderCalled {

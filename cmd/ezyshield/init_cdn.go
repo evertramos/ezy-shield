@@ -47,6 +47,10 @@ type cdnStep struct {
 	// enforcer at init time. On false with detected non-empty, the wizard
 	// prints the loud-skip warning (issue #43 §3).
 	cfEnabled bool
+	// cfAttempted is true once the operator entered the Cloudflare subflow.
+	// cfAttempted && !cfEnabled means the subflow aborted (the loud banner
+	// from issue #93 fired); used only by the init summary (issue #102).
+	cfAttempted bool
 	// cfCfg is the CF config the wizard will emit into config.yaml, only
 	// populated when cfEnabled is true and validation succeeded.
 	cfCfg *config.CloudflareCfg
@@ -415,6 +419,11 @@ func runCloudflareSubflow(
 	deps cdnDeps,
 	detectedCFDomains []string,
 ) {
+	// Mark the attempt so the init summary can distinguish "operator entered
+	// the subflow and it aborted" from "operator declined at the yes/no
+	// prompt" (issue #102). Presentation-only: no prompt or write changes.
+	step.cfAttempted = true
+
 	// Every early-return path below leaves step.cfEnabled=false. Without a
 	// tail-banner the per-line reason ("invalid account_id", "token
 	// validation failed", …) scrolls past under the AI prompts and the

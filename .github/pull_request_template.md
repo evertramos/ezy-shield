@@ -11,7 +11,7 @@ Closes #
 - [ ] Parser change? fuzz test present (`go test -fuzz`)
 - [ ] `make lint test` green locally (`-race`)
 
-## Security review (per docs/SECURITY-REVIEW.md)
+## Security review (per docs/internal/SECURITY-REVIEW.md)
 <!-- For each section: FINDING (file:line + why + fix), OK, or N/A. -->
 - §1 Input handling (hostile logs):
 - §2 Decision engine (lock-out / false-ban):
@@ -28,7 +28,7 @@ Closes #
 lock-out / injection / privilege-escalation / secret-exfil / evasion? Explain.
 
 ## Checklist
-- [ ] Follows .ezy/agents/AGENTS.md Hard Rules (no new listeners, allowlist supremacy, dry-run default, secrets out of code)
+- [ ] Follows AGENTS.md Hard Rules (no new listeners, allowlist supremacy, dry-run default, secrets out of code)
 - [ ] No hardening systemd directive removed (or justified above)
 - [ ] Docs updated (PLAN/ARCHITECTURE/guide) if behavior changed
 - [ ] New dependency justified (or none added)

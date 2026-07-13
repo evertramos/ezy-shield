@@ -8,15 +8,10 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
-	"regexp"
 	"time"
 
 	"github.com/evertramos/ezy-shield/pkg/sdk"
 )
-
-// reUnitName is an allowlist for journald unit names.
-// Only alphanumeric characters plus [._@:-] are accepted to prevent injection.
-var reUnitName = regexp.MustCompile(`^[A-Za-z0-9._@:\-]+$`)
 
 // JournaldCollector reads log entries for a systemd unit via journalctl.
 // It executes journalctl as a subprocess (no CGO, no CGO dependency on libsystemd).
@@ -39,7 +34,7 @@ func (c *JournaldCollector) Run(ctx context.Context, out chan<- sdk.RawLine) err
 	}
 
 	// Validate unit name against allowlist to prevent shell injection.
-	if !reUnitName.MatchString(c.Unit) {
+	if !ValidUnitName(c.Unit) {
 		return fmt.Errorf("journald: invalid unit name %q (must match [A-Za-z0-9._@:-]+)", c.Unit)
 	}
 

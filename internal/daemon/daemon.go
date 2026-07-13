@@ -126,6 +126,13 @@ type Daemon struct {
 	startTime  time.Time
 	version    string
 
+	// evidenceJournalctl and evidenceDockerSocket override the journalctl
+	// binary and Docker engine socket used by on-demand evidence extraction
+	// (issue #126). Empty means the defaults ("journalctl" from PATH,
+	// /var/run/docker.sock). Only set by tests.
+	evidenceJournalctl   string
+	evidenceDockerSocket string
+
 	// staticAllowlist holds the parsed policy.Allowlist + policy.AdminCIDRs.
 	// It is derived once at construction from d.policy and never mutated,
 	// so no lock is needed. Kept semantically separate from runtimeAllowlist

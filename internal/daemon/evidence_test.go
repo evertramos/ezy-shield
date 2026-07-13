@@ -114,6 +114,9 @@ func TestCollectEvidence_Degradation(t *testing.T) {
 		{Kind: "journald", Unit: "sshd"},
 		{Kind: "docker", Container: "web"},
 	}}
+	// Controlled fakes: never touch the host's journalctl or docker socket.
+	d.evidenceJournalctl = writeFakeJournalctl(t, "sshd", "") // emits nothing
+	d.evidenceDockerSocket = filepath.Join(t.TempDir(), "no-such.sock")
 
 	evs := d.collectEvidence(context.Background(), netip.MustParseAddr("203.0.113.7"))
 	if len(evs) != 4 {
@@ -125,11 +128,11 @@ func TestCollectEvidence_Degradation(t *testing.T) {
 	if !strings.Contains(evs[1].Note, "not readable") {
 		t.Errorf("missing file: want honest note, got %+v", evs[1])
 	}
-	if evs[2].Source != "journald:sshd" || !strings.Contains(evs[2].Note, "journalctl -u sshd") {
-		t.Errorf("journald: want skip note with manual hint, got %+v", evs[2])
+	if evs[2].Source != "journald:sshd" || !strings.Contains(evs[2].Note, "no entries mentioning") {
+		t.Errorf("journald: want empty-journal note, got %+v", evs[2])
 	}
-	if evs[3].Source != "docker:web" || evs[3].Note == "" {
-		t.Errorf("docker: want skip note, got %+v", evs[3])
+	if evs[3].Source != "docker:web" || !strings.Contains(evs[3].Note, "socket unreachable") {
+		t.Errorf("docker: want unreachable-socket note, got %+v", evs[3])
 	}
 }
 

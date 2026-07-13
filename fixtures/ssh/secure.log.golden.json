@@ -1,0 +1,6 @@
+[
+  {"kind": "ssh_invalid_user", "source_ip": "192.0.2.50",  "fields": {"username": "oracle",   "port": "51000"}},
+  {"kind": "ssh_invalid_user", "source_ip": "192.0.2.51",  "fields": {"username": "postgres", "port": "51002"}},
+  {"kind": "ssh_accept",       "source_ip": "192.0.2.52",  "fields": {"username": "centos",   "port": "51004"}},
+  {"kind": "ssh_fail",         "source_ip": "2001:db8::50","fields": {"username": "root",     "port": "51006"}}
+]

@@ -173,6 +173,8 @@ func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
 		resp = d.handleListAllow(ctx)
 	case "events":
 		resp = d.handleEvents(ctx, req)
+	case "report":
+		resp = d.handleReport(ctx, req)
 	case "subscribe":
 		// Long-lived, read-only event stream; writes its own ack + events.
 		d.handleSubscribe(ctx, conn)
@@ -184,7 +186,7 @@ func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
 	case "allow":
 		resp = d.handleAllow(ctx, req)
 	default:
-		resp = SocketResponse{Error: fmt.Sprintf("unknown verb %q; valid: status list list_allow events subscribe ban unban allow", req.Verb)}
+		resp = SocketResponse{Error: fmt.Sprintf("unknown verb %q; valid: status list list_allow events subscribe report ban unban allow", req.Verb)}
 	}
 
 	writeResponse(conn, resp)

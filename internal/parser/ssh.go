@@ -24,15 +24,19 @@ const maxRedactLen = 200
 
 // Package-level compiled regexes — compiled once, reused for every parsed line.
 var (
-	reSyslogPrefix  = regexp.MustCompile(`^(\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\s+\S+\s+sshd\[\d+\]:\s+(.*)$`)
+	// reSyslogPrefix matches traditional syslog "Jan  1 12:00:00 host sshd[123]: msg".
+	// Also matches "sshd-session" (OpenSSH 8.9+ with systemd session tracking).
+	reSyslogPrefix  = regexp.MustCompile(`^(\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\s+\S+\s+sshd(?:-session)?\[\d+\]:\s+(.*)$`)
 	reFailedInvalid = regexp.MustCompile(`^Failed \S+ for invalid user (\S{1,64}) from ([0-9a-fA-F.:]+) port (\d{1,5})`)
 	reFailedPass    = regexp.MustCompile(`^Failed \S+ for (\S{1,64}) from ([0-9a-fA-F.:]+) port (\d{1,5})`)
 	reInvalidUser   = regexp.MustCompile(`^Invalid user (\S{1,64}) from ([0-9a-fA-F.:]+) port (\d{1,5})`)
+	reNotAllowed    = regexp.MustCompile(`^User (\S{1,64}) from ([0-9a-fA-F.:]+) not allowed`)
 	reAccepted      = regexp.MustCompile(`^Accepted \S+ for (\S{1,64}) from ([0-9a-fA-F.:]+) port (\d{1,5})`)
 )
 
 // SSHParser parses SSH authentication log lines.
-// Sources handled: "journald:sshd", "file:/var/log/auth.log", any ending in "auth.log" or "/secure".
+// Sources handled: "journald:sshd", "journald:sshd-session" (OpenSSH 8.9+),
+// "file:/var/log/auth.log", any ending in "auth.log" or "/secure".
 type SSHParser struct {
 	logger *slog.Logger
 }
@@ -45,6 +49,7 @@ func NewSSHParser(logger *slog.Logger) *SSHParser {
 // Matches reports whether this parser handles the given collector source ID.
 func (p *SSHParser) Matches(source string) bool {
 	return source == "journald:sshd" ||
+		source == "journald:sshd-session" ||
 		source == "file:/var/log/auth.log" ||
 		strings.HasSuffix(source, "auth.log") ||
 		strings.HasSuffix(source, "/secure") ||
@@ -143,6 +148,22 @@ func (p *SSHParser) matchMessage(msg string, t time.Time, origin string) (sdk.Ev
 		}, true
 	}
 
+	// "User X from IP not allowed because not listed in AllowUsers" (and similar)
+	if m := reNotAllowed.FindStringSubmatch(msg); m != nil {
+		ip, err := parseIP(m[2])
+		if err != nil {
+			p.logger.Debug("ssh: invalid IP in NotAllowed", slog.String("raw", redactForLog(m[2])))
+			return sdk.Event{}, false
+		}
+		return sdk.Event{
+			Time:     t,
+			SourceIP: ip,
+			Kind:     "ssh_invalid_user",
+			Fields:   map[string]string{"username": capUsername(m[1])},
+			Origin:   origin,
+		}, true
+	}
+
 	if m := reAccepted.FindStringSubmatch(msg); m != nil {
 		ip, err := parseIP(m[2])
 		if err != nil {
@@ -163,13 +184,18 @@ func (p *SSHParser) matchMessage(msg string, t time.Time, origin string) (sdk.Ev
 
 // fields builds the event Fields map, capping username at maxUsernameBytes.
 func fields(username, port string) map[string]string {
-	if len(username) > maxUsernameBytes {
-		username = username[:maxUsernameBytes]
-	}
 	return map[string]string{
-		"username": username,
+		"username": capUsername(username),
 		"port":     port,
 	}
+}
+
+// capUsername truncates username to maxUsernameBytes.
+func capUsername(username string) string {
+	if len(username) > maxUsernameBytes {
+		return username[:maxUsernameBytes]
+	}
+	return username
 }
 
 // parseIP parses an IP address string, stripping optional brackets (IPv6).

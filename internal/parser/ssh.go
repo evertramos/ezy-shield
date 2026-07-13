@@ -24,19 +24,33 @@ const maxRedactLen = 200
 
 // Package-level compiled regexes — compiled once, reused for every parsed line.
 var (
-	// reSyslogPrefix matches traditional syslog "Jan  1 12:00:00 host sshd[123]: msg".
-	// Also matches "sshd-session" (OpenSSH 8.9+ with systemd session tracking).
-	reSyslogPrefix  = regexp.MustCompile(`^(\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\s+\S+\s+sshd(?:-session)?\[\d+\]:\s+(.*)$`)
-	reFailedInvalid = regexp.MustCompile(`^Failed \S+ for invalid user (\S{1,64}) from ([0-9a-fA-F.:]+) port (\d{1,5})`)
-	reFailedPass    = regexp.MustCompile(`^Failed \S+ for (\S{1,64}) from ([0-9a-fA-F.:]+) port (\d{1,5})`)
-	reInvalidUser   = regexp.MustCompile(`^Invalid user (\S{1,64}) from ([0-9a-fA-F.:]+) port (\d{1,5})`)
-	reNotAllowed    = regexp.MustCompile(`^User (\S{1,64}) from ([0-9a-fA-F.:]+) not allowed`)
-	reAccepted      = regexp.MustCompile(`^Accepted \S+ for (\S{1,64}) from ([0-9a-fA-F.:]+) port (\d{1,5})`)
+	// reSyslogPrefix matches the traditional RFC3164 syslog prefix
+	// "Jan  1 12:00:00 host sshd[123]: msg" — RHEL/CentOS /var/log/secure and
+	// older distros. Also matches "sshd-session" (OpenSSH 9.6+ split session).
+	reSyslogPrefix = regexp.MustCompile(`^(\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\s+\S+\s+sshd(?:-session)?\[\d+\]:\s+(.*)$`)
+	// reSyslogPrefixISO matches the RFC3339/ISO-8601 syslog prefix
+	// "2026-07-13T22:57:35.182105+00:00 host sshd-session[123]: msg" — the
+	// systemd-journald → rsyslog default on Debian 12+/Ubuntu 24.04+.
+	reSyslogPrefixISO = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2}))\s+\S+\s+sshd(?:-session)?\[\d+\]:\s+(.*)$`)
+	reFailedInvalid   = regexp.MustCompile(`^Failed \S+ for invalid user (\S{1,64}) from ([0-9a-fA-F.:]+) port (\d{1,5})`)
+	reFailedPass      = regexp.MustCompile(`^Failed \S+ for (\S{1,64}) from ([0-9a-fA-F.:]+) port (\d{1,5})`)
+	reInvalidUser     = regexp.MustCompile(`^Invalid user (\S{1,64}) from ([0-9a-fA-F.:]+) port (\d{1,5})`)
+	reNotAllowed      = regexp.MustCompile(`^User (\S{1,64}) from ([0-9a-fA-F.:]+) not allowed`)
+	reAccepted        = regexp.MustCompile(`^Accepted \S+ for (\S{1,64}) from ([0-9a-fA-F.:]+) port (\d{1,5})`)
 )
 
-// SSHParser parses SSH authentication log lines.
-// Sources handled: "journald:sshd", "journald:sshd-session" (OpenSSH 8.9+),
-// "file:/var/log/auth.log", any ending in "auth.log" or "/secure".
+// SSHParser parses SSH authentication log lines from any distribution and
+// collection method:
+//   - journald units: "journald:ssh" (Debian/Ubuntu), "journald:sshd"
+//     (RHEL/CentOS/Fedora/Arch/SUSE), "journald:sshd-session", each with or
+//     without a ".service" suffix.
+//   - file logs: any path ending in "auth.log" (Debian/Ubuntu) or "/secure"
+//     (RHEL family), as "file:<path>" or a bare path.
+//   - an explicit "ssh:" parser override (parser: ssh in a collector).
+//
+// Both the RFC3164 ("Jan  1 12:00:00") and RFC3339/ISO-8601
+// ("2026-07-13T22:57:35.182105+00:00") syslog prefixes are recognised, as are
+// prefix-less messages (journald "-o cat").
 type SSHParser struct {
 	logger *slog.Logger
 }
@@ -47,13 +61,42 @@ func NewSSHParser(logger *slog.Logger) *SSHParser {
 }
 
 // Matches reports whether this parser handles the given collector source ID.
+//
+// The SSH systemd unit is "ssh" on Debian/Ubuntu but "sshd" on the RHEL family,
+// Arch and SUSE; both (and the OpenSSH 9.6+ "sshd-session" identifier) are
+// accepted, with or without a ".service" suffix. An explicit override for a
+// different parser (e.g. "nginx:<path>") is never claimed, so routing stays
+// deterministic.
 func (p *SSHParser) Matches(source string) bool {
-	return source == "journald:sshd" ||
-		source == "journald:sshd-session" ||
-		source == "file:/var/log/auth.log" ||
-		strings.HasSuffix(source, "auth.log") ||
-		strings.HasSuffix(source, "/secure") ||
-		strings.HasPrefix(source, "ssh:")
+	// Explicit parser override wins.
+	if strings.HasPrefix(source, "ssh:") {
+		return true
+	}
+	// journald unit sources — accept the SSH unit under any distro's name.
+	if unit, ok := strings.CutPrefix(source, "journald:"); ok {
+		switch strings.TrimSuffix(unit, ".service") {
+		case "ssh", "sshd", "sshd-session":
+			return true
+		default:
+			return false
+		}
+	}
+	// Auto-routed file sources ("file:<path>").
+	if path, ok := strings.CutPrefix(source, "file:"); ok {
+		return isSSHLogPath(path)
+	}
+	// Any other explicit "<parser>:..." override belongs to that parser.
+	if strings.Contains(source, ":") {
+		return false
+	}
+	// Bare path fallback (no scheme).
+	return isSSHLogPath(source)
+}
+
+// isSSHLogPath reports whether path is a conventional SSH auth log file:
+// Debian/Ubuntu "auth.log" or the RHEL family's "/secure".
+func isSSHLogPath(path string) bool {
+	return strings.HasSuffix(path, "auth.log") || strings.HasSuffix(path, "/secure")
 }
 
 // Parse converts a single raw log line into zero or more Events.
@@ -74,18 +117,23 @@ func (p *SSHParser) Parse(line sdk.RawLine) ([]sdk.Event, error) {
 		return nil, nil
 	}
 
-	// Determine event timestamp and message body.
-	// Try to strip the syslog prefix first.
+	// Determine event timestamp and message body by stripping a syslog prefix,
+	// if present. Two prefix formats are supported (ISO-8601 first, then the
+	// legacy RFC3164 stamp); a prefix-less message (journald "-o cat") falls
+	// through unchanged. If timestamp parsing fails, collection time is used.
 	eventTime := line.At
 	msg := raw
 
-	if m := reSyslogPrefix.FindStringSubmatch(raw); m != nil {
-		stamp := m[1]
+	if m := reSyslogPrefixISO.FindStringSubmatch(raw); m != nil {
 		msg = m[2]
-		if t, err := parseSSHTime(stamp, line.At); err == nil {
+		if t, err := parseISOTime(m[1]); err == nil {
 			eventTime = t
 		}
-		// If timestamp parse fails, fall back to collection time (already set).
+	} else if m := reSyslogPrefix.FindStringSubmatch(raw); m != nil {
+		msg = m[2]
+		if t, err := parseSSHTime(m[1], line.At); err == nil {
+			eventTime = t
+		}
 	}
 
 	// Attempt each pattern in order (most specific first).
@@ -208,6 +256,18 @@ func parseIP(s string) (netip.Addr, error) {
 		return netip.Addr{}, fmt.Errorf("parseIP: %w", err)
 	}
 	return addr, nil
+}
+
+// parseISOTime parses an RFC3339/ISO-8601 syslog timestamp, tolerating both
+// colon ("+00:00") and bare ("+0000") numeric offsets and optional fractional
+// seconds. The timestamp carries its own zone, so no reference time is needed.
+func parseISOTime(stamp string) (time.Time, error) {
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02T15:04:05.999999999Z0700"} {
+		if t, err := time.Parse(layout, stamp); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("parseISOTime: unrecognized timestamp %q", stamp)
 }
 
 // parseSSHTime parses a syslog timestamp (time.Stamp format) relative to a reference time.

@@ -11,17 +11,11 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/evertramos/ezy-shield/pkg/sdk"
 )
-
-// reDockerContainerName is an allowlist for Docker container names and IDs.
-// Names: [a-zA-Z0-9][a-zA-Z0-9_.-]* Short IDs: 12 hex chars. Full IDs: 64 hex.
-// The pattern covers all valid forms.
-var reDockerContainerName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.\-]*$`)
 
 const (
 	dockerBackoffBase = time.Second
@@ -74,7 +68,7 @@ func (c *DockerCollector) Run(ctx context.Context, out chan<- sdk.RawLine) error
 		logger = slog.Default()
 	}
 
-	if !reDockerContainerName.MatchString(c.Container) {
+	if !ValidContainerName(c.Container) {
 		return fmt.Errorf("docker: invalid container name %q (must match [a-zA-Z0-9][a-zA-Z0-9_.-]*)", c.Container)
 	}
 

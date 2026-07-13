@@ -228,6 +228,37 @@ func (s *DB) HasActiveBan(ctx context.Context, ip netip.Addr) (bool, error) {
 	return true, nil
 }
 
+// BanInfo holds metadata about an active ban, used for ban_ineffective checks.
+type BanInfo struct {
+	BannedAt time.Time
+	Strike   int
+}
+
+// GetBanInfo returns the ban metadata for ip if it has an active ban.
+// Returns nil (not an error) if the IP has no active ban.
+func (s *DB) GetBanInfo(ctx context.Context, ip netip.Addr) (*BanInfo, error) {
+	var bannedAtStr string
+	var strike int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT banned_at, strike_num FROM bans_active WHERE ip = ?`,
+		ip.String()).Scan(&bannedAtStr, &strike)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: GetBanInfo %s: %w", ip, err)
+	}
+	bannedAt, err := time.Parse(time.RFC3339Nano, bannedAtStr)
+	if err != nil {
+		// Fall back to RFC3339 if nano parsing fails
+		bannedAt, err = time.Parse(time.RFC3339, bannedAtStr)
+		if err != nil {
+			return nil, fmt.Errorf("store: GetBanInfo parse banned_at: %w", err)
+		}
+	}
+	return &BanInfo{BannedAt: bannedAt, Strike: strike}, nil
+}
+
 // BumpLastSeen updates offenders.last_seen for ip to now. It is a
 // lightweight write — the only store mutation on the suppression path when
 // an IP is already actively banned. If ip has no offender row yet (rare

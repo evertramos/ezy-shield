@@ -65,7 +65,7 @@ func newUpdateCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "update",
-		Short: "Self-update ezyshield from GitHub Releases",
+		Short: "Self-update " + progName + " from GitHub Releases",
 		Long: `Check GitHub Releases for a newer ezyshield, verify SHA256 checksums,
 and atomically replace the on-disk binaries (ezyshield and ezyshield-enforcer).
 
@@ -174,8 +174,8 @@ func runUpdate(ctx context.Context, opts updateOptions) error {
 	}
 
 	if opts.checkOnly {
-		out.printf("Current: %s\nLatest:  %s\nUpdate available. Run: sudo ezyshield update\n",
-			opts.currentVersion, rel.TagName)
+		out.printf("Current: %s\nLatest:  %s\nUpdate available. Run: sudo %s update\n",
+			opts.currentVersion, rel.TagName, progName)
 		return out.err
 	}
 

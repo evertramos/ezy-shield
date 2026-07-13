@@ -10,6 +10,49 @@ order: 4
 
 Referência completa para a CLI do `ezyshield`.
 
+## Convenções globais
+
+### Códigos de saída
+
+Todos os comandos seguem o mesmo contrato de códigos de saída:
+
+| Código | Significado |
+|--------|-------------|
+| `0` | Sucesso |
+| `1` | Erro de execução — o comando iniciou mas falhou (config inválida, erro de API, falha de escrita) |
+| `2` | Erro de uso — comando/flag desconhecido, argumento inválido, ou arquivo de entrada que não existe / não pode ser lido |
+| `3` | Daemon inacessível — o socket de controle recusou a conexão (o daemon está em execução?) |
+
+Duas exceções deliberadas: `status` sai com `0` mesmo quando o daemon está
+parado (ele reporta o estado com sucesso), e `doctor` sai com `0` mesmo quando
+verificações individuais falham (a saída dele é o relatório).
+
+### Saída JSON (`--json`)
+
+Todos os comandos de leitura suportam `--json` com nomes de campos estáveis,
+seguros para scripts:
+
+| Comando | Formato |
+|---------|---------|
+| `status` | Objeto: `daemon`, `enforcer`, `mode`, `uptime`, `version`, `active_bans`, `bans_by_strike`, `message` |
+| `list` | Envelope: `ok`, `error`, `data` (linhas dentro de `data`) |
+| `watch` | NDJSON: um objeto de evento por linha |
+| `scan` | Objeto: `listeners`, `new_listeners` |
+| `doctor` | Objeto: `checks` (`name`, `status`, `hint`) e `summary` (`total`, `pass`, `fail`) |
+| `config show` | Objeto: `config`, `policy` (valores efetivos, segredos redigidos) |
+| `version` | Objeto: `version`, `commit`, `build_date` |
+
+Com `--json`, o stdout carrega apenas JSON; avisos e notas de conexão vão para
+o stderr, então encadear com `jq` é sempre seguro.
+
+### Cores
+
+Saída colorida/estilizada só é habilitada quando todas estas condições valem:
+o stdout é um terminal interativo, a variável de ambiente
+[`NO_COLOR`](https://no-color.org) não está definida, e `--no-color` não foi
+passado. Saída redirecionada ou encadeada por pipe é sempre texto puro, então
+`ezyshield watch | grep ban` nunca vê códigos de escape.
+
 ## ezyshield run
 
 Inicia o daemon em primeiro plano. Lê logs, toma decisões e aplica banimentos.

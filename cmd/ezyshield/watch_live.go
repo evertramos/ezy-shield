@@ -103,7 +103,7 @@ func runWatch(cmd *cobra.Command, socketPath string, kinds []string, ipFilter st
 
 	out := cmd.OutOrStdout()
 	errOut := cmd.ErrOrStderr()
-	color := !jsonOutput && useColor(out)
+	color := !jsonOutput && colorEnabled(out)
 
 	// NDJSON: one compact JSON object per event, one per line. The encoder
 	// escapes all C0 control bytes (ESC, CR, LF) as \uXXXX, so hostile bytes
@@ -293,21 +293,4 @@ func kindColor(kind string) string {
 	default: // detection, record
 		return "\x1b[36m" // cyan
 	}
-}
-
-// useColor reports whether w is an interactive terminal that should get ANSI
-// colors. Respects the NO_COLOR convention.
-func useColor(w any) bool {
-	if os.Getenv("NO_COLOR") != "" {
-		return false
-	}
-	f, ok := w.(*os.File)
-	if !ok {
-		return false
-	}
-	info, err := f.Stat()
-	if err != nil {
-		return false
-	}
-	return info.Mode()&os.ModeCharDevice != 0
 }

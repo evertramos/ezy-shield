@@ -358,7 +358,7 @@ func printLoudSkipWarning(p *wPrinter, results []cdndetect.DomainResult) {
 	}
 	p.println("")
 	p.println("      To retry: delete /etc/ezyshield/config.yaml + policy.yaml")
-	p.println("      and re-run 'sudo ezyshield init'.")
+	p.printf("      and re-run 'sudo %s init'.\n", progName)
 	p.println("  ─────────────────────────────────────────────────────────────")
 	p.println("")
 }
@@ -383,7 +383,7 @@ func printCFSetupAbortedBanner(p *wPrinter) {
 	p.println("      reason printed above (invalid input, or token validation).")
 	p.println("")
 	p.println("      To retry: delete /etc/ezyshield/config.yaml + policy.yaml")
-	p.println("      and re-run 'sudo ezyshield init'.")
+	p.printf("      and re-run 'sudo %s init'.\n", progName)
 	p.println("  ─────────────────────────────────────────────────────────────")
 	p.println("")
 }
@@ -732,8 +732,8 @@ func probeCFTokenScope(ctx context.Context, deps cdnDeps, base string, cfg *conf
 		}
 		return fmt.Errorf("%s (HTTP %d: %s)", reason, status, msg)
 	default:
-		return fmt.Errorf("cloudflare API returned HTTP %d validating %s (transient?) — delete config.yaml and re-run `sudo ezyshield init` to retry",
-			status, cfg.Mode)
+		return fmt.Errorf("cloudflare API returned HTTP %d validating %s (transient?) — delete config.yaml and re-run `sudo %s init` to retry",
+			status, cfg.Mode, progName)
 	}
 }
 

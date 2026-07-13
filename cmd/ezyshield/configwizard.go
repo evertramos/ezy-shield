@@ -157,7 +157,7 @@ Available names: ` + strings.Join(sortedWizardKeys(componentWizards[kind]), ", "
 				return fmt.Errorf("writing output: %w", p.err)
 			}
 			if code != validateExitOK {
-				os.Exit(code)
+				return exitCodeError{code}
 			}
 			return nil
 		},

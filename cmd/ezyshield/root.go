@@ -2,19 +2,29 @@ package main
 
 import "github.com/spf13/cobra"
 
+// progName is the user-facing invocation name used in help text and hints.
+// Single definition site (see AGENTS.md "CLI naming"): the root command and
+// every printed hint derive from it, so the future `ezy shield` dispatcher
+// renames the CLI by changing this one line.
+const progName = "ezyshield"
+
 // jsonOutput is set by the --json persistent flag and read by all subcommands.
 var jsonOutput bool
 
+// noColor is set by the --no-color persistent flag; colorEnabled honors it
+// alongside the NO_COLOR environment variable and TTY detection.
+var noColor bool
+
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
-		Use:   "ezyshield",
+		Use:   progName,
 		Short: "EzyShield — Linux security daemon (ezy shield)",
 		Long: `EzyShield is a CLI-first Linux security tool.
 
 It detects malicious IPs from logs, escalates bans by strike count,
 and enforces blocks locally (nftables) and at the edge (Cloudflare/Bunny/AWS).
 
-Commands read as:  ezyshield <verb>   (equivalent to: ezy shield <verb>)`,
+Commands read as:  ` + progName + ` <verb>   (equivalent to: ezy shield <verb>)`,
 		// Wires up `ezyshield --version` (used by the self-update verifier
 		// to confirm a freshly downloaded binary actually runs).
 		Version:       version,
@@ -23,6 +33,8 @@ Commands read as:  ezyshield <verb>   (equivalent to: ezy shield <verb>)`,
 	}
 
 	root.PersistentFlags().BoolVar(&jsonOutput, "json", false, "output results as JSON")
+	root.PersistentFlags().BoolVar(&noColor, "no-color", false,
+		"disable colored output (the NO_COLOR env var is also honored)")
 
 	root.AddCommand(
 		newVersionCmd(),

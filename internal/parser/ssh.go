@@ -37,6 +37,12 @@ var (
 	reInvalidUser     = regexp.MustCompile(`^Invalid user (\S{1,64}) from ([0-9a-fA-F.:]+) port (\d{1,5})`)
 	reNotAllowed      = regexp.MustCompile(`^User (\S{1,64}) from ([0-9a-fA-F.:]+) not allowed`)
 	reAccepted        = regexp.MustCompile(`^Accepted \S+ for (\S{1,64}) from ([0-9a-fA-F.:]+) port (\d{1,5})`)
+	// Connection closed by invalid user (OpenSSH variant)
+	reConnectionClosed = regexp.MustCompile(`^Connection closed by invalid user (\S{1,64}) ([0-9a-fA-F.:]+) port (\d{1,5})`)
+	// SSH dispatch fatal (connection from invalid user)
+	reDispatchFatal = regexp.MustCompile(`^ssh_dispatch_run_fatal: Connection from invalid user (\S{1,64}) ([0-9a-fA-F.:]+) port (\d{1,5}):`)
+	// Banner exchange error (protocol-level, no username)
+	reBannerError = regexp.MustCompile(`^banner exchange: Connection from ([0-9a-fA-F.:]+) port (\d{1,5}):`)
 )
 
 // SSHParser parses SSH authentication log lines from any distribution and
@@ -208,6 +214,54 @@ func (p *SSHParser) matchMessage(msg string, t time.Time, origin string) (sdk.Ev
 			SourceIP: ip,
 			Kind:     "ssh_invalid_user",
 			Fields:   map[string]string{"username": capUsername(m[1])},
+			Origin:   origin,
+		}, true
+	}
+
+	// "Connection closed by invalid user X IP port Y" (OpenSSH variant)
+	if m := reConnectionClosed.FindStringSubmatch(msg); m != nil {
+		ip, err := parseIP(m[2])
+		if err != nil {
+			p.logger.Debug("ssh: invalid IP in ConnectionClosed", slog.String("raw", redactForLog(m[2])))
+			return sdk.Event{}, false
+		}
+		return sdk.Event{
+			Time:     t,
+			SourceIP: ip,
+			Kind:     "ssh_invalid_user",
+			Fields:   fields(m[1], m[3]),
+			Origin:   origin,
+		}, true
+	}
+
+	// "ssh_dispatch_run_fatal: Connection from invalid user X IP port Y: ..." (fatal dispatch error)
+	if m := reDispatchFatal.FindStringSubmatch(msg); m != nil {
+		ip, err := parseIP(m[2])
+		if err != nil {
+			p.logger.Debug("ssh: invalid IP in DispatchFatal", slog.String("raw", redactForLog(m[2])))
+			return sdk.Event{}, false
+		}
+		return sdk.Event{
+			Time:     t,
+			SourceIP: ip,
+			Kind:     "ssh_invalid_user",
+			Fields:   fields(m[1], m[3]),
+			Origin:   origin,
+		}, true
+	}
+
+	// "banner exchange: Connection from IP port P: invalid format" (protocol error, no username)
+	if m := reBannerError.FindStringSubmatch(msg); m != nil {
+		ip, err := parseIP(m[1])
+		if err != nil {
+			p.logger.Debug("ssh: invalid IP in BannerError", slog.String("raw", redactForLog(m[1])))
+			return sdk.Event{}, false
+		}
+		return sdk.Event{
+			Time:     t,
+			SourceIP: ip,
+			Kind:     "ssh_banner_error",
+			Fields:   map[string]string{"port": m[2]},
 			Origin:   origin,
 		}, true
 	}

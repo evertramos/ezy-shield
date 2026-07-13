@@ -12,11 +12,12 @@ import "encoding/json"
 // are logged to the append-only audit_log.
 type SocketRequest struct {
 	// Verb selects the operation: "status", "list", "list_allow", "events",
-	// "subscribe", "ban", "unban", "allow".
+	// "subscribe", "report", "ban", "unban", "allow".
 	Verb string `json:"verb"`
-	// IP is the target for ban/unban/allow. Accepts either a bare address
-	// ("1.2.3.4") or a CIDR ("203.0.113.0/24"). A bare address is treated
-	// as a host prefix (/32 or /128).
+	// IP is the target for ban/unban/allow/report. ban/unban/allow accept
+	// either a bare address ("1.2.3.4") or a CIDR ("203.0.113.0/24"); a bare
+	// address is treated as a host prefix (/32 or /128). report accepts only
+	// a bare address; an empty IP selects the offender-listing mode.
 	IP string `json:"ip,omitempty"`
 	// TTL is a Go duration string (e.g. "5m", "24h") for the ban verb.
 	// Zero or absent means the policy strike table decides.
@@ -30,10 +31,14 @@ type SocketRequest struct {
 	// Reason is an operator-supplied free-text note, surfaced in list output
 	// and the audit log.
 	Reason string `json:"reason,omitempty"`
-	// Limit caps the number of rows returned by list-shaped verbs (currently
-	// "events"). Zero or negative means "server default" (100 for events).
-	// The daemon also enforces an upper bound to avoid ballooning memory.
+	// Limit caps the number of rows returned by list-shaped verbs ("events",
+	// "report"). Zero or negative means "server default" (100). The daemon
+	// also enforces an upper bound to avoid ballooning memory.
 	Limit int `json:"limit,omitempty"`
+	// Filter narrows the report verb's listing mode (IP empty): "" or "all"
+	// returns every offender, "permanent" only those with a permanent active
+	// ban. Other values are rejected.
+	Filter string `json:"filter,omitempty"`
 }
 
 // SocketResponse is returned by the daemon for every request.
@@ -123,6 +128,21 @@ type StreamEvent struct {
 	Reason string `json:"reason,omitempty"`
 	// Source is "pipeline" for automatic events and "cli" for socket verbs.
 	Source string `json:"source,omitempty"`
+}
+
+// ReportSummaryEntry is one element in the array returned by the "report"
+// verb's listing mode (request IP empty). The single-IP mode returns an
+// sdk.AbuseReport instead. Timestamps are RFC 3339 UTC strings.
+type ReportSummaryEntry struct {
+	IP           string `json:"ip"`
+	FirstSeen    string `json:"first_seen"`
+	LastSeen     string `json:"last_seen"`
+	TotalStrikes int    `json:"total_strikes"`
+	Banned       bool   `json:"banned"`
+	Permanent    bool   `json:"permanent,omitempty"`
+	// Country/ASN come from GeoIP enrichment; empty when not configured.
+	Country string `json:"country,omitempty"`
+	ASN     string `json:"asn,omitempty"`
 }
 
 // AllowEntry is one element in the array returned by the "list_allow" verb.

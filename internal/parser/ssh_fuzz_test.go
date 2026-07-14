@@ -39,6 +39,24 @@ func FuzzSSHParser(f *testing.F) {
 	f.Add([]byte("banner exchange: Connection from 192.0.2.3 port 50442: invalid format"))
 	// ISO-prefixed banner error
 	f.Add([]byte("2026-07-13T23:30:36.020302+00:00 host sshd-session[1093238]: banner exchange: Connection from 192.0.2.4 port 50442: invalid format"))
+	// Canonical probe patterns (issue #140): bare + authenticating-user + pam + protocol.
+	f.Add([]byte("Connection closed by 192.0.2.5 port 60216"))
+	f.Add([]byte("Connection reset by 192.0.2.6 port 54990"))
+	f.Add([]byte("Received disconnect from 192.0.2.7 port 40780:11: Bye Bye [preauth]"))
+	f.Add([]byte("Disconnected from invalid user root 192.0.2.8 port 40780"))
+	f.Add([]byte("Connection closed by authenticating user kylian 192.0.2.9 port 40780 [preauth]"))
+	f.Add([]byte("Disconnecting invalid user test 192.0.2.10 port 5678: Too many authentication failures"))
+	f.Add([]byte("pam_unix(sshd:auth): authentication failure; logname= uid=0 euid=0 tty=ssh ruser= rhost=192.0.2.11  user=root"))
+	f.Add([]byte("PAM 4 more authentication failures; logname= uid=0 euid=0 tty=ssh ruser= rhost=192.0.2.12  user=root"))
+	f.Add([]byte("error: kex_exchange_identification: Connection reset by 192.0.2.13 port 50442"))
+	f.Add([]byte("Unable to negotiate with 192.0.2.14 port 5000: no matching host key type found. Their offer: ssh-rsa"))
+	f.Add([]byte("error: maximum authentication attempts exceeded for invalid user root from 192.0.2.15 port 2222 ssh2 [preauth]"))
+	// No-IP protocol lines (must be skipped cleanly, never panic).
+	f.Add([]byte("pam_unix(sshd:auth): check pass; user unknown"))
+	f.Add([]byte("error: kex_exchange_identification: read: Connection reset by peer"))
+	f.Add([]byte("PAM service(sshd) ignoring max retries; 5 > 3"))
+	// Malformed rhost (not an IP) must not create an event or panic.
+	f.Add([]byte("pam_unix(sshd:auth): authentication failure; rhost=not-an-ip  user=root"))
 	f.Add([]byte(""))
 	f.Add([]byte("THIS IS GARBAGE"))
 	f.Add([]byte("\x00\x01\x02\x03"))                                                    // binary input

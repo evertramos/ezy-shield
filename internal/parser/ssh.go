@@ -22,22 +22,140 @@ const maxUsernameBytes = 64
 // maxRedactLen is the maximum length of a redacted string used in log messages.
 const maxRedactLen = 200
 
-// Package-level compiled regexes — compiled once, reused for every parsed line.
+// Canonical SSH event kinds. Recognition is broad (many line variants), but the
+// decision surface is deliberately small: only these four kinds exist, and the
+// specific line that matched is preserved in Fields["subtype"] for observability
+// — not as a distinct kind. See issue #140.
+//
+//   - kindInvalidUser / kindFail: real authentication attempts. These are the
+//     kinds the built-in ban rules count (configs/rules.yaml).
+//   - kindProbe: connection/protocol anomalies and corroborating termination /
+//     PAM echoes of an attempt already counted. NOT counted by the default
+//     rules — available to an opt-in "aggressive" rule (higher false-positive
+//     risk on shared/CGNAT IPs).
+//   - kindAccept: successful auth. Telemetry only; referenced by no ban rule and
+//     never used to suppress strikes (a success is not proof of innocence on a
+//     shared IP).
+const (
+	kindInvalidUser = "ssh_invalid_user"
+	kindFail        = "ssh_fail"
+	kindAccept      = "ssh_accept"
+	kindProbe       = "ssh_probe"
+)
+
+// Syslog prefix regexes — compiled once, reused for every parsed line. Both
+// capture the sshd PID (group 2) so a future connection-scoped deduplicator can
+// key on (IP, pid); journald "-o cat" carries no prefix, so pid is then empty.
 var (
 	// reSyslogPrefix matches the traditional RFC3164 syslog prefix
 	// "Jan  1 12:00:00 host sshd[123]: msg" — RHEL/CentOS /var/log/secure and
 	// older distros. Also matches "sshd-session" (OpenSSH 9.6+ split session).
-	reSyslogPrefix = regexp.MustCompile(`^(\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\s+\S+\s+sshd(?:-session)?\[\d+\]:\s+(.*)$`)
+	// Groups: 1=timestamp, 2=pid, 3=message.
+	reSyslogPrefix = regexp.MustCompile(`^(\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\s+\S+\s+sshd(?:-session)?\[(\d+)\]:\s+(.*)$`)
 	// reSyslogPrefixISO matches the RFC3339/ISO-8601 syslog prefix
 	// "2026-07-13T22:57:35.182105+00:00 host sshd-session[123]: msg" — the
 	// systemd-journald → rsyslog default on Debian 12+/Ubuntu 24.04+.
-	reSyslogPrefixISO = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2}))\s+\S+\s+sshd(?:-session)?\[\d+\]:\s+(.*)$`)
-	reFailedInvalid   = regexp.MustCompile(`^Failed \S+ for invalid user (\S{1,64}) from ([0-9a-fA-F.:]+) port (\d{1,5})`)
-	reFailedPass      = regexp.MustCompile(`^Failed \S+ for (\S{1,64}) from ([0-9a-fA-F.:]+) port (\d{1,5})`)
-	reInvalidUser     = regexp.MustCompile(`^Invalid user (\S{1,64}) from ([0-9a-fA-F.:]+) port (\d{1,5})`)
-	reNotAllowed      = regexp.MustCompile(`^User (\S{1,64}) from ([0-9a-fA-F.:]+) not allowed`)
-	reAccepted        = regexp.MustCompile(`^Accepted \S+ for (\S{1,64}) from ([0-9a-fA-F.:]+) port (\d{1,5})`)
+	// Groups: 1=timestamp, 2=pid, 3=message.
+	reSyslogPrefixISO = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2}))\s+\S+\s+sshd(?:-session)?\[(\d+)\]:\s+(.*)$`)
 )
+
+// sshPattern binds a message regex to the canonical kind it produces and the
+// submatch indices for the fields to extract. ipIdx is required (>0); a pattern
+// that cannot yield an IP is not attributable and is deliberately omitted (e.g.
+// "check pass; user unknown", "ignoring max retries" — no rhost). userIdx and
+// portIdx are 0 when absent.
+type sshPattern struct {
+	re      *regexp.Regexp
+	kind    string
+	subtype string // fixed internal constant, never attacker-controlled
+	userIdx int
+	ipIdx   int
+	portIdx int
+}
+
+// sshPatterns is evaluated top-to-bottom; the first match wins, so more-specific
+// patterns MUST precede their looser prefixes (e.g. "... by invalid user X IP"
+// before the bare "... by IP"). See issue #140 for the full mapping rationale.
+//
+// Only the first four (real auth attempts) map to the default-bannable kinds;
+// every other recognised line maps to kindProbe so broadening recognition never
+// inflates the built-in rule counts.
+var sshPatterns = []sshPattern{
+	// ---- Authentication attempts (default-bannable) ----
+	// "Failed password/none/... for invalid user X from IP port P" — must precede
+	// the valid-user variant below.
+	{re: regexp.MustCompile(`^Failed \S+ for invalid user (\S{1,64}) from ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindInvalidUser, subtype: "failed_invalid", userIdx: 1, ipIdx: 2, portIdx: 3},
+	// "Failed password/none/... for X from IP port P" (valid/known user).
+	{re: regexp.MustCompile(`^Failed \S+ for (\S{1,64}) from ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindFail, subtype: "failed_password", userIdx: 1, ipIdx: 2, portIdx: 3},
+	// "Invalid user X from IP port P".
+	{re: regexp.MustCompile(`^Invalid user (\S{1,64}) from ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindInvalidUser, subtype: "invalid_user", userIdx: 1, ipIdx: 2, portIdx: 3},
+	// "User X from IP not allowed because ..." (AllowUsers/DenyUsers). No port.
+	{re: regexp.MustCompile(`^User (\S{1,64}) from ([0-9a-fA-F.:]+) not allowed`), kind: kindInvalidUser, subtype: "not_allowed", userIdx: 1, ipIdx: 2, portIdx: 0},
+
+	// ---- Probe / corroboration (opt-in aggressive; not counted by default) ----
+	// "error: maximum authentication attempts exceeded for [invalid user] X from IP port P".
+	{re: regexp.MustCompile(`^error: maximum authentication attempts exceeded for invalid user (\S{1,64}) from ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "max_attempts", userIdx: 1, ipIdx: 2, portIdx: 3},
+	{re: regexp.MustCompile(`^error: maximum authentication attempts exceeded for (\S{1,64}) from ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "max_attempts", userIdx: 1, ipIdx: 2, portIdx: 3},
+	// "ssh_dispatch_run_fatal: Connection from invalid user X IP port P: ...".
+	{re: regexp.MustCompile(`^ssh_dispatch_run_fatal: Connection from invalid user (\S{1,64}) ([0-9a-fA-F.:]+) port (\d{1,5}):`), kind: kindProbe, subtype: "dispatch_fatal", userIdx: 1, ipIdx: 2, portIdx: 3},
+	// Termination lines naming an invalid user — must precede the bare variants.
+	{re: regexp.MustCompile(`^Connection closed by invalid user (\S{1,64}) ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "conn_closed_invalid", userIdx: 1, ipIdx: 2, portIdx: 3},
+	{re: regexp.MustCompile(`^Connection reset by invalid user (\S{1,64}) ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "conn_reset_invalid", userIdx: 1, ipIdx: 2, portIdx: 3},
+	{re: regexp.MustCompile(`^Disconnected from invalid user (\S{1,64}) ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "disconnected_invalid", userIdx: 1, ipIdx: 2, portIdx: 3},
+	{re: regexp.MustCompile(`^Disconnecting invalid user (\S{1,64}) ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "disconnecting_invalid", userIdx: 1, ipIdx: 2, portIdx: 3},
+	// Termination lines naming an authenticating (valid/allowed) user.
+	{re: regexp.MustCompile(`^Connection closed by authenticating user (\S{1,64}) ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "authenticating_closed", userIdx: 1, ipIdx: 2, portIdx: 3},
+	{re: regexp.MustCompile(`^Connection reset by authenticating user (\S{1,64}) ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "authenticating_reset", userIdx: 1, ipIdx: 2, portIdx: 3},
+	{re: regexp.MustCompile(`^Disconnected from authenticating user (\S{1,64}) ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "authenticating_disconnected", userIdx: 1, ipIdx: 2, portIdx: 3},
+	{re: regexp.MustCompile(`^Disconnecting authenticating user (\S{1,64}) ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "authenticating_disconnecting", userIdx: 1, ipIdx: 2, portIdx: 3},
+	// Bare termination lines (no username). These are AMBIGUOUS: a legitimately
+	// authenticated user's normal logout also emits "Received disconnect" /
+	// "Connection closed/reset by <ip>". Require the "[preauth]" tag so only
+	// pre-authentication churn (never an established session) is flagged — the
+	// tag is sshd's own marker that the event occurred before auth completed.
+	// The invalid-user / authenticating-user variants above carry their own
+	// attack indicator and need no tag.
+	//
+	// Validated against 30 days of live auth.log: EVERY "Received disconnect"
+	// line without [preauth] (59/59) was the same real user's own IP with reason
+	// "disconnected by user" (SSH_DISCONNECT_BY_APPLICATION — the client itself
+	// asked to hang up); every line WITH [preauth] (561/561) carried the generic
+	// bot/scanner reason "Bye Bye". Do not weaken this gate without re-validating
+	// against a live auth.log (not `journalctl -u ssh`, which reattributes a
+	// forked child to the login session's cgroup post-auth and silently drops
+	// these lines from its output — measuring there undercounts the "without
+	// preauth" population and looks alarming for no reason).
+	{re: regexp.MustCompile(`^Connection closed by ([0-9a-fA-F.:]+) port (\d{1,5}).*\[preauth\]`), kind: kindProbe, subtype: "conn_closed", userIdx: 0, ipIdx: 1, portIdx: 2},
+	{re: regexp.MustCompile(`^Connection reset by ([0-9a-fA-F.:]+) port (\d{1,5}).*\[preauth\]`), kind: kindProbe, subtype: "conn_reset", userIdx: 0, ipIdx: 1, portIdx: 2},
+	{re: regexp.MustCompile(`^Received disconnect from ([0-9a-fA-F.:]+) port (\d{1,5}).*\[preauth\]`), kind: kindProbe, subtype: "disconnect_recv", userIdx: 0, ipIdx: 1, portIdx: 2},
+	{re: regexp.MustCompile(`^Disconnected from ([0-9a-fA-F.:]+) port (\d{1,5}).*\[preauth\]`), kind: kindProbe, subtype: "disconnected", userIdx: 0, ipIdx: 1, portIdx: 2},
+	// Protocol-level anomalies carrying an IP.
+	{re: regexp.MustCompile(`^banner exchange: Connection from ([0-9a-fA-F.:]+) port (\d{1,5}):`), kind: kindProbe, subtype: "banner_invalid", userIdx: 0, ipIdx: 1, portIdx: 2},
+	{re: regexp.MustCompile(`^error: kex_exchange_identification: Connection (?:reset|closed) by ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "kex_reset", userIdx: 0, ipIdx: 1, portIdx: 2},
+	{re: regexp.MustCompile(`^Unable to negotiate with ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "negotiate_fail", userIdx: 0, ipIdx: 1, portIdx: 2},
+	// sshd's own per-source defenses (OpenSSH 9.8+ PerSourcePenalties). The line
+	// carries TWO bracketed [ip]:port pairs — the client ("from") and our own
+	// listening address ("on"); only the first (client) is captured, and the
+	// pattern requires the literal " on [" delimiter so the second address is
+	// never mistaken for the reported one. Deliberately excludes the sibling
+	// "past Maxstartups" reason (no "penalty:" keyword): that one fires when the
+	// server-wide unauthenticated-connection cap is hit and can drop a
+	// legitimate client caught in the flood — it is not evidence against this
+	// specific source the way a per-source "penalty:" refusal is.
+	{re: regexp.MustCompile(`^drop connection #\d+ from \[([0-9a-fA-F.:]+)\]:(\d+) on \[[0-9a-fA-F.:]+\]:\d+ penalty: `), kind: kindProbe, subtype: "server_penalty", userIdx: 0, ipIdx: 1, portIdx: 2},
+	// LoginGraceTime elapsed with no completed authentication — structurally
+	// pre-auth only (an authenticated session cannot "time out before auth"), so
+	// this needs no [preauth] gate. The second IP ("to <our-ip>") is our own
+	// listening address and is never captured.
+	{re: regexp.MustCompile(`^Timeout before authentication for connection from ([0-9a-fA-F.:]+) to [0-9a-fA-F.:]+`), kind: kindProbe, subtype: "auth_timeout", userIdx: 0, ipIdx: 1, portIdx: 0},
+	// PAM auth failures carrying rhost=IP (the "user=" suffix is optional; the
+	// username there is not positionally stable, so it is not extracted).
+	{re: regexp.MustCompile(`^pam_unix\(sshd:auth\): authentication failure;.*?rhost=([0-9a-fA-F.:]+)`), kind: kindProbe, subtype: "pam_auth_fail", userIdx: 0, ipIdx: 1, portIdx: 0},
+	{re: regexp.MustCompile(`^PAM \d+ more authentication failures?;.*?rhost=([0-9a-fA-F.:]+)`), kind: kindProbe, subtype: "pam_more_fail", userIdx: 0, ipIdx: 1, portIdx: 0},
+
+	// ---- Success (telemetry only) ----
+	{re: regexp.MustCompile(`^Accepted \S+ for (\S{1,64}) from ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindAccept, subtype: "accepted", userIdx: 1, ipIdx: 2, portIdx: 3},
+}
 
 // SSHParser parses SSH authentication log lines from any distribution and
 // collection method:
@@ -117,27 +235,29 @@ func (p *SSHParser) Parse(line sdk.RawLine) ([]sdk.Event, error) {
 		return nil, nil
 	}
 
-	// Determine event timestamp and message body by stripping a syslog prefix,
-	// if present. Two prefix formats are supported (ISO-8601 first, then the
-	// legacy RFC3164 stamp); a prefix-less message (journald "-o cat") falls
-	// through unchanged. If timestamp parsing fails, collection time is used.
+	// Determine event timestamp, connection pid and message body by stripping a
+	// syslog prefix, if present. Two prefix formats are supported (ISO-8601
+	// first, then the legacy RFC3164 stamp); a prefix-less message (journald
+	// "-o cat") falls through unchanged with an empty pid. If timestamp parsing
+	// fails, collection time is used.
 	eventTime := line.At
 	msg := raw
+	pid := ""
 
 	if m := reSyslogPrefixISO.FindStringSubmatch(raw); m != nil {
-		msg = m[2]
+		pid, msg = m[2], m[3]
 		if t, err := parseISOTime(m[1]); err == nil {
 			eventTime = t
 		}
 	} else if m := reSyslogPrefix.FindStringSubmatch(raw); m != nil {
-		msg = m[2]
+		pid, msg = m[2], m[3]
 		if t, err := parseSSHTime(m[1], line.At); err == nil {
 			eventTime = t
 		}
 	}
 
 	// Attempt each pattern in order (most specific first).
-	ev, ok := p.matchMessage(msg, eventTime, line.Source)
+	ev, ok := p.matchMessage(msg, eventTime, line.Source, pid)
 	if !ok {
 		p.logger.Debug("ssh: unrecognised message, skipping",
 			slog.String("msg", redactForLog(msg)),
@@ -148,94 +268,42 @@ func (p *SSHParser) Parse(line sdk.RawLine) ([]sdk.Event, error) {
 	return []sdk.Event{ev}, nil
 }
 
-// matchMessage applies the SSH message patterns to msg and returns an Event on success.
-func (p *SSHParser) matchMessage(msg string, t time.Time, origin string) (sdk.Event, bool) {
-	// reFailedInvalid must be checked before reFailedPass (more specific).
-	if m := reFailedInvalid.FindStringSubmatch(msg); m != nil {
-		ip, err := parseIP(m[2])
+// matchMessage applies the SSH message patterns to msg and returns an Event on
+// the first match. A matched pattern whose IP fails to parse yields no event
+// (the line is malformed); it is not retried against looser patterns.
+func (p *SSHParser) matchMessage(msg string, t time.Time, origin, pid string) (sdk.Event, bool) {
+	for _, pat := range sshPatterns {
+		m := pat.re.FindStringSubmatch(msg)
+		if m == nil {
+			continue
+		}
+		ip, err := parseIP(m[pat.ipIdx])
 		if err != nil {
-			p.logger.Debug("ssh: invalid IP in FailedInvalid", slog.String("raw", redactForLog(m[2])))
+			p.logger.Debug("ssh: invalid IP in matched pattern",
+				slog.String("subtype", pat.subtype),
+				slog.String("raw", redactForLog(m[pat.ipIdx])),
+			)
 			return sdk.Event{}, false
+		}
+		f := map[string]string{"subtype": pat.subtype}
+		if pat.userIdx > 0 {
+			f["username"] = capUsername(m[pat.userIdx])
+		}
+		if pat.portIdx > 0 {
+			f["port"] = m[pat.portIdx]
+		}
+		if pid != "" {
+			f["pid"] = pid
 		}
 		return sdk.Event{
 			Time:     t,
 			SourceIP: ip,
-			Kind:     "ssh_invalid_user",
-			Fields:   fields(m[1], m[3]),
+			Kind:     pat.kind,
+			Fields:   f,
 			Origin:   origin,
 		}, true
 	}
-
-	if m := reFailedPass.FindStringSubmatch(msg); m != nil {
-		ip, err := parseIP(m[2])
-		if err != nil {
-			p.logger.Debug("ssh: invalid IP in FailedPass", slog.String("raw", redactForLog(m[2])))
-			return sdk.Event{}, false
-		}
-		return sdk.Event{
-			Time:     t,
-			SourceIP: ip,
-			Kind:     "ssh_fail",
-			Fields:   fields(m[1], m[3]),
-			Origin:   origin,
-		}, true
-	}
-
-	if m := reInvalidUser.FindStringSubmatch(msg); m != nil {
-		ip, err := parseIP(m[2])
-		if err != nil {
-			p.logger.Debug("ssh: invalid IP in InvalidUser", slog.String("raw", redactForLog(m[2])))
-			return sdk.Event{}, false
-		}
-		return sdk.Event{
-			Time:     t,
-			SourceIP: ip,
-			Kind:     "ssh_invalid_user",
-			Fields:   fields(m[1], m[3]),
-			Origin:   origin,
-		}, true
-	}
-
-	// "User X from IP not allowed because not listed in AllowUsers" (and similar)
-	if m := reNotAllowed.FindStringSubmatch(msg); m != nil {
-		ip, err := parseIP(m[2])
-		if err != nil {
-			p.logger.Debug("ssh: invalid IP in NotAllowed", slog.String("raw", redactForLog(m[2])))
-			return sdk.Event{}, false
-		}
-		return sdk.Event{
-			Time:     t,
-			SourceIP: ip,
-			Kind:     "ssh_invalid_user",
-			Fields:   map[string]string{"username": capUsername(m[1])},
-			Origin:   origin,
-		}, true
-	}
-
-	if m := reAccepted.FindStringSubmatch(msg); m != nil {
-		ip, err := parseIP(m[2])
-		if err != nil {
-			p.logger.Debug("ssh: invalid IP in Accepted", slog.String("raw", redactForLog(m[2])))
-			return sdk.Event{}, false
-		}
-		return sdk.Event{
-			Time:     t,
-			SourceIP: ip,
-			Kind:     "ssh_accept",
-			Fields:   fields(m[1], m[3]),
-			Origin:   origin,
-		}, true
-	}
-
 	return sdk.Event{}, false
-}
-
-// fields builds the event Fields map, capping username at maxUsernameBytes.
-func fields(username, port string) map[string]string {
-	return map[string]string{
-		"username": capUsername(username),
-		"port":     port,
-	}
 }
 
 // capUsername truncates username to maxUsernameBytes.

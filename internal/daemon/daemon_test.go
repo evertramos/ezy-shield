@@ -715,8 +715,8 @@ func TestSyncEnforcerAllowlist_UnionOfPolicyAndRuntime(t *testing.T) {
 			"::1/128",       // IPv6
 		},
 		AdminCIDRs: []string{
-			"189.6.10.31/32",
-			"2001:41d0:404:200::8218/128",
+			"203.0.113.42/32",
+			"2001:db8:404:200::8218/128",
 			"127.0.0.1/32", // duplicate of the bare-IP allowlist entry above
 		},
 	}
@@ -752,8 +752,8 @@ func TestSyncEnforcerAllowlist_UnionOfPolicyAndRuntime(t *testing.T) {
 		netip.MustParsePrefix("127.0.0.1/32"),  // widened bare IP; dedup with admin_cidrs
 		netip.MustParsePrefix("172.16.0.0/12"), // policy allowlist CIDR
 		netip.MustParsePrefix("::1/128"),
-		netip.MustParsePrefix("189.6.10.31/32"),
-		netip.MustParsePrefix("2001:41d0:404:200::8218/128"),
+		netip.MustParsePrefix("203.0.113.42/32"),
+		netip.MustParsePrefix("2001:db8:404:200::8218/128"),
 		runtimePfx, // runtime store entry
 	})
 

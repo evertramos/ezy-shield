@@ -382,9 +382,9 @@ func TestSyncAllowlist_Issue37_PolicyPrefixesReachHelper(t *testing.T) {
 		netip.MustParsePrefix("127.0.0.1/32"),
 		netip.MustParsePrefix("172.16.0.0/12"),
 		netip.MustParsePrefix("::1/128"),
-		netip.MustParsePrefix("189.6.10.31/32"),
-		netip.MustParsePrefix("51.77.145.130/32"),
-		netip.MustParsePrefix("2001:41d0:404:200::8218/128"),
+		netip.MustParsePrefix("203.0.113.42/32"),
+		netip.MustParsePrefix("203.0.113.99/32"),
+		netip.MustParsePrefix("2001:db8:404:200::8218/128"),
 	}
 	if err := e.SyncAllowlist(context.Background(), want); err != nil {
 		t.Fatal(err)

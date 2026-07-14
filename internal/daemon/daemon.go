@@ -754,7 +754,7 @@ func staticAllowlistFromPolicy(p *config.Policy) []netip.Prefix {
 // the order of first occurrence (static entries first, then runtime).
 // netip.Prefix is comparable, so a map[netip.Prefix]struct{} is safe as a set.
 // Duplicates can arise legitimately when an operator runs `ezyshield allow
-// 189.6.10.31/32` for a prefix already listed in policy.admin_cidrs; the sync
+// 203.0.113.42/32` for a prefix already listed in policy.admin_cidrs; the sync
 // must push each nft element exactly once (SyncAllowlist iterates a map, but
 // belt-and-suspenders: deduplicate before crossing the process boundary).
 func unionPrefixes(a, b []netip.Prefix) []netip.Prefix {

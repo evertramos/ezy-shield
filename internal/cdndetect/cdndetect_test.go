@@ -195,7 +195,7 @@ func TestMatchDomains(t *testing.T) {
 		{
 			name:        "non-CDN IP",
 			domain:      "origin.example.com",
-			answer:      []netip.Addr{mustAddr(t, "51.77.145.130")},
+			answer:      []netip.Addr{mustAddr(t, "203.0.113.99")},
 			wantMatched: nil,
 		},
 		{

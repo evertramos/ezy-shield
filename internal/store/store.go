@@ -259,6 +259,30 @@ func (s *DB) GetBanInfo(ctx context.Context, ip netip.Addr) (*BanInfo, error) {
 	return &BanInfo{BannedAt: bannedAt, Strike: strike}, nil
 }
 
+// LastStrike returns the recording time and TTL of the most recent strike for
+// ip; found is false when ip has no strike history. Ordered by the strikes
+// AUTOINCREMENT id (insertion order) rather than the recorded_at string:
+// RFC3339Nano trims trailing zeros, which makes lexicographic order unreliable
+// within a second. All SQL uses parameterized queries (Hard Rule §4).
+func (s *DB) LastStrike(ctx context.Context, ip netip.Addr) (time.Time, time.Duration, bool, error) {
+	var recordedAtStr string
+	var ttlSec int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT recorded_at, ttl_seconds FROM strikes WHERE ip = ? ORDER BY id DESC LIMIT 1`,
+		ip.String()).Scan(&recordedAtStr, &ttlSec)
+	if err == sql.ErrNoRows {
+		return time.Time{}, 0, false, nil
+	}
+	if err != nil {
+		return time.Time{}, 0, false, fmt.Errorf("store: LastStrike %s: %w", ip, err)
+	}
+	recordedAt, err := time.Parse(time.RFC3339Nano, recordedAtStr)
+	if err != nil {
+		return time.Time{}, 0, false, fmt.Errorf("store: LastStrike parse recorded_at: %w", err)
+	}
+	return recordedAt, time.Duration(ttlSec) * time.Second, true, nil
+}
+
 // BumpLastSeen updates offenders.last_seen for ip to now. It is a
 // lightweight write — the only store mutation on the suppression path when
 // an IP is already actively banned. If ip has no offender row yet (rare

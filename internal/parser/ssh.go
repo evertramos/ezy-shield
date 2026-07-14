@@ -108,11 +108,17 @@ var sshPatterns = []sshPattern{
 	{re: regexp.MustCompile(`^Connection reset by authenticating user (\S{1,64}) ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "authenticating_reset", userIdx: 1, ipIdx: 2, portIdx: 3},
 	{re: regexp.MustCompile(`^Disconnected from authenticating user (\S{1,64}) ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "authenticating_disconnected", userIdx: 1, ipIdx: 2, portIdx: 3},
 	{re: regexp.MustCompile(`^Disconnecting authenticating user (\S{1,64}) ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "authenticating_disconnecting", userIdx: 1, ipIdx: 2, portIdx: 3},
-	// Bare termination lines (no username).
-	{re: regexp.MustCompile(`^Connection closed by ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "conn_closed", userIdx: 0, ipIdx: 1, portIdx: 2},
-	{re: regexp.MustCompile(`^Connection reset by ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "conn_reset", userIdx: 0, ipIdx: 1, portIdx: 2},
-	{re: regexp.MustCompile(`^Received disconnect from ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "disconnect_recv", userIdx: 0, ipIdx: 1, portIdx: 2},
-	{re: regexp.MustCompile(`^Disconnected from ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "disconnected", userIdx: 0, ipIdx: 1, portIdx: 2},
+	// Bare termination lines (no username). These are AMBIGUOUS: a legitimately
+	// authenticated user's normal logout also emits "Received disconnect" /
+	// "Connection closed/reset by <ip>". Require the "[preauth]" tag so only
+	// pre-authentication churn (never an established session) is flagged — the
+	// tag is sshd's own marker that the event occurred before auth completed.
+	// The invalid-user / authenticating-user variants above carry their own
+	// attack indicator and need no tag.
+	{re: regexp.MustCompile(`^Connection closed by ([0-9a-fA-F.:]+) port (\d{1,5}).*\[preauth\]`), kind: kindProbe, subtype: "conn_closed", userIdx: 0, ipIdx: 1, portIdx: 2},
+	{re: regexp.MustCompile(`^Connection reset by ([0-9a-fA-F.:]+) port (\d{1,5}).*\[preauth\]`), kind: kindProbe, subtype: "conn_reset", userIdx: 0, ipIdx: 1, portIdx: 2},
+	{re: regexp.MustCompile(`^Received disconnect from ([0-9a-fA-F.:]+) port (\d{1,5}).*\[preauth\]`), kind: kindProbe, subtype: "disconnect_recv", userIdx: 0, ipIdx: 1, portIdx: 2},
+	{re: regexp.MustCompile(`^Disconnected from ([0-9a-fA-F.:]+) port (\d{1,5}).*\[preauth\]`), kind: kindProbe, subtype: "disconnected", userIdx: 0, ipIdx: 1, portIdx: 2},
 	// Protocol-level anomalies carrying an IP.
 	{re: regexp.MustCompile(`^banner exchange: Connection from ([0-9a-fA-F.:]+) port (\d{1,5}):`), kind: kindProbe, subtype: "banner_invalid", userIdx: 0, ipIdx: 1, portIdx: 2},
 	{re: regexp.MustCompile(`^error: kex_exchange_identification: Connection (?:reset|closed) by ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "kex_reset", userIdx: 0, ipIdx: 1, portIdx: 2},

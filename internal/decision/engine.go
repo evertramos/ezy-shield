@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/evertramos/ezy-shield/internal/config"
-	"github.com/evertramos/ezy-shield/internal/store"
 	"github.com/evertramos/ezy-shield/pkg/sdk"
 )
 
@@ -32,15 +31,23 @@ var ErrRateLimited = errors.New("decision: global ban rate limit exceeded")
 // Store is the persistence interface required by Engine.
 // The concrete *store.DB satisfies this interface.
 type Store interface {
-	// HasActiveBan returns true when ip has an unexpired row in bans_active,
-	// false when it does not. The engine calls this before GetStrikeCount to
-	// suppress redundant strike/enforcer writes for already-banned IPs.
-	HasActiveBan(ctx context.Context, ip netip.Addr) (bool, error)
-	// GetBanInfo returns ban metadata (banned_at, strike) for ip if active.
-	// Returns nil if no active ban exists.
-	GetBanInfo(ctx context.Context, ip netip.Addr) (*store.BanInfo, error)
+	// GetBanInfo returns when ip's active ban was applied and at which strike.
+	// found is false when ip has no active ban. The engine calls this before
+	// GetStrikeCount to suppress redundant strike/enforcer writes for
+	// already-banned IPs.
+	GetBanInfo(ctx context.Context, ip netip.Addr) (bannedAt time.Time, strike int, found bool, err error)
+	// RecordSuppressed increments ip's per-ban suppression counters and
+	// returns the updated totals plus whether ban_ineffective already fired
+	// for this ban. Zero counts when ip has no active ban row (expiry race).
+	RecordSuppressed(ctx context.Context, ip netip.Addr, afterGrace bool) (total, afterGraceCount int, fired bool, err error)
+	// MarkBanIneffective flags ip's active ban as diagnosed and records the
+	// permanent had-ineffective mark on the offender. Returns true only for
+	// the caller that transitioned the flag (fire-once guarantee).
+	MarkBanIneffective(ctx context.Context, ip netip.Addr) (bool, error)
+	// HadIneffectiveBan reports whether ip ever had a ban marked ineffective;
+	// survives ban expiry and daemon restarts.
+	HadIneffectiveBan(ctx context.Context, ip netip.Addr) (bool, error)
 	// BumpLastSeen updates offenders.last_seen for ip without recording a strike.
-	// It is the only store write on the suppression path.
 	BumpLastSeen(ctx context.Context, ip netip.Addr) error
 	// GetStrikeCount returns the cumulative strike count for ip (0 if never seen).
 	GetStrikeCount(ctx context.Context, ip netip.Addr) (int, error)
@@ -54,15 +61,11 @@ type Store interface {
 	Audit(ctx context.Context, a sdk.Action) error
 }
 
-// suppressionState tracks per-IP suppression metrics for ban_ineffective detection.
-type suppressionState struct {
-	count           int  // events suppressed since ban started
-	afterGraceCount int  // events suppressed after grace period
-	firedDiag       bool // true if ban_ineffective was already emitted for this ban
-}
-
 // Engine converts Verdicts into Actions according to policy.
-// It is safe for concurrent use.
+// It is safe for concurrent use. Suppression state for the ban_ineffective
+// diagnostic (ADR-0009) lives in the store, on the ban row itself — nothing
+// here grows with offender count, and the diagnostic history survives
+// daemon restarts.
 type Engine struct {
 	policy *config.Policy
 	store  Store
@@ -71,11 +74,6 @@ type Engine struct {
 	mu          sync.Mutex
 	bansInWin   int
 	windowStart time.Time
-
-	// Suppression tracking for ban_ineffective (ADR-0009)
-	supMu          sync.Mutex
-	suppression    map[netip.Addr]*suppressionState
-	hadIneffective map[netip.Addr]bool // IPs that had ban_ineffective on a prior ban
 }
 
 // New creates an Engine from policy and a store.
@@ -90,12 +88,10 @@ func New(policy *config.Policy, st Store) (*Engine, error) {
 		return nil, err
 	}
 	return &Engine{
-		policy:         policy,
-		store:          st,
-		allow:          allow,
-		windowStart:    time.Now(),
-		suppression:    make(map[netip.Addr]*suppressionState),
-		hadIneffective: make(map[netip.Addr]bool),
+		policy:      policy,
+		store:       st,
+		allow:       allow,
+		windowStart: time.Now(),
 	}, nil
 }
 
@@ -172,20 +168,20 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 	// dry-run mode because RecordStrike is also skipped there. The guard runs
 	// only when armed=true to preserve the current dry-run semantics unchanged.
 	if e.policy.Armed {
-		banInfo, err := e.store.GetBanInfo(ctx, ip)
+		bannedAt, banStrike, banned, err := e.store.GetBanInfo(ctx, ip)
 		if err != nil {
 			// Non-fatal: log and fall through to the normal strike path rather
 			// than silently suppressing a verdict on a DB error.
 			slog.ErrorContext(ctx, "decision: GetBanInfo failed — falling through to strike path",
 				"ip", ip, "err", err)
-		} else if banInfo != nil {
+		} else if banned {
 			// Suppression path: IP is actively banned.
 			slog.InfoContext(ctx, "decision: already_banned — suppressing strike/enforcer",
 				"ip", ip)
 			act := sdk.Action{IP: ip, Op: "already_banned", Reason: "active ban in bans_active", Verdicts: verdicts}
 
 			// Track suppressed events for ban_ineffective (ADR-0009)
-			e.trackSuppressedEvent(ctx, ip, banInfo)
+			e.trackSuppressedEvent(ctx, ip, bannedAt, banStrike)
 
 			if err := e.store.BumpLastSeen(ctx, ip); err != nil {
 				slog.ErrorContext(ctx, "decision: BumpLastSeen failed", "ip", ip, "err", err)
@@ -246,20 +242,21 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 	// If this strike promotes to permanent and the IP had ban_ineffective on a
 	// prior ban, emit a louder warning — an ineffective permanent ban is the
 	// worst case (operator thinks it's "resolved forever" while traffic flows).
-	isPermanent := ttl == 0
-	if isPermanent {
-		e.supMu.Lock()
-		hadIneff := e.hadIneffective[ip]
-		e.supMu.Unlock()
-		if hadIneff {
+	// The flag is read from offenders.had_ineffective, so it survives daemon
+	// restarts between the ineffective ban and the promotion.
+	if ttl == 0 {
+		hadIneff, err := e.store.HadIneffectiveBan(ctx, ip)
+		if err != nil {
+			slog.ErrorContext(ctx, "decision: HadIneffectiveBan failed — pre-permanent alert skipped",
+				"ip", ip, "err", err)
+		} else if hadIneff {
 			slog.WarnContext(ctx, "decision: ban_ineffective_permanent — promoting to permanent an IP that had ineffective bans",
 				"ip", ip, "strike", nextStrike)
 		}
 	}
 
-	// Clear suppression state for this IP (new ban resets the counters)
-	e.clearSuppressionState(ip)
-
+	// RecordStrike's bans_active upsert resets the per-ban suppression
+	// counters — no engine-side state to clear.
 	if err := e.store.RecordStrike(ctx, act); err != nil {
 		return sdk.Action{}, fmt.Errorf("decision: RecordStrike: %w", err)
 	}
@@ -320,47 +317,41 @@ func (e *Engine) escalationExempt(ctx context.Context, ip netip.Addr) bool {
 	return time.Since(banEnd) <= e.policy.EscalationExemptWindow.AsDuration()
 }
 
-// trackSuppressedEvent increments suppression counters and emits ban_ineffective
-// diagnostic when the threshold is reached (ADR-0009). The diagnostic fires once
-// per ban; subsequent events for the same ban are silently counted.
-func (e *Engine) trackSuppressedEvent(ctx context.Context, ip netip.Addr, banInfo *store.BanInfo) {
-	e.supMu.Lock()
-	defer e.supMu.Unlock()
-
-	st := e.suppression[ip]
-	if st == nil {
-		st = &suppressionState{}
-		e.suppression[ip] = st
-	}
-	st.count++
-
-	// Check if grace period has passed
+// trackSuppressedEvent records a suppressed event on ip's active ban and
+// emits the ban_ineffective diagnostic when ≥ BanIneffectiveMinEvents arrive
+// after the BanIneffectiveGrace period (ADR-0009). The counters live on the
+// ban row; MarkBanIneffective's compare-and-set makes the diagnostic fire
+// exactly once per ban, across concurrent calls and daemon restarts. All
+// failures are non-fatal: the diagnostic must never break the suppression
+// path.
+func (e *Engine) trackSuppressedEvent(ctx context.Context, ip netip.Addr, bannedAt time.Time, banStrike int) {
 	grace := e.policy.BanIneffectiveGrace.AsDuration()
-	if time.Since(banInfo.BannedAt) < grace {
-		return // still in grace period, don't count toward threshold
+	afterGrace := time.Since(bannedAt) >= grace
+
+	total, afterCount, fired, err := e.store.RecordSuppressed(ctx, ip, afterGrace)
+	if err != nil {
+		slog.ErrorContext(ctx, "decision: RecordSuppressed failed", "ip", ip, "err", err)
+		return
+	}
+	if !afterGrace || fired || afterCount < e.policy.BanIneffectiveMinEvents {
+		return
 	}
 
-	st.afterGraceCount++
-
-	// Check threshold and fire diagnostic once per ban
-	if st.firedDiag {
-		return // already fired for this ban
+	newlyFired, err := e.store.MarkBanIneffective(ctx, ip)
+	if err != nil {
+		slog.ErrorContext(ctx, "decision: MarkBanIneffective failed", "ip", ip, "err", err)
+		return
 	}
-	if st.afterGraceCount < e.policy.BanIneffectiveMinEvents {
-		return // below threshold
+	if !newlyFired {
+		return // another Decide call won the race for this ban
 	}
-
-	// Fire ban_ineffective diagnostic
-	st.firedDiag = true
-	e.hadIneffective[ip] = true // remember for pre-permanent alert
 
 	// Compute ladder context for the warning
-	ladderPos := banInfo.Strike
 	ladderLen := len(e.policy.Strikes)
 	var nextRungs string
-	if ladderPos < ladderLen {
-		remaining := make([]string, 0, ladderLen-ladderPos)
-		for i := ladderPos; i < ladderLen; i++ {
+	if banStrike < ladderLen {
+		remaining := make([]string, 0, ladderLen-banStrike)
+		for i := banStrike; i < ladderLen; i++ {
 			ttl := e.policy.Strikes[i].TTL.AsDuration()
 			if ttl == 0 {
 				remaining = append(remaining, "permanent")
@@ -375,23 +366,12 @@ func (e *Engine) trackSuppressedEvent(ctx context.Context, ip netip.Addr, banInf
 
 	slog.WarnContext(ctx, "decision: ban_ineffective — traffic flowing despite active ban",
 		"ip", ip,
-		"strike", fmt.Sprintf("%d/%d", ladderPos, ladderLen),
+		"strike", fmt.Sprintf("%d/%d", banStrike, ladderLen),
 		"next_rungs", nextRungs,
-		"events_after_grace", st.afterGraceCount,
-		"total_suppressed", st.count,
+		"events_after_grace", afterCount,
+		"total_suppressed", total,
 		"grace_seconds", int(grace.Seconds()),
 	)
-}
-
-// clearSuppressionState resets suppression counters for ip when a new ban is
-// recorded. The hadIneffective flag is preserved across bans (for pre-permanent
-// alert); only the per-ban counters are cleared.
-func (e *Engine) clearSuppressionState(ip netip.Addr) {
-	e.supMu.Lock()
-	defer e.supMu.Unlock()
-	delete(e.suppression, ip)
-	// Note: hadIneffective[ip] is intentionally NOT cleared — it tracks whether
-	// the IP ever had an ineffective ban, used for the pre-permanent alert.
 }
 
 // buildAllowlist parses policy.Allowlist, policy.AdminCIDRs, and the SSH peer

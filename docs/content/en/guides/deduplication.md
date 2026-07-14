@@ -130,5 +130,5 @@ These operate on the burst tier and allow more requests before triggering, since
 - Issue #47: contains_any support and exploit probe detection (2026-07-08)
 - Issue #48: sustained-tier rules for low & slow detection (2026-07-08)
 - `internal/decision/engine.go`: `Engine.Decide` — active-ban guard
-- `internal/store/store.go`: `HasActiveBan`, `BumpLastSeen`
+- `internal/store/store.go`: `GetBanInfo`, `BumpLastSeen`
 - `docs/content/en/getting-started/index.md`: strike table and deduplication semantics

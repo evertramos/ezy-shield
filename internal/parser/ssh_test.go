@@ -498,21 +498,28 @@ func TestSSHParser_ProbePatterns(t *testing.T) {
 			ip:      "203.0.113.9", username: "kylian", port: "40780",
 		},
 		{
-			name:    "connection closed bare",
-			line:    "Connection closed by 198.51.100.204 port 60216",
+			// Bare terminations only count when [preauth]-tagged (pre-login churn).
+			name:    "connection closed bare preauth",
+			line:    "Connection closed by 198.51.100.204 port 60216 [preauth]",
 			subtype: "conn_closed",
 			ip:      "198.51.100.204", port: "60216",
 		},
 		{
-			name:    "connection reset bare",
-			line:    "Connection reset by 198.51.100.209 port 54990",
+			name:    "connection reset bare preauth",
+			line:    "Connection reset by 198.51.100.209 port 54990 [preauth]",
 			subtype: "conn_reset",
 			ip:      "198.51.100.209", port: "54990",
 		},
 		{
-			name:    "received disconnect",
+			name:    "received disconnect preauth",
 			line:    "Received disconnect from 198.51.100.203 port 40780:11: Bye Bye [preauth]",
 			subtype: "disconnect_recv",
+			ip:      "198.51.100.203", port: "40780",
+		},
+		{
+			name:    "disconnected bare preauth",
+			line:    "Disconnected from 198.51.100.203 port 40780 [preauth]",
+			subtype: "disconnected",
 			ip:      "198.51.100.203", port: "40780",
 		},
 		{
@@ -573,6 +580,53 @@ func TestSSHParser_ProbePatterns(t *testing.T) {
 				t.Errorf("port: got %q, want %q", ev.Fields["port"], tc.port)
 			}
 		})
+	}
+}
+
+// TestSSHParser_LegitSessionNoFalsePositive replays a real authenticated
+// user's connect/sudo/logout sequence (from a live host) and asserts the parser
+// never manufactures an attack signal from it: the only event is the successful
+// login (ssh_accept, telemetry), and every session/sudo/su/logout line — most
+// importantly the post-auth "Received disconnect ... disconnected by user" — is
+// either dropped or, at worst, never a bannable kind. A bare termination without
+// the [preauth] tag is a legitimate logout, not a probe.
+func TestSSHParser_LegitSessionNoFalsePositive(t *testing.T) {
+	p := parser.NewSSHParser(discardLogger())
+
+	// IP is a TEST-NET-3 address (RFC 5737) — never a real, routable host.
+	// Username is a generic placeholder; PIDs/timestamps are kept realistic —
+	// only the identifying username, source IP and key fingerprint of the
+	// original live session are synthetic.
+	session := []string{
+		"2026-07-14T12:02:04.177634+00:00 fagots sshd-session[1388641]: Accepted publickey for testuser from 203.0.113.42 port 2843 ssh2: RSA SHA256:AAAA",
+		"2026-07-14T12:02:04.180610+00:00 fagots sshd-session[1388641]: pam_unix(sshd:session): session opened for user testuser(uid=1001) by testuser(uid=0)",
+		"2026-07-14T12:02:29.019523+00:00 fagots sudo:    testuser : TTY=pts/1 ; PWD=/home/testuser ; USER=root ; COMMAND=/usr/bin/su -",
+		"2026-07-14T12:02:29.021470+00:00 fagots sudo: pam_unix(sudo:session): session opened for user root(uid=0) by testuser(uid=1001)",
+		"2026-07-14T12:02:44.659148+00:00 fagots su[1388922]: pam_unix(su-l:session): session closed for user root",
+		"2026-07-14T12:03:03.874162+00:00 fagots sshd-session[1388766]: Received disconnect from 203.0.113.42 port 2843:11: disconnected by user",
+		"2026-07-14T12:03:03.874478+00:00 fagots sshd-session[1388766]: Disconnected from user testuser 203.0.113.42 port 2843",
+		"2026-07-14T12:03:03.875144+00:00 fagots sshd-session[1388641]: pam_unix(sshd:session): session closed for user testuser",
+		"2026-07-14T12:03:03.878840+00:00 fagots systemd-logind[902]: Session 1043 logged out. Waiting for processes to exit.",
+	}
+
+	accepts := 0
+	for _, line := range session {
+		evs, err := p.Parse(sdk.RawLine{Source: "file:/var/log/auth.log", Line: []byte(line), At: time.Now()})
+		if err != nil {
+			t.Fatalf("Parse error: %v", err)
+		}
+		for _, ev := range evs {
+			switch ev.Kind {
+			case "ssh_accept":
+				accepts++
+			case "ssh_fail", "ssh_invalid_user", "ssh_probe":
+				t.Errorf("false positive: legit session line produced %q (subtype %q): %q",
+					ev.Kind, ev.Fields["subtype"], line)
+			}
+		}
+	}
+	if accepts != 1 {
+		t.Errorf("expected exactly 1 ssh_accept (the successful login), got %d", accepts)
 	}
 }
 

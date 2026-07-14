@@ -556,19 +556,19 @@ func TestSSHParser_ProbePatterns(t *testing.T) {
 			// OpenSSH 9.8+ PerSourcePenalties. Two IPs on the line (client "from",
 			// our own listener "on") — only the first must be captured.
 			name:    "server penalty login grace time",
-			line:    "drop connection #9 from [91.92.40.49]:24236 on [51.77.145.130]:22 penalty: exceeded LoginGraceTime",
+			line:    "drop connection #9 from [91.92.40.49]:24236 on [203.0.113.1]:22 penalty: exceeded LoginGraceTime",
 			subtype: "server_penalty",
 			ip:      "91.92.40.49", port: "24236",
 		},
 		{
 			name:    "server penalty failed authentication",
-			line:    "drop connection #0 from [91.92.40.49]:58182 on [51.77.145.130]:22 penalty: failed authentication",
+			line:    "drop connection #0 from [91.92.40.49]:58182 on [203.0.113.1]:22 penalty: failed authentication",
 			subtype: "server_penalty",
 			ip:      "91.92.40.49", port: "58182",
 		},
 		{
 			name:    "auth timeout",
-			line:    "Timeout before authentication for connection from 14.103.114.17 to 51.77.145.130, pid = 902311",
+			line:    "Timeout before authentication for connection from 14.103.114.17 to 203.0.113.1, pid = 902311",
 			subtype: "auth_timeout",
 			ip:      "14.103.114.17",
 		},
@@ -658,7 +658,7 @@ func TestSSHParser_LegitSessionNoFalsePositive(t *testing.T) {
 // only the first (client) may ever be extracted.
 func TestSSHParser_NeverCapturesOwnListenAddress(t *testing.T) {
 	p := parser.NewSSHParser(discardLogger())
-	const ownIP = "51.77.145.130"
+	const ownIP = "203.0.113.1"
 	const clientIP = "91.92.40.49"
 
 	lines := []string{
@@ -689,7 +689,7 @@ func TestSSHParser_MaxstartupsNotServerPenalty(t *testing.T) {
 
 	evs, err := p.Parse(sdk.RawLine{
 		Source: "journald:ssh",
-		Line:   []byte("drop connection #10 from [91.92.40.49]:24230 on [51.77.145.130]:22 past Maxstartups"),
+		Line:   []byte("drop connection #10 from [91.92.40.49]:24230 on [203.0.113.1]:22 past Maxstartups"),
 		At:     time.Now(),
 	})
 	if err != nil {

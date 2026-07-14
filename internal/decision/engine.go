@@ -44,6 +44,10 @@ type Store interface {
 	BumpLastSeen(ctx context.Context, ip netip.Addr) error
 	// GetStrikeCount returns the cumulative strike count for ip (0 if never seen).
 	GetStrikeCount(ctx context.Context, ip netip.Addr) (int, error)
+	// LastStrike returns the recording time and TTL of ip's most recent strike;
+	// found is false when ip has no strike history. The engine uses it to bound
+	// the escalation rate-limit exemption to recently-ended bans (ADR-0009).
+	LastStrike(ctx context.Context, ip netip.Addr) (recordedAt time.Time, ttl time.Duration, found bool, err error)
 	// RecordStrike persists a ban strike and updates bans_active + audit_log.
 	RecordStrike(ctx context.Context, a sdk.Action) error
 	// Audit appends a record to the append-only audit_log without recording a strike.
@@ -225,12 +229,17 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 	}
 
 	// ── Safety invariant §1: rate limit enforced before every real ban ─────────
-	// Escalations (strike > 1) are exempt: they extend an existing block for a
-	// known offender and add zero new-lockout risk (ADR-0009).
-	if nextStrike == 1 {
-		if err := e.checkRateLimit(); err != nil {
-			return sdk.Action{}, err
-		}
+	// Exception (ADR-0009 §3, amended): an escalation is exempt only when the
+	// previous ban ended within escalation_exempt_window — re-blocking an IP
+	// that was blocked until moments ago adds no new-lockout exposure. A strike
+	// count alone is NOT enough: strikes never decay, so "was banned at some
+	// point" would bypass the cap forever and disable it exactly during a
+	// mass-re-detection runaway. Stale escalations count like any fresh ban.
+	if nextStrike > 1 && e.escalationExempt(ctx, ip) {
+		slog.InfoContext(ctx, "decision: escalation exempt from rate limit — previous ban ended recently",
+			"ip", ip, "strike", nextStrike)
+	} else if err := e.checkRateLimit(); err != nil {
+		return sdk.Action{}, err
 	}
 
 	// ── Pre-permanent alert (ADR-0009) ───────────────────────────────────────
@@ -286,6 +295,29 @@ func (e *Engine) checkRateLimit() error {
 		return ErrRateLimited
 	}
 	return nil
+}
+
+// escalationExempt reports whether an escalation ban (strike > 1) for ip may
+// skip the max_bans_per_minute cap. Exemption requires the previous ban to
+// have ended within policy.EscalationExemptWindow of now.
+//
+// Fail-safe: every uncertain case counts against the cap — store error, no
+// strike history, or a permanent last strike (a permanent ban that is no
+// longer active means an operator unbanned; the re-ban is a fresh decision).
+// A ban whose scheduled end is still in the future (early manual unban,
+// immediate re-offense) is within the window by construction.
+func (e *Engine) escalationExempt(ctx context.Context, ip netip.Addr) bool {
+	recordedAt, ttl, found, err := e.store.LastStrike(ctx, ip)
+	if err != nil {
+		slog.ErrorContext(ctx, "decision: LastStrike failed — escalation not exempt from rate limit",
+			"ip", ip, "err", err)
+		return false
+	}
+	if !found || ttl <= 0 {
+		return false
+	}
+	banEnd := recordedAt.Add(ttl)
+	return time.Since(banEnd) <= e.policy.EscalationExemptWindow.AsDuration()
 }
 
 // trackSuppressedEvent increments suppression counters and emits ban_ineffective

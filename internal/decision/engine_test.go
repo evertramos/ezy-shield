@@ -14,12 +14,20 @@ import (
 	"github.com/evertramos/ezy-shield/pkg/sdk"
 )
 
+// lastStrikeRow mirrors what store.LastStrike reads from the strikes table.
+type lastStrikeRow struct {
+	recordedAt time.Time
+	ttl        time.Duration
+}
+
 // mockStore is a thread-safe test double for decision.Store.
 type mockStore struct {
 	mu            sync.Mutex
 	strikes       map[string]int
 	activeBans    map[string]bool           // ip → active ban present
 	banInfo       map[string]*store.BanInfo // ip → ban details (for GetBanInfo)
+	lastStrike    map[string]lastStrikeRow  // ip → most recent strike row
+	lastStrikeErr error                     // forced error for LastStrike
 	lastSeenBumps []string                  // IPs whose last_seen was bumped
 	banned        []sdk.Action              // calls to RecordStrike
 	audited       []sdk.Action              // calls to Audit
@@ -30,6 +38,7 @@ func newMock(initial map[string]int) *mockStore {
 		strikes:    make(map[string]int),
 		activeBans: make(map[string]bool),
 		banInfo:    make(map[string]*store.BanInfo),
+		lastStrike: make(map[string]lastStrikeRow),
 	}
 	for k, v := range initial {
 		s.strikes[k] = v
@@ -75,12 +84,34 @@ func (m *mockStore) GetStrikeCount(_ context.Context, ip netip.Addr) (int, error
 	return m.strikes[ip.String()], nil
 }
 
+func (m *mockStore) LastStrike(_ context.Context, ip netip.Addr) (time.Time, time.Duration, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.lastStrikeErr != nil {
+		return time.Time{}, 0, false, m.lastStrikeErr
+	}
+	row, ok := m.lastStrike[ip.String()]
+	if !ok {
+		return time.Time{}, 0, false, nil
+	}
+	return row.recordedAt, row.ttl, true, nil
+}
+
+// setLastStrike seeds the most recent strike row for ip, as if a prior ban
+// was recorded at recordedAt with the given TTL.
+func (m *mockStore) setLastStrike(ip netip.Addr, recordedAt time.Time, ttl time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lastStrike[ip.String()] = lastStrikeRow{recordedAt: recordedAt, ttl: ttl}
+}
+
 func (m *mockStore) RecordStrike(_ context.Context, a sdk.Action) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.strikes[a.IP.String()]++
 	m.activeBans[a.IP.String()] = true // mirror what real store does
 	m.banInfo[a.IP.String()] = &store.BanInfo{BannedAt: time.Now(), Strike: a.Strike}
+	m.lastStrike[a.IP.String()] = lastStrikeRow{recordedAt: time.Now(), ttl: a.TTL}
 	m.banned = append(m.banned, a)
 	return nil
 }
@@ -782,40 +813,126 @@ func TestBanIneffective_FiresOncePerBan(t *testing.T) {
 	// In production, we'd verify only one WARN log was emitted.
 }
 
-// TestEscalation_ExemptFromRateLimit verifies that strike escalations (strike > 1)
-// are exempt from the max_bans_per_minute rate limit.
-func TestEscalation_ExemptFromRateLimit(t *testing.T) {
-	pol := armedPolicy()
-	pol.MaxBansPerMinute = 1 // very tight limit
+// TestEscalation_RateLimitExemption verifies the recency-bounded exemption
+// from max_bans_per_minute (ADR-0009 §3, amended): an escalation skips the
+// cap only when the previous ban ended within escalation_exempt_window.
+// Every uncertain case (stale history, no history, permanent last strike,
+// store error) fails safe and counts against the cap.
+func TestEscalation_RateLimitExemption(t *testing.T) {
+	window := 24 * time.Hour
 
-	// First, exhaust the rate limit with strike #1 on a fresh IP
-	st := newMock(nil)
+	tests := []struct {
+		name     string
+		seed     func(m *mockStore) // strike history for ip2
+		wantErr  error              // expected error from the escalation Decide
+		wantOp   string             // expected Op when wantErr == nil
+		wantStrk int
+	}{
+		{
+			name: "recent expiry → exempt",
+			seed: func(m *mockStore) {
+				// 1h ban recorded 90m ago: ended 30m ago, well inside the window.
+				m.setLastStrike(ip2, time.Now().Add(-90*time.Minute), time.Hour)
+			},
+			wantOp:   "ban",
+			wantStrk: 2,
+		},
+		{
+			name: "ban end still in the future (early manual unban) → exempt",
+			seed: func(m *mockStore) {
+				// 24h ban recorded 1h ago: scheduled end is ahead of now.
+				m.setLastStrike(ip2, time.Now().Add(-time.Hour), 24*time.Hour)
+			},
+			wantOp:   "ban",
+			wantStrk: 2,
+		},
+		{
+			name: "stale history → rate limited",
+			seed: func(m *mockStore) {
+				// 1h ban recorded 30 days ago: ended far outside the window.
+				m.setLastStrike(ip2, time.Now().Add(-30*24*time.Hour), time.Hour)
+			},
+			wantErr: decision.ErrRateLimited,
+		},
+		{
+			name:    "strike count without history row → rate limited",
+			seed:    func(_ *mockStore) {},
+			wantErr: decision.ErrRateLimited,
+		},
+		{
+			name: "permanent last strike (operator unbanned) → rate limited",
+			seed: func(m *mockStore) {
+				m.setLastStrike(ip2, time.Now().Add(-time.Hour), 0)
+			},
+			wantErr: decision.ErrRateLimited,
+		},
+		{
+			name: "store error → rate limited (fail-safe)",
+			seed: func(m *mockStore) {
+				m.lastStrikeErr = errors.New("db locked")
+			},
+			wantErr: decision.ErrRateLimited,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pol := armedPolicy()
+			pol.MaxBansPerMinute = 1 // one ban exhausts the cap
+			pol.EscalationExemptWindow = config.Duration(window)
+
+			st := newMock(map[string]int{ip2.String(): 1}) // ip2 escalates to strike #2
+			tc.seed(st)
+			engine := mustEngine(t, pol, st)
+
+			// Exhaust the cap with a strike #1 on a fresh IP.
+			if _, err := engine.Decide(context.Background(), []sdk.Verdict{mkVerdict(ip3, 85, "bruteforce")}); err != nil {
+				t.Fatalf("ip3 strike #1: %v", err)
+			}
+
+			act, err := engine.Decide(context.Background(), []sdk.Verdict{mkVerdict(ip2, 85, "bruteforce")})
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("Decide err = %v, want %v", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Decide: %v", err)
+			}
+			if act.Op != tc.wantOp {
+				t.Errorf("Op = %q, want %q", act.Op, tc.wantOp)
+			}
+			if act.Strike != tc.wantStrk {
+				t.Errorf("Strike = %d, want %d", act.Strike, tc.wantStrk)
+			}
+		})
+	}
+}
+
+// TestEscalation_StaleCountsAgainstCap verifies that a stale escalation is not
+// dropped when the cap has room — it proceeds as a normal ban and consumes
+// cap budget like any fresh ban.
+func TestEscalation_StaleCountsAgainstCap(t *testing.T) {
+	pol := armedPolicy()
+	pol.MaxBansPerMinute = 1
+	pol.EscalationExemptWindow = config.Duration(24 * time.Hour)
+
+	st := newMock(map[string]int{ip2.String(): 1})
+	st.setLastStrike(ip2, time.Now().Add(-30*24*time.Hour), time.Hour) // stale
 	engine := mustEngine(t, pol, st)
 
-	_, err := engine.Decide(context.Background(), []sdk.Verdict{mkVerdict(ip1, 85, "bruteforce")})
+	// Cap has room: the stale escalation bans normally.
+	act, err := engine.Decide(context.Background(), []sdk.Verdict{mkVerdict(ip2, 85, "bruteforce")})
 	if err != nil {
-		t.Fatalf("First ban: %v", err)
+		t.Fatalf("stale escalation with free cap: %v", err)
+	}
+	if act.Op != "ban" || act.Strike != 2 {
+		t.Errorf("Op/Strike = %q/%d, want ban/2", act.Op, act.Strike)
 	}
 
-	// Now try to escalate ip2 which already has 1 strike (so this is strike #2)
-	st2 := newMock(map[string]int{ip2.String(): 1})
-	engine2 := mustEngine(t, pol, st2)
-
-	// Exhaust rate limit with strike #1 on a fresh IP
-	_, err = engine2.Decide(context.Background(), []sdk.Verdict{mkVerdict(ip3, 85, "bruteforce")})
-	if err != nil {
-		t.Fatalf("ip3 strike #1: %v", err)
-	}
-
-	// ip2 escalation (strike #2) should NOT be rate-limited
-	act, err := engine2.Decide(context.Background(), []sdk.Verdict{mkVerdict(ip2, 85, "bruteforce")})
-	if err != nil {
-		t.Fatalf("ip2 escalation: %v", err)
-	}
-	if act.Op != "ban" {
-		t.Errorf("escalation Op = %q, want ban (exempt from rate limit)", act.Op)
-	}
-	if act.Strike != 2 {
-		t.Errorf("escalation Strike = %d, want 2", act.Strike)
+	// ...and it consumed the cap: the next fresh strike #1 is limited.
+	if _, err := engine.Decide(context.Background(), []sdk.Verdict{mkVerdict(ip3, 85, "bruteforce")}); !errors.Is(err, decision.ErrRateLimited) {
+		t.Fatalf("fresh ban after stale escalation: err = %v, want ErrRateLimited", err)
 	}
 }

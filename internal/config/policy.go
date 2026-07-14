@@ -28,6 +28,18 @@ const DefaultBanIneffectiveGrace = 90 * time.Second
 // suppressed events after grace to trigger a ban_ineffective diagnostic.
 const DefaultBanIneffectiveMinEvents = 3
 
+// DefaultEscalationExemptWindow is how long after a ban's scheduled end a
+// re-offense still counts as an escalation exempt from max_bans_per_minute.
+// The exemption exists because re-banning an IP that was blocked until
+// moments ago adds no new-lockout exposure; an IP whose last ban ended long
+// ago is a fresh ban for rate-limit purposes and must count against the cap.
+const DefaultEscalationExemptWindow = 24 * time.Hour
+
+// MaxEscalationExemptWindow is the ceiling for escalation_exempt_window.
+// A larger window weakens the max_bans_per_minute safety cap (Hard Rule §1),
+// so policy may tighten the window but never widen it past this bound.
+const MaxEscalationExemptWindow = 7 * 24 * time.Hour
+
 // DefaultStrikes is the strike escalation table used when policy.yaml omits strikes.
 // A TTL of zero means permanent ban.
 var DefaultStrikes = []StrikeEntry{
@@ -64,6 +76,12 @@ type Policy struct {
 	// the grace period to trigger a ban_ineffective diagnostic.
 	// Minimum 3; defaults to 3 if omitted or below minimum.
 	BanIneffectiveMinEvents int `yaml:"ban_ineffective_min_events"`
+
+	// EscalationExemptWindow bounds the escalation exemption from
+	// max_bans_per_minute: a strike > 1 skips the cap only when the previous
+	// ban ended within this window. Defaults to 24h if omitted or <= 0;
+	// values above 7d are clamped down (widening weakens the safety cap).
+	EscalationExemptWindow Duration `yaml:"escalation_exempt_window"`
 }
 
 // GeoBlockScore is the score added to verdicts from blocked countries or ASNs.
@@ -164,6 +182,14 @@ func (p *Policy) applyDefaults() {
 	}
 	if p.BanIneffectiveMinEvents < DefaultBanIneffectiveMinEvents {
 		p.BanIneffectiveMinEvents = DefaultBanIneffectiveMinEvents
+	}
+	// escalation_exempt_window: default when omitted, ceiling when widened —
+	// tightening (any positive value below the ceiling) is always allowed.
+	if p.EscalationExemptWindow.AsDuration() <= 0 {
+		p.EscalationExemptWindow = Duration(DefaultEscalationExemptWindow)
+	}
+	if p.EscalationExemptWindow.AsDuration() > MaxEscalationExemptWindow {
+		p.EscalationExemptWindow = Duration(MaxEscalationExemptWindow)
 	}
 }
 

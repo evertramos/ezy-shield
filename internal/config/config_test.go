@@ -549,6 +549,33 @@ func TestLoadPolicy_DefaultsApplied(t *testing.T) {
 			t.Errorf("Strikes[%d].TTL = %v, want %v", i, s.TTL, DefaultStrikes[i].TTL)
 		}
 	}
+	if p.EscalationExemptWindow.AsDuration() != DefaultEscalationExemptWindow {
+		t.Errorf("EscalationExemptWindow = %v, want %v",
+			p.EscalationExemptWindow.AsDuration(), DefaultEscalationExemptWindow)
+	}
+}
+
+func TestLoadPolicy_EscalationExemptWindowBounds(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		yaml string
+		want time.Duration
+	}{
+		{"omitted → default", "armed: false\n", DefaultEscalationExemptWindow},
+		{"tightening allowed", "armed: false\nescalation_exempt_window: 1h\n", time.Hour},
+		{"at ceiling kept", "armed: false\nescalation_exempt_window: 168h\n", MaxEscalationExemptWindow},
+		{"above ceiling clamped", "armed: false\nescalation_exempt_window: 720h\n", MaxEscalationExemptWindow},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := mustLoadPolicy(t, tc.yaml)
+			if got := p.EscalationExemptWindow.AsDuration(); got != tc.want {
+				t.Errorf("EscalationExemptWindow = %v, want %v", got, tc.want)
+			}
+		})
+	}
 }
 
 func TestLoadPolicy_DefaultStrikesNotMutated(t *testing.T) {

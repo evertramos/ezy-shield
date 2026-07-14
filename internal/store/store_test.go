@@ -964,3 +964,74 @@ func TestBumpLastSeen_DoesNotIncrementStrikeCount(t *testing.T) {
 		t.Errorf("total_strikes = %d after 3 BumpLastSeen calls, want 1", n)
 	}
 }
+
+// ── LastStrike (ADR-0009, escalation rate-limit exemption) ───────────────────
+
+// TestLastStrike_NoHistory verifies found=false (no error) for an unseen IP.
+func TestLastStrike_NoHistory(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	_, _, found, err := db.LastStrike(ctx, ip1)
+	if err != nil {
+		t.Fatalf("LastStrike on empty DB: %v", err)
+	}
+	if found {
+		t.Error("want found=false for unseen IP, got true")
+	}
+}
+
+// TestLastStrike_ReturnsMostRecent verifies the newest strike row wins and
+// that recordedAt/ttl round-trip through the store.
+func TestLastStrike_ReturnsMostRecent(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	before := time.Now().Add(-time.Second)
+	if err := db.RecordStrike(ctx, action(ip1, 1, 5*time.Minute)); err != nil {
+		t.Fatalf("RecordStrike #1: %v", err)
+	}
+	if err := db.RecordStrike(ctx, action(ip1, 2, time.Hour)); err != nil {
+		t.Fatalf("RecordStrike #2: %v", err)
+	}
+
+	recordedAt, ttl, found, err := db.LastStrike(ctx, ip1)
+	if err != nil {
+		t.Fatalf("LastStrike: %v", err)
+	}
+	if !found {
+		t.Fatal("want found=true after two strikes")
+	}
+	if ttl != time.Hour {
+		t.Errorf("ttl = %v, want %v (most recent strike)", ttl, time.Hour)
+	}
+	if recordedAt.Before(before) || recordedAt.After(time.Now().Add(time.Second)) {
+		t.Errorf("recordedAt = %v not within test window", recordedAt)
+	}
+}
+
+// TestLastStrike_SurvivesBanExpiry verifies strike history remains readable
+// after ExpireBans removes the bans_active row — the exemption check runs
+// exactly then, on the first re-offense after expiry.
+func TestLastStrike_SurvivesBanExpiry(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	if err := db.RecordStrike(ctx, action(ip1, 1, time.Second)); err != nil {
+		t.Fatalf("RecordStrike: %v", err)
+	}
+	if _, err := db.ExpireBans(ctx, time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("ExpireBans: %v", err)
+	}
+
+	_, ttl, found, err := db.LastStrike(ctx, ip1)
+	if err != nil {
+		t.Fatalf("LastStrike post-expiry: %v", err)
+	}
+	if !found {
+		t.Fatal("want found=true after ban expiry (strikes are append-only)")
+	}
+	if ttl != time.Second {
+		t.Errorf("ttl = %v, want %v", ttl, time.Second)
+	}
+}

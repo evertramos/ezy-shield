@@ -256,7 +256,7 @@ caused real bugs in this project.
 ### Test & fixture data hygiene
 - [ ] Test/fixture log lines derived from a real host use RFC 5737
       (`192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`) or RFC 3849
-      (`2001:db8::/32`) example IPs and generic usernames (`testuser`, `admin`)
+      (`2001:db8::/32`) example IPs and generic usernames (`testuser`, `johndoe`)
       — never a real client/admin IP, a real individual's username, or a real
       SSH key fingerprint (Hard Rule 8, AGENTS.md).
 

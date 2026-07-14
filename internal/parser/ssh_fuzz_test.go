@@ -57,6 +57,16 @@ func FuzzSSHParser(f *testing.F) {
 	f.Add([]byte("PAM service(sshd) ignoring max retries; 5 > 3"))
 	// Malformed rhost (not an IP) must not create an event or panic.
 	f.Add([]byte("pam_unix(sshd:auth): authentication failure; rhost=not-an-ip  user=root"))
+	// OpenSSH 9.8+ per-source penalty / grace-time timeout (two-IP lines — the
+	// server's own listen address must never be extracted; see
+	// TestSSHParser_NeverCapturesOwnListenAddress).
+	f.Add([]byte("drop connection #9 from [192.0.2.20]:24236 on [192.0.2.1]:22 penalty: exceeded LoginGraceTime"))
+	f.Add([]byte("drop connection #0 from [192.0.2.21]:58182 on [192.0.2.1]:22 penalty: failed authentication"))
+	f.Add([]byte("drop connection #10 from [192.0.2.22]:24230 on [192.0.2.1]:22 past Maxstartups")) // must NOT match (no event)
+	f.Add([]byte("Timeout before authentication for connection from 192.0.2.23 to 192.0.2.1, pid = 902311"))
+	// Malformed variants of the two-IP lines must not panic.
+	f.Add([]byte("drop connection # from [] on [] penalty:"))
+	f.Add([]byte("Timeout before authentication for connection from  to , pid ="))
 	f.Add([]byte(""))
 	f.Add([]byte("THIS IS GARBAGE"))
 	f.Add([]byte("\x00\x01\x02\x03"))                                                    // binary input

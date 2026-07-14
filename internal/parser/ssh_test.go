@@ -552,6 +552,26 @@ func TestSSHParser_ProbePatterns(t *testing.T) {
 			subtype: "pam_more_fail",
 			ip:      "198.51.100.206",
 		},
+		{
+			// OpenSSH 9.8+ PerSourcePenalties. Two IPs on the line (client "from",
+			// our own listener "on") — only the first must be captured.
+			name:    "server penalty login grace time",
+			line:    "drop connection #9 from [198.51.100.209]:24236 on [192.0.2.130]:22 penalty: exceeded LoginGraceTime",
+			subtype: "server_penalty",
+			ip:      "198.51.100.209", port: "24236",
+		},
+		{
+			name:    "server penalty failed authentication",
+			line:    "drop connection #0 from [198.51.100.209]:58182 on [192.0.2.130]:22 penalty: failed authentication",
+			subtype: "server_penalty",
+			ip:      "198.51.100.209", port: "58182",
+		},
+		{
+			name:    "auth timeout",
+			line:    "Timeout before authentication for connection from 198.51.100.201 to 192.0.2.130, pid = 902311",
+			subtype: "auth_timeout",
+			ip:      "198.51.100.201",
+		},
 	}
 
 	for _, tc := range cases {
@@ -627,6 +647,56 @@ func TestSSHParser_LegitSessionNoFalsePositive(t *testing.T) {
 	}
 	if accepts != 1 {
 		t.Errorf("expected exactly 1 ssh_accept (the successful login), got %d", accepts)
+	}
+}
+
+// TestSSHParser_NeverCapturesOwnListenAddress locks in the single most
+// dangerous class of parser bug for a self-enforcing security daemon: a line
+// that carries the SERVER's own address alongside the client's must never
+// yield an event on the server's own IP. "drop connection" and "Timeout before
+// authentication" both log two addresses (client, then our own listener) —
+// only the first (client) may ever be extracted.
+func TestSSHParser_NeverCapturesOwnListenAddress(t *testing.T) {
+	p := parser.NewSSHParser(discardLogger())
+	const ownIP = "192.0.2.130"
+	const clientIP = "198.51.100.209"
+
+	lines := []string{
+		"drop connection #9 from [" + clientIP + "]:24236 on [" + ownIP + "]:22 penalty: exceeded LoginGraceTime",
+		"Timeout before authentication for connection from " + clientIP + " to " + ownIP + ", pid = 902311",
+	}
+	for _, line := range lines {
+		evs, err := p.Parse(sdk.RawLine{Source: "journald:ssh", Line: []byte(line), At: time.Now()})
+		if err != nil {
+			t.Fatalf("Parse error: %v", err)
+		}
+		if len(evs) != 1 {
+			t.Fatalf("[%s] expected 1 event, got %d", line, len(evs))
+		}
+		if evs[0].SourceIP.String() != clientIP {
+			t.Errorf("[%s] SourceIP: got %q, want client IP %q (own listen address must never be the reported IP)",
+				line, evs[0].SourceIP.String(), clientIP)
+		}
+	}
+}
+
+// TestSSHParser_MaxstartupsNotServerPenalty ensures the sibling "past
+// Maxstartups" drop reason (global unauthenticated-connection cap, can hit a
+// legitimate client caught in an unrelated flood) is NOT treated as a
+// per-source penalty against the dropped IP, unlike "penalty: ...".
+func TestSSHParser_MaxstartupsNotServerPenalty(t *testing.T) {
+	p := parser.NewSSHParser(discardLogger())
+
+	evs, err := p.Parse(sdk.RawLine{
+		Source: "journald:ssh",
+		Line:   []byte("drop connection #10 from [198.51.100.209]:24230 on [192.0.2.130]:22 past Maxstartups"),
+		At:     time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	if len(evs) != 0 {
+		t.Errorf("expected 0 events for 'past Maxstartups' (server-wide load signal, not per-source), got %d: %+v", len(evs), evs)
 	}
 }
 

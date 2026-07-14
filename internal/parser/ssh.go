@@ -115,6 +115,16 @@ var sshPatterns = []sshPattern{
 	// tag is sshd's own marker that the event occurred before auth completed.
 	// The invalid-user / authenticating-user variants above carry their own
 	// attack indicator and need no tag.
+	//
+	// Validated against 30 days of live auth.log: EVERY "Received disconnect"
+	// line without [preauth] (59/59) was the same real user's own IP with reason
+	// "disconnected by user" (SSH_DISCONNECT_BY_APPLICATION — the client itself
+	// asked to hang up); every line WITH [preauth] (561/561) carried the generic
+	// bot/scanner reason "Bye Bye". Do not weaken this gate without re-validating
+	// against a live auth.log (not `journalctl -u ssh`, which reattributes a
+	// forked child to the login session's cgroup post-auth and silently drops
+	// these lines from its output — measuring there undercounts the "without
+	// preauth" population and looks alarming for no reason).
 	{re: regexp.MustCompile(`^Connection closed by ([0-9a-fA-F.:]+) port (\d{1,5}).*\[preauth\]`), kind: kindProbe, subtype: "conn_closed", userIdx: 0, ipIdx: 1, portIdx: 2},
 	{re: regexp.MustCompile(`^Connection reset by ([0-9a-fA-F.:]+) port (\d{1,5}).*\[preauth\]`), kind: kindProbe, subtype: "conn_reset", userIdx: 0, ipIdx: 1, portIdx: 2},
 	{re: regexp.MustCompile(`^Received disconnect from ([0-9a-fA-F.:]+) port (\d{1,5}).*\[preauth\]`), kind: kindProbe, subtype: "disconnect_recv", userIdx: 0, ipIdx: 1, portIdx: 2},
@@ -123,6 +133,21 @@ var sshPatterns = []sshPattern{
 	{re: regexp.MustCompile(`^banner exchange: Connection from ([0-9a-fA-F.:]+) port (\d{1,5}):`), kind: kindProbe, subtype: "banner_invalid", userIdx: 0, ipIdx: 1, portIdx: 2},
 	{re: regexp.MustCompile(`^error: kex_exchange_identification: Connection (?:reset|closed) by ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "kex_reset", userIdx: 0, ipIdx: 1, portIdx: 2},
 	{re: regexp.MustCompile(`^Unable to negotiate with ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "negotiate_fail", userIdx: 0, ipIdx: 1, portIdx: 2},
+	// sshd's own per-source defenses (OpenSSH 9.8+ PerSourcePenalties). The line
+	// carries TWO bracketed [ip]:port pairs — the client ("from") and our own
+	// listening address ("on"); only the first (client) is captured, and the
+	// pattern requires the literal " on [" delimiter so the second address is
+	// never mistaken for the reported one. Deliberately excludes the sibling
+	// "past Maxstartups" reason (no "penalty:" keyword): that one fires when the
+	// server-wide unauthenticated-connection cap is hit and can drop a
+	// legitimate client caught in the flood — it is not evidence against this
+	// specific source the way a per-source "penalty:" refusal is.
+	{re: regexp.MustCompile(`^drop connection #\d+ from \[([0-9a-fA-F.:]+)\]:(\d+) on \[[0-9a-fA-F.:]+\]:\d+ penalty: `), kind: kindProbe, subtype: "server_penalty", userIdx: 0, ipIdx: 1, portIdx: 2},
+	// LoginGraceTime elapsed with no completed authentication — structurally
+	// pre-auth only (an authenticated session cannot "time out before auth"), so
+	// this needs no [preauth] gate. The second IP ("to <our-ip>") is our own
+	// listening address and is never captured.
+	{re: regexp.MustCompile(`^Timeout before authentication for connection from ([0-9a-fA-F.:]+) to [0-9a-fA-F.:]+`), kind: kindProbe, subtype: "auth_timeout", userIdx: 0, ipIdx: 1, portIdx: 0},
 	// PAM auth failures carrying rhost=IP (the "user=" suffix is optional; the
 	// username there is not positionally stable, so it is not extracted).
 	{re: regexp.MustCompile(`^pam_unix\(sshd:auth\): authentication failure;.*?rhost=([0-9a-fA-F.:]+)`), kind: kindProbe, subtype: "pam_auth_fail", userIdx: 0, ipIdx: 1, portIdx: 0},

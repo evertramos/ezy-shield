@@ -432,96 +432,222 @@ func TestSSHParser_SingleEventPerLine(t *testing.T) {
 	}
 }
 
-// TestSSHParser_ConnectionClosed ensures "Connection closed by invalid user"
-// lines produce ssh_invalid_user events.
-func TestSSHParser_ConnectionClosed(t *testing.T) {
+// TestSSHParser_ProbePatterns table-drives the connection/protocol lines that
+// canonicalise to ssh_probe (issue #140): recognised (no silent drop) but not
+// counted by the default ban rules. Each asserts kind, subtype, IP and — where
+// present — username/port.
+func TestSSHParser_ProbePatterns(t *testing.T) {
 	p := parser.NewSSHParser(discardLogger())
 
-	line := sdk.RawLine{
-		Source: "journald:sshd-session",
-		Line:   []byte("Connection closed by invalid user hassanjawaiddts9 91.92.47.53 port 32792 [preauth]"),
-		At:     time.Now(),
+	cases := []struct {
+		name     string
+		line     string
+		subtype  string
+		ip       string
+		username string // "" when the line carries no username
+		port     string // "" when the line carries no port
+	}{
+		{
+			name:     "connection closed by invalid user",
+			line:     "Connection closed by invalid user hassanjawaiddts9 91.92.47.53 port 32792 [preauth]",
+			subtype:  "conn_closed_invalid",
+			ip:       "91.92.47.53",
+			username: "hassanjawaiddts9",
+			port:     "32792",
+		},
+		{
+			name:    "dispatch fatal invalid user",
+			line:    "ssh_dispatch_run_fatal: Connection from invalid user user14 91.92.47.53 port 32846: Software caused connection abort [preauth]",
+			subtype: "dispatch_fatal",
+			ip:      "91.92.47.53", username: "user14", port: "32846",
+		},
+		{
+			name:    "banner exchange invalid format",
+			line:    "banner exchange: Connection from 8.152.209.0 port 50442: invalid format",
+			subtype: "banner_invalid",
+			ip:      "8.152.209.0", port: "50442",
+		},
+		{
+			name:    "banner exchange could not read",
+			line:    "banner exchange: Connection from 8.152.209.0 port 50442: could not read protocol version",
+			subtype: "banner_invalid",
+			ip:      "8.152.209.0", port: "50442",
+		},
+		{
+			name:    "disconnected from invalid user",
+			line:    "Disconnected from invalid user root 190.244.39.224 port 40780",
+			subtype: "disconnected_invalid",
+			ip:      "190.244.39.224", username: "root", port: "40780",
+		},
+		{
+			name:    "connection reset by invalid user",
+			line:    "Connection reset by invalid user root 45.227.254.170 port 51000",
+			subtype: "conn_reset_invalid",
+			ip:      "45.227.254.170", username: "root", port: "51000",
+		},
+		{
+			name:    "disconnecting invalid user too many",
+			line:    "Disconnecting invalid user test 1.2.3.4 port 5678: Too many authentication failures",
+			subtype: "disconnecting_invalid",
+			ip:      "1.2.3.4", username: "test", port: "5678",
+		},
+		{
+			name:    "connection closed by authenticating user",
+			line:    "Connection closed by authenticating user kylian 203.0.113.9 port 40780 [preauth]",
+			subtype: "authenticating_closed",
+			ip:      "203.0.113.9", username: "kylian", port: "40780",
+		},
+		{
+			name:    "connection closed bare",
+			line:    "Connection closed by 195.178.110.30 port 60216",
+			subtype: "conn_closed",
+			ip:      "195.178.110.30", port: "60216",
+		},
+		{
+			name:    "connection reset bare",
+			line:    "Connection reset by 91.92.40.49 port 54990",
+			subtype: "conn_reset",
+			ip:      "91.92.40.49", port: "54990",
+		},
+		{
+			name:    "received disconnect",
+			line:    "Received disconnect from 190.244.39.224 port 40780:11: Bye Bye [preauth]",
+			subtype: "disconnect_recv",
+			ip:      "190.244.39.224", port: "40780",
+		},
+		{
+			name:    "kex exchange reset with ip",
+			line:    "error: kex_exchange_identification: Connection reset by 8.152.209.0 port 50442",
+			subtype: "kex_reset",
+			ip:      "8.152.209.0", port: "50442",
+		},
+		{
+			name:    "unable to negotiate",
+			line:    "Unable to negotiate with 141.98.11.10 port 5000: no matching host key type found. Their offer: ssh-rsa",
+			subtype: "negotiate_fail",
+			ip:      "141.98.11.10", port: "5000",
+		},
+		{
+			name:    "max attempts invalid user",
+			line:    "error: maximum authentication attempts exceeded for invalid user root from 5.178.101.192 port 2222 ssh2 [preauth]",
+			subtype: "max_attempts",
+			ip:      "5.178.101.192", username: "root", port: "2222",
+		},
+		{
+			name:    "pam auth failure with rhost",
+			line:    "pam_unix(sshd:auth): authentication failure; logname= uid=0 euid=0 tty=ssh ruser= rhost=217.160.190.176  user=root",
+			subtype: "pam_auth_fail",
+			ip:      "217.160.190.176",
+		},
+		{
+			name:    "pam more failures",
+			line:    "PAM 4 more authentication failures; logname= uid=0 euid=0 tty=ssh ruser= rhost=45.227.254.170  user=root",
+			subtype: "pam_more_fail",
+			ip:      "45.227.254.170",
+		},
 	}
-	evs, err := p.Parse(line)
-	if err != nil {
-		t.Fatalf("Parse error: %v", err)
-	}
-	if len(evs) != 1 {
-		t.Fatalf("expected 1 event, got %d", len(evs))
-	}
-	if evs[0].Kind != "ssh_invalid_user" {
-		t.Errorf("kind: got %q, want ssh_invalid_user", evs[0].Kind)
-	}
-	if evs[0].SourceIP.String() != "91.92.47.53" {
-		t.Errorf("source_ip: got %q, want 91.92.47.53", evs[0].SourceIP.String())
-	}
-	if evs[0].Fields["username"] != "hassanjawaiddts9" {
-		t.Errorf("username: got %q, want hassanjawaiddts9", evs[0].Fields["username"])
-	}
-	if evs[0].Fields["port"] != "32792" {
-		t.Errorf("port: got %q, want 32792", evs[0].Fields["port"])
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			evs, err := p.Parse(sdk.RawLine{Source: "journald:sshd-session", Line: []byte(tc.line), At: time.Now()})
+			if err != nil {
+				t.Fatalf("Parse error: %v", err)
+			}
+			if len(evs) != 1 {
+				t.Fatalf("expected 1 event, got %d", len(evs))
+			}
+			ev := evs[0]
+			if ev.Kind != "ssh_probe" {
+				t.Errorf("kind: got %q, want ssh_probe", ev.Kind)
+			}
+			if ev.Fields["subtype"] != tc.subtype {
+				t.Errorf("subtype: got %q, want %q", ev.Fields["subtype"], tc.subtype)
+			}
+			if ev.SourceIP.String() != tc.ip {
+				t.Errorf("source_ip: got %q, want %q", ev.SourceIP.String(), tc.ip)
+			}
+			if ev.Fields["username"] != tc.username {
+				t.Errorf("username: got %q, want %q", ev.Fields["username"], tc.username)
+			}
+			if ev.Fields["port"] != tc.port {
+				t.Errorf("port: got %q, want %q", ev.Fields["port"], tc.port)
+			}
+		})
 	}
 }
 
-// TestSSHParser_DispatchFatal ensures "ssh_dispatch_run_fatal" lines produce
-// ssh_invalid_user events.
-func TestSSHParser_DispatchFatal(t *testing.T) {
+// TestSSHParser_ProbeNotCountedByDefault documents the core anti-inflation
+// guarantee: probe subtypes carry a kind the default rules ([ssh_fail,
+// ssh_invalid_user]) do not count, so broadening recognition cannot lower the
+// effective ban threshold.
+func TestSSHParser_ProbeNotCountedByDefault(t *testing.T) {
 	p := parser.NewSSHParser(discardLogger())
+	defaultKinds := map[string]bool{"ssh_fail": true, "ssh_invalid_user": true}
 
-	line := sdk.RawLine{
-		Source: "journald:sshd-session",
-		Line:   []byte("ssh_dispatch_run_fatal: Connection from invalid user user14 91.92.47.53 port 32846: Software caused connection abort [preauth]"),
-		At:     time.Now(),
+	probes := []string{
+		"Connection closed by invalid user root 1.2.3.4 port 22",
+		"Disconnected from invalid user root 1.2.3.4 port 22",
+		"pam_unix(sshd:auth): authentication failure; rhost=1.2.3.4  user=root",
+		"banner exchange: Connection from 1.2.3.4 port 22: invalid format",
 	}
-	evs, err := p.Parse(line)
-	if err != nil {
-		t.Fatalf("Parse error: %v", err)
-	}
-	if len(evs) != 1 {
-		t.Fatalf("expected 1 event, got %d", len(evs))
-	}
-	if evs[0].Kind != "ssh_invalid_user" {
-		t.Errorf("kind: got %q, want ssh_invalid_user", evs[0].Kind)
-	}
-	if evs[0].SourceIP.String() != "91.92.47.53" {
-		t.Errorf("source_ip: got %q, want 91.92.47.53", evs[0].SourceIP.String())
-	}
-	if evs[0].Fields["username"] != "user14" {
-		t.Errorf("username: got %q, want user14", evs[0].Fields["username"])
-	}
-	if evs[0].Fields["port"] != "32846" {
-		t.Errorf("port: got %q, want 32846", evs[0].Fields["port"])
+	for _, line := range probes {
+		evs, err := p.Parse(sdk.RawLine{Source: "journald:ssh", Line: []byte(line), At: time.Now()})
+		if err != nil {
+			t.Fatalf("Parse error: %v", err)
+		}
+		if len(evs) != 1 {
+			t.Fatalf("[%s] expected 1 event, got %d", line, len(evs))
+		}
+		if defaultKinds[evs[0].Kind] {
+			t.Errorf("[%s] mapped to default-bannable kind %q; probe lines must not inflate default rules", line, evs[0].Kind)
+		}
 	}
 }
 
-// TestSSHParser_BannerError ensures "banner exchange" error lines produce
-// ssh_banner_error events (without username).
-func TestSSHParser_BannerError(t *testing.T) {
+// TestSSHParser_ConnectionInflation feeds the realistic multi-line sequence a
+// single invalid-user connection emits and asserts that only ONE event lands in
+// the default-bannable kinds — the rest are ssh_probe. This locks the "one
+// attack connection ⇒ one strike" invariant (issue #140) without a dedup layer.
+func TestSSHParser_ConnectionInflation(t *testing.T) {
 	p := parser.NewSSHParser(discardLogger())
 
-	line := sdk.RawLine{
-		Source: "journald:sshd-session",
-		Line:   []byte("banner exchange: Connection from 8.152.209.0 port 50442: invalid format"),
-		At:     time.Now(),
+	// One connection (same pid), as OpenSSH logs it in password mode.
+	connection := []string{
+		"2026-07-13T23:32:40.100000+00:00 fagots sshd-session[1094039]: Invalid user oracle from 91.92.47.53 port 32792",
+		"2026-07-13T23:32:40.200000+00:00 fagots sshd-session[1094039]: pam_unix(sshd:auth): authentication failure; logname= uid=0 euid=0 tty=ssh ruser= rhost=91.92.47.53",
+		"2026-07-13T23:32:40.898546+00:00 fagots sshd-session[1094039]: Failed password for invalid user oracle from 91.92.47.53 port 32792 ssh2",
+		"2026-07-13T23:32:43.220742+00:00 fagots sshd-session[1094039]: Connection closed by invalid user oracle 91.92.47.53 port 32792 [preauth]",
 	}
-	evs, err := p.Parse(line)
-	if err != nil {
-		t.Fatalf("Parse error: %v", err)
+
+	defaultCount, probeCount := 0, 0
+	for _, line := range connection {
+		evs, err := p.Parse(sdk.RawLine{Source: "file:/var/log/auth.log", Line: []byte(line), At: time.Now()})
+		if err != nil {
+			t.Fatalf("Parse error: %v", err)
+		}
+		for _, ev := range evs {
+			switch ev.Kind {
+			case "ssh_fail", "ssh_invalid_user":
+				defaultCount++
+			case "ssh_probe":
+				probeCount++
+			}
+			// pid must be captured from the sshd-session[...] prefix.
+			if ev.Fields["pid"] != "1094039" {
+				t.Errorf("pid: got %q, want 1094039 (line %q)", ev.Fields["pid"], line)
+			}
+		}
 	}
-	if len(evs) != 1 {
-		t.Fatalf("expected 1 event, got %d", len(evs))
+
+	// "Invalid user oracle" is the single attempt line; "Failed password for
+	// invalid user" is also an attempt line, so the default count is 2 here
+	// (both are genuine attempt lines OpenSSH emits). The point of this test is
+	// that the two TERMINATION/PAM lines add ZERO to the default count — they are
+	// probe. Without the canonical split they would have made it 4.
+	if defaultCount != 2 {
+		t.Errorf("default-bannable events: got %d, want 2 (Invalid user + Failed password only)", defaultCount)
 	}
-	if evs[0].Kind != "ssh_banner_error" {
-		t.Errorf("kind: got %q, want ssh_banner_error", evs[0].Kind)
-	}
-	if evs[0].SourceIP.String() != "8.152.209.0" {
-		t.Errorf("source_ip: got %q, want 8.152.209.0", evs[0].SourceIP.String())
-	}
-	// Banner error should have port but no username
-	if evs[0].Fields["port"] != "50442" {
-		t.Errorf("port: got %q, want 50442", evs[0].Fields["port"])
-	}
-	if evs[0].Fields["username"] != "" {
-		t.Errorf("username: got %q, want empty", evs[0].Fields["username"])
+	if probeCount != 2 {
+		t.Errorf("probe events: got %d, want 2 (pam + connection-closed)", probeCount)
 	}
 }

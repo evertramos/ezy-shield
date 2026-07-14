@@ -16,6 +16,7 @@ EzyShield is a CLI-first Linux security tool: detects malicious IPs from logs, e
 5. Firewall mutations only through `internal/enforce` via the enforcer helper — never exec iptables/nft directly elsewhere.
 6. One feature = one issue = one branch = one PR. Keep PRs under ~400 lines of diff when possible.
 7. Every PR: code + tests + doc updates together. New parser/rule ⇒ new fixture in `fixtures/`.
+8. **No real personal data in the repo.** Never commit a real client/admin IP address, a real individual's username, or a real SSH key fingerprint — in code, tests, fixtures, comments, or PR/issue/commit text — even when reproducing a bug from real logs. Use RFC 5737 (`192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`) or RFC 3849 (`2001:db8::/32`) example ranges and generic placeholders (`testuser`, `admin`) instead. If you find real personal data already committed, do not silently work around it — flag it and open an issue; removing it from a shared/default branch needs history rewrite and is a judgment call for a human, not a unilateral agent action.
 
 ## CLI naming (ezy family)
 
@@ -82,3 +83,4 @@ Adding a new parser → add a `FuzzXxxParser` with seeds: malformed, oversized (
 - Binding the dashboard to 0.0.0.0 "for convenience" — forbidden
 - Adding a dependency for something stdlib does; justify every new dependency in the PR
 - Writing migrations that edit old migration files — always append a new one
+- Pasting real log lines from a live host straight into a test/fixture without sanitizing the IP/username/key-fingerprint first (Hard Rule 8) — this reached a public commit once already

@@ -144,7 +144,11 @@ func emitBootstrapCredentials(w io.Writer, isTTY bool, password, authDBPath stri
 
 // writePasswordFile creates path with O_EXCL so a still-unread password from
 // a previous run is never clobbered, and chmods 0600 explicitly as
-// belt-and-suspenders against permissive umask setups.
+// belt-and-suspenders against permissive umask setups. Any failure after
+// creation removes the file: a partial write must never leave a truncated
+// password an operator could mistake for the real one, and a leftover file
+// would block the O_EXCL retry path. The remove is safe — O_EXCL succeeding
+// proves this call created the file.
 func writePasswordFile(path, password string) error {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600) //nolint:gosec // path is derived from the admin-controlled auth DB location
 	if err != nil {
@@ -152,13 +156,21 @@ func writePasswordFile(path, password string) error {
 	}
 	if _, err := f.WriteString(password + "\n"); err != nil {
 		_ = f.Close()
+		_ = os.Remove(path)
 		return err
 	}
 	if err := f.Chmod(0o600); err != nil {
 		_ = f.Close()
+		_ = os.Remove(path)
 		return err
 	}
-	return f.Close()
+	if err := f.Close(); err != nil {
+		// A failed close can mean buffered bytes never hit the disk — the
+		// file content is untrustworthy, so it goes too.
+		_ = os.Remove(path)
+		return err
+	}
+	return nil
 }
 
 func printBootstrapCredentials(w io.Writer, password, authDBPath string) {

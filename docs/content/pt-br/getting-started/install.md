@@ -10,6 +10,53 @@ Este guia cobre todas as formas de instalar EzyShield: a partir de uma versão p
 
 ---
 
+## Instalar via gerenciador de pacotes (apt / dnf)
+
+Os pacotes nativos trazem os binários, as units do systemd, o usuário de
+serviço `ezyshield` e upgrades limpos. Os metadados do repositório são
+assinados com GPG; releases estáveis ficam na suite `stable`, release
+candidates em `testing`.
+
+**Debian / Ubuntu:**
+
+```bash
+curl -fsSL https://packages.ezyshield.com/ezyshield.asc | sudo gpg --dearmor -o /usr/share/keyrings/ezyshield.gpg
+echo "deb [signed-by=/usr/share/keyrings/ezyshield.gpg] https://packages.ezyshield.com/apt stable main" | sudo tee /etc/apt/sources.list.d/ezyshield.list
+sudo apt update && sudo apt install ezyshield
+```
+
+**RHEL / Rocky / Alma:**
+
+```bash
+sudo tee /etc/yum.repos.d/ezyshield.repo <<'EOF'
+[ezyshield]
+name=EzyShield
+baseurl=https://packages.ezyshield.com/rpm/stable/$basearch
+enabled=1
+gpgcheck=0
+repo_gpgcheck=1
+gpgkey=https://packages.ezyshield.com/ezyshield.asc
+EOF
+sudo dnf install ezyshield
+```
+
+> `repo_gpgcheck=1` valida os metadados assinados do repositório, que por sua
+> vez fixam o SHA-256 de cada pacote — a integridade é coberta de ponta a
+> ponta. Assinatura por pacote rpm chega com o trabalho de assinatura de
+> artefatos (#100), quando `gpgcheck=1` vira o padrão documentado.
+
+Fingerprint da chave de assinatura (confira após importar com `gpg --show-keys`):
+
+```
+<KEY-FINGERPRINT — mantenedor preenche após a primeira publicação>
+```
+
+Para acompanhar release candidates, troque `stable` por `testing` em
+qualquer dos snippets. Os pacotes **não** habilitam nem iniciam serviço
+algum — rode `sudo ezyshield init` depois de instalar.
+
+---
+
 ## Instalação rápida (última versão estável)
 
 ```bash

@@ -47,8 +47,31 @@ The `packages` job in `ci.yaml` runs the same snapshot + container
 install-verify (debian:12 for .deb, rockylinux:9 for .rpm) on every PR, so a
 broken package config fails before a tag ever exists.
 
+## Package repositories (packages.ezyshield.com)
+
+`publish-repos.yaml` runs on every published release (and via manual
+dispatch with a tag): stable tags land in the apt/yum **stable** suite,
+rc/alpha/beta in **testing**. `scripts/package/publish-repos.sh` pulls the
+current repo state from Cloudflare R2, adds the release's .deb/.rpm,
+regenerates and GPG-signs the metadata (apt `InRelease`/`Release.gpg`, yum
+`repomd.xml.asc`), and uploads packages first, metadata last — clients never
+see metadata referencing missing files. Publishing never deletes old
+versions; pruning is a manual maintainer action.
+
+Required repo secrets: `R2_ENDPOINT`, `R2_ACCESS_KEY_ID`,
+`R2_SECRET_ACCESS_KEY`, `R2_BUCKET`, `REPO_GPG_PRIVATE_KEY`,
+`REPO_GPG_PASSPHRASE`. Cloudflare side: R2 bucket with the
+`packages.ezyshield.com` custom domain and a cache-bypass rule on
+`/apt/dists/*` and `/rpm/repodata/*` (stale cached metadata breaks
+signature verification on update).
+
+Local end-to-end test with a throwaway key (no R2 involved): see the header
+of `scripts/package/publish-repos.sh` — generate into a temp dir, serve it
+with `python3 -m http.server`, and point debian:12/rockylinux:9 containers
+at it.
+
 ## Follow-ups (tracked)
 
-- #99 signed apt/yum repositories (hosting)
-- #100 cosign keyless signing + SBOM
+- #100 cosign keyless signing + SBOM (adds per-package rpm signatures →
+  flip docs to `gpgcheck=1`)
 - #101 GHCR container image

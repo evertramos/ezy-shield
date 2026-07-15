@@ -31,15 +31,30 @@ var ErrRateLimited = errors.New("decision: global ban rate limit exceeded")
 // Store is the persistence interface required by Engine.
 // The concrete *store.DB satisfies this interface.
 type Store interface {
-	// HasActiveBan returns true when ip has an unexpired row in bans_active,
-	// false when it does not. The engine calls this before GetStrikeCount to
-	// suppress redundant strike/enforcer writes for already-banned IPs.
-	HasActiveBan(ctx context.Context, ip netip.Addr) (bool, error)
+	// GetBanInfo returns when ip's active ban was applied and at which strike.
+	// found is false when ip has no active ban. The engine calls this before
+	// GetStrikeCount to suppress redundant strike/enforcer writes for
+	// already-banned IPs.
+	GetBanInfo(ctx context.Context, ip netip.Addr) (bannedAt time.Time, strike int, found bool, err error)
+	// RecordSuppressed increments ip's per-ban suppression counters and
+	// returns the updated totals plus whether ban_ineffective already fired
+	// for this ban. Zero counts when ip has no active ban row (expiry race).
+	RecordSuppressed(ctx context.Context, ip netip.Addr, afterGrace bool) (total, afterGraceCount int, fired bool, err error)
+	// MarkBanIneffective flags ip's active ban as diagnosed and records the
+	// permanent had-ineffective mark on the offender. Returns true only for
+	// the caller that transitioned the flag (fire-once guarantee).
+	MarkBanIneffective(ctx context.Context, ip netip.Addr) (bool, error)
+	// HadIneffectiveBan reports whether ip ever had a ban marked ineffective;
+	// survives ban expiry and daemon restarts.
+	HadIneffectiveBan(ctx context.Context, ip netip.Addr) (bool, error)
 	// BumpLastSeen updates offenders.last_seen for ip without recording a strike.
-	// It is the only store write on the suppression path.
 	BumpLastSeen(ctx context.Context, ip netip.Addr) error
 	// GetStrikeCount returns the cumulative strike count for ip (0 if never seen).
 	GetStrikeCount(ctx context.Context, ip netip.Addr) (int, error)
+	// LastStrike returns the recording time and TTL of ip's most recent strike;
+	// found is false when ip has no strike history. The engine uses it to bound
+	// the escalation rate-limit exemption to recently-ended bans (ADR-0009).
+	LastStrike(ctx context.Context, ip netip.Addr) (recordedAt time.Time, ttl time.Duration, found bool, err error)
 	// RecordStrike persists a ban strike and updates bans_active + audit_log.
 	RecordStrike(ctx context.Context, a sdk.Action) error
 	// Audit appends a record to the append-only audit_log without recording a strike.
@@ -47,7 +62,10 @@ type Store interface {
 }
 
 // Engine converts Verdicts into Actions according to policy.
-// It is safe for concurrent use.
+// It is safe for concurrent use. Suppression state for the ban_ineffective
+// diagnostic (ADR-0009) lives in the store, on the ban row itself — nothing
+// here grows with offender count, and the diagnostic history survives
+// daemon restarts.
 type Engine struct {
 	policy *config.Policy
 	store  Store
@@ -139,26 +157,32 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 		return act, nil
 	}
 
-	// ── Active-ban guard (issue #28) ─────────────────────────────────────────
+	// ── Active-ban guard (issues #28, #29, ADR-0009) ────────────────────────
 	// If the IP already has an active ban (temp or permanent), suppress the
-	// strike/audit/enforcer writes. Only offenders.last_seen is bumped so the
-	// IP still appears as "active" in observability. bans_active remains the
-	// enforcer source of truth; the Sync loop handles expiry races.
+	// strike/audit/enforcer writes. Events are counted for ban_ineffective
+	// detection. Only offenders.last_seen is bumped so the IP still appears
+	// as "active" in observability. bans_active remains the enforcer source
+	// of truth; the Sync loop handles expiry races.
 	//
 	// Dry-run is handled further below — we still skip the store check in
 	// dry-run mode because RecordStrike is also skipped there. The guard runs
 	// only when armed=true to preserve the current dry-run semantics unchanged.
 	if e.policy.Armed {
-		banned, err := e.store.HasActiveBan(ctx, ip)
+		bannedAt, banStrike, banned, err := e.store.GetBanInfo(ctx, ip)
 		if err != nil {
 			// Non-fatal: log and fall through to the normal strike path rather
 			// than silently suppressing a verdict on a DB error.
-			slog.ErrorContext(ctx, "decision: HasActiveBan failed — falling through to strike path",
+			slog.ErrorContext(ctx, "decision: GetBanInfo failed — falling through to strike path",
 				"ip", ip, "err", err)
 		} else if banned {
+			// Suppression path: IP is actively banned.
 			slog.InfoContext(ctx, "decision: already_banned — suppressing strike/enforcer",
 				"ip", ip)
 			act := sdk.Action{IP: ip, Op: "already_banned", Reason: "active ban in bans_active", Verdicts: verdicts}
+
+			// Track suppressed events for ban_ineffective (ADR-0009)
+			e.trackSuppressedEvent(ctx, ip, bannedAt, banStrike)
+
 			if err := e.store.BumpLastSeen(ctx, ip); err != nil {
 				slog.ErrorContext(ctx, "decision: BumpLastSeen failed", "ip", ip, "err", err)
 			}
@@ -201,10 +225,38 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 	}
 
 	// ── Safety invariant §1: rate limit enforced before every real ban ─────────
-	if err := e.checkRateLimit(); err != nil {
+	// Exception (ADR-0009 §3, amended): an escalation is exempt only when the
+	// previous ban ended within escalation_exempt_window — re-blocking an IP
+	// that was blocked until moments ago adds no new-lockout exposure. A strike
+	// count alone is NOT enough: strikes never decay, so "was banned at some
+	// point" would bypass the cap forever and disable it exactly during a
+	// mass-re-detection runaway. Stale escalations count like any fresh ban.
+	if nextStrike > 1 && e.escalationExempt(ctx, ip) {
+		slog.InfoContext(ctx, "decision: escalation exempt from rate limit — previous ban ended recently",
+			"ip", ip, "strike", nextStrike)
+	} else if err := e.checkRateLimit(); err != nil {
 		return sdk.Action{}, err
 	}
 
+	// ── Pre-permanent alert (ADR-0009) ───────────────────────────────────────
+	// If this strike promotes to permanent and the IP had ban_ineffective on a
+	// prior ban, emit a louder warning — an ineffective permanent ban is the
+	// worst case (operator thinks it's "resolved forever" while traffic flows).
+	// The flag is read from offenders.had_ineffective, so it survives daemon
+	// restarts between the ineffective ban and the promotion.
+	if ttl == 0 {
+		hadIneff, err := e.store.HadIneffectiveBan(ctx, ip)
+		if err != nil {
+			slog.ErrorContext(ctx, "decision: HadIneffectiveBan failed — pre-permanent alert skipped",
+				"ip", ip, "err", err)
+		} else if hadIneff {
+			slog.WarnContext(ctx, "decision: ban_ineffective_permanent — promoting to permanent an IP that had ineffective bans",
+				"ip", ip, "strike", nextStrike)
+		}
+	}
+
+	// RecordStrike's bans_active upsert resets the per-ban suppression
+	// counters — no engine-side state to clear.
 	if err := e.store.RecordStrike(ctx, act); err != nil {
 		return sdk.Action{}, fmt.Errorf("decision: RecordStrike: %w", err)
 	}
@@ -240,6 +292,86 @@ func (e *Engine) checkRateLimit() error {
 		return ErrRateLimited
 	}
 	return nil
+}
+
+// escalationExempt reports whether an escalation ban (strike > 1) for ip may
+// skip the max_bans_per_minute cap. Exemption requires the previous ban to
+// have ended within policy.EscalationExemptWindow of now.
+//
+// Fail-safe: every uncertain case counts against the cap — store error, no
+// strike history, or a permanent last strike (a permanent ban that is no
+// longer active means an operator unbanned; the re-ban is a fresh decision).
+// A ban whose scheduled end is still in the future (early manual unban,
+// immediate re-offense) is within the window by construction.
+func (e *Engine) escalationExempt(ctx context.Context, ip netip.Addr) bool {
+	recordedAt, ttl, found, err := e.store.LastStrike(ctx, ip)
+	if err != nil {
+		slog.ErrorContext(ctx, "decision: LastStrike failed — escalation not exempt from rate limit",
+			"ip", ip, "err", err)
+		return false
+	}
+	if !found || ttl <= 0 {
+		return false
+	}
+	banEnd := recordedAt.Add(ttl)
+	return time.Since(banEnd) <= e.policy.EscalationExemptWindow.AsDuration()
+}
+
+// trackSuppressedEvent records a suppressed event on ip's active ban and
+// emits the ban_ineffective diagnostic when ≥ BanIneffectiveMinEvents arrive
+// after the BanIneffectiveGrace period (ADR-0009). The counters live on the
+// ban row; MarkBanIneffective's compare-and-set makes the diagnostic fire
+// exactly once per ban, across concurrent calls and daemon restarts. All
+// failures are non-fatal: the diagnostic must never break the suppression
+// path.
+func (e *Engine) trackSuppressedEvent(ctx context.Context, ip netip.Addr, bannedAt time.Time, banStrike int) {
+	grace := e.policy.BanIneffectiveGrace.AsDuration()
+	afterGrace := time.Since(bannedAt) >= grace
+
+	total, afterCount, fired, err := e.store.RecordSuppressed(ctx, ip, afterGrace)
+	if err != nil {
+		slog.ErrorContext(ctx, "decision: RecordSuppressed failed", "ip", ip, "err", err)
+		return
+	}
+	if !afterGrace || fired || afterCount < e.policy.BanIneffectiveMinEvents {
+		return
+	}
+
+	newlyFired, err := e.store.MarkBanIneffective(ctx, ip)
+	if err != nil {
+		slog.ErrorContext(ctx, "decision: MarkBanIneffective failed", "ip", ip, "err", err)
+		return
+	}
+	if !newlyFired {
+		return // another Decide call won the race for this ban
+	}
+
+	// Compute ladder context for the warning
+	ladderLen := len(e.policy.Strikes)
+	var nextRungs string
+	if banStrike < ladderLen {
+		remaining := make([]string, 0, ladderLen-banStrike)
+		for i := banStrike; i < ladderLen; i++ {
+			ttl := e.policy.Strikes[i].TTL.AsDuration()
+			if ttl == 0 {
+				remaining = append(remaining, "permanent")
+			} else {
+				remaining = append(remaining, ttl.String())
+			}
+		}
+		nextRungs = strings.Join(remaining, ", ")
+	} else {
+		nextRungs = "(already at top)"
+	}
+
+	slog.WarnContext(ctx, "decision: ban_ineffective — traffic flowing despite active ban",
+		"ip", ip,
+		"strike", fmt.Sprintf("%d/%d", banStrike, ladderLen),
+		"next_rungs", nextRungs,
+		"events_after_grace", afterCount,
+		"total_suppressed", total,
+		"grace_seconds", int(grace.Seconds()),
+	)
 }
 
 // buildAllowlist parses policy.Allowlist, policy.AdminCIDRs, and the SSH peer

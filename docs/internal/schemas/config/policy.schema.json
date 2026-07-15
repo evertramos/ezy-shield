@@ -52,6 +52,21 @@
       "minimum": 1,
       "description": "Global safety rate limit. Exceeding it pauses enforcement and sends a critical alert. Default: 30."
     },
+    "escalation_exempt_window": {
+      "type": "string",
+      "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$",
+      "description": "Escalations (strike > 1) skip max_bans_per_minute only when the previous ban ended within this window. Default: 24h; values above 168h are clamped down."
+    },
+    "ban_ineffective_grace": {
+      "type": "string",
+      "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$",
+      "description": "Grace period after a ban before suppressed events count toward the ban_ineffective diagnostic. Floor and default: 90s; lower values are raised."
+    },
+    "ban_ineffective_min_events": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Suppressed events after the grace period that trigger the ban_ineffective diagnostic. Floor and default: 3; lower values are raised."
+    },
     "allowlist": {
       "type": "array",
       "description": "IPs and CIDRs that can never be banned. The allowlist wins over every other decision.",

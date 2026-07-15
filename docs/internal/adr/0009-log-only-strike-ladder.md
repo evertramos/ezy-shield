@@ -80,6 +80,27 @@ never return, *any* ladder is decorative — including a counter-based one. If
 real deployments show the re-offense ladder escalating too slowly against
 sustained attackers, the revisit gets its own issue.
 
+## Amendment (2026-07-14): recency bound on the rate-limit exemption
+
+Decision item 3 exempted escalation bans from `max_bans_per_minute` on the
+grounds that they "extend an existing block for a known offender". Review of
+the first implementation showed that condition, as stated, is too weak: strike
+counts never decay (decay is deferred to v0.2), so *any* IP ever banned would
+bypass the cap forever. "Has a strike" degrades from *was blocked until
+moments ago* into *was blocked at some point in history* — and a mass
+re-detection of old offenders (parser bug, log replay) would bypass the cap
+for its entire blast radius, disabling the safety valve exactly when it is
+needed.
+
+The exemption is therefore bounded by recency: an escalation skips the cap
+only when the previous ban **ended within `escalation_exempt_window`**
+(default 24h, ceiling 7d — policy may tighten the window, never widen it past
+the ceiling, since a wider window weakens the cap). The ban end is derived
+from the last strike row (`recorded_at + ttl_seconds`); permanent last
+strikes, missing history, and store errors all fail safe to "not exempt".
+Escalations outside the window are not dropped — they count against the cap
+like any fresh ban.
+
 ## Consequences
 
 - The 1→5-in-seconds runaway is structurally impossible: rung advances require

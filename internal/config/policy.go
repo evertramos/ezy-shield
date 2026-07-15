@@ -19,6 +19,27 @@ const DefaultObserveThreshold = 40
 // DefaultMaxBansPerMinute is the global ban-rate safety cap.
 const DefaultMaxBansPerMinute = 30
 
+// DefaultBanIneffectiveGrace is the default (and minimum) grace period before
+// traffic during a ban is considered anomalous. In-flight requests, CDN
+// buffering, and log-write latency can cause legitimate hits after a ban.
+const DefaultBanIneffectiveGrace = 90 * time.Second
+
+// DefaultBanIneffectiveMinEvents is the default (and minimum) number of
+// suppressed events after grace to trigger a ban_ineffective diagnostic.
+const DefaultBanIneffectiveMinEvents = 3
+
+// DefaultEscalationExemptWindow is how long after a ban's scheduled end a
+// re-offense still counts as an escalation exempt from max_bans_per_minute.
+// The exemption exists because re-banning an IP that was blocked until
+// moments ago adds no new-lockout exposure; an IP whose last ban ended long
+// ago is a fresh ban for rate-limit purposes and must count against the cap.
+const DefaultEscalationExemptWindow = 24 * time.Hour
+
+// MaxEscalationExemptWindow is the ceiling for escalation_exempt_window.
+// A larger window weakens the max_bans_per_minute safety cap (Hard Rule §1),
+// so policy may tighten the window but never widen it past this bound.
+const MaxEscalationExemptWindow = 7 * 24 * time.Hour
+
 // DefaultStrikes is the strike escalation table used when policy.yaml omits strikes.
 // A TTL of zero means permanent ban.
 var DefaultStrikes = []StrikeEntry{
@@ -46,6 +67,21 @@ type Policy struct {
 	// BlockASNs lists autonomous system numbers to block (format "AS12345").
 	// Same semantics as BlockCountries. Example: [AS16276, AS14061]
 	BlockASNs []string `yaml:"block_asns"`
+
+	// BanIneffectiveGrace is the grace period after a ban before traffic is
+	// considered anomalous (in-flight requests, CDN buffering, log latency).
+	// Minimum 90s; defaults to 90s if omitted or below minimum.
+	BanIneffectiveGrace Duration `yaml:"ban_ineffective_grace"`
+	// BanIneffectiveMinEvents is the minimum number of suppressed events after
+	// the grace period to trigger a ban_ineffective diagnostic.
+	// Minimum 3; defaults to 3 if omitted or below minimum.
+	BanIneffectiveMinEvents int `yaml:"ban_ineffective_min_events"`
+
+	// EscalationExemptWindow bounds the escalation exemption from
+	// max_bans_per_minute: a strike > 1 skips the cap only when the previous
+	// ban ended within this window. Defaults to 24h if omitted or <= 0;
+	// values above 7d are clamped down (widening weakens the safety cap).
+	EscalationExemptWindow Duration `yaml:"escalation_exempt_window"`
 }
 
 // GeoBlockScore is the score added to verdicts from blocked countries or ASNs.
@@ -139,6 +175,21 @@ func (p *Policy) applyDefaults() {
 	}
 	if p.MaxBansPerMinute == 0 {
 		p.MaxBansPerMinute = DefaultMaxBansPerMinute
+	}
+	// ban_ineffective thresholds: enforce minimums (per ADR-0009)
+	if p.BanIneffectiveGrace.AsDuration() < DefaultBanIneffectiveGrace {
+		p.BanIneffectiveGrace = Duration(DefaultBanIneffectiveGrace)
+	}
+	if p.BanIneffectiveMinEvents < DefaultBanIneffectiveMinEvents {
+		p.BanIneffectiveMinEvents = DefaultBanIneffectiveMinEvents
+	}
+	// escalation_exempt_window: default when omitted, ceiling when widened —
+	// tightening (any positive value below the ceiling) is always allowed.
+	if p.EscalationExemptWindow.AsDuration() <= 0 {
+		p.EscalationExemptWindow = Duration(DefaultEscalationExemptWindow)
+	}
+	if p.EscalationExemptWindow.AsDuration() > MaxEscalationExemptWindow {
+		p.EscalationExemptWindow = Duration(MaxEscalationExemptWindow)
 	}
 }
 

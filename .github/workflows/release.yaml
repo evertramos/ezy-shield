@@ -27,13 +27,20 @@ jobs:
     outputs:
       new_tag: ${{ steps.bump.outputs.new_tag }}
     steps:
-      # dev is the DEFAULT branch (development); releases are cut from main
-      # only. The dispatch UI pre-selects the default branch, so without this
-      # guard a careless click would tag dev's HEAD.
-      - name: Refuse to tag anything but main
-        if: github.ref != 'refs/heads/main'
+      # dev is the DEFAULT branch (development). Stable releases are cut from
+      # main only; rc tags may also be cut from dev — an rc is a rehearsal of
+      # dev's integration state and publishes only to the "testing" package
+      # suite, never to "stable".
+      - name: Refuse stable bumps outside main
+        if: inputs.bump != 'rc' && github.ref != 'refs/heads/main'
         run: |
-          echo "::error::Release dispatch must run from 'main' (got '${{ github.ref_name }}'). Select 'main' in the 'Use workflow from' dropdown — 'dev' is the development branch."
+          echo "::error::'${{ inputs.bump }}' releases must be dispatched from 'main' (got '${{ github.ref_name }}'). Select 'main' in the 'Use workflow from' dropdown. Only 'rc' may be cut from dev."
+          exit 1
+
+      - name: Refuse rc bumps outside dev or main
+        if: inputs.bump == 'rc' && github.ref != 'refs/heads/dev' && github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::rc releases are cut from 'dev' (or 'main'), got '${{ github.ref_name }}'."
           exit 1
 
       - uses: actions/checkout@v7
@@ -110,16 +117,26 @@ jobs:
           fetch-depth: 0
           ref: ${{ needs.tag.outputs.new_tag || github.ref }}
 
-      # Defence-in-depth for the push-tag path too: a tag created on a dev
-      # commit (e.g. a manual `git tag` from the wrong checkout) must never
-      # produce a release. Releases are cut from main only.
-      - name: Verify the tagged commit is on main
+      # Defence-in-depth for the push-tag path: a STABLE tag on a commit that
+      # is not on main must never produce a release (covers a manual `git tag`
+      # from the wrong checkout). Prerelease tags (-rc/-alpha/-beta) are
+      # exempt — they may be cut from dev and only feed the "testing" package
+      # suite and prerelease GitHub releases.
+      - name: Verify stable tags are on main
         run: |
-          git fetch -q origin main
-          if ! git merge-base --is-ancestor HEAD origin/main; then
-            echo "::error::Tag '${{ needs.tag.outputs.new_tag || github.ref_name }}' points at a commit that is not on main. Releases are cut from main only — merge the release PR (dev → main) first."
-            exit 1
-          fi
+          TAG="${{ needs.tag.outputs.new_tag || github.ref_name }}"
+          case "$TAG" in
+          *-*)
+            echo "prerelease tag '$TAG' — main ancestry not required (testing channel)"
+            ;;
+          *)
+            git fetch -q origin main
+            if ! git merge-base --is-ancestor HEAD origin/main; then
+              echo "::error::Stable tag '$TAG' points at a commit that is not on main. Stable releases are cut from main only — merge the release PR (dev → main) first."
+              exit 1
+            fi
+            ;;
+          esac
 
       - uses: actions/setup-go@v6
         with:

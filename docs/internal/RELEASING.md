@@ -18,11 +18,13 @@ mark (`release.prerelease: auto`).
 - **dev** is the DEFAULT branch: all feature PRs target it (auto-close of
   `Closes #N` works per-PR), event-triggered workflows read their definition
   from it, and it is what visitors browse.
-- **main** holds releases only. Releases are cut **from main exclusively**,
-  enforced twice in `release.yaml`: the dispatch `tag` job refuses any ref
-  but main (the UI pre-selects the default branch = dev — the guard catches
-  the careless click), and the `release` job verifies the tagged commit is
-  an ancestor of main before building anything.
+- **main** holds stable releases. **Stable tags are cut from main
+  exclusively**; **rc tags may be cut from dev** — an rc is a rehearsal of
+  dev's integration state and publishes only to the "testing" package suite
+  and a prerelease GitHub release, never to "stable" or the "latest" mark.
+  Enforced twice in `release.yaml`: the dispatch `tag` job refuses stable
+  bumps outside main (and rc bumps outside dev/main), and the `release` job
+  verifies stable tags are ancestors of main before building anything.
 - **Post-release routine**: release PRs are squash-merged, so dev and main
   diverge again the moment a release lands. Immediately after each release —
   while no PRs are open — reset dev onto main:

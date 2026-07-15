@@ -105,54 +105,21 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Build binaries
-        run: |
-          VERSION="${{ needs.tag.outputs.new_tag || github.ref_name }}"
-          COMMIT="$(git rev-parse --short HEAD)"
-          DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          LDFLAGS="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildDate=${DATE}"
-
-          declare -a TARGETS=(
-            "linux/amd64"
-            "linux/arm64"
-          )
-
-          mkdir -p dist
-
-          for target in "${TARGETS[@]}"; do
-            GOOS="${target%/*}"
-            GOARCH="${target#*/}"
-            SUFFIX="${GOOS}-${GOARCH}"
-
-            echo "Building ezyshield-${SUFFIX}..."
-            CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH \
-              go build -trimpath -ldflags "$LDFLAGS" \
-              -o "dist/ezyshield-${SUFFIX}" ./cmd/ezyshield
-
-            echo "Building ezyshield-enforcer-${SUFFIX}..."
-            CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH \
-              go build -trimpath -ldflags "$LDFLAGS" \
-              -o "dist/ezyshield-enforcer-${SUFFIX}" ./cmd/ezyshield-enforcer
-          done
-
-      - name: Generate checksums
-        run: |
-          cd dist
-          sha256sum * > checksums.txt
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
+      # goreleaser (issues #97/#98) builds both binaries for amd64+arm64
+      # (CGO off, -trimpath, ldflags version), publishes raw binaries under
+      # the exact names scripts/get.sh expects, tarballs, checksums.txt, and
+      # .deb/.rpm packages. rc/alpha/beta tags become prereleases and never
+      # take "latest" (release.prerelease: auto in .goreleaser.yaml).
+      # The same snapshot build is install-verified in containers by the
+      # `packages` job in ci.yaml on every PR.
+      - name: Run goreleaser
+        uses: goreleaser/goreleaser-action@v6
         with:
-          tag_name: ${{ needs.tag.outputs.new_tag || github.ref_name }}
-          generate_release_notes: true
-          # Overwrite any pre-existing notes instead of appending to them,
-          # so notes are not duplicated if the release already exists.
-          append_body: false
-          prerelease: ${{ contains(needs.tag.outputs.new_tag || github.ref_name, '-rc') || contains(needs.tag.outputs.new_tag || github.ref_name, '-alpha') || contains(needs.tag.outputs.new_tag || github.ref_name, '-beta') }}
-          make_latest: ${{ !contains(needs.tag.outputs.new_tag || github.ref_name, '-rc') && !contains(needs.tag.outputs.new_tag || github.ref_name, '-alpha') && !contains(needs.tag.outputs.new_tag || github.ref_name, '-beta') }}
-          files: |
-            dist/ezyshield-*
-            dist/checksums.txt
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Release summary
         run: |

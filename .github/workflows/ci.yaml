@@ -140,6 +140,56 @@ jobs:
             echo "::notice::All vulnerabilities are in Go stdlib — Go will be updated when fix is released"
           fi
 
+  packages:
+    # Builds the full goreleaser snapshot and install-verifies the resulting
+    # .deb on debian:12 and .rpm on rockylinux:9 (issue #98): version prints,
+    # doctor runs (may fail on missing nftables — asserted to run, not pass),
+    # service user/dirs created by postinstall, units pass systemd-analyze
+    # verify, and removal preserves /var/lib/ezyshield.
+    needs: detect
+    if: needs.detect.outputs.has_go == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: goreleaser snapshot
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --snapshot --clean
+      - name: Verify .deb on debian:12
+        run: |
+          docker run --rm -v "$PWD/dist:/dist:ro" debian:12 bash -ec '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get -qq update >/dev/null && apt-get -qq install -y systemd >/dev/null
+            dpkg -i /dist/ezyshield_*_linux_amd64.deb
+            ezyshield version
+            ezyshield-enforcer --version
+            id ezyshield
+            stat -c "%a %U:%G %n" /etc/ezyshield /var/lib/ezyshield
+            out=$(ezyshield doctor 2>&1 || true); test -n "$out"
+            systemd-analyze verify /usr/lib/systemd/system/ezyshield.service /usr/lib/systemd/system/ezyshield-enforcer.service
+            ls /etc/ezyshield/config.yaml.example /etc/ezyshield/policy.yaml.example /etc/ezyshield/rules.yaml.example
+          '
+      - name: Verify .rpm on rockylinux:9
+        run: |
+          docker run --rm -v "$PWD/dist:/dist:ro" rockylinux:9 bash -ec '
+            dnf -q -y install systemd shadow-utils >/dev/null
+            rpm -i /dist/ezyshield_*_linux_amd64.rpm
+            ezyshield version
+            id ezyshield
+            out=$(ezyshield doctor 2>&1 || true); test -n "$out"
+            systemd-analyze verify /usr/lib/systemd/system/ezyshield.service /usr/lib/systemd/system/ezyshield-enforcer.service
+            rpm -e ezyshield
+            test -d /var/lib/ezyshield
+          '
+
   security-review-gate:
     # Reminds/enforces the security review on PRs that touch critical (🔴) paths.
     if: github.event_name == 'pull_request'

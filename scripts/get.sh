@@ -27,6 +27,14 @@ fi
 
 SUFFIX="${OS}-${ARCH}"
 
+# Native packages exist for deb/rpm systems — they add the systemd units,
+# the service user, and clean upgrades via the package manager. This script
+# still works everywhere; the hint is informational only (issue #99).
+if command -v apt-get >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
+  echo "Tip: native .deb/.rpm packages are available — see the apt/dnf setup in the"
+  echo "     install docs: https://github.com/evertramos/ezy-shield#install"
+fi
+
 # Source override: point the installer at a local mirror (air-gapped installs,
 # CI, or the QEMU e2e harness) instead of GitHub Releases. When set, the
 # "latest release" API lookup is skipped and artifacts + checksums.txt are

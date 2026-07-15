@@ -10,6 +10,52 @@ This guide covers all ways to install EzyShield: from a pre-built release, a spe
 
 ---
 
+## Install via package manager (apt / dnf)
+
+Native packages ship the binaries, systemd units, the `ezyshield` service
+user, and clean upgrades. Repository metadata is GPG-signed; stable releases
+live in the `stable` suite, release candidates in `testing`.
+
+**Debian / Ubuntu:**
+
+```bash
+curl -fsSL https://packages.ezyshield.com/ezyshield.asc | sudo gpg --dearmor -o /usr/share/keyrings/ezyshield.gpg
+echo "deb [signed-by=/usr/share/keyrings/ezyshield.gpg] https://packages.ezyshield.com/apt stable main" | sudo tee /etc/apt/sources.list.d/ezyshield.list
+sudo apt update && sudo apt install ezyshield
+```
+
+**RHEL / Rocky / Alma:**
+
+```bash
+sudo tee /etc/yum.repos.d/ezyshield.repo <<'EOF'
+[ezyshield]
+name=EzyShield
+baseurl=https://packages.ezyshield.com/rpm/stable/$basearch
+enabled=1
+gpgcheck=0
+repo_gpgcheck=1
+gpgkey=https://packages.ezyshield.com/ezyshield.asc
+EOF
+sudo dnf install ezyshield
+```
+
+> `repo_gpgcheck=1` validates the signed repository metadata, which in turn
+> pins the SHA-256 of every package — integrity is covered end to end.
+> Per-package rpm signatures arrive with the artifact-signing work (#100),
+> at which point `gpgcheck=1` becomes the documented default.
+
+Signing key fingerprint (verify after import with `gpg --show-keys`):
+
+```
+<KEY-FINGERPRINT — maintainer fills in after first publish>
+```
+
+To follow release candidates instead, replace `stable` with `testing` in
+either snippet. Packages do **not** enable or start any service — run
+`sudo ezyshield init` after installing.
+
+---
+
 ## Quick install (latest stable)
 
 ```bash

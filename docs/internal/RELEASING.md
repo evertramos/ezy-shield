@@ -13,6 +13,24 @@ Releases are built by goreleaser (`.goreleaser.yaml`) from a git tag.
 `rc`/`alpha`/`beta` tags become **prereleases** and never take the "latest"
 mark (`release.prerelease: auto`).
 
+## Branch model
+
+- **dev** is the DEFAULT branch: all feature PRs target it (auto-close of
+  `Closes #N` works per-PR), event-triggered workflows read their definition
+  from it, and it is what visitors browse.
+- **main** holds releases only. Releases are cut **from main exclusively**,
+  enforced twice in `release.yaml`: the dispatch `tag` job refuses any ref
+  but main (the UI pre-selects the default branch = dev — the guard catches
+  the careless click), and the `release` job verifies the tagged commit is
+  an ancestor of main before building anything.
+- **Post-release routine**: release PRs are squash-merged, so dev and main
+  diverge again the moment a release lands. Immediately after each release —
+  while no PRs are open — reset dev onto main:
+  `git push --force origin origin/main:refs/heads/dev` (trees are identical
+  at that moment; the squashed granular history stays reachable through the
+  release PR). Skipping this brings back the phantom-conflict storm on the
+  next release PR.
+
 ## Artifacts per release
 
 | Artifact | Purpose |

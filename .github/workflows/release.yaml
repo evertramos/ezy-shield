@@ -27,6 +27,15 @@ jobs:
     outputs:
       new_tag: ${{ steps.bump.outputs.new_tag }}
     steps:
+      # dev is the DEFAULT branch (development); releases are cut from main
+      # only. The dispatch UI pre-selects the default branch, so without this
+      # guard a careless click would tag dev's HEAD.
+      - name: Refuse to tag anything but main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Release dispatch must run from 'main' (got '${{ github.ref_name }}'). Select 'main' in the 'Use workflow from' dropdown — 'dev' is the development branch."
+          exit 1
+
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
@@ -100,6 +109,17 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ needs.tag.outputs.new_tag || github.ref }}
+
+      # Defence-in-depth for the push-tag path too: a tag created on a dev
+      # commit (e.g. a manual `git tag` from the wrong checkout) must never
+      # produce a release. Releases are cut from main only.
+      - name: Verify the tagged commit is on main
+        run: |
+          git fetch -q origin main
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::Tag '${{ needs.tag.outputs.new_tag || github.ref_name }}' points at a commit that is not on main. Releases are cut from main only — merge the release PR (dev → main) first."
+            exit 1
+          fi
 
       - uses: actions/setup-go@v6
         with:

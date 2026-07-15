@@ -174,3 +174,18 @@ jobs:
           else
             echo "No 🔴 critical paths touched; security-review gate is advisory."
           fi
+
+  ip-hygiene-gate:
+    # Enforces AGENTS.md Hard Rule 8: IP literals added to tests, fixtures/,
+    # or configs/ must be documentation ranges (RFC 5737 / RFC 3849).
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Check added IP literals are documentation ranges
+        run: |
+          git fetch -q origin "${{ github.base_ref }}"
+          bash scripts/ip-hygiene-gate.sh --self-test
+          bash scripts/ip-hygiene-gate.sh "origin/${{ github.base_ref }}"

@@ -53,12 +53,20 @@ ipv4_offenders() {
 
 # ipv6_offenders: stdin → IPv6-looking literals outside the allowed ranges.
 # A candidate must contain a hex letter or "::" (filters timestamps), and
-# MAC addresses (six 2-hex-digit groups) are skipped.
+# MAC addresses (six 2-hex-digit groups) are skipped. The compressed forms
+# are matched narrowly so language scope operators ("std::string",
+# "foo::bar") are never extracted: an empty-prefix "::" match must be
+# multi-group, a prefixed "::" match must have hex digits on both sides,
+# and a trailing "::" (prefix notation, e.g. "2a02:8d4::/32") needs at
+# least two leading groups. "::ffff:" (IPv4-mapped) is allowed here because
+# the embedded IPv4 literal is gated by the IPv4 pass. Residual accepted
+# gap: a bare single-group compressed literal ("::abcd" / "abcd::").
 ipv6_offenders() {
-	grep -oiE '\b([0-9a-f]{1,4}:){2,7}:?[0-9a-f]{1,4}\b|([0-9a-f]{1,4})?::[0-9a-f:]*[0-9a-f]' |
+	grep -oiE '\b([0-9a-f]{1,4}:){2,7}:?[0-9a-f]{1,4}\b|[0-9a-f]{1,4}::[0-9a-f:]*[0-9a-f]|::([0-9a-f]{1,4}:)+[0-9a-f]{1,4}|\b([0-9a-f]{1,4}:){2,7}:' |
+		grep -vE '::.*::' |
 		grep -iE '[a-f]|::' |
 		grep -viE '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' |
-		grep -viE '^(2001:0?db8(:|$)|fe80:|f[cd][0-9a-f]{0,2}:|ff[0-9a-f]{0,2}:)' |
+		grep -viE '^(2001:0?db8(:|$)|fe80:|f[cd][0-9a-f]{0,2}:|ff[0-9a-f]{0,2}:|::ffff:)' |
 		grep -vxiE '::1?' |
 		sort -u
 }
@@ -90,6 +98,12 @@ self_test() {
 		"$(printf '2001:db8::1 2001:db8:2ab::9 fe80::1 fd00::1 ff02::1 ::1' | ipv6_offenders)"
 	check "timestamps and MACs pass" "" \
 		"$(printf 'at 12:34:56 mac aa:bb:cc:dd:ee:ff' | ipv6_offenders)"
+	check "trailing-:: prefix notation flagged" "2a02:8d4::" \
+		"$(printf 'ISP range 2a02:8d4::/32 observed' | ipv6_offenders)"
+	check "language scope operators pass" "" \
+		"$(printf 'std::string foo::bar() base::add::a1' | ipv6_offenders)"
+	check "IPv4-mapped passes v6 (v4 pass gates the payload)" "" \
+		"$(printf 'mapped ::ffff:192.0.2.7' | ipv6_offenders)"
 
 	[ "$rc" -eq 0 ] && echo "self-test: all green"
 	return "$rc"

@@ -301,14 +301,16 @@ func TestLogin_SuccessGrantsAccess(t *testing.T) {
 }
 
 func TestLogout_ClearsSession(t *testing.T) {
-	_, client, base, cleanup := newTestServer(t, "correct-horse-battery-staple")
+	srv, client, base, cleanup := newTestServer(t, "correct-horse-battery-staple")
 	defer cleanup()
 
 	form := url.Values{"username": {"admin"}, "password": {"correct-horse-battery-staple"}}
 	loginResp := doPostForm(t, client, base+"/login", form)
 	closeBody(t, loginResp)
 
-	logoutResp := doPostForm(t, client, base+"/logout", url.Values{})
+	// Logout is auth- and CSRF-gated like every other POST (issue #86), so
+	// the real browser flow carries the session's token.
+	logoutResp := authedPostForm(t, srv, client, base, "/logout", url.Values{})
 	closeBody(t, logoutResp)
 
 	resp := doGet(t, client, base+"/")

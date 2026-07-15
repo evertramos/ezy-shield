@@ -8,6 +8,8 @@ order: 2
 
 [Conteúdo de tradução em andamento - veja docs/content/en/reference/config.md para a versão em inglês]
 
+> `ezyshield init` e os wizards `ezyshield config <componente>` escrevem em `/etc/ezyshield` e precisam de `sudo` — falham imediatamente com a dica antes de qualquer pergunta.
+
 Referência completa para `/etc/ezyshield/config.yaml`.
 
 ## Coletor SSH (nome do unit varia por distro)

@@ -8,6 +8,8 @@ order: 2
 
 Complete reference for `/etc/ezyshield/config.yaml`. All paths are required unless marked optional.
 
+> `ezyshield init` and the `ezyshield config <component>` wizards write to `/etc/ezyshield` and must run with `sudo` — they fail fast with a hint before asking any question.
+
 ## Top level
 
 | Field | Type | Required | Description |

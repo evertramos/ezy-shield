@@ -65,6 +65,9 @@ Pass --yes to accept all smart defaults without prompting.
 Pass --config-dir to write files elsewhere (skips systemd/service steps — useful for testing).`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := requireRootForWrites(cmd, configDir); err != nil {
+				return err
+			}
 			if configDir != defaultConfigDir {
 				skipSystem = true
 			}

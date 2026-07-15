@@ -73,6 +73,7 @@ addressed. "Looks fine" is not a review — cite file:line, why, and the fix.
 | `internal/decision/antilockout_test.go` | SSH peer / allowlist / CDN range can never be banned (§2 SECURITY-REVIEW) |
 | `internal/ai/prompt_injection_test.go` | Hostile log content excluded from AI payload; off-schema responses fall back to rules; policy clamps (§5 SECURITY-REVIEW) |
 | `internal/config/secret_leak_test.go` + `internal/ai/secret_leak_test.go` | Tokens never appear in errors, logs, or request bodies (§4 SECURITY-REVIEW) |
+| `ip-hygiene-gate` (`scripts/ip-hygiene-gate.sh`) | Hard Rule 8: IP literals added to tests/`fixtures/`/`configs/` must be RFC 5737/3849 documentation ranges; `internal/cdndetect/` (real CDN range data) is exempt. Usernames/key fingerprints have no reserved range — still review-only |
 
 Adding a new parser → add a `FuzzXxxParser` with seeds: malformed, oversized (>4 KB), binary, ANSI, CRLF injection.
 

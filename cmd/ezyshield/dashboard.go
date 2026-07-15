@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/evertramos/ezy-shield/internal/config"
 	"github.com/evertramos/ezy-shield/internal/daemon"
@@ -107,12 +108,57 @@ func runDashboard(ctx context.Context, stderr io.Writer, configPath, addrOverrid
 		return fmt.Errorf("bootstrap admin: %w", err)
 	}
 	if created {
-		printBootstrapCredentials(stderr, pw, authDB)
+		isTTY := term.IsTerminal(int(os.Stderr.Fd()))
+		if err := emitBootstrapCredentials(stderr, isTTY, pw, authDB); err != nil {
+			return err
+		}
 	}
 
 	sigCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	return srv.Run(sigCtx)
+}
+
+// emitBootstrapCredentials delivers the first-run admin password. On an
+// interactive stderr it prints the banner inline, exactly as before. When
+// stderr is not a TTY (systemd, docker, cron, redirection) the plaintext
+// would be captured on disk by journald / docker logs, so the password is
+// written to a 0600 file next to the auth DB and only the path is printed
+// (issue #89) — the captured log line contains no secret.
+func emitBootstrapCredentials(w io.Writer, isTTY bool, password, authDBPath string) error {
+	if isTTY {
+		printBootstrapCredentials(w, password, authDBPath)
+		return nil
+	}
+	path := filepath.Join(filepath.Dir(authDBPath), "dashboard.first-run-password")
+	if err := writePasswordFile(path, password); err != nil {
+		return fmt.Errorf("dashboard: write initial password file %s: %w", path, err)
+	}
+	fmt.Fprintln(w, "EzyShield dashboard: admin account created (username: admin).")   //nolint:errcheck // stderr banner
+	fmt.Fprintln(w, "stderr is not a terminal — the initial password was written to:") //nolint:errcheck // stderr banner
+	fmt.Fprintln(w, " ", path, "(mode 0600)")                                          //nolint:errcheck // stderr banner
+	fmt.Fprintln(w, "Read it once and remove it:")                                     //nolint:errcheck // stderr banner
+	fmt.Fprintln(w, "  sudo cat", path, "&& sudo rm", path)                            //nolint:errcheck // stderr banner
+	return nil
+}
+
+// writePasswordFile creates path with O_EXCL so a still-unread password from
+// a previous run is never clobbered, and chmods 0600 explicitly as
+// belt-and-suspenders against permissive umask setups.
+func writePasswordFile(path, password string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600) //nolint:gosec // path is derived from the admin-controlled auth DB location
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteString(password + "\n"); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 func printBootstrapCredentials(w io.Writer, password, authDBPath string) {

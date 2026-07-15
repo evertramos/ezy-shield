@@ -34,17 +34,18 @@ set -euo pipefail
 
 APT_ARCHES=(amd64 arm64)
 
-gpg_sign_args() {
-	# --pinentry-mode loopback lets CI sign without a tty. An empty
-	# passphrase (throwaway test keys) works with the same flags.
-	printf '%s\n' --batch --yes --pinentry-mode loopback \
-		--passphrase "${GPG_PASSPHRASE:-}" --local-user "${GPG_KEY_ID:?set GPG_KEY_ID}"
+# gpg_sign runs gpg non-interactively for CI. The passphrase is fed via
+# stdin (--passphrase-fd 0), never as an argument — a --passphrase argv
+# would be readable in /proc/<pid>/cmdline for the lifetime of every gpg
+# process. Signing input always comes from file arguments here, so stdin
+# is free for the passphrase; an empty one (throwaway test keys) works too.
+gpg_sign() {
+	printf '%s' "${GPG_PASSPHRASE:-}" | gpg --batch --yes --pinentry-mode loopback \
+		--passphrase-fd 0 --local-user "${GPG_KEY_ID:?set GPG_KEY_ID}" "$@"
 }
 
 generate() {
 	local pkgdir=$1 root=$2 suite=$3
-	local sign_args
-	mapfile -t sign_args < <(gpg_sign_args)
 
 	case "$suite" in
 	stable | testing) ;;
@@ -97,13 +98,13 @@ generate() {
 		-o "APT::FTPArchive::Release::Architectures=${APT_ARCHES[*]}" \
 		-o "APT::FTPArchive::Release::Components=main" \
 		release "$dist" >"$dist/Release"
-	gpg "${sign_args[@]}" --clearsign -o "$dist/InRelease" "$dist/Release"
-	gpg "${sign_args[@]}" --armor --detach-sign -o "$dist/Release.gpg" "$dist/Release"
+	gpg_sign --clearsign -o "$dist/InRelease" "$dist/Release"
+	gpg_sign --armor --detach-sign -o "$dist/Release.gpg" "$dist/Release"
 
 	# ── yum metadata ───────────────────────────────────────────────────────
 	for arch in x86_64 aarch64; do
 		createrepo_c --update "$root/rpm/$suite/$arch" >/dev/null
-		gpg "${sign_args[@]}" --armor --detach-sign \
+		gpg_sign --armor --detach-sign \
 			-o "$root/rpm/$suite/$arch/repodata/repomd.xml.asc" \
 			"$root/rpm/$suite/$arch/repodata/repomd.xml"
 	done

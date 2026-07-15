@@ -10,6 +10,19 @@ rules:
     score: 85
     category: bruteforce
 
+  # Optional aggressive tier — also ban SSH scanners and malformed handshakes
+  # (bare connection close/reset, banner errors, kex resets, PAM echoes). These
+  # are the `ssh_probe` kind: recognised but NOT counted by the rules above.
+  # Higher false-positive risk on shared/CGNAT IPs, so it ships disabled — enable
+  # by uncommenting. See docs/reference/policy.md ("SSH probe / aggressive tier").
+  # - name: ssh_probe_aggressive
+  #   description: "SSH scanners / malformed connections (opt-in, higher FP risk)"
+  #   kinds: [ssh_probe]
+  #   window: 60s
+  #   threshold: 10
+  #   score: 60
+  #   category: scanner
+
   - name: http_scanner
     description: "High 404 response rate — directory/endpoint scanner"
     kinds: [http_request]
@@ -142,6 +155,6 @@ rules:
     description: "Sustained SSH brute force (low & slow)"
     kinds: [ssh_fail, ssh_invalid_user]
     window: 3600s
-    threshold: 15
+    threshold: 10
     score: 80
     category: bruteforce

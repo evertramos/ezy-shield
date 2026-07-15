@@ -1,9 +1,12 @@
 package decision_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net/netip"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -13,20 +16,43 @@ import (
 	"github.com/evertramos/ezy-shield/pkg/sdk"
 )
 
-// mockStore is a thread-safe test double for decision.Store.
+// lastStrikeRow mirrors what store.LastStrike reads from the strikes table.
+type lastStrikeRow struct {
+	recordedAt time.Time
+	ttl        time.Duration
+}
+
+// mockStore is a thread-safe test double for decision.Store. It mirrors the
+// real store's semantics: ban presence = row in banBannedAt; suppression
+// counters are per-ban (reset by RecordStrike, removed with the ban row);
+// hadIneff is the permanent offenders.had_ineffective mirror.
 type mockStore struct {
-	mu            sync.Mutex
-	strikes       map[string]int
-	activeBans    map[string]bool // ip → active ban present
-	lastSeenBumps []string        // IPs whose last_seen was bumped
-	banned        []sdk.Action    // calls to RecordStrike
-	audited       []sdk.Action    // calls to Audit
+	mu                  sync.Mutex
+	strikes             map[string]int
+	banBannedAt         map[string]time.Time // ip → active ban start (presence = banned)
+	banStrike           map[string]int       // ip → strike_num of active ban
+	supTotal            map[string]int       // ip → suppressed_total
+	supAfter            map[string]int       // ip → suppressed_after_grace
+	supFired            map[string]bool      // ip → ineffective_fired
+	hadIneff            map[string]bool      // ip → offenders.had_ineffective
+	lastStrike          map[string]lastStrikeRow
+	lastStrikeErr       error        // forced error for LastStrike
+	recordSuppressedErr error        // forced error for RecordSuppressed
+	lastSeenBumps       []string     // IPs whose last_seen was bumped
+	banned              []sdk.Action // calls to RecordStrike
+	audited             []sdk.Action // calls to Audit
 }
 
 func newMock(initial map[string]int) *mockStore {
 	s := &mockStore{
-		strikes:    make(map[string]int),
-		activeBans: make(map[string]bool),
+		strikes:     make(map[string]int),
+		banBannedAt: make(map[string]time.Time),
+		banStrike:   make(map[string]int),
+		supTotal:    make(map[string]int),
+		supAfter:    make(map[string]int),
+		supFired:    make(map[string]bool),
+		hadIneff:    make(map[string]bool),
+		lastStrike:  make(map[string]lastStrikeRow),
 	}
 	for k, v := range initial {
 		s.strikes[k] = v
@@ -34,17 +60,72 @@ func newMock(initial map[string]int) *mockStore {
 	return s
 }
 
-// setBanned marks ip as having (true) or not having (false) an active ban.
+// setBanned marks ip as having (true) or not having (false) an active ban
+// starting now at strike 1. Removing the ban also removes the per-ban
+// suppression counters, mirroring row deletion by ExpireBans.
 func (m *mockStore) setBanned(ip netip.Addr, active bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.activeBans[ip.String()] = active
+	k := ip.String()
+	if active {
+		m.banBannedAt[k] = time.Now()
+		m.banStrike[k] = 1
+		return
+	}
+	delete(m.banBannedAt, k)
+	delete(m.banStrike, k)
+	delete(m.supTotal, k)
+	delete(m.supAfter, k)
+	delete(m.supFired, k)
 }
 
-func (m *mockStore) HasActiveBan(_ context.Context, ip netip.Addr) (bool, error) {
+func (m *mockStore) GetBanInfo(_ context.Context, ip netip.Addr) (time.Time, int, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.activeBans[ip.String()], nil
+	k := ip.String()
+	bannedAt, ok := m.banBannedAt[k]
+	if !ok {
+		return time.Time{}, 0, false, nil
+	}
+	return bannedAt, m.banStrike[k], true, nil
+}
+
+func (m *mockStore) RecordSuppressed(_ context.Context, ip netip.Addr, afterGrace bool) (int, int, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.recordSuppressedErr != nil {
+		return 0, 0, false, m.recordSuppressedErr
+	}
+	k := ip.String()
+	if _, ok := m.banBannedAt[k]; !ok {
+		return 0, 0, false, nil // no active ban row (expiry race)
+	}
+	m.supTotal[k]++
+	if afterGrace {
+		m.supAfter[k]++
+	}
+	return m.supTotal[k], m.supAfter[k], m.supFired[k], nil
+}
+
+func (m *mockStore) MarkBanIneffective(_ context.Context, ip netip.Addr) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k := ip.String()
+	if _, ok := m.banBannedAt[k]; !ok {
+		return false, nil
+	}
+	if m.supFired[k] {
+		return false, nil
+	}
+	m.supFired[k] = true
+	m.hadIneff[k] = true
+	return true, nil
+}
+
+func (m *mockStore) HadIneffectiveBan(_ context.Context, ip netip.Addr) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.hadIneff[ip.String()], nil
 }
 
 func (m *mockStore) BumpLastSeen(_ context.Context, ip netip.Addr) error {
@@ -60,11 +141,39 @@ func (m *mockStore) GetStrikeCount(_ context.Context, ip netip.Addr) (int, error
 	return m.strikes[ip.String()], nil
 }
 
+func (m *mockStore) LastStrike(_ context.Context, ip netip.Addr) (time.Time, time.Duration, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.lastStrikeErr != nil {
+		return time.Time{}, 0, false, m.lastStrikeErr
+	}
+	row, ok := m.lastStrike[ip.String()]
+	if !ok {
+		return time.Time{}, 0, false, nil
+	}
+	return row.recordedAt, row.ttl, true, nil
+}
+
+// setLastStrike seeds the most recent strike row for ip, as if a prior ban
+// was recorded at recordedAt with the given TTL.
+func (m *mockStore) setLastStrike(ip netip.Addr, recordedAt time.Time, ttl time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lastStrike[ip.String()] = lastStrikeRow{recordedAt: recordedAt, ttl: ttl}
+}
+
 func (m *mockStore) RecordStrike(_ context.Context, a sdk.Action) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.strikes[a.IP.String()]++
-	m.activeBans[a.IP.String()] = true // mirror what real store does
+	k := a.IP.String()
+	m.strikes[k]++
+	// Mirror the real store's bans_active upsert: new ban resets counters.
+	m.banBannedAt[k] = time.Now()
+	m.banStrike[k] = a.Strike
+	m.supTotal[k] = 0
+	m.supAfter[k] = 0
+	m.supFired[k] = false
+	m.lastStrike[k] = lastStrikeRow{recordedAt: time.Now(), ttl: a.TTL}
 	m.banned = append(m.banned, a)
 	return nil
 }
@@ -96,13 +205,30 @@ func mkVerdict(ip netip.Addr, score int, category string) sdk.Verdict {
 
 // armedPolicy returns a policy with Armed=true and standard defaults.
 func armedPolicy() *config.Policy {
+	// Mirrors applyDefaults' floors so tests exercise production-reachable
+	// config states.
 	return &config.Policy{
-		Armed:            true,
-		BanThreshold:     70,
-		ObserveThreshold: 40,
-		MaxBansPerMinute: 30,
-		Strikes:          config.DefaultStrikes,
+		Armed:                   true,
+		BanThreshold:            70,
+		ObserveThreshold:        40,
+		MaxBansPerMinute:        30,
+		Strikes:                 config.DefaultStrikes,
+		BanIneffectiveGrace:     config.Duration(config.DefaultBanIneffectiveGrace),
+		BanIneffectiveMinEvents: config.DefaultBanIneffectiveMinEvents,
+		EscalationExemptWindow:  config.Duration(config.DefaultEscalationExemptWindow),
 	}
+}
+
+// captureLogs redirects slog's default logger to a buffer for the duration of
+// the test, so tests can assert diagnostics were (or were not) emitted.
+// Tests using it must not call t.Parallel().
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
 }
 
 // mustEngine creates an Engine and fails t on error.
@@ -667,5 +793,324 @@ func TestDecide_DryRunEscalation(t *testing.T) {
 				t.Error("dry_ban must not call RecordStrike")
 			}
 		})
+	}
+}
+
+// ── ban_ineffective tests (ADR-0009) ──────────────────────────────────────────
+
+const (
+	diagMsg     = "ban_ineffective — traffic flowing despite active ban"
+	prePermMsg  = "ban_ineffective_permanent"
+	suppressMsg = "already_banned"
+)
+
+// setBannedWithTime marks ip as having an active ban that started at bannedAt.
+func (m *mockStore) setBannedWithTime(ip netip.Addr, bannedAt time.Time, strike int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.banBannedAt[ip.String()] = bannedAt
+	m.banStrike[ip.String()] = strike
+}
+
+// suppressN sends n verdicts for a banned ip and asserts each is suppressed.
+func suppressN(t *testing.T, engine *decision.Engine, ip netip.Addr, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		act, err := engine.Decide(context.Background(), []sdk.Verdict{mkVerdict(ip, 85, "bruteforce")})
+		if err != nil {
+			t.Fatalf("Decide[%d]: %v", i, err)
+		}
+		if act.Op != suppressMsg {
+			t.Errorf("Decide[%d]: Op = %q, want %s", i, act.Op, suppressMsg)
+		}
+	}
+}
+
+// TestBanIneffective_GracePeriod verifies that events during the grace period
+// are counted but never trigger the diagnostic.
+func TestBanIneffective_GracePeriod(t *testing.T) {
+	buf := captureLogs(t)
+	st := newMock(nil)
+	// Ban started 30 seconds ago — still inside the 90s grace period.
+	st.setBannedWithTime(ip1, time.Now().Add(-30*time.Second), 1)
+	engine := mustEngine(t, armedPolicy(), st)
+
+	suppressN(t, engine, ip1, 5)
+
+	if got := strings.Count(buf.String(), diagMsg); got != 0 {
+		t.Errorf("ban_ineffective emitted %d time(s) during grace, want 0", got)
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.supTotal[ip1.String()] != 5 {
+		t.Errorf("suppressed_total = %d, want 5", st.supTotal[ip1.String()])
+	}
+	if st.supAfter[ip1.String()] != 0 {
+		t.Errorf("suppressed_after_grace = %d, want 0 (all events in grace)", st.supAfter[ip1.String()])
+	}
+	if st.supFired[ip1.String()] {
+		t.Error("ineffective_fired set during grace period")
+	}
+}
+
+// TestBanIneffective_Threshold verifies the diagnostic fires exactly when the
+// MinEvents-th event arrives after the grace period, and not before.
+func TestBanIneffective_Threshold(t *testing.T) {
+	buf := captureLogs(t)
+	st := newMock(nil)
+	// Ban started 10 minutes ago — past the 90s grace.
+	st.setBannedWithTime(ip1, time.Now().Add(-10*time.Minute), 1)
+	engine := mustEngine(t, armedPolicy(), st) // MinEvents = 3
+
+	suppressN(t, engine, ip1, 2)
+	if got := strings.Count(buf.String(), diagMsg); got != 0 {
+		t.Errorf("ban_ineffective emitted %d time(s) below threshold, want 0", got)
+	}
+
+	suppressN(t, engine, ip1, 1) // 3rd event: threshold reached
+	if got := strings.Count(buf.String(), diagMsg); got != 1 {
+		t.Errorf("ban_ineffective emitted %d time(s) at threshold, want exactly 1", got)
+	}
+	// The WARN carries ladder context (strike 1 of 5 default rungs).
+	if !strings.Contains(buf.String(), "strike=1/5") {
+		t.Errorf("ban_ineffective WARN missing ladder context; log:\n%s", buf.String())
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if !st.supFired[ip1.String()] {
+		t.Error("ineffective_fired not persisted to ban row")
+	}
+	if !st.hadIneff[ip1.String()] {
+		t.Error("offenders.had_ineffective not persisted")
+	}
+}
+
+// TestBanIneffective_FiresOncePerBan verifies the diagnostic fires exactly
+// once per ban no matter how many events follow.
+func TestBanIneffective_FiresOncePerBan(t *testing.T) {
+	buf := captureLogs(t)
+	st := newMock(nil)
+	st.setBannedWithTime(ip1, time.Now().Add(-10*time.Minute), 1)
+	engine := mustEngine(t, armedPolicy(), st)
+
+	suppressN(t, engine, ip1, 10)
+
+	if got := strings.Count(buf.String(), diagMsg); got != 1 {
+		t.Errorf("ban_ineffective emitted %d time(s) over 10 events, want exactly 1", got)
+	}
+}
+
+// TestBanIneffective_ResetsOnNewBan verifies the counters are per-ban: after
+// the diagnostic fires, a new ban (next episode) starts fresh and the
+// diagnostic can fire again for the new ban.
+func TestBanIneffective_ResetsOnNewBan(t *testing.T) {
+	buf := captureLogs(t)
+	st := newMock(map[string]int{ip1.String(): 1})
+	st.setBannedWithTime(ip1, time.Now().Add(-10*time.Minute), 1)
+	engine := mustEngine(t, armedPolicy(), st)
+
+	// Ban #1: fire the diagnostic.
+	suppressN(t, engine, ip1, 3)
+	if got := strings.Count(buf.String(), diagMsg); got != 1 {
+		t.Fatalf("ban #1: diagnostic fired %d time(s), want 1", got)
+	}
+
+	// Ban #1 expires; the re-offense escalates to strike #2 (new ban).
+	st.setBanned(ip1, false)
+	act, err := engine.Decide(context.Background(), []sdk.Verdict{mkVerdict(ip1, 85, "bruteforce")})
+	if err != nil {
+		t.Fatalf("re-offense: %v", err)
+	}
+	if act.Op != "ban" || act.Strike != 2 {
+		t.Fatalf("re-offense Op/Strike = %q/%d, want ban/2", act.Op, act.Strike)
+	}
+
+	// New ban starts fresh: counters were reset by RecordStrike's upsert.
+	st.mu.Lock()
+	if st.supTotal[ip1.String()] != 0 || st.supFired[ip1.String()] {
+		t.Errorf("new ban inherited counters: total=%d fired=%v",
+			st.supTotal[ip1.String()], st.supFired[ip1.String()])
+	}
+	st.mu.Unlock()
+
+	// Age the new ban past grace; the diagnostic fires again for ban #2.
+	st.setBannedWithTime(ip1, time.Now().Add(-10*time.Minute), 2)
+	suppressN(t, engine, ip1, 3)
+	if got := strings.Count(buf.String(), diagMsg); got != 2 {
+		t.Errorf("after ban #2: diagnostic fired %d time(s) total, want 2 (once per ban)", got)
+	}
+}
+
+// TestBanIneffective_StoreErrorNonFatal verifies a store failure in the
+// diagnostic path never breaks the suppression path.
+func TestBanIneffective_StoreErrorNonFatal(t *testing.T) {
+	buf := captureLogs(t)
+	st := newMock(nil)
+	st.setBannedWithTime(ip1, time.Now().Add(-10*time.Minute), 1)
+	st.recordSuppressedErr = errors.New("db locked")
+	engine := mustEngine(t, armedPolicy(), st)
+
+	suppressN(t, engine, ip1, 5) // still suppressed despite the store error
+
+	if got := strings.Count(buf.String(), diagMsg); got != 0 {
+		t.Errorf("diagnostic fired %d time(s) despite store errors, want 0", got)
+	}
+}
+
+// TestBanIneffective_PrePermanentAlert verifies the louder warning fires when
+// promoting to permanent an IP that had an ineffective ban — and stays silent
+// for IPs that never had one.
+func TestBanIneffective_PrePermanentAlert(t *testing.T) {
+	cases := []struct {
+		name     string
+		hadIneff bool
+		want     int
+	}{
+		{"had ineffective ban → alert", true, 1},
+		{"clean history → no alert", false, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := captureLogs(t)
+			// 4 strikes in DB → next strike is #5, permanent in the default ladder.
+			st := newMock(map[string]int{ip1.String(): 4})
+			st.hadIneff[ip1.String()] = tc.hadIneff
+			engine := mustEngine(t, armedPolicy(), st)
+
+			act, err := engine.Decide(context.Background(), []sdk.Verdict{mkVerdict(ip1, 85, "bruteforce")})
+			if err != nil {
+				t.Fatalf("Decide: %v", err)
+			}
+			if act.Strike != 5 || act.TTL != 0 {
+				t.Fatalf("Strike/TTL = %d/%v, want 5/permanent", act.Strike, act.TTL)
+			}
+			if got := strings.Count(buf.String(), prePermMsg); got != tc.want {
+				t.Errorf("pre-permanent alert emitted %d time(s), want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestEscalation_RateLimitExemption verifies the recency-bounded exemption
+// from max_bans_per_minute (ADR-0009 §3, amended): an escalation skips the
+// cap only when the previous ban ended within escalation_exempt_window.
+// Every uncertain case (stale history, no history, permanent last strike,
+// store error) fails safe and counts against the cap.
+func TestEscalation_RateLimitExemption(t *testing.T) {
+	window := 24 * time.Hour
+
+	tests := []struct {
+		name     string
+		seed     func(m *mockStore) // strike history for ip2
+		wantErr  error              // expected error from the escalation Decide
+		wantOp   string             // expected Op when wantErr == nil
+		wantStrk int
+	}{
+		{
+			name: "recent expiry → exempt",
+			seed: func(m *mockStore) {
+				// 1h ban recorded 90m ago: ended 30m ago, well inside the window.
+				m.setLastStrike(ip2, time.Now().Add(-90*time.Minute), time.Hour)
+			},
+			wantOp:   "ban",
+			wantStrk: 2,
+		},
+		{
+			name: "ban end still in the future (early manual unban) → exempt",
+			seed: func(m *mockStore) {
+				// 24h ban recorded 1h ago: scheduled end is ahead of now.
+				m.setLastStrike(ip2, time.Now().Add(-time.Hour), 24*time.Hour)
+			},
+			wantOp:   "ban",
+			wantStrk: 2,
+		},
+		{
+			name: "stale history → rate limited",
+			seed: func(m *mockStore) {
+				// 1h ban recorded 30 days ago: ended far outside the window.
+				m.setLastStrike(ip2, time.Now().Add(-30*24*time.Hour), time.Hour)
+			},
+			wantErr: decision.ErrRateLimited,
+		},
+		{
+			name:    "strike count without history row → rate limited",
+			seed:    func(_ *mockStore) {},
+			wantErr: decision.ErrRateLimited,
+		},
+		{
+			name: "permanent last strike (operator unbanned) → rate limited",
+			seed: func(m *mockStore) {
+				m.setLastStrike(ip2, time.Now().Add(-time.Hour), 0)
+			},
+			wantErr: decision.ErrRateLimited,
+		},
+		{
+			name: "store error → rate limited (fail-safe)",
+			seed: func(m *mockStore) {
+				m.lastStrikeErr = errors.New("db locked")
+			},
+			wantErr: decision.ErrRateLimited,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pol := armedPolicy()
+			pol.MaxBansPerMinute = 1 // one ban exhausts the cap
+			pol.EscalationExemptWindow = config.Duration(window)
+
+			st := newMock(map[string]int{ip2.String(): 1}) // ip2 escalates to strike #2
+			tc.seed(st)
+			engine := mustEngine(t, pol, st)
+
+			// Exhaust the cap with a strike #1 on a fresh IP.
+			if _, err := engine.Decide(context.Background(), []sdk.Verdict{mkVerdict(ip3, 85, "bruteforce")}); err != nil {
+				t.Fatalf("ip3 strike #1: %v", err)
+			}
+
+			act, err := engine.Decide(context.Background(), []sdk.Verdict{mkVerdict(ip2, 85, "bruteforce")})
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("Decide err = %v, want %v", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Decide: %v", err)
+			}
+			if act.Op != tc.wantOp {
+				t.Errorf("Op = %q, want %q", act.Op, tc.wantOp)
+			}
+			if act.Strike != tc.wantStrk {
+				t.Errorf("Strike = %d, want %d", act.Strike, tc.wantStrk)
+			}
+		})
+	}
+}
+
+// TestEscalation_StaleCountsAgainstCap verifies that a stale escalation is not
+// dropped when the cap has room — it proceeds as a normal ban and consumes
+// cap budget like any fresh ban.
+func TestEscalation_StaleCountsAgainstCap(t *testing.T) {
+	pol := armedPolicy()
+	pol.MaxBansPerMinute = 1
+	pol.EscalationExemptWindow = config.Duration(24 * time.Hour)
+
+	st := newMock(map[string]int{ip2.String(): 1})
+	st.setLastStrike(ip2, time.Now().Add(-30*24*time.Hour), time.Hour) // stale
+	engine := mustEngine(t, pol, st)
+
+	// Cap has room: the stale escalation bans normally.
+	act, err := engine.Decide(context.Background(), []sdk.Verdict{mkVerdict(ip2, 85, "bruteforce")})
+	if err != nil {
+		t.Fatalf("stale escalation with free cap: %v", err)
+	}
+	if act.Op != "ban" || act.Strike != 2 {
+		t.Errorf("Op/Strike = %q/%d, want ban/2", act.Op, act.Strike)
+	}
+
+	// ...and it consumed the cap: the next fresh strike #1 is limited.
+	if _, err := engine.Decide(context.Background(), []sdk.Verdict{mkVerdict(ip3, 85, "bruteforce")}); !errors.Is(err, decision.ErrRateLimited) {
+		t.Fatalf("fresh ban after stale escalation: err = %v, want ErrRateLimited", err)
 	}
 }

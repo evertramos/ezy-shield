@@ -1,0 +1,7 @@
+2026-07-13T22:57:35.182105+00:00 fagots sshd-session[1079310]: Failed password for invalid user root from 192.0.2.40 port 58446 ssh2
+2026-07-13T22:58:44.868083+00:00 fagots sshd-session[1079738]: Invalid user infinity from 192.0.2.41 port 36049
+2026-07-13T22:58:46.660938+00:00 fagots sshd-session[1079738]: Failed password for invalid user infinity from 192.0.2.41 port 36049 ssh2
+2026-07-13T22:59:11.280766+00:00 fagots sshd-session[1079905]: Accepted publickey for testuser from 192.0.2.42 port 2901 ssh2: RSA SHA256:AAAA
+2026-07-13T23:00:01.000000+00:00 fagots sshd-session[1080000]: Failed password for root from 2001:db8::40 port 44210 ssh2
+2026-07-13T23:00:05.500000+00:00 fagots sshd-session[1080100]: User admin from 192.0.2.43 not allowed because not listed in AllowUsers
+2026-07-13T23:00:09.111111+00:00 fagots systemd-logind[902]: New session 936 of user testuser.

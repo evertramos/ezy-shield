@@ -13,11 +13,13 @@ import (
 	"github.com/evertramos/ezy-shield/internal/config"
 )
 
-// Exit codes for the validate command (documented in --help).
+// Exit codes for the validate/config family (documented in --help), aliased
+// to the global CLI exit codes in exit.go: a missing or unreadable input
+// file counts as a usage error (exit 2) under the frozen v0.1 convention.
 const (
-	validateExitOK       = 0
-	validateExitError    = 1
-	validateExitNotFound = 2
+	validateExitOK       = exitOK
+	validateExitError    = exitRuntime
+	validateExitNotFound = exitUsage
 )
 
 // Output markers.
@@ -42,6 +44,9 @@ Reads config.yaml and policy.yaml, runs the strict loaders, and reports
 errors and warnings. Does NOT start the daemon, open sockets, or touch
 any state.
 
+'validate' and 'config validate' are equivalent; the top-level form is
+kept as an alias.
+
 Exit codes:
   0  valid (may have warnings)
   1  errors found
@@ -50,7 +55,7 @@ Exit codes:
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			code := runValidate(cmd.OutOrStdout(), configPath, policyPath)
 			if code != validateExitOK {
-				os.Exit(code)
+				return exitCodeError{code}
 			}
 			return nil
 		},

@@ -187,14 +187,19 @@ func (s *DB) RecordStrike(ctx context.Context, a sdk.Action) error {
 		t := time.Now().UTC().Add(a.TTL).Format(time.RFC3339Nano)
 		expiresAt = &t
 	}
+	// A new ban resets the suppression counters: they are per-ban state for
+	// the ban_ineffective diagnostic (ADR-0009).
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO bans_active (ip, banned_at, expires_at, strike_num, reason)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(ip) DO UPDATE SET
-			banned_at  = excluded.banned_at,
-			expires_at = excluded.expires_at,
-			strike_num = excluded.strike_num,
-			reason     = excluded.reason
+			banned_at              = excluded.banned_at,
+			expires_at             = excluded.expires_at,
+			strike_num             = excluded.strike_num,
+			reason                 = excluded.reason,
+			suppressed_total       = 0,
+			suppressed_after_grace = 0,
+			ineffective_fired      = 0
 	`, ip, now, expiresAt, a.Strike, a.Reason); err != nil {
 		return fmt.Errorf("store: upsert ban: %w", err)
 	}
@@ -210,22 +215,150 @@ func (s *DB) RecordStrike(ctx context.Context, a sdk.Action) error {
 	return tx.Commit()
 }
 
-// HasActiveBan returns true when ip has a row in bans_active (permanent or
-// not-yet-expired), false when it does not. Callers should rely on the
-// daemon's expiry ticker to keep stale rows pruned; this method never
-// deletes rows on its own. All SQL uses parameterized queries; ip is never
-// interpolated into the query string (Hard Rule §4).
-func (s *DB) HasActiveBan(ctx context.Context, ip netip.Addr) (bool, error) {
-	var dummy int
+// GetBanInfo returns the active-ban metadata for ip: when the ban was
+// applied and at which strike. found is false when ip has no row in
+// bans_active (permanent or not-yet-expired — callers rely on the daemon's
+// expiry ticker to keep stale rows pruned). All SQL uses parameterized
+// queries; ip is never interpolated into the query string (Hard Rule §4).
+func (s *DB) GetBanInfo(ctx context.Context, ip netip.Addr) (time.Time, int, bool, error) {
+	var bannedAtStr string
+	var strike int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT 1 FROM bans_active WHERE ip = ?`, ip.String()).Scan(&dummy)
+		`SELECT banned_at, strike_num FROM bans_active WHERE ip = ?`,
+		ip.String()).Scan(&bannedAtStr, &strike)
+	if err == sql.ErrNoRows {
+		return time.Time{}, 0, false, nil
+	}
+	if err != nil {
+		return time.Time{}, 0, false, fmt.Errorf("store: GetBanInfo %s: %w", ip, err)
+	}
+	bannedAt, err := time.Parse(time.RFC3339Nano, bannedAtStr)
+	if err != nil {
+		return time.Time{}, 0, false, fmt.Errorf("store: GetBanInfo parse banned_at: %w", err)
+	}
+	return bannedAt, strike, true, nil
+}
+
+// RecordSuppressed increments the suppression counters on ip's active ban row
+// and returns the updated totals plus whether ban_ineffective already fired
+// for this ban. The counters live on bans_active so their lifecycle matches
+// the ban: the RecordStrike upsert resets them, expiry removes them. If ip
+// has no active ban row (expiry race), zero counts are returned — the caller
+// treats that as "nothing to diagnose".
+func (s *DB) RecordSuppressed(ctx context.Context, ip netip.Addr, afterGrace bool) (int, int, bool, error) {
+	ag := 0
+	if afterGrace {
+		ag = 1
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, false, fmt.Errorf("store: begin RecordSuppressed: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE bans_active SET
+			suppressed_total       = suppressed_total + 1,
+			suppressed_after_grace = suppressed_after_grace + ?
+		WHERE ip = ?
+	`, ag, ip.String()); err != nil {
+		return 0, 0, false, fmt.Errorf("store: RecordSuppressed update %s: %w", ip, err)
+	}
+
+	var total, after, fired int
+	err = tx.QueryRowContext(ctx, `
+		SELECT suppressed_total, suppressed_after_grace, ineffective_fired
+		FROM bans_active WHERE ip = ?
+	`, ip.String()).Scan(&total, &after, &fired)
+	if err == sql.ErrNoRows {
+		return 0, 0, false, tx.Commit()
+	}
+	if err != nil {
+		return 0, 0, false, fmt.Errorf("store: RecordSuppressed read %s: %w", ip, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, 0, false, fmt.Errorf("store: commit RecordSuppressed: %w", err)
+	}
+	return total, after, fired != 0, nil
+}
+
+// MarkBanIneffective flags ip's active ban as having fired the
+// ban_ineffective diagnostic and permanently records on the offender row
+// that this IP had an ineffective ban (consumed by the pre-permanent
+// alert). It returns true only for the caller that actually transitioned
+// the flag — the WHERE ineffective_fired = 0 guard makes the once-per-ban
+// semantics hold across concurrent Decide calls and daemon restarts.
+func (s *DB) MarkBanIneffective(ctx context.Context, ip netip.Addr) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("store: begin MarkBanIneffective: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx, `
+		UPDATE bans_active SET ineffective_fired = 1
+		WHERE ip = ? AND ineffective_fired = 0
+	`, ip.String())
+	if err != nil {
+		return false, fmt.Errorf("store: MarkBanIneffective %s: %w", ip, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("store: MarkBanIneffective rows %s: %w", ip, err)
+	}
+	if n == 0 {
+		return false, tx.Commit() // already fired for this ban, or ban row gone
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE offenders SET had_ineffective = 1 WHERE ip = ?
+	`, ip.String()); err != nil {
+		return false, fmt.Errorf("store: MarkBanIneffective offender %s: %w", ip, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("store: commit MarkBanIneffective: %w", err)
+	}
+	return true, nil
+}
+
+// HadIneffectiveBan reports whether ip ever had a ban marked ineffective.
+// The flag lives on the offenders row, so it survives ban expiry and daemon
+// restarts (ADR-0009: an ineffective permanent ban must never pass silently).
+func (s *DB) HadIneffectiveBan(ctx context.Context, ip netip.Addr) (bool, error) {
+	var had int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT had_ineffective FROM offenders WHERE ip = ?`,
+		ip.String()).Scan(&had)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("store: HasActiveBan %s: %w", ip, err)
+		return false, fmt.Errorf("store: HadIneffectiveBan %s: %w", ip, err)
 	}
-	return true, nil
+	return had != 0, nil
+}
+
+// LastStrike returns the recording time and TTL of the most recent strike for
+// ip; found is false when ip has no strike history. Ordered by the strikes
+// AUTOINCREMENT id (insertion order) rather than the recorded_at string:
+// RFC3339Nano trims trailing zeros, which makes lexicographic order unreliable
+// within a second. All SQL uses parameterized queries (Hard Rule §4).
+func (s *DB) LastStrike(ctx context.Context, ip netip.Addr) (time.Time, time.Duration, bool, error) {
+	var recordedAtStr string
+	var ttlSec int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT recorded_at, ttl_seconds FROM strikes WHERE ip = ? ORDER BY id DESC LIMIT 1`,
+		ip.String()).Scan(&recordedAtStr, &ttlSec)
+	if err == sql.ErrNoRows {
+		return time.Time{}, 0, false, nil
+	}
+	if err != nil {
+		return time.Time{}, 0, false, fmt.Errorf("store: LastStrike %s: %w", ip, err)
+	}
+	recordedAt, err := time.Parse(time.RFC3339Nano, recordedAtStr)
+	if err != nil {
+		return time.Time{}, 0, false, fmt.Errorf("store: LastStrike parse recorded_at: %w", err)
+	}
+	return recordedAt, time.Duration(ttlSec) * time.Second, true, nil
 }
 
 // BumpLastSeen updates offenders.last_seen for ip to now. It is a
@@ -396,13 +529,17 @@ func (s *DB) RecordManualBan(ctx context.Context, ip netip.Addr, ttl time.Durati
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// A new ban resets the suppression counters (see RecordStrike).
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO bans_active (ip, banned_at, expires_at, strike_num, reason)
 		VALUES (?, ?, ?, 1, ?)
 		ON CONFLICT(ip) DO UPDATE SET
-			banned_at  = excluded.banned_at,
-			expires_at = excluded.expires_at,
-			reason     = excluded.reason
+			banned_at              = excluded.banned_at,
+			expires_at             = excluded.expires_at,
+			reason                 = excluded.reason,
+			suppressed_total       = 0,
+			suppressed_after_grace = 0,
+			ineffective_fired      = 0
 	`, ipStr, now, expiresAt, reason); err != nil {
 		return fmt.Errorf("store: upsert manual ban: %w", err)
 	}

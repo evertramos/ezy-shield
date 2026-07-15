@@ -54,6 +54,12 @@ type daemonStore interface {
 	ListAllow(ctx context.Context) ([]store.AllowEntry, error)
 	ExpireAllows(ctx context.Context, now time.Time) (int, error)
 	ListAuditLog(ctx context.Context, limit int) ([]store.AuditEntry, error)
+	// Read-only queries backing the "report" verb (issue #54).
+	GetOffender(ctx context.Context, ip netip.Addr) (*store.OffenderRecord, error)
+	ActiveBanForIP(ctx context.Context, ip netip.Addr) (*store.BanRecord, error)
+	StrikesForIP(ctx context.Context, ip netip.Addr, limit int) ([]store.StrikeRecord, error)
+	AuditLogForIP(ctx context.Context, ip netip.Addr, limit int) ([]store.AuditEntry, error)
+	ListOffenders(ctx context.Context, permanentOnly bool, limit int) ([]store.OffenderSummary, error)
 }
 
 // geoLookup is the minimal interface consumed from *enrich.Enricher.
@@ -120,6 +126,13 @@ type Daemon struct {
 	startTime  time.Time
 	version    string
 
+	// evidenceJournalctl and evidenceDockerSocket override the journalctl
+	// binary and Docker engine socket used by on-demand evidence extraction
+	// (issue #126). Empty means the defaults ("journalctl" from PATH,
+	// /var/run/docker.sock). Only set by tests.
+	evidenceJournalctl   string
+	evidenceDockerSocket string
+
 	// staticAllowlist holds the parsed policy.Allowlist + policy.AdminCIDRs.
 	// It is derived once at construction from d.policy and never mutated,
 	// so no lock is needed. Kept semantically separate from runtimeAllowlist
@@ -127,6 +140,11 @@ type Daemon struct {
 	// only store-owned (runtime) entries — static prefixes are only
 	// materialised at enforcer-sync time (see syncEnforcerAllowlist).
 	staticAllowlist []netip.Prefix
+
+	// events fans live pipeline/CLI events out to "subscribe" socket clients
+	// (the `watch` command). Best-effort broadcast: slow subscribers drop
+	// events rather than back-pressuring the pipeline.
+	events *eventBus
 
 	mu               sync.RWMutex
 	runtimeAllowlist []netip.Prefix // dynamically added by the 'allow' socket command
@@ -193,6 +211,7 @@ func New(dcfg Config) (*Daemon, error) {
 		aiCache:         dcfg.AICache,
 		enricher:        enricherFrom(dcfg.Enricher),
 		staticAllowlist: staticAllowlistFromPolicy(dcfg.Policy),
+		events:          newEventBus(),
 		socketPath:      socketPath,
 		version:         dcfg.Version,
 		startTime:       time.Now(),
@@ -385,6 +404,11 @@ func (d *Daemon) processRaw(ctx context.Context, raw sdk.RawLine) {
 
 		verdicts = d.maybeConsultAI(ctx, ev.SourceIP, verdicts)
 		verdicts = d.maybeInjectGeoVerdict(ctx, ev.SourceIP, verdicts)
+
+		// Live "detection" events for `watch` subscribers. Published before the
+		// allowlist check on purpose: a detection happened either way, and the
+		// resulting action (or lack of one) is a separate event.
+		d.publishDetections(verdicts)
 
 		// Runtime allowlist (added via 'allow' command) is checked before decision.
 		if d.isRuntimeAllowlisted(ev.SourceIP) {
@@ -590,6 +614,9 @@ func (d *Daemon) dispatch(ctx context.Context, action sdk.Action) {
 		default:
 		}
 	}
+
+	d.publishActionEvent(action.Op, action.IP.String(), action.Strike,
+		action.TTL, action.Reason, "pipeline")
 
 	if action.Op == "ban" && d.enforcer != nil {
 		t := sdk.Target{IP: action.IP, TTL: action.TTL}

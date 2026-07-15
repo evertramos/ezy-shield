@@ -198,12 +198,12 @@ EzyShield enforces a 4 requests/second rate limit on Cloudflare API calls to sta
 
 ## Validating Your Configuration
 
-### Using `test-enforce cloudflare`
+### Using `test enforcer cloudflare`
 
 After configuration, validate your setup with:
 
 ```bash
-ezyshield test-enforce cloudflare --config-dir /etc/ezyshield/
+ezyshield test enforcer cloudflare --config-dir /etc/ezyshield/
 ```
 
 This command will:

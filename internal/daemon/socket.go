@@ -173,6 +173,12 @@ func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
 		resp = d.handleListAllow(ctx)
 	case "events":
 		resp = d.handleEvents(ctx, req)
+	case "report":
+		resp = d.handleReport(ctx, req)
+	case "subscribe":
+		// Long-lived, read-only event stream; writes its own ack + events.
+		d.handleSubscribe(ctx, conn)
+		return
 	case "ban":
 		resp = d.handleBan(ctx, req)
 	case "unban":
@@ -180,10 +186,70 @@ func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
 	case "allow":
 		resp = d.handleAllow(ctx, req)
 	default:
-		resp = SocketResponse{Error: fmt.Sprintf("unknown verb %q; valid: status list list_allow events ban unban allow", req.Verb)}
+		resp = SocketResponse{Error: fmt.Sprintf("unknown verb %q; valid: status list list_allow events subscribe report ban unban allow", req.Verb)}
 	}
 
 	writeResponse(conn, resp)
+}
+
+// subscribeWriteTimeout bounds each event write to a subscriber so a stuck
+// client is dropped instead of pinning the connection goroutine forever.
+const subscribeWriteTimeout = 5 * time.Second
+
+// handleSubscribe streams live StreamEvents to conn until the client
+// disconnects or ctx is cancelled.
+//
+// Security (§6 control surfaces): this verb is strictly read-only — it never
+// touches the store, the enforcer, or daemon state beyond registering an
+// in-memory subscriber channel; any extra fields on the request are ignored.
+// Event payloads may embed hostile log content; terminal clients must
+// sanitize before rendering (see StreamEvent doc).
+func (d *Daemon) handleSubscribe(ctx context.Context, conn net.Conn) {
+	// handleConn set a short request/response deadline; a subscription is
+	// long-lived, so clear it and bound individual writes instead.
+	_ = conn.SetDeadline(time.Time{})
+
+	if err := json.NewEncoder(conn).Encode(SocketResponse{OK: true}); err != nil {
+		slog.Debug("daemon: subscribe ack write error", "err", err)
+		return
+	}
+
+	ch := d.events.subscribe()
+	defer d.events.unsubscribe(ch)
+
+	slog.InfoContext(ctx, "daemon: event subscriber connected")
+	defer slog.InfoContext(ctx, "daemon: event subscriber disconnected")
+
+	// The client sends nothing after the request, so a Read unblocking means
+	// it closed its end (or handleConn's deferred Close fired). This lets an
+	// idle subscription be reaped promptly instead of waiting for the next
+	// event write to fail.
+	clientGone := make(chan struct{})
+	go func() {
+		defer close(clientGone)
+		buf := make([]byte, 1)
+		for {
+			if _, err := conn.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	enc := json.NewEncoder(conn)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-clientGone:
+			return
+		case ev := <-ch:
+			_ = conn.SetWriteDeadline(time.Now().Add(subscribeWriteTimeout))
+			if err := enc.Encode(ev); err != nil {
+				return
+			}
+			_ = conn.SetWriteDeadline(time.Time{})
+		}
+	}
 }
 
 // handleStatus returns daemon health and current ban count.
@@ -313,6 +379,8 @@ func (d *Daemon) handleBan(ctx context.Context, req SocketRequest) SocketRespons
 		)
 	}
 
+	d.publishActionEvent(op, prefixDisplay(prefix), 0, ttl, reason, "cli")
+
 	return SocketResponse{OK: true}
 }
 
@@ -353,6 +421,8 @@ func (d *Daemon) handleUnban(ctx context.Context, req SocketRequest) SocketRespo
 		"reason", req.Reason,
 		"source", "cli",
 	)
+
+	d.publishActionEvent("unban", prefixDisplay(prefix), 0, 0, req.Reason, "cli")
 
 	return SocketResponse{OK: true}
 }
@@ -438,6 +508,8 @@ func (d *Daemon) handleAllow(ctx context.Context, req SocketRequest) SocketRespo
 		"reason", req.Reason,
 		"source", "cli",
 	)
+
+	d.publishActionEvent("allow", prefixDisplay(prefix), 0, ttl, req.Reason, "cli")
 
 	return SocketResponse{OK: true}
 }

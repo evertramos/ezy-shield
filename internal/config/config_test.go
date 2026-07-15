@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/evertramos/ezy-shield/configs"
 )
 
@@ -547,6 +549,33 @@ func TestLoadPolicy_DefaultsApplied(t *testing.T) {
 			t.Errorf("Strikes[%d].TTL = %v, want %v", i, s.TTL, DefaultStrikes[i].TTL)
 		}
 	}
+	if p.EscalationExemptWindow.AsDuration() != DefaultEscalationExemptWindow {
+		t.Errorf("EscalationExemptWindow = %v, want %v",
+			p.EscalationExemptWindow.AsDuration(), DefaultEscalationExemptWindow)
+	}
+}
+
+func TestLoadPolicy_EscalationExemptWindowBounds(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		yaml string
+		want time.Duration
+	}{
+		{"omitted → default", "armed: false\n", DefaultEscalationExemptWindow},
+		{"tightening allowed", "armed: false\nescalation_exempt_window: 1h\n", time.Hour},
+		{"at ceiling kept", "armed: false\nescalation_exempt_window: 168h\n", MaxEscalationExemptWindow},
+		{"above ceiling clamped", "armed: false\nescalation_exempt_window: 720h\n", MaxEscalationExemptWindow},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := mustLoadPolicy(t, tc.yaml)
+			if got := p.EscalationExemptWindow.AsDuration(); got != tc.want {
+				t.Errorf("EscalationExemptWindow = %v, want %v", got, tc.want)
+			}
+		})
+	}
 }
 
 func TestLoadPolicy_DefaultStrikesNotMutated(t *testing.T) {
@@ -1012,5 +1041,42 @@ func TestExampleConfigs_Policy(t *testing.T) {
 	// armed: false is the safe default
 	if p.Armed {
 		t.Error("example policy.yaml must ship with armed: false")
+	}
+}
+
+// TestDuration_MarshalYAML_RoundTrip guards the `config show` policy dump:
+// rendered strike TTLs must be re-loadable by LoadPolicyReader, including the
+// integer-zero permanent marker.
+func TestDuration_MarshalYAML_RoundTrip(t *testing.T) {
+	t.Parallel()
+	in := &Policy{
+		Armed:            false,
+		BanThreshold:     70,
+		ObserveThreshold: 40,
+		MaxBansPerMinute: 30,
+		Strikes: []StrikeEntry{
+			{TTL: Duration(5 * time.Minute)},
+			{TTL: Duration(168 * time.Hour)},
+			{TTL: Duration(0)}, // permanent
+		},
+	}
+	data, err := yaml.Marshal(in)
+	if err != nil {
+		t.Fatalf("yaml.Marshal: %v", err)
+	}
+	if !strings.Contains(string(data), "ttl: 5m0s") {
+		t.Errorf("expected duration string form in dump, got:\n%s", data)
+	}
+	if !strings.Contains(string(data), "ttl: 0") {
+		t.Errorf("expected integer 0 for permanent TTL in dump, got:\n%s", data)
+	}
+	out, err := LoadPolicyReader(bytes.NewReader(data), "round-trip")
+	if err != nil {
+		t.Fatalf("LoadPolicyReader on marshaled policy: %v", err)
+	}
+	for i := range in.Strikes {
+		if out.Strikes[i].TTL != in.Strikes[i].TTL {
+			t.Errorf("strikes[%d].TTL = %v, want %v", i, out.Strikes[i].TTL, in.Strikes[i].TTL)
+		}
 	}
 }

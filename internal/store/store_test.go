@@ -835,48 +835,54 @@ func TestRecordManualBan_RejectsNegativeTTL(t *testing.T) {
 	}
 }
 
-// TestHasActiveBan_NotPresent verifies HasActiveBan returns false for a
+// TestGetBanInfo_NotPresent verifies GetBanInfo returns found=false for a
 // never-seen IP — the baseline state before any ban is recorded.
-func TestHasActiveBan_NotPresent(t *testing.T) {
+func TestGetBanInfo_NotPresent(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
 
-	found, err := db.HasActiveBan(ctx, ip1)
+	_, _, found, err := db.GetBanInfo(ctx, ip1)
 	if err != nil {
-		t.Fatalf("HasActiveBan on empty DB: %v", err)
+		t.Fatalf("GetBanInfo on empty DB: %v", err)
 	}
 	if found {
-		t.Error("want false for unseen IP, got true")
+		t.Error("want found=false for unseen IP, got true")
 	}
 }
 
-// TestHasActiveBan_PresentAfterStrike verifies HasActiveBan returns true once
-// RecordStrike writes a row to bans_active.
-func TestHasActiveBan_PresentAfterStrike(t *testing.T) {
+// TestGetBanInfo_PresentAfterStrike verifies GetBanInfo returns the ban
+// metadata once RecordStrike writes a row to bans_active.
+func TestGetBanInfo_PresentAfterStrike(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
 
-	if err := db.RecordStrike(ctx, action(ip1, 1, time.Hour)); err != nil {
+	before := time.Now().Add(-time.Second)
+	if err := db.RecordStrike(ctx, action(ip1, 2, time.Hour)); err != nil {
 		t.Fatalf("RecordStrike: %v", err)
 	}
-	found, err := db.HasActiveBan(ctx, ip1)
+	bannedAt, strike, found, err := db.GetBanInfo(ctx, ip1)
 	if err != nil {
-		t.Fatalf("HasActiveBan: %v", err)
+		t.Fatalf("GetBanInfo: %v", err)
 	}
 	if !found {
-		t.Error("want true after RecordStrike, got false")
+		t.Fatal("want found=true after RecordStrike, got false")
+	}
+	if strike != 2 {
+		t.Errorf("strike = %d, want 2", strike)
+	}
+	if bannedAt.Before(before) || bannedAt.After(time.Now().Add(time.Second)) {
+		t.Errorf("bannedAt = %v not within test window", bannedAt)
 	}
 }
 
-// TestHasActiveBan_FalseAfterExpiry verifies HasActiveBan returns false once
-// the ban row is removed by ExpireBans.
-func TestHasActiveBan_FalseAfterExpiry(t *testing.T) {
+// TestGetBanInfo_FalseAfterExpiry verifies GetBanInfo returns found=false
+// once the ban row is removed by ExpireBans.
+func TestGetBanInfo_FalseAfterExpiry(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
 
 	// Record a short ban that expires in the past.
-	a := action(ip1, 1, time.Millisecond)
-	if err := db.RecordStrike(ctx, a); err != nil {
+	if err := db.RecordStrike(ctx, action(ip1, 1, time.Millisecond)); err != nil {
 		t.Fatalf("RecordStrike: %v", err)
 	}
 
@@ -885,18 +891,18 @@ func TestHasActiveBan_FalseAfterExpiry(t *testing.T) {
 		t.Fatalf("ExpireBans: %v", err)
 	}
 
-	found, err := db.HasActiveBan(ctx, ip1)
+	_, _, found, err := db.GetBanInfo(ctx, ip1)
 	if err != nil {
-		t.Fatalf("HasActiveBan post-expiry: %v", err)
+		t.Fatalf("GetBanInfo post-expiry: %v", err)
 	}
 	if found {
-		t.Error("want false after ban expiry, got true")
+		t.Error("want found=false after ban expiry, got true")
 	}
 }
 
-// TestHasActiveBan_PermanentNeverExpires verifies a permanent ban (TTL=0)
-// is never swept by ExpireBans and remains visible to HasActiveBan.
-func TestHasActiveBan_PermanentNeverExpires(t *testing.T) {
+// TestGetBanInfo_PermanentNeverExpires verifies a permanent ban (TTL=0)
+// is never swept by ExpireBans and remains visible to GetBanInfo.
+func TestGetBanInfo_PermanentNeverExpires(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
 
@@ -909,12 +915,15 @@ func TestHasActiveBan_PermanentNeverExpires(t *testing.T) {
 		t.Fatalf("ExpireBans: %v", err)
 	}
 
-	found, err := db.HasActiveBan(ctx, ip1)
+	_, strike, found, err := db.GetBanInfo(ctx, ip1)
 	if err != nil {
-		t.Fatalf("HasActiveBan post-expire: %v", err)
+		t.Fatalf("GetBanInfo post-expire: %v", err)
 	}
 	if !found {
-		t.Error("want true for permanent ban after ExpireBans, got false")
+		t.Error("want found=true for permanent ban after ExpireBans, got false")
+	}
+	if strike != 5 {
+		t.Errorf("strike = %d, want 5", strike)
 	}
 }
 
@@ -962,5 +971,219 @@ func TestBumpLastSeen_DoesNotIncrementStrikeCount(t *testing.T) {
 	}
 	if n != 1 {
 		t.Errorf("total_strikes = %d after 3 BumpLastSeen calls, want 1", n)
+	}
+}
+
+// ── LastStrike (ADR-0009, escalation rate-limit exemption) ───────────────────
+
+// TestLastStrike_NoHistory verifies found=false (no error) for an unseen IP.
+func TestLastStrike_NoHistory(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	_, _, found, err := db.LastStrike(ctx, ip1)
+	if err != nil {
+		t.Fatalf("LastStrike on empty DB: %v", err)
+	}
+	if found {
+		t.Error("want found=false for unseen IP, got true")
+	}
+}
+
+// TestLastStrike_ReturnsMostRecent verifies the newest strike row wins and
+// that recordedAt/ttl round-trip through the store.
+func TestLastStrike_ReturnsMostRecent(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	before := time.Now().Add(-time.Second)
+	if err := db.RecordStrike(ctx, action(ip1, 1, 5*time.Minute)); err != nil {
+		t.Fatalf("RecordStrike #1: %v", err)
+	}
+	if err := db.RecordStrike(ctx, action(ip1, 2, time.Hour)); err != nil {
+		t.Fatalf("RecordStrike #2: %v", err)
+	}
+
+	recordedAt, ttl, found, err := db.LastStrike(ctx, ip1)
+	if err != nil {
+		t.Fatalf("LastStrike: %v", err)
+	}
+	if !found {
+		t.Fatal("want found=true after two strikes")
+	}
+	if ttl != time.Hour {
+		t.Errorf("ttl = %v, want %v (most recent strike)", ttl, time.Hour)
+	}
+	if recordedAt.Before(before) || recordedAt.After(time.Now().Add(time.Second)) {
+		t.Errorf("recordedAt = %v not within test window", recordedAt)
+	}
+}
+
+// TestLastStrike_SurvivesBanExpiry verifies strike history remains readable
+// after ExpireBans removes the bans_active row — the exemption check runs
+// exactly then, on the first re-offense after expiry.
+func TestLastStrike_SurvivesBanExpiry(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	if err := db.RecordStrike(ctx, action(ip1, 1, time.Second)); err != nil {
+		t.Fatalf("RecordStrike: %v", err)
+	}
+	if _, err := db.ExpireBans(ctx, time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("ExpireBans: %v", err)
+	}
+
+	_, ttl, found, err := db.LastStrike(ctx, ip1)
+	if err != nil {
+		t.Fatalf("LastStrike post-expiry: %v", err)
+	}
+	if !found {
+		t.Fatal("want found=true after ban expiry (strikes are append-only)")
+	}
+	if ttl != time.Second {
+		t.Errorf("ttl = %v, want %v", ttl, time.Second)
+	}
+}
+
+// ── suppression counters / ban_ineffective persistence (ADR-0009) ────────────
+
+// TestRecordSuppressed_CountsAndFireOnce verifies the counter increments, the
+// after-grace split, and the MarkBanIneffective fire-once guarantee.
+func TestRecordSuppressed_CountsAndFireOnce(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	if err := db.RecordStrike(ctx, action(ip1, 1, time.Hour)); err != nil {
+		t.Fatalf("RecordStrike: %v", err)
+	}
+
+	// Two in-grace events, three after-grace events.
+	for i := 0; i < 2; i++ {
+		if _, _, _, err := db.RecordSuppressed(ctx, ip1, false); err != nil {
+			t.Fatalf("RecordSuppressed in-grace[%d]: %v", i, err)
+		}
+	}
+	var total, after int
+	var fired bool
+	var err error
+	for i := 0; i < 3; i++ {
+		total, after, fired, err = db.RecordSuppressed(ctx, ip1, true)
+		if err != nil {
+			t.Fatalf("RecordSuppressed after-grace[%d]: %v", i, err)
+		}
+	}
+	if total != 5 || after != 3 {
+		t.Errorf("total/after = %d/%d, want 5/3", total, after)
+	}
+	if fired {
+		t.Error("fired = true before MarkBanIneffective")
+	}
+
+	// First mark transitions the flag; the second reports already-fired.
+	newly, err := db.MarkBanIneffective(ctx, ip1)
+	if err != nil {
+		t.Fatalf("MarkBanIneffective #1: %v", err)
+	}
+	if !newly {
+		t.Error("MarkBanIneffective #1 = false, want true (first transition)")
+	}
+	newly, err = db.MarkBanIneffective(ctx, ip1)
+	if err != nil {
+		t.Fatalf("MarkBanIneffective #2: %v", err)
+	}
+	if newly {
+		t.Error("MarkBanIneffective #2 = true, want false (fire-once)")
+	}
+
+	// Subsequent RecordSuppressed reports fired=true.
+	_, _, fired, err = db.RecordSuppressed(ctx, ip1, true)
+	if err != nil {
+		t.Fatalf("RecordSuppressed post-mark: %v", err)
+	}
+	if !fired {
+		t.Error("fired = false after MarkBanIneffective")
+	}
+}
+
+// TestRecordSuppressed_NoActiveBan verifies the expiry race: counting against
+// a missing ban row returns zeros, not an error.
+func TestRecordSuppressed_NoActiveBan(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	total, after, fired, err := db.RecordSuppressed(ctx, ip1, true)
+	if err != nil {
+		t.Fatalf("RecordSuppressed without ban: %v", err)
+	}
+	if total != 0 || after != 0 || fired {
+		t.Errorf("total/after/fired = %d/%d/%v, want 0/0/false", total, after, fired)
+	}
+}
+
+// TestSuppression_ResetOnNewBan verifies a new RecordStrike upsert resets the
+// per-ban counters and the fired flag, while offenders.had_ineffective
+// persists across bans and ban expiry (pre-permanent alert memory).
+func TestSuppression_ResetOnNewBan(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	if err := db.RecordStrike(ctx, action(ip1, 1, time.Second)); err != nil {
+		t.Fatalf("RecordStrike #1: %v", err)
+	}
+	if _, _, _, err := db.RecordSuppressed(ctx, ip1, true); err != nil {
+		t.Fatalf("RecordSuppressed: %v", err)
+	}
+	if _, err := db.MarkBanIneffective(ctx, ip1); err != nil {
+		t.Fatalf("MarkBanIneffective: %v", err)
+	}
+
+	// Ban #1 expires; had_ineffective must survive the row deletion.
+	if _, err := db.ExpireBans(ctx, time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("ExpireBans: %v", err)
+	}
+	had, err := db.HadIneffectiveBan(ctx, ip1)
+	if err != nil {
+		t.Fatalf("HadIneffectiveBan post-expiry: %v", err)
+	}
+	if !had {
+		t.Error("had_ineffective lost after ban expiry")
+	}
+
+	// Ban #2: fresh counters.
+	if err := db.RecordStrike(ctx, action(ip1, 2, time.Hour)); err != nil {
+		t.Fatalf("RecordStrike #2: %v", err)
+	}
+	total, after, fired, err := db.RecordSuppressed(ctx, ip1, true)
+	if err != nil {
+		t.Fatalf("RecordSuppressed on ban #2: %v", err)
+	}
+	if total != 1 || after != 1 || fired {
+		t.Errorf("ban #2 total/after/fired = %d/%d/%v, want 1/1/false (reset)", total, after, fired)
+	}
+}
+
+// TestHadIneffectiveBan_Default verifies the flag is false for unseen IPs and
+// for offenders that never had an ineffective ban.
+func TestHadIneffectiveBan_Default(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	had, err := db.HadIneffectiveBan(ctx, ip1)
+	if err != nil {
+		t.Fatalf("HadIneffectiveBan unseen: %v", err)
+	}
+	if had {
+		t.Error("want false for unseen IP")
+	}
+
+	if err := db.RecordStrike(ctx, action(ip1, 1, time.Hour)); err != nil {
+		t.Fatalf("RecordStrike: %v", err)
+	}
+	had, err = db.HadIneffectiveBan(ctx, ip1)
+	if err != nil {
+		t.Fatalf("HadIneffectiveBan clean offender: %v", err)
+	}
+	if had {
+		t.Error("want false for offender without ineffective bans")
 	}
 }

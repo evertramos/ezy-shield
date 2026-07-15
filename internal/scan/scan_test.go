@@ -241,11 +241,11 @@ func TestClassifyPublic(t *testing.T) {
 		{"172.31.255.255", false},
 		{"172.32.0.1", true}, // outside 172.16/12
 		{"192.168.1.1", false},
-		{"198.51.100.213", true},  // outside 192.168/16
-		{"169.254.1.1", false}, // link-local
-		{"fc00::1", false},     // ULA
-		{"fe80::1", false},     // link-local IPv6
-		{"2001:db8::1", true},  // documentation range, but not RFC 1918
+		{"198.51.100.213", true}, // outside 192.168/16
+		{"169.254.1.1", false},   // link-local
+		{"fc00::1", false},       // ULA
+		{"fe80::1", false},       // link-local IPv6
+		{"2001:db8::1", true},    // documentation range, but not RFC 1918
 	}
 	for _, tt := range tests {
 		addr := netip.MustParseAddr(tt.addr)

@@ -51,19 +51,55 @@ func (s *scriptedPrompter) askBool(q string, def bool) bool {
 	return v
 }
 
-// httpFake is a cfClient implementation that returns a canned response.
+// httpFake is a cfClient implementation that returns canned responses.
+//
+// Since dryValidateCFToken now runs a two-phase probe (identity + scope),
+// most tests need to serve more than one response per run. The fake
+// supports two modes:
+//
+//   - Legacy single-response: set `status` + `bodyJSON`. Every Do() call
+//     returns the same tuple. Kept so tests that don't care which endpoint
+//     was hit (e.g. TransientError, where err is set) stay minimal.
+//   - URL-routed: set `byPath` keyed on req.URL.Path. The fake looks up
+//     the response by path; unknown paths return 404 so tests fail loudly
+//     if the production code drifts to a new endpoint they didn't stub.
 type httpFake struct {
 	status   int
 	bodyJSON string
 	err      error
+	byPath   map[string]httpFakeResp
 	// requests captures every Do() call for assertions on URL / headers.
 	requests []*http.Request
+}
+
+// httpFakeResp is one canned response in the byPath map.
+type httpFakeResp struct {
+	status   int
+	bodyJSON string
 }
 
 func (h *httpFake) Do(req *http.Request) (*http.Response, error) {
 	h.requests = append(h.requests, req)
 	if h.err != nil {
 		return nil, h.err
+	}
+	if h.byPath != nil {
+		r, ok := h.byPath[req.URL.Path]
+		if !ok {
+			// Loud 404 with a body pointing at the unstubbed path so
+			// the test failure names the endpoint the caller forgot.
+			return &http.Response{
+				StatusCode: http.StatusNotFound,
+				Body: io.NopCloser(bytes.NewBufferString(
+					`{"success":false,"errors":[{"code":7003,"message":"httpFake: no stub for ` + req.URL.Path + `"}]}`)),
+				Header: make(http.Header),
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: r.status,
+			Body:       io.NopCloser(bytes.NewBufferString(r.bodyJSON)),
+			Header:     make(http.Header),
+		}, nil
 	}
 	return &http.Response{
 		StatusCode: h.status,
@@ -141,7 +177,14 @@ func TestRunCDNStep_HappyPath_Lists(t *testing.T) {
 			"shop.example.com":     {mustAddr(t, "172.67.132.246")},
 		},
 	}
-	httpc := &httpFake{status: 200, bodyJSON: `{"success":true}`}
+	// Account-token happy path: identity probe hits the account verify
+	// endpoint (200), then the scope probe hits rules/lists (200).
+	httpc := &httpFake{
+		byPath: map[string]httpFakeResp{
+			"/accounts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/tokens/verify": {status: 200, bodyJSON: `{"success":true}`},
+			"/accounts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/rules/lists":   {status: 200, bodyJSON: `{"success":true,"result":[]}`},
+		},
+	}
 
 	prompt := &scriptedPrompter{
 		strings: []string{
@@ -201,16 +244,40 @@ func TestRunCDNStep_HappyPath_Lists(t *testing.T) {
 	if !strings.Contains(out, "(ip.src in $ezyshield_blocked)") {
 		t.Errorf("stdout missing WAF rule expression; out=%q", out)
 	}
-	// Validation call must have hit /accounts/<id>.
-	if len(httpc.requests) != 1 {
-		t.Fatalf("http calls=%d, want 1", len(httpc.requests))
+	// Two-phase probe: (1) account tokens/verify, (2) rules/lists?per_page=1.
+	// No user/tokens/verify request should happen — the account verify
+	// returned 200 on the first shot, so the fallback is skipped.
+	if len(httpc.requests) != 2 {
+		t.Fatalf("http calls=%d, want 2 (identity + scope); paths=%v",
+			len(httpc.requests), reqPaths(httpc.requests))
 	}
-	if got := httpc.requests[0].URL.Path; got != "/accounts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
-		t.Errorf("validation URL path = %q", got)
+	if got := httpc.requests[0].URL.Path; got != "/accounts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/tokens/verify" {
+		t.Errorf("phase-1 URL path = %q", got)
+	}
+	if got := httpc.requests[1].URL.Path; got != "/accounts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/rules/lists" {
+		t.Errorf("phase-2 URL path = %q", got)
+	}
+	if got := httpc.requests[1].URL.RawQuery; got != "per_page=1" {
+		t.Errorf("phase-2 query = %q, want per_page=1", got)
 	}
 	if got := httpc.requests[0].Header.Get("Authorization"); got != "Bearer cf-test-token" {
 		t.Errorf("auth header wrong: %q", got)
 	}
+	// The abort banner (#93) must NOT fire on the happy path — it exists
+	// only to make silent bails visible.
+	if strings.Contains(out, "Cloudflare enforcer setup did NOT complete") {
+		t.Errorf("abort banner fired on happy path: %q", out)
+	}
+}
+
+// reqPaths returns the URL paths from a captured request list — used in
+// test failure messages so the reader sees which endpoints were hit.
+func reqPaths(rs []*http.Request) []string {
+	out := make([]string, len(rs))
+	for i, r := range rs {
+		out[i] = r.URL.Path
+	}
+	return out
 }
 
 // ── Happy path: rulesets mode ────────────────────────────────────────────────
@@ -229,7 +296,19 @@ func TestRunCDNStep_HappyPath_Rulesets(t *testing.T) {
 			"one.example.com": {mustAddr(t, "104.21.13.183")},
 		},
 	}
-	httpc := &httpFake{status: 200, bodyJSON: `{"success":true}`}
+	// Rulesets mode never collects an account ID, so the identity probe
+	// (Phase 1) is SKIPPED: /accounts//tokens/verify would be a broken
+	// URL and /user/tokens/verify rejects account-owned (cfat_) tokens —
+	// running it here would misreport valid tokens as expired. The scope
+	// probe against the first zone's rulesets endpoint is the single
+	// source of truth: 200 proves the token is both alive and scoped.
+	// Only that route exists in the fake; any verify request would 404
+	// and fail the exact-request-count assertion below.
+	httpc := &httpFake{
+		byPath: map[string]httpFakeResp{
+			"/zones/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/rulesets": {status: 200, bodyJSON: `{"success":true,"result":[]}`},
+		},
+	}
 
 	prompt := &scriptedPrompter{
 		strings: []string{
@@ -266,15 +345,35 @@ func TestRunCDNStep_HappyPath_Rulesets(t *testing.T) {
 	if strings.Contains(out, "Custom Rules") {
 		t.Errorf("rulesets mode leaked lists-mode instructions: %q", out)
 	}
-	// Validation hit the first zone.
-	if got := httpc.requests[0].URL.Path; got != "/zones/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {
-		t.Errorf("validation URL path = %q", got)
+	// Rulesets mode = scope probe ONLY: exactly one request, against
+	// zones/{first_zone}/rulesets?per_page=1. No identity probe may run
+	// (no account ID exists to verify against, and /user/tokens/verify
+	// would falsely reject cfat_ account tokens).
+	if len(httpc.requests) != 1 {
+		t.Fatalf("http calls=%d, want 1 (scope probe only); paths=%v",
+			len(httpc.requests), reqPaths(httpc.requests))
+	}
+	for _, r := range httpc.requests {
+		if strings.Contains(r.URL.Path, "/tokens/verify") {
+			t.Errorf("identity probe ran in rulesets mode (no account ID available): %s", r.URL.Path)
+		}
+	}
+	if got := httpc.requests[0].URL.Path; got != "/zones/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/rulesets" {
+		t.Errorf("scope-probe URL path = %q (want /zones/{first_zone}/rulesets)", got)
+	}
+	if got := httpc.requests[0].URL.RawQuery; got != "per_page=1" {
+		t.Errorf("scope-probe query = %q, want per_page=1", got)
 	}
 }
 
-// ── Scope mismatch (401) ─────────────────────────────────────────────────────
+// ── Rulesets mode failure — scope probe rejects, message covers both causes ─
 
-func TestRunCDNStep_ScopeMismatch401(t *testing.T) {
+// TestRunCDNStep_Rulesets_TokenRejected covers the cfat_/rulesets edge
+// case: with no account ID, the wizard cannot run an identity probe, so a
+// 403 on the zone rulesets read is ambiguous — dead token OR missing
+// Zone:Firewall Services:Edit. The message must name both possibilities
+// (not just "lacks scope") and the abort banner must fire.
+func TestRunCDNStep_Rulesets_TokenRejected(t *testing.T) {
 	t.Parallel()
 
 	docker := &dockerFake{
@@ -289,8 +388,95 @@ func TestRunCDNStep_ScopeMismatch401(t *testing.T) {
 		},
 	}
 	httpc := &httpFake{
-		status:   401,
-		bodyJSON: `{"success":false,"errors":[{"code":10000,"message":"Invalid API token"}]}`,
+		byPath: map[string]httpFakeResp{
+			"/zones/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/rulesets": {
+				status:   403,
+				bodyJSON: `{"success":false,"errors":[{"code":10000,"message":"insufficient permissions"}]}`,
+			},
+		},
+	}
+	prompt := &scriptedPrompter{
+		strings: []string{
+			"rulesets", "block",
+			"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		},
+		bools: []bool{true},
+	}
+	step := &cdnStep{}
+	out := captureStep(t, func(p *wPrinter) {
+		runCDNStep(context.Background(), p, prompt, step, cdnDeps{
+			DockerCLI:    docker,
+			Resolver:     resolver,
+			HTTPClient:   httpc,
+			TokenReader:  func(string) (string, error) { return "cfat_rejected-token", nil },
+			CFAPIBaseURL: "http://cf.example",
+		})
+	})
+
+	if step.cfEnabled {
+		t.Fatal("cfEnabled=true despite 403 on scope probe")
+	}
+	if step.cfCfg != nil {
+		t.Errorf("cfCfg was populated on failure: %+v", step.cfCfg)
+	}
+	// No identity probe: rulesets mode has no account ID, and the user
+	// verify endpoint rejects cfat_ tokens (the very bug this guards).
+	for _, r := range httpc.requests {
+		if strings.Contains(r.URL.Path, "/tokens/verify") {
+			t.Errorf("identity probe ran in rulesets mode: %s", r.URL.Path)
+		}
+	}
+	// Without an identity check the 403 is ambiguous — the message must
+	// admit it could be a dead token, not blame only the scope.
+	if !strings.Contains(out, "invalid, expired, or lacks scope") {
+		t.Errorf("rulesets rejection message must cover dead-token AND scope: %q", out)
+	}
+	if !strings.Contains(out, "Zone:Firewall Services:Edit") {
+		t.Errorf("wizard didn't tell the operator which scope to enable: %q", out)
+	}
+	if !strings.Contains(out, "Cloudflare enforcer setup did NOT complete") {
+		t.Errorf("abort banner missing on rulesets token rejection: %q", out)
+	}
+	if strings.Contains(out, "cfat_rejected-token") {
+		t.Error("token leaked on failure path")
+	}
+}
+
+// ── Invalid / expired token — both verify endpoints reject ─────────────────
+
+// TestRunCDNStep_InvalidToken_BothVerifyFail is the exact scenario the
+// old dryValidateCFToken conflated with "wrong scope": every call to the
+// CF API returns 401. Under the two-phase design, the identity probe
+// hits BOTH /accounts/{id}/tokens/verify and /user/tokens/verify, and
+// only when both reject does the wizard report the token as
+// invalid/expired. The message must NOT falsely blame the scope — that's
+// what the historical 403 on GET /accounts/{id} did.
+func TestRunCDNStep_InvalidToken_BothVerifyFail(t *testing.T) {
+	t.Parallel()
+
+	docker := &dockerFake{
+		ps: "app\tcompany/app",
+		inspect: map[string]string{
+			"app": "VIRTUAL_HOST=one.example.com\n",
+		},
+	}
+	resolver := &resolverFake{
+		answers: map[string][]netip.Addr{
+			"one.example.com": {mustAddr(t, "104.21.13.183")},
+		},
+	}
+	// Both verify endpoints reject. The scope probe is never reached.
+	httpc := &httpFake{
+		byPath: map[string]httpFakeResp{
+			"/accounts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/tokens/verify": {
+				status:   401,
+				bodyJSON: `{"success":false,"errors":[{"code":10000,"message":"Invalid API token"}]}`,
+			},
+			"/user/tokens/verify": {
+				status:   401,
+				bodyJSON: `{"success":false,"errors":[{"code":10000,"message":"Invalid API token"}]}`,
+			},
+		},
 	}
 	prompt := &scriptedPrompter{
 		strings: []string{
@@ -306,33 +492,212 @@ func TestRunCDNStep_ScopeMismatch401(t *testing.T) {
 			DockerCLI:    docker,
 			Resolver:     resolver,
 			HTTPClient:   httpc,
-			TokenReader:  func(string) (string, error) { return "bad-scope-token", nil },
+			TokenReader:  func(string) (string, error) { return "expired-token", nil },
 			CFAPIBaseURL: "http://cf.example",
 		})
 	})
 
 	if step.cfEnabled {
-		t.Fatal("cfEnabled=true despite 401 scope mismatch")
+		t.Fatal("cfEnabled=true despite invalid token")
 	}
 	if step.cfCfg != nil {
 		t.Errorf("cfCfg was populated on failure: %+v", step.cfCfg)
 	}
-	if !strings.Contains(out, "scope") {
-		t.Errorf("scope-mismatch message missing 'scope': %q", out)
+	// Both verify endpoints must have been probed, in order.
+	if len(httpc.requests) < 2 {
+		t.Fatalf("expected >= 2 requests (account+user verify); got %d, paths=%v",
+			len(httpc.requests), reqPaths(httpc.requests))
 	}
-	if !strings.Contains(out, "401") {
-		t.Errorf("scope-mismatch message missing HTTP 401: %q", out)
+	if got := httpc.requests[0].URL.Path; got != "/accounts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/tokens/verify" {
+		t.Errorf("first probe should be account verify, got %q", got)
+	}
+	if got := httpc.requests[1].URL.Path; got != "/user/tokens/verify" {
+		t.Errorf("second probe should be user verify, got %q", got)
+	}
+	// The scope probe must NOT have been reached — Phase 2 is gated on
+	// Phase 1 success.
+	for _, r := range httpc.requests {
+		if strings.HasSuffix(r.URL.Path, "/rules/lists") || strings.HasSuffix(r.URL.Path, "/rulesets") {
+			t.Errorf("scope probe reached despite failed identity probe: %s", r.URL.Path)
+		}
+	}
+	// The message must name the failure honestly — the historical
+	// "token lacks scope" was a bug for this input.
+	if !strings.Contains(out, "invalid, expired") {
+		t.Errorf("invalid-token message missing 'invalid, expired': %q", out)
+	}
+	if strings.Contains(out, "token lacks scope") {
+		t.Errorf("wizard blamed scope on an identity failure — regression on the original bug: %q", out)
+	}
+	// The loud-skip warning should still fire.
+	if !strings.Contains(out, "CDN detected but no edge enforcer configured") {
+		t.Errorf("loud-skip warning missing after CF setup failure: %q", out)
+	}
+	// Issue #93: the abort banner must ALSO fire.
+	if !strings.Contains(out, "Cloudflare enforcer setup did NOT complete") {
+		t.Errorf("abort banner missing after CF setup failure: %q", out)
+	}
+	// The token itself must NEVER appear.
+	if strings.Contains(out, "expired-token") {
+		t.Error("token leaked on failure path")
+	}
+}
+
+// ── Wrong scope — identity OK, but Account Filter Lists is missing ─────────
+
+// TestRunCDNStep_WrongScope_ListsForbidden is the case the original
+// dryValidateCFToken pretended to test but couldn't distinguish from an
+// invalid token. The identity probe succeeds (token is real and belongs
+// to the account), then the rules/lists probe returns 403 because the
+// operator forgot to add "Account Filter Lists:Edit" to the token.
+// The scope-hint text must name that exact scope so the operator can fix
+// it without hunting through CF docs.
+func TestRunCDNStep_WrongScope_ListsForbidden(t *testing.T) {
+	t.Parallel()
+
+	docker := &dockerFake{
+		ps: "app\tcompany/app",
+		inspect: map[string]string{
+			"app": "VIRTUAL_HOST=one.example.com\n",
+		},
+	}
+	resolver := &resolverFake{
+		answers: map[string][]netip.Addr{
+			"one.example.com": {mustAddr(t, "104.21.13.183")},
+		},
+	}
+	httpc := &httpFake{
+		byPath: map[string]httpFakeResp{
+			"/accounts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/tokens/verify": {
+				status: 200, bodyJSON: `{"success":true}`,
+			},
+			"/accounts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/rules/lists": {
+				status:   403,
+				bodyJSON: `{"success":false,"errors":[{"code":10000,"message":"insufficient permissions"}]}`,
+			},
+		},
+	}
+	prompt := &scriptedPrompter{
+		strings: []string{
+			"lists", "block",
+			"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"ezyshield_blocked",
+		},
+		bools: []bool{true},
+	}
+	step := &cdnStep{}
+	out := captureStep(t, func(p *wPrinter) {
+		runCDNStep(context.Background(), p, prompt, step, cdnDeps{
+			DockerCLI:    docker,
+			Resolver:     resolver,
+			HTTPClient:   httpc,
+			TokenReader:  func(string) (string, error) { return "narrow-scope-token", nil },
+			CFAPIBaseURL: "http://cf.example",
+		})
+	})
+
+	if step.cfEnabled {
+		t.Fatal("cfEnabled=true despite 403 wrong-scope")
+	}
+	if !strings.Contains(out, "token lacks scope") {
+		t.Errorf("scope-mismatch message missing 'token lacks scope': %q", out)
+	}
+	if !strings.Contains(out, "403") {
+		t.Errorf("scope-mismatch message missing HTTP 403: %q", out)
 	}
 	if !strings.Contains(out, "Account:Account Filter Lists:Edit") {
 		t.Errorf("wizard didn't tell the operator which scope to enable: %q", out)
 	}
-	// The loud-skip warning should also fire.
-	if !strings.Contains(out, "CDN detected but no edge enforcer configured") {
-		t.Errorf("loud-skip warning missing after CF setup failure: %q", out)
+	if !strings.Contains(out, "Cloudflare enforcer setup did NOT complete") {
+		t.Errorf("abort banner missing on wrong-scope failure: %q", out)
 	}
-	// The token itself must NEVER appear.
-	if strings.Contains(out, "bad-scope-token") {
+	if strings.Contains(out, "narrow-scope-token") {
 		t.Error("token leaked on failure path")
+	}
+}
+
+// ── User-owned token happy path (personal token) ───────────────────────────
+
+// TestRunCDNStep_HappyPath_UserToken_Lists covers the class of tokens
+// that live under a Cloudflare USER (personal API tokens), rather than
+// under an account. The account verify endpoint rejects these ("token
+// isn't a member of this account's token pool"), but the user verify
+// endpoint accepts them, and if the user has been granted Account Filter
+// Lists:Edit on the target account the scope probe succeeds. The bug
+// this test guards against: the old validation used a single account
+// endpoint that would 403 personal tokens even when they were perfectly
+// configured.
+func TestRunCDNStep_HappyPath_UserToken_Lists(t *testing.T) {
+	t.Parallel()
+
+	docker := &dockerFake{
+		ps: "app\tcompany/app",
+		inspect: map[string]string{
+			"app": "VIRTUAL_HOST=one.example.com\n",
+		},
+	}
+	resolver := &resolverFake{
+		answers: map[string][]netip.Addr{
+			"one.example.com": {mustAddr(t, "104.21.13.183")},
+		},
+	}
+	httpc := &httpFake{
+		byPath: map[string]httpFakeResp{
+			// Account verify rejects — this token doesn't live in the
+			// account's token pool.
+			"/accounts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/tokens/verify": {
+				status:   401,
+				bodyJSON: `{"success":false,"errors":[{"code":1001,"message":"invalid API token for account"}]}`,
+			},
+			// User verify accepts — it's a personal token.
+			"/user/tokens/verify": {status: 200, bodyJSON: `{"success":true}`},
+			// Scope probe succeeds — the operator granted Account
+			// Filter Lists:Edit to the personal token.
+			"/accounts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/rules/lists": {
+				status: 200, bodyJSON: `{"success":true,"result":[]}`,
+			},
+		},
+	}
+	prompt := &scriptedPrompter{
+		strings: []string{
+			"lists", "block",
+			"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"ezyshield_blocked",
+		},
+		bools: []bool{true},
+	}
+	step := &cdnStep{}
+	out := captureStep(t, func(p *wPrinter) {
+		runCDNStep(context.Background(), p, prompt, step, cdnDeps{
+			DockerCLI:    docker,
+			Resolver:     resolver,
+			HTTPClient:   httpc,
+			TokenReader:  func(string) (string, error) { return "personal-cf-token", nil },
+			CFAPIBaseURL: "http://cf.example",
+		})
+	})
+
+	if !step.cfEnabled {
+		t.Fatalf("cfEnabled false on user-token happy path; out=%q", out)
+	}
+	if len(httpc.requests) != 3 {
+		t.Fatalf("http calls=%d, want 3 (account verify + user verify + scope); paths=%v",
+			len(httpc.requests), reqPaths(httpc.requests))
+	}
+	if got := httpc.requests[0].URL.Path; got != "/accounts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/tokens/verify" {
+		t.Errorf("phase-1a URL = %q", got)
+	}
+	if got := httpc.requests[1].URL.Path; got != "/user/tokens/verify" {
+		t.Errorf("phase-1b URL = %q", got)
+	}
+	if got := httpc.requests[2].URL.Path; got != "/accounts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/rules/lists" {
+		t.Errorf("phase-2 URL = %q", got)
+	}
+	if strings.Contains(out, "personal-cf-token") {
+		t.Error("token leaked on happy path")
+	}
+	if strings.Contains(out, "Cloudflare enforcer setup did NOT complete") {
+		t.Errorf("abort banner fired on user-token happy path: %q", out)
 	}
 }
 
@@ -374,6 +739,163 @@ func TestRunCDNStep_TransientError(t *testing.T) {
 	}
 	if !strings.Contains(out, "unreachable") {
 		t.Errorf("transient-error message missing 'unreachable': %q", out)
+	}
+	// Issue #93: the abort banner must fire so the operator doesn't lose
+	// the transient-error message under later wizard output.
+	if !strings.Contains(out, "Cloudflare enforcer setup did NOT complete") {
+		t.Errorf("abort banner missing after transient CF API error: %q", out)
+	}
+}
+
+// ── Silent-bail scenarios (issue #93) ────────────────────────────────────────
+
+// TestRunCDNStep_Issue93_InvalidAccountIDShowsBanner covers the specific
+// path that produced the original bug report: the operator was prompted for
+// the CF token and pasted it, but then hit ENTER (or a typo) at the
+// account_id prompt. The single "must be 32 lowercase hex" line scrolled
+// past under the later AI + systemd output, and config.yaml silently lacked
+// enforce.cloudflare. The banner must fire so this can't happen again.
+func TestRunCDNStep_Issue93_InvalidAccountIDShowsBanner(t *testing.T) {
+	t.Parallel()
+
+	docker := &dockerFake{
+		ps: "app\tcompany/app",
+		inspect: map[string]string{
+			"app": "VIRTUAL_HOST=one.example.com\n",
+		},
+	}
+	resolver := &resolverFake{
+		answers: map[string][]netip.Addr{
+			"one.example.com": {mustAddr(t, "104.21.13.183")},
+		},
+	}
+	prompt := &scriptedPrompter{
+		strings: []string{
+			"lists", // mode
+			"block", // action
+			"",      // account_id — operator hits ENTER
+		},
+		bools: []bool{true}, // "Configure the CF enforcer now?" → yes
+	}
+	step := &cdnStep{}
+	out := captureStep(t, func(p *wPrinter) {
+		runCDNStep(context.Background(), p, prompt, step, cdnDeps{
+			DockerCLI:   docker,
+			Resolver:    resolver,
+			TokenReader: func(string) (string, error) { return "opt-in-token", nil },
+			// No HTTPClient — dry-validate should never be reached.
+		})
+	})
+	if step.cfEnabled {
+		t.Fatal("cfEnabled=true despite invalid account_id")
+	}
+	if !strings.Contains(out, "account_id must be 32 lowercase hex") {
+		t.Errorf("per-line reason missing: %q", out)
+	}
+	if !strings.Contains(out, "Cloudflare enforcer setup did NOT complete") {
+		t.Errorf("abort banner missing on invalid account_id: %q", out)
+	}
+	// The token itself must NEVER appear on stdout.
+	if strings.Contains(out, "opt-in-token") {
+		t.Error("token leaked on abort path")
+	}
+}
+
+// TestRunCDNStep_Issue93_InvalidListNameShowsBanner covers the sibling
+// silent-bail path: valid account_id but a list_name that fails the
+// [A-Za-z0-9_]+ Cloudflare constraint.
+func TestRunCDNStep_Issue93_InvalidListNameShowsBanner(t *testing.T) {
+	t.Parallel()
+
+	docker := &dockerFake{
+		ps: "app\tcompany/app",
+		inspect: map[string]string{
+			"app": "VIRTUAL_HOST=one.example.com\n",
+		},
+	}
+	resolver := &resolverFake{
+		answers: map[string][]netip.Addr{
+			"one.example.com": {mustAddr(t, "104.21.13.183")},
+		},
+	}
+	prompt := &scriptedPrompter{
+		strings: []string{
+			"lists",
+			"block",
+			"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"has-dashes-not-allowed",
+		},
+		bools: []bool{true},
+	}
+	step := &cdnStep{}
+	out := captureStep(t, func(p *wPrinter) {
+		runCDNStep(context.Background(), p, prompt, step, cdnDeps{
+			DockerCLI:   docker,
+			Resolver:    resolver,
+			TokenReader: func(string) (string, error) { return "opt-in-token", nil },
+		})
+	})
+	if step.cfEnabled {
+		t.Fatal("cfEnabled=true despite invalid list_name")
+	}
+	if !strings.Contains(out, "list_name must match") {
+		t.Errorf("per-line reason missing: %q", out)
+	}
+	if !strings.Contains(out, "Cloudflare enforcer setup did NOT complete") {
+		t.Errorf("abort banner missing on invalid list_name: %q", out)
+	}
+}
+
+// TestRunCDNStep_Issue93_GenericPathBailShowsBanner covers the path where
+// no CDN was auto-detected (DNS didn't resolve to a known CF range, CF
+// Tunnel, etc.) but the operator said "yes, this server IS behind a CDN"
+// on the generic follow-up prompt and then bailed inside the subflow.
+// printLoudSkipWarning is a no-op in this branch because there are no
+// matched domains to warn about — so the new abort banner is the ONLY
+// signal the operator has that config.yaml won't get the CF section.
+func TestRunCDNStep_Issue93_GenericPathBailShowsBanner(t *testing.T) {
+	t.Parallel()
+
+	docker := &dockerFake{
+		ps: "app\tcompany/app",
+		inspect: map[string]string{
+			"app": "VIRTUAL_HOST=behind-tunnel.example.com\n",
+		},
+	}
+	// Resolves to a non-CF IP so no auto-detect matches.
+	resolver := &resolverFake{
+		answers: map[string][]netip.Addr{
+			"behind-tunnel.example.com": {mustAddr(t, "203.0.113.4")},
+		},
+	}
+	prompt := &scriptedPrompter{
+		strings: []string{
+			"lists",
+			"block",
+			"", // account_id → empty → subflow bails
+		},
+		bools: []bool{
+			true, // "Does this server sit behind a CDN?" → yes (generic path)
+		},
+	}
+	step := &cdnStep{}
+	out := captureStep(t, func(p *wPrinter) {
+		runCDNStep(context.Background(), p, prompt, step, cdnDeps{
+			DockerCLI:   docker,
+			Resolver:    resolver,
+			TokenReader: func(string) (string, error) { return "opt-in-token", nil },
+		})
+	})
+	if step.cfEnabled {
+		t.Fatal("cfEnabled=true despite subflow bail")
+	}
+	// The domain-level loud-skip warning specifically MUST NOT fire here
+	// (nothing to warn about), so the abort banner is our only defense.
+	if strings.Contains(out, "CDN detected but no edge enforcer configured") {
+		t.Errorf("domain-level loud-skip warning fired on no-detection path: %q", out)
+	}
+	if !strings.Contains(out, "Cloudflare enforcer setup did NOT complete") {
+		t.Errorf("abort banner missing on generic-path silent bail: %q", out)
 	}
 }
 
@@ -418,6 +940,13 @@ func TestRunCDNStep_LoudSkipWhenCDNDetected(t *testing.T) {
 	}
 	if !strings.Contains(out, "Cloudflare") {
 		t.Errorf("loud-skip warning missing the provider name: %q", out)
+	}
+	// Issue #93: the abort banner exists to catch bail-outs mid-subflow,
+	// NOT the "operator declined the CF setup" case. When the operator
+	// explicitly said no, runCloudflareSubflow is never entered, so the
+	// banner must stay silent.
+	if strings.Contains(out, "Cloudflare enforcer setup did NOT complete") {
+		t.Errorf("abort banner fired when operator declined CF setup: %q", out)
 	}
 }
 

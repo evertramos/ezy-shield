@@ -47,6 +47,10 @@ type cdnStep struct {
 	// enforcer at init time. On false with detected non-empty, the wizard
 	// prints the loud-skip warning (issue #43 §3).
 	cfEnabled bool
+	// cfAttempted is true once the operator entered the Cloudflare subflow.
+	// cfAttempted && !cfEnabled means the subflow aborted (the loud banner
+	// from issue #93 fired); used only by the init summary (issue #102).
+	cfAttempted bool
 	// cfCfg is the CF config the wizard will emit into config.yaml, only
 	// populated when cfEnabled is true and validation succeeded.
 	cfCfg *config.CloudflareCfg
@@ -357,7 +361,33 @@ func printLoudSkipWarning(p *wPrinter, results []cdndetect.DomainResult) {
 			f.domain, strings.Join(f.providers, ", "), addrsList(f.addrs))
 	}
 	p.println("")
-	p.println("      Re-run 'ezyshield init --add-cloudflare' later to configure it.")
+	p.println("      To retry: delete /etc/ezyshield/config.yaml + policy.yaml")
+	p.printf("      and re-run 'sudo %s init'.\n", progName)
+	p.println("  ─────────────────────────────────────────────────────────────")
+	p.println("")
+}
+
+// printCFSetupAbortedBanner is emitted when the operator explicitly opted
+// into the Cloudflare subflow (auto-detect happy-path OR the generic "behind
+// a CDN?" prompt) but the subflow returned before setting cfEnabled=true —
+// invalid account_id, invalid list_name, dryValidateCFToken failure, etc.
+//
+// Without this banner (issue #93) the specific error line printed inside
+// runCloudflareSubflow scrolls past under the AI prompts and the "[3/5]
+// Writing configuration files..." output, leaving the operator with a
+// config.yaml that silently lacks the enforce.cloudflare section they asked
+// for. The banner sits at the end of the CDN step so it's the last thing
+// visible before the wizard moves on.
+func printCFSetupAbortedBanner(p *wPrinter) {
+	p.println("")
+	p.println("  ─────────────────────────────────────────────────────────────")
+	p.println("  [!] Cloudflare enforcer setup did NOT complete.")
+	p.println("      config.yaml will NOT contain enforce.cloudflare, and .env")
+	p.println("      will NOT contain CLOUDFLARE_API_TOKEN. See the specific")
+	p.println("      reason printed above (invalid input, or token validation).")
+	p.println("")
+	p.println("      To retry: delete /etc/ezyshield/config.yaml + policy.yaml")
+	p.printf("      and re-run 'sudo %s init'.\n", progName)
 	p.println("  ─────────────────────────────────────────────────────────────")
 	p.println("")
 }
@@ -389,6 +419,25 @@ func runCloudflareSubflow(
 	deps cdnDeps,
 	detectedCFDomains []string,
 ) {
+	// Mark the attempt so the init summary can distinguish "operator entered
+	// the subflow and it aborted" from "operator declined at the yes/no
+	// prompt" (issue #102). Presentation-only: no prompt or write changes.
+	step.cfAttempted = true
+
+	// Every early-return path below leaves step.cfEnabled=false. Without a
+	// tail-banner the per-line reason ("invalid account_id", "token
+	// validation failed", …) scrolls past under the AI prompts and the
+	// "[3/5] Writing configuration files..." output, and the operator ends
+	// up with a config.yaml silently missing enforce.cloudflare — issue #93.
+	// The defer fires on every exit, including the happy-path where it's a
+	// no-op because cfEnabled has been flipped to true just before the
+	// function returns naturally.
+	defer func() {
+		if !step.cfEnabled {
+			printCFSetupAbortedBanner(p)
+		}
+	}()
+
 	if len(detectedCFDomains) > 0 {
 		p.printf("  Configuring Cloudflare enforcer for detected domain(s): %s\n",
 			strings.Join(detectedCFDomains, ", "))
@@ -558,44 +607,157 @@ func buildCFWAFRuleExpression(listName string) string {
 	return fmt.Sprintf("(ip.src in $%s)", listName)
 }
 
-// dryValidateCFToken makes a single GET request to the Cloudflare API to
-// verify the token is scoped correctly for the chosen mode. On 401/403 it
-// returns a scope-specific message; on any other non-2xx it returns a
-// generic error including the status code but NOT the response body (which
-// could contain rate-limit correlation IDs or other Cloudflare-internal
-// data we don't need to surface).
+// dryValidateCFToken checks that the token the operator pasted is (a) a
+// real, active Cloudflare API token and (b) actually usable for the mode
+// the operator chose. It never hits an endpoint that requires a scope the
+// enforcer itself would not need — that was the original bug: probing
+// GET /accounts/{id} demanded Account Settings:Read, so a correctly
+// Account-Filter-Lists:Edit-scoped token failed here with 403 even though
+// nothing else was wrong with it.
 //
-// The token is never appended to the error message — the CF API only
-// accepts it in the Authorization header, and %w/%v wrapping is scoped to
-// the request URL (built with req.URL.Query()) which never carries the
-// token.
+// The check runs in two phases:
+//
+//  1. Identity probe — is this token alive at all? Cloudflare exposes
+//     two verify endpoints depending on who OWNS the token:
+//     - Account-owned tokens: GET /accounts/{account_id}/tokens/verify
+//     - User-owned  tokens:   GET /user/tokens/verify
+//     We try the account path first (recommended for service accounts)
+//     and fall back to the user path. If neither returns 200 the token
+//     is genuinely invalid or expired.
+//     This phase REQUIRES an account ID: account-owned (cfat_) tokens
+//     are rejected by /user/tokens/verify, and without an ID the account
+//     URL degenerates to /accounts//tokens/verify. Rulesets mode never
+//     collects an account ID (it only needs zone IDs), so running the
+//     identity probe there would misreport a perfectly valid cfat_
+//     token as "invalid or expired". When cfg.AccountID is empty we
+//     skip Phase 1 entirely and let Phase 2 prove the token is alive —
+//     a 200 on the zone rulesets read implies both identity and scope.
+//
+//  2. Scope probe — does the token actually have the permission needed
+//     for the operational mode? We hit the read-side of the endpoint the
+//     enforcer will write to. Read implies Edit succeeds too (Edit is a
+//     superset), so we accept 200 as evidence of "at least Read on the
+//     right object" and rely on the scope-hint text to tell the operator
+//     which Edit scope to enable if this fails with 403.
+//     - lists    → GET /accounts/{account_id}/rules/lists?per_page=1
+//     - rulesets → GET /zones/{zone_id}/rulesets?per_page=1
+//
+// The token is only ever sent as an Authorization header — never in a URL
+// path or query — so %w wrapping of transport errors and status-code
+// echoes cannot leak it. All error bodies are read through
+// readCFErrorMessage, which caps the read and strips ANSI (§1
+// SECURITY-REVIEW.md).
 func dryValidateCFToken(ctx context.Context, deps cdnDeps, cfg *config.CloudflareCfg, token string) error {
 	base := deps.CFAPIBaseURL
 	if base == "" {
 		base = "https://api.cloudflare.com/client/v4"
 	}
+	identityVerified := false
+	if cfg.AccountID != "" {
+		if err := verifyCFTokenIdentity(ctx, deps, base, cfg.AccountID, token); err != nil {
+			return err
+		}
+		identityVerified = true
+	}
+	return probeCFTokenScope(ctx, deps, base, cfg, token, identityVerified)
+}
+
+// verifyCFTokenIdentity implements Phase 1. Returns nil as soon as either
+// verify endpoint reports 200; otherwise returns an "invalid or expired"
+// error that echoes both status codes so the operator can distinguish
+// "wrong account_id" (accounts verify 404 / 401 with `invalid account`)
+// from "token expired" (both verify 401).
+func verifyCFTokenIdentity(ctx context.Context, deps cdnDeps, base, accountID, token string) error {
+	// Account-owned path first — this is what CI/service tokens use, and
+	// what the wizard steers operators toward.
+	acctURL := fmt.Sprintf("%s/accounts/%s/tokens/verify", base, accountID)
+	acctStatus, acctMsg, err := doCFGet(ctx, deps, acctURL, token)
+	if err != nil {
+		return err
+	}
+	if acctStatus == http.StatusOK {
+		return nil
+	}
+	// User-owned fallback for personal API tokens.
+	userURL := base + "/user/tokens/verify"
+	userStatus, _, err := doCFGet(ctx, deps, userURL, token)
+	if err != nil {
+		return err
+	}
+	if userStatus == http.StatusOK {
+		return nil
+	}
+	// Both verify endpoints rejected the token. Prefer the account
+	// endpoint's error message when available — it's the more specific
+	// diagnostic ("wrong account" vs "expired token"). We deliberately
+	// do NOT surface the user-endpoint body: it can only add noise here.
+	if acctMsg != "" {
+		return fmt.Errorf("cloudflare token is invalid, expired, or not authorised for account %s (accounts verify HTTP %d: %s; user verify HTTP %d) — see https://developers.cloudflare.com/fundamentals/api/get-started/create-token/",
+			accountID, acctStatus, acctMsg, userStatus)
+	}
+	return fmt.Errorf("cloudflare token is invalid, expired, or not authorised for account %s (accounts verify HTTP %d; user verify HTTP %d) — see https://developers.cloudflare.com/fundamentals/api/get-started/create-token/",
+		accountID, acctStatus, userStatus)
+}
+
+// probeCFTokenScope implements Phase 2: "can this token actually operate
+// on the target resource?". identityVerified says whether Phase 1 ran and
+// passed; when it did NOT (rulesets mode has no account ID to verify
+// against), a 401/403 here is ambiguous — the token may be dead, not just
+// under-scoped — and the error message must say so.
+func probeCFTokenScope(ctx context.Context, deps cdnDeps, base string, cfg *config.CloudflareCfg, token string, identityVerified bool) error {
 	var url, scopeHint string
 	switch cfg.Mode {
 	case "lists":
-		url = fmt.Sprintf("%s/accounts/%s", base, cfg.AccountID)
+		// per_page=1 keeps the response tiny even on accounts with
+		// thousands of Custom Lists.
+		url = fmt.Sprintf("%s/accounts/%s/rules/lists?per_page=1", base, cfg.AccountID)
 		scopeHint = "Account:Account Filter Lists:Edit on account " + cfg.AccountID
 	case "rulesets":
 		if len(cfg.ZoneIDs) == 0 {
 			return fmt.Errorf("internal: rulesets mode with no zone_ids")
 		}
-		url = fmt.Sprintf("%s/zones/%s", base, cfg.ZoneIDs[0])
-		scopeHint = "Zone:Firewall:Edit on zone " + cfg.ZoneIDs[0]
+		url = fmt.Sprintf("%s/zones/%s/rulesets?per_page=1", base, cfg.ZoneIDs[0])
+		scopeHint = "Zone:Firewall Services:Edit on zone " + cfg.ZoneIDs[0]
 	default:
 		return fmt.Errorf("internal: unknown mode %q", cfg.Mode)
 	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil) //nolint:gosec // G107: url is built from compile-time constant base + operator-typed ID validated to [a-f0-9]{32}
+	status, msg, err := doCFGet(ctx, deps, url, token)
 	if err != nil {
-		// This can only happen for a malformed URL (would indicate an
-		// internal bug, not operator error). Report without echoing the
-		// URL — which is fine here since the URL doesn't contain the
-		// token, but stays defensive.
-		return fmt.Errorf("building validation request: %w", err)
+		return err
+	}
+	switch status {
+	case http.StatusOK:
+		return nil
+	case http.StatusUnauthorized, http.StatusForbidden:
+		reason := fmt.Sprintf("token lacks scope %q", scopeHint)
+		if !identityVerified {
+			// No Phase-1 identity check ran, so we cannot distinguish a
+			// dead token from an under-scoped one — name both.
+			reason = fmt.Sprintf("token is invalid, expired, or lacks scope %q", scopeHint)
+		}
+		if msg == "" {
+			return fmt.Errorf("%s (HTTP %d) — see https://developers.cloudflare.com/fundamentals/api/reference/permissions/",
+				reason, status)
+		}
+		return fmt.Errorf("%s (HTTP %d: %s)", reason, status, msg)
+	default:
+		return fmt.Errorf("cloudflare API returned HTTP %d validating %s (transient?) — delete config.yaml and re-run `sudo %s init` to retry",
+			status, cfg.Mode, progName)
+	}
+}
+
+// doCFGet issues one GET against the Cloudflare API and returns the HTTP
+// status, a best-effort parsed error message on non-2xx, and any
+// transport-layer error. The token is passed exclusively as an
+// Authorization header; the response body is bounded via readCFErrorMessage.
+//
+// On 2xx the response body is closed but NOT parsed — we don't need any
+// verify-endpoint payload, and skipping the parse avoids exposing us to a
+// giant success response.
+func doCFGet(ctx context.Context, deps cdnDeps, url, token string) (int, string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil) //nolint:gosec // G107: url is built from compile-time constant base + operator-typed IDs validated to [a-f0-9]{32}
+	if err != nil {
+		return 0, "", fmt.Errorf("building validation request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
@@ -607,27 +769,15 @@ func dryValidateCFToken(ctx context.Context, deps cdnDeps, cfg *config.Cloudflar
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("cloudflare API unreachable: %w", err)
+		return 0, "", fmt.Errorf("cloudflare API unreachable: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	switch {
-	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
-		// Best-effort read of the CF error struct so we can echo the
-		// most useful hint. Bounded to keep the message reasonable —
-		// even a runaway CF response shouldn't ever be more than a few
-		// hundred bytes for these endpoints.
-		msg := readCFErrorMessage(resp.Body)
-		if msg == "" {
-			return fmt.Errorf("token lacks scope %q (HTTP %d) — see https://developers.cloudflare.com/fundamentals/api/reference/permissions/",
-				scopeHint, resp.StatusCode)
-		}
-		return fmt.Errorf("token lacks scope %q (HTTP %d: %s)", scopeHint, resp.StatusCode, msg)
-	case resp.StatusCode >= 400:
-		return fmt.Errorf("cloudflare API returned HTTP %d validating %s (transient?) — retry with `ezyshield init --add-cloudflare`",
-			resp.StatusCode, cfg.Mode)
+	var msg string
+	if resp.StatusCode != http.StatusOK {
+		msg = readCFErrorMessage(resp.Body)
 	}
-	return nil
+	return resp.StatusCode, msg, nil
 }
 
 // cfErrorResponse mirrors the Cloudflare v4 error envelope. We only look at

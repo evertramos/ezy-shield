@@ -21,6 +21,17 @@ strikes:
 # Exceeding this pauses enforcement and sends a critical alert.
 max_bans_per_minute: 30
 
+# Escalation exemption from max_bans_per_minute: a re-offense (strike > 1)
+# skips the cap only if the previous ban ended within this window.
+# Default 24h; max 168h (7d) — larger values are clamped down.
+escalation_exempt_window: 24h
+
+# ban_ineffective diagnostic: fires when a banned IP keeps producing log
+# events (enforcement anomaly — e.g. a CDN in front of the server).
+# Both values are floors: policy may raise them, never lower them.
+ban_ineffective_grace: 90s      # wait after a ban before counting events
+ban_ineffective_min_events: 3   # events after grace that trigger the WARN
+
 # Allowlist — IPs/CIDRs that can NEVER be banned (allowlist wins over everything)
 allowlist: []
 

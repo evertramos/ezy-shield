@@ -1,6 +1,6 @@
 # SECURITY-REVIEW.md — Playbook for AI & human security review
 
-> Read this **before reviewing or writing any PR**. .ezy/agents/AGENTS.md has the day-to-day
+> Read this **before reviewing or writing any PR**. AGENTS.md has the day-to-day
 > rules; this file is the adversarial lens. EzyShield is a root-capable security
 > daemon — a bug here isn't a crash, it's a server compromise or a self-inflicted
 > outage. Review like an attacker who has read this whole repo.
@@ -51,7 +51,7 @@ attacker. Treat every parsed field as adversarial.
 
 ## 2. 🔴 Decision engine — the lock-out / false-ban surface
 
-The worst non-root bug is banning the admin or a whole CDN. (See .ezy/agents/AGENTS.md Hard
+The worst non-root bug is banning the admin or a whole CDN. (See AGENTS.md Hard
 Rules; this is the verification side.)
 
 - [ ] Allowlist is checked **first** and is **unbypassable** — no code path bans
@@ -111,9 +111,9 @@ command execution through it.
 
 - **Operator paste-mistake at the env-var-name prompt (issue #13, mitigated in #22).** The original wizard asked for the *name* of the env var holding the API key (e.g. `ANTHROPIC_API_KEY`). If the operator pasted the real key instead, the naive code path (a) wrote `api_key: env:sk-ant-<full-key>` to `/etc/ezyshield/config.yaml` and (b) later logged `environment variable sk-ant-<full-key> is not set` to journald on every daemon restart — leaking the secret to whoever reads the system journal.
 
-  **Mitigation (issue #22):** the wizard (cmd/ezyshield/init.go `askKeySource`) now presents two options: (1) paste the key value directly — input is echo-suppressed via `term.ReadPassword`; the raw key is written only to `/etc/ezyshield/.env` (mode `0600 root:ezyshield`) and `config.yaml` always contains `api_key: env:CANONICAL_NAME`; or (2) supply an env var name manually for advanced setups (sops / vault / LoadCredential) — this path still validates the name as a POSIX shell identifier (`^[A-Za-z_][A-Za-z0-9_]*$`) via `config.ValidateEnvVarName`, rejecting secret-shaped input. The raw API key value **never enters `config.yaml`** through the wizard, regardless of which option is chosen.
+  **Mitigation (issue #22):** the wizard (cmd/ezyshield/init_ai.go `askAIKeySource`, shared by init and `config ai <provider>`) now presents two options: (1) paste the key value directly — input is echo-suppressed via `term.ReadPassword`; the raw key is written only to `/etc/ezyshield/.env` (mode `0600 root:ezyshield`) and `config.yaml` always contains `api_key: env:CANONICAL_NAME`; or (2) supply an env var name manually for advanced setups (sops / vault / LoadCredential) — this path still validates the name as a POSIX shell identifier (`^[A-Za-z_][A-Za-z0-9_]*$`) via `config.ValidateEnvVarName`, rejecting secret-shaped input. The raw API key value **never enters `config.yaml`** through the wizard, regardless of which option is chosen.
 
-  Canonical env var names are hardcoded per provider (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OLLAMA_API_KEY`) and not user-configurable — eliminating the class of "invent an env var name" confusion entirely. See `cmd/ezyshield/init.go` (`askKeySource`, `writeOrKeepEnvFile`) and `internal/config/secret.go` (`ValidateEnvVarName`, `redactSecret`).
+  Canonical env var names are hardcoded per provider (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OLLAMA_API_KEY`) and not user-configurable — eliminating the class of "invent an env var name" confusion entirely. See `cmd/ezyshield/init_ai.go` (`askAIKeySource`, `writeAIEnvFile`), `cmd/ezyshield/init.go` (`writeOrKeepEnvFile`) and `internal/config/secret.go` (`ValidateEnvVarName`, `redactSecret`).
 
 ## 5. 🔴 AI / LLM boundary — prompt injection
 
@@ -252,6 +252,13 @@ caused real bugs in this project.
       but verify the chain doesn't surface a URL with embedded credentials.
 - [ ] HTTP clients: if the URL contains secrets, wrap errors without `%v` on
       the request/URL. Use `req.URL.Query()` to build parameterized URLs.
+
+### Test & fixture data hygiene
+- [ ] Test/fixture log lines derived from a real host use RFC 5737
+      (`192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`) or RFC 3849
+      (`2001:db8::/32`) example IPs and generic usernames (`testuser`, `johndoe`)
+      — never a real client/admin IP, a real individual's username, or a real
+      SSH key fingerprint (Hard Rule 8, AGENTS.md).
 
 ### Retry & backoff
 - [ ] Any retry loop has a **bounded** delay. If parsing a delay header fails,

@@ -150,7 +150,7 @@ jobs:
       # The same snapshot build is install-verified in containers by the
       # `packages` job in ci.yaml on every PR.
       - name: Run goreleaser
-        uses: goreleaser/goreleaser-action@v6
+        uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
           version: "~> v2"

@@ -190,3 +190,13 @@ jobs:
             echo "- ezyshield-enforcer-linux-arm64"
             echo "- checksums.txt"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # Chained explicitly because goreleaser's GITHUB_TOKEN-created release does
+  # not emit a workflow-triggering "published" event (anti-recursion rule).
+  publish-repos:
+    needs: [tag, release]
+    if: always() && needs.release.result == 'success'
+    uses: ./.github/workflows/publish-repos.yaml
+    with:
+      tag: ${{ needs.tag.outputs.new_tag || github.ref_name }}
+    secrets: inherit

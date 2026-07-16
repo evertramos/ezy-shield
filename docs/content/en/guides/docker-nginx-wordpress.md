@@ -6,10 +6,6 @@ order: 2
 
 # Deploying EzyShield — Docker host with nginx-proxy + multiple WordPress containers
 
-> ⚠️ **Status: this is the *intended* user experience.** EzyShield is pre-alpha;
-> commands marked 🚧 don't exist yet. This guide doubles as the spec for how the
-> MVP must feel to use. Once Phase 1 lands, every step here should "just work."
-
 This walks a server admin through protecting a typical setup: one host running
 Docker, an **nginx reverse proxy** container in front of several **WordPress**
 containers. The attacks you care about here are SSH brute force on the host,
@@ -45,10 +41,11 @@ but fix it properly.)
 ## 2. Install (on the host)
 
 ```bash
-# 🚧 planned installer
-curl -sfL https://get.example.com | sh
+curl -sfL https://get.ezyshield.com | sudo sh
 ezyshield version
 ```
+
+Or install the signed `.deb`/`.rpm` — see the [install guide](../getting-started/install.md).
 
 Until the installer exists, build from source:
 
@@ -121,9 +118,10 @@ real_ip_recursive on;
 ```
 
 > **Critical safety note:** only trust `X-Forwarded-For` from upstreams you
-> actually control. If you trust it from everyone, attackers spoof the header and
-> can get *innocent* IPs banned. You'll tell EzyShield the same trusted ranges in
-> §4 (`trusted_proxies`) so it parses the header the same safe way.
+> actually control (the `set_real_ip_from` ranges above). If the proxy trusts it
+> from everyone, attackers spoof the header and can get *innocent* IPs banned.
+> EzyShield reads whatever real IP the proxy resolves into the log line — get the
+> nginx side right and EzyShield bans the right address.
 
 ### 3c. Per-container WordPress logs (optional)
 If you'd rather read each WordPress container's own access log, bind-mount each
@@ -135,7 +133,7 @@ single proxy log is enough and simpler — start there.
 Before configuring anything by hand, run a scan:
 
 ```bash
-sudo ezyshield scan      # 🚧 inventory listeners, containers, and their logs
+sudo ezyshield scan      # inventory listeners, containers, and their logs
 ```
 
 It walks every listening port and reports something like:
@@ -164,14 +162,14 @@ unexpected new open port is a classic sign of a backdoor:
 ⚠ NEW listener since last scan: port 4444, /tmp/.sys (user www-data) — investigate
 ```
 
-You can also have the daemon rescan on a schedule (`scan.interval` in config).
+Re-run `ezyshield scan` whenever your topology changes — the previous scan is stored as a baseline, so it highlights anything new.
 
 ---
 
 ## 4. Configure EzyShield
 
 ```bash
-sudo ezyshield init      # 🚧 interactive wizard; writes /etc/ezyshield/*.yaml
+sudo ezyshield init      # interactive wizard; writes /etc/ezyshield/*.yaml
 ```
 
 > **Pre-flight (issue #5):** before printing the "Detecting environment..."
@@ -182,65 +180,61 @@ sudo ezyshield init      # 🚧 interactive wizard; writes /etc/ezyshield/*.yaml
 > couldn't write. To regenerate, delete the listed files and re-run. The same
 > check honours `--config-dir <path>` for non-default target directories.
 
-Or write `/etc/ezyshield/config.yaml` directly:
+Or write `/etc/ezyshield/config.yaml` directly. Collectors read your logs;
+enforcement and notifications are configured here, while thresholds and the
+allowlist live in `policy.yaml`:
 
 ```yaml
-# What to watch
+# /etc/ezyshield/config.yaml — what to watch and how to act
 collectors:
-  - type: authlog          # host SSH brute force
-    path: /var/log/auth.log
-  - type: nginx
+  - kind: journald            # host SSH brute force
+    unit: ssh
+  - kind: file                # the proxy's access log
     path: /var/log/nginx-proxy/access.log
-    format: combined        # or "json" if your proxy logs JSON
+    parser: nginx
 
-# Trust X-Forwarded-For ONLY from these (must match §3b)
-trusted_proxies:
-  - 173.245.48.0/20         # e.g. Cloudflare; or 172.16.0.0/12 for docker bridge
-                            # if your in-front proxy lives on the docker network
-
-# Never block these — your own access
-allowlist:
-  - 203.0.113.7/32          # your home/office IP  (CHANGE THIS)
-  # current SSH session + admin IPs are auto-added by anti-lockout
-
-# Firewall backend
 enforce:
-  backend: nftables
-
-# Start SAFE: observe only, block nothing yet
-armed: false                # dry-run until you're confident (default)
+  nftables: {}                # local firewall (default table/set)
 
 notify:
   telegram:
-    enabled: true
-    bot_token: env:TELEGRAM_BOT_TOKEN   # secrets come from env, never inline
-    chat_id: env:TELEGRAM_CHAT_ID
+    bot_token: env:EZYSHIELD_TELEGRAM_TOKEN   # secrets come from env, never inline
+    chat_ids: ["987654321"]
 ```
-
-`/etc/ezyshield/policy.yaml` (the strike escalation — defaults shown):
 
 ```yaml
+# /etc/ezyshield/policy.yaml — decisions, escalation, and safety
+armed: false                  # dry-run until you're confident (default)
 ban_threshold: 70
+
 strikes:
-  - 5m
-  - 1h
-  - 24h
-  - 7d
-  - permanent
-# WordPress-specific signatures are built in (wp-login.php, xmlrpc.php floods);
-# you can add your own:
-signatures:
-  paths: ["/wp-login.php", "/xmlrpc.php", "/.env", "/wp-config.php.bak"]
+  - ttl: 5m
+  - ttl: 1h
+  - ttl: 24h
+  - ttl: 168h
+  - ttl: 0                    # permanent
+
+# Never block these — your own access. Current SSH peer + admin_cidrs are
+# auto-allowlisted before every ban.
+allowlist:
+  - 203.0.113.7               # your home/office IP  (CHANGE THIS)
+admin_cidrs:
+  - 192.0.2.0/24
 ```
 
-Put secrets in an env file readable only by root (perms enforced by `doctor`):
+WordPress signatures (wp-login.php / xmlrpc.php floods, exploit-probe paths)
+are built into the shipped rules — no configuration needed. To customize
+thresholds, point `rules_path` in config.yaml at your own copy of
+`/etc/ezyshield/rules.yaml.example`.
+
+Secrets go in an env file the systemd unit loads (`ezyshield init` creates it
+at mode 0600; `doctor` checks its permissions):
 
 ```bash
-sudo tee /etc/ezyshield/ezyshield.env >/dev/null <<'EOF'
-TELEGRAM_BOT_TOKEN=123456:abc...
-TELEGRAM_CHAT_ID=987654321
+sudo tee /etc/ezyshield/.env >/dev/null <<'EOF'
+EZYSHIELD_TELEGRAM_TOKEN=123456:abc...
 EOF
-sudo chmod 600 /etc/ezyshield/ezyshield.env
+sudo chmod 600 /etc/ezyshield/.env
 ```
 
 ---
@@ -248,14 +242,16 @@ sudo chmod 600 /etc/ezyshield/ezyshield.env
 ## 5. Verify before you arm it
 
 ```bash
-sudo ezyshield doctor          # 🚧 checks config, perms, nft, log readability
+sudo ezyshield doctor          # checks config, perms, nft, log readability
+sudo ezyshield config validate # strict schema check
 sudo ezyshield test notifier telegram
 ```
 
-Then watch what it *would* do, without blocking anything:
+Then run the daemon in the foreground and watch what it *would* do (it stays in
+dry-run until you set `armed: true`):
 
 ```bash
-sudo ezyshield dry-run --since 1h     # 🚧 prints "would ban x.x.x.x — wp-login flood"
+sudo ezyshield run             # logs "dry_ban (would ban ...)" decisions
 ```
 
 Let this run during real traffic for a day. Confirm:
@@ -270,18 +266,20 @@ Let this run during real traffic for a day. Confirm:
 
 Flip `armed: true` in config, then run it for real as a service:
 
+The systemd units are installed by `ezyshield init` (or the deb/rpm package).
+Enable and start:
+
 ```bash
-sudo ezyshield install-service   # 🚧 drops the hardened systemd units
-sudo systemctl enable --now ezyshield
+sudo systemctl enable --now ezyshield-enforcer ezyshield
 systemctl status ezyshield
 ```
 
 Now bans are live. Watch them:
 
 ```bash
-ezyshield status                 # health, providers, today's token spend
-ezyshield list --active          # currently banned IPs + strike # + expiry
-ezyshield watch --follow         # 🚧 live event stream in your terminal
+ezyshield status                 # daemon/enforcer health, mode, active bans
+ezyshield list                   # currently banned IPs + strike # + expiry
+ezyshield watch                  # live event stream in your terminal
 ```
 
 Manual control any time:
@@ -294,36 +292,36 @@ sudo ezyshield allow 5.6.7.8     # add to allowlist
 
 ---
 
-## 7. Optional: also block at Cloudflare (Phase 2)
+## 7. Optional: also block at Cloudflare
 
 If your WordPress sites sit behind Cloudflare, blocking at the edge stops
 attackers before they even reach your host:
 
 ```yaml
 enforce:
-  backend: nftables
-  edge:
-    - type: cloudflare
-      api_token: env:CF_API_TOKEN     # scope it to "Firewall Services: Edit" only
-      zone: example.com
-      block_by: [ip, asn]             # can also block whole hostile ASNs
+  nftables: {}
+  cloudflare:
+    api_token: env:CF_API_TOKEN     # scope it to "Account Filter Lists: Edit"
+    account_id: "your-account-id"   # required in the default "lists" mode
 ```
 
 EzyShield then writes bans to *both* the host firewall and Cloudflare, and keeps
-them in sync.
+them in sync. See the [Cloudflare guide](cloudflare.md) for token scoping and
+the lists-vs-rulesets modes.
 
 ---
 
-## 8. Optional: turn on AI analysis (Phase 1/2)
+## 8. Optional: turn on AI analysis
 
 The rule engine works with no AI at all. To let AI judge the ambiguous cases
 (is this aggressive crawler a real user or a scraper?):
 
 ```yaml
 ai:
-  provider: anthropic            # or claude-cli, ollama (local), openai-compat
+  provider: anthropic            # anthropic | openai | ollama
+  model: claude-3-5-haiku-latest
   api_key: env:ANTHROPIC_API_KEY
-  daily_token_budget: 50000      # hard cap; rule engine takes over if exceeded
+  token_budget_daily: 50000      # hard daily cap; rule engine takes over if exceeded
 ```
 
 Only suspicious aggregates get sent, already minimized to summaries like
@@ -334,37 +332,33 @@ token usage stays tiny.
 
 ## 9. If something goes wrong — panic button
 
-```bash
-sudo ezyshield disable --all     # 🚧 flush ALL EzyShield blocks, everywhere
-```
-
-This removes EzyShield's blocks from **both** the host firewall **and every
-configured edge** (Cloudflare, Bunny, AWS) — important, because a block at
-Cloudflare keeps rejecting traffic even after you stop the local daemon. The
-command reports each target's result, e.g.:
-
-```
-local nftables ........ flushed (1,204 entries)
-cloudflare (example.com) flushed (1,180 rules)
-```
-
-If an edge API is slow or unreachable and you need the host unblocked *now*:
+Stop new bans immediately and drop every local block at once:
 
 ```bash
-sudo ezyshield disable --local-only   # 🚧 host firewall only; edge left as-is
+sudo systemctl stop ezyshield          # daemon stops deciding
+sudo nft delete table inet ezyshield   # all local blocks gone in one command
 ```
 
-Worst case, drop the local table directly:
+EzyShield keeps every rule it writes inside its own `inet ezyshield` table and
+never touches rules outside it — deleting that table clears all of EzyShield's
+local blocks and nothing else. It also never blocks your active SSH session
+(anti-lockout re-checks before every ban).
+
+To unblock a specific IP everywhere (host **and** the configured Cloudflare
+edge):
 
 ```bash
-sudo nft delete table inet ezyshield
+sudo ezyshield unban 203.0.113.7
 ```
 
-(That only clears the **local** firewall — Cloudflare rules would remain until
-`disable --all` runs or you remove them in the Cloudflare dashboard.)
+Cloudflare edge entries are removed per-IP by `unban`. To clear an entire edge
+list at once, use the Cloudflare dashboard (Manage Account → Configurations →
+Lists) — a block at the edge keeps rejecting traffic even after you stop the
+local daemon, so don't forget it.
 
-EzyShield never touches rules outside its own `inet ezyshield` table, and never
-blocks your active SSH session — but the panic command is there regardless.
+To remove EzyShield from the host completely, use `scripts/wipe.sh` (stops and
+removes services, units, binaries, nftables rules, the service user, and —
+optionally — data).
 
 ---
 
@@ -372,12 +366,12 @@ blocks your active SSH session — but the panic command is there regardless.
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| It's banning `172.x.x.x` / Docker IPs | proxy logs container IP, not client | configure `real_ip` (§3b) + `trusted_proxies` (§4) |
+| It's banning `172.x.x.x` / Docker IPs | proxy logs container IP, not client | configure nginx `real_ip` (§3b) |
 | Nothing is detected | wrong log path or format | `ezyshield doctor`; check `format: json` vs `combined` |
 | Got briefly locked out | allowlist missing your IP | anti-lockout should prevent it; add your IP to `allowlist` |
 | Telegram silent | token/chat_id or env not loaded | `ezyshield test notifier telegram`; check `ezyshield.env` perms |
-| Real visitors blocked | trusting XFF from untrusted source | tighten `trusted_proxies` to upstreams you control |
-| Warned "this might be a Cloudflare IP" | logs show CDN edge, not visitor | fix `real_ip`/`trusted_proxies`; never hard-ban a CDN range |
+| Real visitors blocked | proxy trusts XFF from untrusted source | tighten `set_real_ip_from` to upstreams you control |
+| Warned "this might be a Cloudflare IP" | logs show CDN edge, not visitor | fix nginx `real_ip` (§3b); never hard-ban a CDN range |
 | Warned "source is internal/private" | attack from inside the LAN | real possibility (insider/compromised host) — investigate the box, don't just ban |
 
 ---

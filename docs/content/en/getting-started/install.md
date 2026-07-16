@@ -117,17 +117,32 @@ sudo install -m 755 bin/ezyshield-enforcer /usr/local/bin/
 
 ## Upgrading to a new version
 
-To upgrade an existing installation:
+**Installed via apt / dnf** (recommended — upgrades arrive with your normal system updates):
 
 ```bash
-# Uninstall
-sudo rm /usr/local/bin/ezyshield /usr/local/bin/ezyshield-enforcer
+# Debian / Ubuntu
+sudo apt update && sudo apt install --only-upgrade ezyshield
 
-# Reinstall (latest)
+# RHEL / Rocky / Alma
+sudo dnf upgrade ezyshield
+```
+
+Config files in `/etc/ezyshield` are never touched by package upgrades. Restart the services afterwards:
+
+```bash
+sudo systemctl restart ezyshield-enforcer ezyshield
+```
+
+**Installed via the install script** (binaries in `/usr/local/bin`) — re-run it; it replaces the binaries in place:
+
+```bash
+# Latest stable
 curl -sfL https://get.ezyshield.com | sudo sh
 
-# Or specific version
-curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=v0.4.0 sh
+# Or a specific version
+curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=v0.1.0 sh
+
+sudo systemctl restart ezyshield-enforcer ezyshield
 ```
 
 ---

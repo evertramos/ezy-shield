@@ -38,7 +38,7 @@ curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=v0.1.0 sh
 
 ### Build from source
 
-Requires **Go 1.24+**.
+Requires **Go 1.26+**.
 
 ```bash
 git clone https://github.com/evertramos/ezy-shield.git
@@ -105,11 +105,13 @@ sudo ezyshield doctor
 Expected output:
 
 ```
-✓ config.yaml valid
-✓ policy.yaml valid
-✓ rules.yaml valid
-✓ nftables accessible
-✓ data directory writable
+[PASS] config.yaml: exists
+[PASS] config.yaml: parses
+[PASS] policy.yaml: exists
+[PASS] policy.yaml: parses
+[PASS] nft binary: present
+[PASS] journald: readable
+[PASS] enforcer socket: reachable
 ```
 
 ---
@@ -143,8 +145,8 @@ enforce:
 ```
 
 The privileged helper (`ezyshield-enforcer`) handles all firewall writes via a
-unix socket. If the socket isn't available at startup, bans queue in SQLite and
-apply automatically when the helper comes up.
+unix socket. The daemon re-syncs the full ban set to the enforcer at startup,
+so blocks survive restarts of either process.
 
 ### AI (optional)
 

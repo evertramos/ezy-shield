@@ -6,178 +6,133 @@ order: 3
 
 # Policy Reference
 
-Complete reference for `/etc/ezyshield/policy.yaml`. Controls decision thresholds, strike escalation, and enforcement mode.
+Complete reference for `/etc/ezyshield/policy.yaml` — decision thresholds, strike escalation, safety limits, and enforcement mode. Every field below exists in the current release; the file is strictly validated (unknown keys are rejected).
 
-## Top level
+## Full example (all fields, defaults shown)
 
 ```yaml
-armed: false                  # Enable enforcement (default: dry-run)
+# Dry-run by default: nothing is blocked until you set armed: true.
+armed: false
 
-thresholds:
-  ssh_bruteforce: 70
-  web_scanner: 60
-  # ... more rule thresholds
+# Score thresholds (rule engine + AI produce a score 0-100)
+ban_threshold:     70   # score >= this triggers a strike
+observe_threshold: 40   # score in [observe, ban) -> log/notify only
 
+# Strike escalation: ban TTL per cumulative strike count.
+# TTL of 0 means permanent ban.
 strikes:
-  - ttl: 5m
-    ban_duration: 5m
-  - ttl: 1h
-    ban_duration: 1h
-  - ttl: 24h
-    ban_duration: 24h
-  - ttl: 7d
-    ban_duration: 7d
-  - ttl: forever
-    ban_duration: permanent
+  - ttl: 5m     # strike 1
+  - ttl: 1h     # strike 2
+  - ttl: 24h    # strike 3
+  - ttl: 168h   # strike 4 (7 days)
+  - ttl: 0      # strike 5 — permanent
 
-allowlist:
-  cidrs: []
-  asns: []
+# Global safety cap: maximum ban actions per minute.
+max_bans_per_minute: 30
 
-rate_limit:
-  max_bans_per_minute: 30
+# Escalations (strike > 1) skip the cap only when the previous ban ended
+# within this window. Default 24h; values above 168h are clamped down.
+escalation_exempt_window: 24h
+
+# ban_ineffective diagnostic: fires when a banned IP keeps producing log
+# events (enforcement anomaly — e.g. a CDN in front of the server).
+# Both values are floors: policy may raise them, never lower them.
+ban_ineffective_grace: 90s
+ban_ineffective_min_events: 3
+
+# IPs/CIDRs that can NEVER be banned. Allowlist wins over everything.
+allowlist: []
+
+# Admin CIDRs merged into the runtime allowlist at startup and before each ban.
+admin_cidrs: []
+
+# Geo blocking (optional; requires GeoIP enrichment — silently skipped
+# without it). Matching traffic gets a large score boost, not an instant ban.
+block_countries: []   # ISO 3166-1 alpha-2, e.g. [CN, RU]
+block_asns: []        # e.g. [AS16276, AS14061]
 ```
 
 ## armed
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `armed` | bool | `false` | `true` = enforce bans; `false` = dry-run only |
+| `armed` | bool | `false` | `true` = enforce bans; `false` = dry-run: the full pipeline runs and logs `dry_ban` decisions, but nothing is blocked and nothing is written to the ban store |
 
-## thresholds
+Dry-run is the default on purpose — run it until `ezyshield doctor` is clean and the decisions in the log look right.
 
-Confidence scores (0–100) below which an attack is ignored.
+## Thresholds
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `ssh_bruteforce` | int | 70 | SSH login attempts |
-| `web_scanner` | int | 60 | Port scanners, bot crawlers |
-| `web_bruteforce` | int | 75 | WordPress/Drupal login attempts |
-| `wordpress_xmlrpc` | int | 80 | WordPress XML-RPC abuse |
+| `ban_threshold` | int (1–100) | 70 | Score at or above this triggers a strike/ban |
+| `observe_threshold` | int (0–ban_threshold) | 0 | Score in `[observe_threshold, ban_threshold)` produces a notification but no strike; below it, the event is only recorded |
 
-If AI is enabled and a decision is ambiguous (40–70), the AI provider is consulted.
+Scores come from the rule engine (see `configs/rules.yaml`) and, for ambiguous cases, the optional AI provider — whose verdict is advisory and always clamped by this policy.
 
 ## strikes
 
-Escalation table: IPs accumulate strikes with TTLs.
+Escalation table indexed by the IP's cumulative strike count; the count past the end of the table clamps to the last entry.
 
-```yaml
-strikes:
-  - ttl: 5m
-    ban_duration: 5m
-  - ttl: 1h
-    ban_duration: 1h
-  - ttl: 24h
-    ban_duration: 24h
-  - ttl: 7d
-    ban_duration: 7d
-  - ttl: forever
-    ban_duration: permanent
-```
+| Field | Type | Description |
+|-------|------|-------------|
+| `strikes[].ttl` | duration or `0` | Ban duration for that strike. `0` = permanent |
 
-- Strike #1 → 5 min ban (TTL 5 min: if no new hits, forget the strike)
-- Strike #2 (within 1 hour of strike #1) → 1 hour ban
-- Strike #3 (within 24 hours) → 24 hour ban
-- Strike #4 (within 7 days) → 7 day ban
-- Strike #5 (permanent TTL) → permanent ban
+Default ladder: `5m → 1h → 24h → 168h → permanent`.
 
-TTL = how long to remember a strike before forgetting it.
-BAN_DURATION = how long to enforce the ban.
+Semantics (one episode = one strike): while a ban is active, new events from that IP never add strikes — they are suppressed and counted. The ladder advances only when the IP re-offends **after** a ban expires. Runaway escalation from a single burst is structurally impossible.
 
-## allowlist
+## Rate limiting
 
-IPs/CIDRs/ASNs that are never banned, even if they match attack patterns.
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_bans_per_minute` | int (>0) | 30 | Global cap on ban actions per minute. Exceeding it returns an error instead of silently dropping the limit — a poisoned feed or parser bug cannot ban the internet |
+| `escalation_exempt_window` | duration | `24h` (max `168h`) | An escalation (strike > 1) skips the cap only when the previous ban **ended within this window** — re-blocking an IP that was blocked moments ago adds no lockout risk. Anything older counts against the cap like a fresh ban. Values above 7d are clamped down |
+
+## ban_ineffective diagnostic
+
+In a healthy armed setup, a banned IP cannot produce new log lines — packets die at the firewall. Log events mentioning a banned IP therefore signal an enforcement anomaly (CDN in front of the server, conntrack not flushed, v4/v6 mismatch). EzyShield emits a structured `ban_ineffective` WARN, once per ban, with ladder context.
+
+| Field | Type | Floor/Default | Description |
+|-------|------|---------------|-------------|
+| `ban_ineffective_grace` | duration | 90s | Events within this window after a ban are counted but never trigger the diagnostic (in-flight requests, proxy buffering, log latency) |
+| `ban_ineffective_min_events` | int | 3 | Suppressed events after the grace period needed to fire the WARN |
+
+Both are floors: policy may raise them, never lower them. The diagnostic never escalates a ban — the remedy it points to is edge enforcement or real-IP parsing, not harsher sentencing.
+
+## allowlist & admin_cidrs
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `allowlist` | list of IP/CIDR | Never banned, checked **first**, unbypassable — wins over rules, AI, and geo blocking |
+| `admin_cidrs` | list of CIDR | Merged into the runtime allowlist at startup and re-checked before every ban (anti-lockout) |
+
+The active SSH peer is additionally re-derived before every ban and can never be banned.
 
 ```yaml
 allowlist:
-  cidrs:
-    - 192.0.2.0/24          # Your office
-    - 198.51.100.100/32     # A specific vendor
-  asns:
-    - 12345                 # ISP ASN
+  - 192.0.2.0/24          # your office
+  - 198.51.100.7          # a specific host
+admin_cidrs:
+  - 10.0.0.0/8
 ```
 
-Allowlist is checked FIRST, before any rule engine decision. No way to bypass it.
+## Geo blocking
 
-## rate_limit
+| Field | Type | Description |
+|-------|------|-------------|
+| `block_countries` | list of ISO alpha-2 codes | Traffic from these countries gets a +100 score boost |
+| `block_asns` | list of `AS<number>` | Same semantics per autonomous system |
 
-Safety cap to prevent runaway bans.
-
-```yaml
-rate_limit:
-  max_bans_per_minute: 30
-```
-
-If the rule engine tries to ban more than 30 IPs in one minute, the excess bans are queued for the next minute. This prevents a misconfigured rule from banning the entire internet.
-
-## Minimal example
-
-```yaml
-armed: false
-
-thresholds:
-  ssh_bruteforce: 70
-  web_scanner: 60
-
-strikes:
-  - ttl: 5m
-    ban_duration: 5m
-  - ttl: 1h
-    ban_duration: 1h
-  - ttl: 24h
-    ban_duration: 24h
-  - ttl: 7d
-    ban_duration: 7d
-  - ttl: forever
-    ban_duration: permanent
-
-allowlist:
-  cidrs:
-    - 10.0.0.0/8            # Internal network
-
-rate_limit:
-  max_bans_per_minute: 30
-```
+Requires GeoIP enrichment to be active; silently skipped otherwise. The boost pushes traffic over `ban_threshold` — allowlist still wins, and a country/ASN match alone never bypasses the strike ladder.
 
 ## Validation
 
-Validate your policy after editing:
-
 ```bash
-sudo ezyshield doctor
+sudo ezyshield config validate   # strict schema + constraint check
+sudo ezyshield doctor            # full environment check
 ```
 
-## Common customizations
-
-**Aggressive blocking (lower thresholds):**
-
-```yaml
-thresholds:
-  ssh_bruteforce: 50
-  web_scanner: 40
-```
-
-**Longer bans for repeat offenders:**
-
-```yaml
-strikes:
-  - ttl: 1h
-    ban_duration: 1h
-  - ttl: 7d
-    ban_duration: 7d
-  - ttl: 30d
-    ban_duration: 30d
-  - ttl: forever
-    ban_duration: permanent
-```
-
-**Whitelist a subnet (e.g., a CDN):**
-
-```yaml
-allowlist:
-  cidrs:
-    - 203.0.113.0/24
-```
+Unknown keys fail validation; out-of-range values (e.g. `ban_threshold: 0`, `max_bans_per_minute: 0`) are rejected with the exact reason.
 
 ## SSH probe / aggressive tier
 

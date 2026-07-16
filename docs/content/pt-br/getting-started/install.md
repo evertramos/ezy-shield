@@ -118,17 +118,32 @@ sudo install -m 755 bin/ezyshield-enforcer /usr/local/bin/
 
 ## Atualizando para uma nova versão
 
-Para atualizar uma instalação existente:
+**Instalado via apt / dnf** (recomendado — atualizações chegam junto com as do sistema):
 
 ```bash
-# Desinstalar
-sudo rm /usr/local/bin/ezyshield /usr/local/bin/ezyshield-enforcer
+# Debian / Ubuntu
+sudo apt update && sudo apt install --only-upgrade ezyshield
 
-# Reinstalar (última versão)
+# RHEL / Rocky / Alma
+sudo dnf upgrade ezyshield
+```
+
+Os arquivos de configuração em `/etc/ezyshield` nunca são tocados pelo upgrade de pacote. Reinicie os serviços depois:
+
+```bash
+sudo systemctl restart ezyshield-enforcer ezyshield
+```
+
+**Instalado via script** (binários em `/usr/local/bin`) — rode o script de novo; ele substitui os binários no lugar:
+
+```bash
+# Última versão estável
 curl -sfL https://get.ezyshield.com | sudo sh
 
 # Ou versão específica
-curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=v0.4.0 sh
+curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=v0.1.0 sh
+
+sudo systemctl restart ezyshield-enforcer ezyshield
 ```
 
 ---

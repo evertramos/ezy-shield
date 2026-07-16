@@ -95,6 +95,13 @@ Start the daemon in the foreground. Reads logs, makes decisions, enforces bans.
 sudo ezyshield run
 ```
 
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--config` | `/etc/ezyshield/config.yaml` | path to config.yaml |
+| `--policy` | `/etc/ezyshield/policy.yaml` | path to policy.yaml |
+| `--db` | `/var/lib/ezyshield/ezyshield.db` | path to the SQLite database |
+| `--socket` | `/run/ezyshield/ezyshield.sock` | control socket path |
+
 Runs in dry-run mode by default (`armed: false` in policy.yaml).
 
 ## ezyshield watch
@@ -135,7 +142,7 @@ automatically with backoff. Press `Ctrl-C` to exit. The daemon must be running
 
 ## ezyshield status
 
-Show daemon status: uptime, active bans, recent decisions.
+Show daemon and enforcer status.
 
 ```bash
 ezyshield status
@@ -144,40 +151,46 @@ ezyshield status
 ezyshield status --json
 ```
 
+| Flag | Description |
+|------|-------------|
+| `--socket` | daemon control socket path override |
+| `--enforcer-socket` | enforcer socket path override |
+
 Output:
-- Daemon uptime
-- Total IPs currently banned
-- Total IPs allowlisted
-- Decisions in last hour
+- Daemon and enforcer reachability
+- Mode (enforce / dry-run), uptime, version
+- Active bans total and per-strike breakdown
 
 ## ezyshield list
 
-Query the audit log and state.
+List active bans (default) or the allowlist.
 
 ```bash
-# All audit entries (default: last 100)
-ezyshield list --audit
+# Active bans
+ezyshield list
 
-# Active bans only
-ezyshield list --bans
+# Grouped by country / by ASN
+ezyshield list --by-country
+ezyshield list --by-asn
 
-# Allowlisted IPs/CIDRs/ASNs
-ezyshield list --allowlist
+# Allowlist entries
+ezyshield list --allow
 
 # JSON output
-ezyshield list --audit --json
-
-# Limit results
-ezyshield list --audit --limit 50
+ezyshield list --json
 ```
 
-Columns:
-- Timestamp
-- Action (ban/unban/allow)
-- IP or CIDR
-- Rule (ssh_bruteforce, web_scanner, etc.)
-- Score
-- Decision (dry_ban, ban, allow)
+| Flag | Description |
+|------|-------------|
+| `--allow` | list allowlist entries instead of bans |
+| `--by-country` | aggregate bans by country (requires GeoIP enrichment) |
+| `--by-asn` | aggregate bans by ASN (requires GeoIP enrichment) |
+| `--socket` | control socket path override |
+
+Ban columns: `IP / STRIKE / TTL / COUNTRY / ASN / REASON`.
+Allowlist columns: `IP/CIDR / EXPIRES / REASON`.
+
+For per-IP history with evidence, use `ezyshield report`.
 
 ## ezyshield report
 
@@ -234,17 +247,25 @@ so a log line cannot inject formatting into the report. Timestamps are UTC
 Manually ban an IP or CIDR.
 
 ```bash
-# Ban for default strike duration (5 min, 1h, 24h, 7d, permanent)
+# Ban using the policy strike table (strike #1 TTL)
 sudo ezyshield ban 203.0.113.42
 
-# Ban permanently (shorthand)
-sudo ezyshield ban --permanent 203.0.113.42
+# Explicit duration
+sudo ezyshield ban --ttl 24h --reason "abuse report" 203.0.113.42
 
 # Ban a subnet
 sudo ezyshield ban 203.0.113.0/24
 ```
 
-Manual bans bypass the allowlist — even allowlisted IPs can be manually banned.
+| Flag | Description |
+|------|-------------|
+| `--ttl` | ban duration (`5m`, `24h`, `7d`); empty = policy strike table |
+| `--reason` | free-text reason stored in the audit log |
+| `--socket` | control socket path override |
+
+Manual bans bypass the rule engine, **not** the allowlist — an allowlisted IP
+can never be banned, manually or otherwise (safety invariant: allowlist always
+wins).
 
 ## ezyshield unban
 
@@ -257,22 +278,30 @@ sudo ezyshield unban 203.0.113.42
 sudo ezyshield unban 203.0.113.0/24
 ```
 
-Does not delete audit history.
+Does not delete audit history. (`--socket` overrides the control socket path.)
 
 ## ezyshield allow
 
-Add an IP/CIDR/ASN to the allowlist.
+Add an IP or CIDR to the runtime allowlist.
 
 ```bash
-# Add IP
+# Add IP (permanent)
 sudo ezyshield allow 192.0.2.100
 
 # Add CIDR
 sudo ezyshield allow 192.0.2.0/24
 
-# Add ASN (blocks all IPs from this ISP)
-sudo ezyshield allow --asn 12345
+# Temporary entries
+sudo ezyshield allow --for 2h --reason "vendor maintenance" 198.51.100.7
+sudo ezyshield allow --until 2026-08-01T00:00:00Z 198.51.100.8
 ```
+
+| Flag | Description |
+|------|-------------|
+| `--for` | relative expiry (e.g. `2h`, `7d`); mutually exclusive with `--until` |
+| `--until` | absolute expiry (RFC 3339 timestamp) |
+| `--reason` | free-text reason stored with the entry |
+| `--socket` | control socket path override |
 
 Allowlist is checked first. No rule can ban an allowlisted IP.
 
@@ -284,12 +313,20 @@ Validate config, permissions, and log sources.
 sudo ezyshield doctor
 ```
 
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--config-dir` | `/etc/ezyshield` | configuration directory to check |
+
 Checks:
-- Config file syntax and permissions
-- Log sources are readable
-- Firewall setup (nftables table/set exist)
-- AI provider connectivity (if configured)
-- Notification channels (Telegram, Slack, etc.)
+- config.yaml / policy.yaml exist, parse, and have safe permissions/ownership
+- `nft` binary present
+- journald readable
+- enforcer socket reachable
+- docker socket present (when Docker collectors are configured)
+- `.env` secret file permissions
+
+To exercise enforcers and notification channels for real, use
+`ezyshield test enforcer` and `ezyshield test notifier`.
 
 ## ezyshield config
 
@@ -413,7 +450,51 @@ sudo ezyshield scan
 sudo ezyshield scan --json
 ```
 
-Lists all listening ports, protocols, and services. Used to identify what to log.
+Lists listening ports, protocols, and services, persists a baseline to
+SQLite, and flags **drift** — new listeners that appeared since the previous
+scan.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--db` | `/var/lib/ezyshield/ezyshield.db` | baseline database path |
+
+## ezyshield update
+
+Self-update the binaries from GitHub Releases (checksum-verified).
+
+```bash
+# Check whether a newer release exists
+sudo ezyshield update --check
+
+# Update to the latest stable
+sudo ezyshield update
+
+# Update/downgrade to a specific version
+sudo ezyshield update --version v0.1.0
+```
+
+If you installed via apt/dnf, prefer the package manager instead (see the
+install guide).
+
+## ezyshield dashboard
+
+Serve the localhost-only web dashboard. Full reference (auth, pages, remote
+access): [dashboard.md](dashboard.md).
+
+| Flag | Description |
+|------|-------------|
+| `--config` | path to config.yaml |
+| `--addr` | bind address override (loopback only — non-loopback is refused) |
+| `--auth-db` | auth database path override |
+| `--socket` | daemon control socket path override |
+
+## ezyshield completion
+
+Generate shell completion scripts (`bash`, `zsh`, `fish`, `powershell`):
+
+```bash
+ezyshield completion zsh > "${fpath[1]}/_ezyshield"
+```
 
 ## ezyshield version
 
@@ -470,9 +551,12 @@ The pre-1.0 verbs `test-enforce <name>` and `test-notify <name>` keep working as
 |------|-------------|
 | `--json` | Output as JSON (see [Global conventions](#global-conventions) for shapes) |
 | `--no-color` | Disable colored output (the `NO_COLOR` env var is also honored) |
-| `--config` | Path to config.yaml (default: `/etc/ezyshield/config.yaml`) |
-| `--policy` | Path to policy.yaml (default: `/etc/ezyshield/policy.yaml`) |
+| `--version` | Print version and exit |
 | `-h, --help` | Show help text |
+
+`--config` / `--policy` are **not** global — they exist on the commands that
+read those files (`run`, `config show`, `validate`, `dashboard`), with
+defaults under `/etc/ezyshield`.
 
 ## Examples
 
@@ -482,22 +566,22 @@ The pre-1.0 verbs `test-enforce <name>` and `test-notify <name>` keep working as
 ezyshield watch --kind ban,dry_ban
 ```
 
-**Export audit log to JSON for analysis:**
+**Export per-IP history with evidence to JSON:**
 
 ```bash
-ezyshield list --audit --json > audit.json
+ezyshield report --json > report.json
 ```
 
 **Check if an IP is currently banned:**
 
 ```bash
-ezyshield list --bans --json | jq '.[] | select(.ip == "203.0.113.42")'
+ezyshield list --json | jq '.[] | select(.ip == "203.0.113.42")'
 ```
 
 **Permanently ban a botnet subnet:**
 
 ```bash
-sudo ezyshield ban --permanent 203.0.113.0/24
+sudo ezyshield ban --ttl 0 203.0.113.0/24
 ```
 
 **Add your office to allowlist:**

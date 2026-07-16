@@ -46,15 +46,15 @@ The allowlist is checked FIRST, before any rule engine decision. An allowlisted 
 
 ```yaml
 allowlist:
-  cidrs:
-    - 10.0.0.0/8     # Internal network
-  asns:
-    - 1234           # Trusted ISP
+  - 10.0.0.0/8       # internal network
+  - 198.51.100.7     # a specific host
+admin_cidrs:
+  - 192.0.2.0/24     # admin ranges, re-checked before every ban
 ```
 
 ## Rate limiting
 
-A broken rule or poisoned feed cannot ban the entire internet. The `max_bans_per_minute` cap (default 30) queues excess bans for the next minute.
+A broken rule or poisoned feed cannot ban the entire internet. The `max_bans_per_minute` cap (default 30) rejects excess bans with an explicit error — never silently, never by dropping the limit.
 
 ## Secret handling
 
@@ -69,25 +69,25 @@ API tokens are resolved once at startup and never printed. If a secret is refere
 
 ## AI safety
 
-When AI is enabled for ambiguous events (40–70 score):
+When AI is enabled for ambiguous events (scores inside the configurable `ambiguous_band`):
 
 1. **Schema validation**: AI output is parsed into a structured type; malformed responses cause a fallback decision.
 2. **Policy clamping**: AI can only suggest within the ban thresholds and durations you configured. It cannot escalate beyond them.
-3. **Audit trail**: Every AI decision is logged with the full AI response, so you can audit and override if needed.
+3. **Audit trail**: every AI verdict (source, score, reason) is persisted with the strike, so you can audit and override if needed.
 4. **No prompt injection**: Log lines are passed as data, never interpolated into instructions. The prompt is fixed and controlled.
 
 ## Privilege separation
 
 - **Main daemon** (`ezyshield`): runs as unprivileged user, reads logs, makes decisions, communicates via unix socket
-- **Enforcer** (`ezyshield-enforcer`): holds `CAP_NET_ADMIN` only, accepts a fixed verb set (ban/unban/sync), mutates nftables in a safe, idempotent way
+- **Enforcer** (`ezyshield-enforcer`): holds `CAP_NET_ADMIN` only, accepts a fixed, typed verb set (`ping`, `add`, `del`, `list`, `flush`, and the allowlist verbs), mutates nftables in a safe, idempotent way
 
 The enforcer is not a library. It's a separate process. The main daemon cannot directly modify the firewall.
 
 ## No network listeners
 
-EzyShield does not open any TCP/UDP ports. Control is via:
+EzyShield opens no network listener for control (the optional dashboard binds to 127.0.0.1 only, and refuses anything else). Control is via:
 - CLI: `ezyshield ban`, `ezyshield list`, etc. (local only)
-- Unix socket: `/var/run/ezyshield/control.sock` (filesystem permissions)
+- Unix socket: `/run/ezyshield/ezyshield.sock` (filesystem permissions)
 
 ## Audit trail
 
@@ -100,16 +100,16 @@ Every action is logged to SQLite:
 Export for compliance:
 
 ```bash
-ezyshield list --audit --json > audit_log.json
+ezyshield report --json > report.json   # per-IP history with evidence
 ```
 
 ## Cloudflare sync
 
 When using Cloudflare Lists:
 
-1. **Idempotent sync**: every 30 min, EzyShield reconciles its view with Cloudflare (adds new bans, removes expired ones)
+1. **Idempotent sync**: EzyShield reconciles its view with Cloudflare at daemon startup and whenever bans expire (adds missing entries, removes stale ones)
 2. **Source of truth**: `bans_active` table in SQLite is the source of truth. If EzyShield crashes and restarts, it will restore Cloudflare blocks from the DB.
-3. **Non-ezyshield rules preserved**: EzyShield only touches rules tagged with `notes: "ezyshield: <ip>"`. Hand-created Cloudflare rules are left alone.
+3. **Non-ezyshield rules preserved**: EzyShield only touches its own IP list (`ezyshield_blocked`) and the WAF rules it created (tagged by description). Hand-created Cloudflare rules are left alone.
 
 ## Dry-run by default
 
@@ -119,7 +119,7 @@ Before arming, run in dry-run for 24+ hours and review decisions.
 
 ## Dependencies
 
-EzyShield is a single static Go binary with minimal runtime dependencies:
+EzyShield ships as two static Go binaries (`ezyshield` + the privilege-separated `ezyshield-enforcer`) with minimal runtime dependencies:
 
 - Linux kernel nftables (for local enforcement)
 - Cloudflare API (optional, TLS verified)
@@ -130,11 +130,10 @@ No Python, no Ruby, no Java runtime. No third-party packet inspection. No kernel
 ## Threat model
 
 **In scope (we protect against):**
-- Brute-force SSH/RDP login attempts
+- Brute-force SSH login attempts
 - WordPress/Drupal login scanners
 - Port scanners and service enumeration
 - HTTP bots and scrapers
-- Distributed attacks (botnet fingerprinting)
 
 **Out of scope:**
 - Kernel exploits
@@ -156,4 +155,4 @@ Suitable for SOC 2, ISO 27001, and GDPR requirements where request logging is ne
 
 ## Reporting security issues
 
-Found a vulnerability? Please report it to security@ezyshield.com (if available) or open a private security advisory on GitHub. Do not open a public issue.
+Found a vulnerability? Open a private security advisory on GitHub (Security tab → Report a vulnerability) — see [SECURITY.md](https://github.com/evertramos/ezy-shield/blob/main/SECURITY.md). Do not open a public issue.

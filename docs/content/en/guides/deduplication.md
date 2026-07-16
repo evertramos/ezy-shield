@@ -67,7 +67,7 @@ EzyShield uses a two-tier detection model to catch both rapid attackers and "low
 - WordPress: 10+ `/wp-login` hits spread across 1 hour
 - XML-RPC abuse: 8+ `/xmlrpc.php` probes across 1 hour
 - HTTP scanning: 60+ distinct 404s across 1 hour
-- SSH: 15+ failed logins across 1 hour
+- SSH: 10+ failed logins across 1 hour
 
 **Tuning**: Thresholds are set conservatively to avoid legitimate user activity:
 - An admin who logs into WordPress 3–4 times per hour will not trigger
@@ -82,7 +82,7 @@ EzyShield uses a two-tier detection model to catch both rapid attackers and "low
 
 ### Adjusting Thresholds
 
-To customize thresholds, edit `configs/rules.yaml` and adjust the `window` and `threshold` fields:
+To customize thresholds, point `rules_path` in config.yaml at your own rules file (start from the shipped `/etc/ezyshield/rules.yaml.example`) and adjust the `window` and `threshold` fields — the built-in rules are embedded in the binary, so editing repo files has no effect on an installed daemon:
 
 ```yaml
 - name: http_wp_probe_sustained
@@ -108,11 +108,11 @@ EzyShield includes a third detection tier for known RCE and exploit paths that h
 **Score**: 95 (bypasses ambiguous band; rules always win)  
 **Category**: `exploit_probe`
 
-**Detected paths**: `phpunit`, `.git`, `.aws`, `cgi-bin`, actuator endpoints, `.env` variants, WordPress plugin shells, Terraform state, database configs, etc.
+**Detected paths**: `phpunit`, `.git`, `.aws`, actuator endpoints, WordPress plugin shells, Terraform state, etc. (`.env` probes are covered by the separate `http_env_probe` rule.)
 
-**Why threshold=1**: These paths have zero legitimate use in production. A single request to `/.git/config` or `/admin.php` is always suspicious.
+**Why threshold=1**: These paths have zero legitimate use in production. A single request to `/.git/config` is always suspicious.
 
-**Why score=95**: Placed above the ambiguous band (0–90), so the decision engine never consults AI — rules verdict is final.
+**Why score=95**: Placed above the ambiguous band, so the decision engine never consults AI — the rules verdict is final.
 
 **No double-ban risk**: Exploit probes trigger instantly with score=95, so they enter `bans_active` before any burst-tier rule. Subsequent hits are suppressed by deduplication.
 

@@ -147,6 +147,9 @@ to config.yaml (mode 0600) — never in config.yaml itself.
 Available names: ` + strings.Join(sortedWizardKeys(componentWizards[kind]), ", "),
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := requireRootForWrites(cmd, configPath); err != nil {
+				return err
+			}
 			sc := bufio.NewScanner(cmd.InOrStdin())
 			ask, askBool := newAskFuncs(sc, cmd.OutOrStdout(), false)
 			p := &wPrinter{w: cmd.OutOrStdout()}

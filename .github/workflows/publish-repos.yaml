@@ -1,0 +1,118 @@
+name: 📦 Publish package repositories
+
+# Publishes .deb/.rpm from a GitHub release into the signed apt/yum
+# repositories at https://packages.ezyshield.com (Cloudflare R2) — issue #99.
+# Stable tags land in the "stable" suite; rc/alpha/beta land in "testing".
+# scripts/package/publish-repos.sh does the actual work and is testable
+# locally (see docs/internal/RELEASING.md).
+
+permissions:
+  contents: read
+
+# NOTE: goreleaser publishes releases with the default GITHUB_TOKEN, and
+# events caused by that token do NOT trigger other workflows (GitHub's
+# anti-recursion rule) — so the primary path is the workflow_call from
+# release.yaml. The release trigger below still covers releases published
+# manually (UI / PAT), and workflow_dispatch covers re-publishing.
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: "Release tag to publish"
+        required: true
+        type: string
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to (re)publish (e.g. v0.1.0)"
+        required: true
+
+# Two publishes interleaving would race on shared repo metadata.
+concurrency:
+  group: publish-repos
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Resolve tag and suite
+        id: meta
+        env:
+          TAG: ${{ inputs.tag || github.event.release.tag_name }}
+        run: |
+          case "$TAG" in
+            v[0-9]*-*) suite=testing ;;
+            v[0-9]*)   suite=stable ;;
+            *) echo "::error::unrecognized tag '$TAG'"; exit 1 ;;
+          esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "suite=$suite" >> "$GITHUB_OUTPUT"
+          echo "Publishing $TAG to suite '$suite'"
+
+      - name: Install tooling
+        run: |
+          sudo apt-get -qq update
+          sudo apt-get -qq install -y dpkg-dev apt-utils createrepo-c rclone
+
+      - name: Import signing key
+        env:
+          REPO_GPG_PRIVATE_KEY: ${{ secrets.REPO_GPG_PRIVATE_KEY }}
+        run: |
+          if [ -z "$REPO_GPG_PRIVATE_KEY" ]; then
+            echo "::error::REPO_GPG_PRIVATE_KEY secret is not configured"; exit 1
+          fi
+          printf '%s' "$REPO_GPG_PRIVATE_KEY" | gpg --batch --import
+          keyid=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec/{print $5; exit}')
+          if [ -z "$keyid" ]; then
+            echo "::error::no secret key found after import"; exit 1
+          fi
+          echo "GPG_KEY_ID=$keyid" >> "$GITHUB_ENV"
+
+      - name: Download release packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          gh release download "$TAG" -p '*.deb' -p '*.rpm' -D packages
+          ls -la packages/
+
+      - name: Pull current repository state
+        env:
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: scripts/package/publish-repos.sh sync-down repo
+
+      - name: Generate and sign repository metadata
+        env:
+          GPG_PASSPHRASE: ${{ secrets.REPO_GPG_PASSPHRASE }}
+          SUITE: ${{ steps.meta.outputs.suite }}
+        run: scripts/package/publish-repos.sh generate packages repo "$SUITE"
+
+      - name: Upload (packages first, metadata last)
+        env:
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: scripts/package/publish-repos.sh sync repo
+
+      - name: Summary
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+          SUITE: ${{ steps.meta.outputs.suite }}
+        run: |
+          {
+            echo "## 📦 Package repositories updated"
+            echo ""
+            echo "**Tag:** \`$TAG\` → suite \`$SUITE\`"
+            echo ""
+            echo "- apt: \`deb [signed-by=…] https://packages.ezyshield.com/apt $SUITE main\`"
+            echo "- yum: \`https://packages.ezyshield.com/rpm/$SUITE/\$basearch\`"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"net/url"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/evertramos/ezy-shield/internal/daemon"
 )
@@ -19,6 +20,7 @@ var flashMessages = map[string]string{
 	"invalid-ip":     "Invalid IP or CIDR — nothing was sent to the daemon.",
 	"missing-ip":     "IP or CIDR is required.",
 	"bad-form":       "Malformed form submission.",
+	"bad-reason":     "Reason contains disallowed characters or exceeds 500 characters.",
 	"daemon-error":   "The daemon rejected the request. See the daemon log for details.",
 	"daemon-offline": "The daemon is not reachable right now.",
 	"ban-queued":     "Ban queued.",
@@ -395,7 +397,29 @@ func parseTargetForm(r *http.Request) (target, reason, flashCode string) {
 		return "", "", "invalid-ip"
 	}
 	reason = strings.TrimSpace(r.FormValue("reason"))
+	if !validReason(reason) {
+		return "", "", "bad-reason"
+	}
 	return target, reason, ""
+}
+
+// validReason bounds the operator-supplied reason before it reaches the
+// daemon RPC: at most 500 characters post-trim, valid UTF-8, and no control
+// bytes other than tab. audit_log stores the reason verbatim, so exports
+// (CSV, JSON, SIEM) must never receive framing or terminal-control payloads
+// through this field (SECURITY-REVIEW §1); the cap also closes the
+// unbounded-size surface. Empty is valid — the bare dashboard:admin tag is
+// applied as today.
+func validReason(reason string) bool {
+	if !utf8.ValidString(reason) || utf8.RuneCountInString(reason) > 500 {
+		return false
+	}
+	for _, b := range []byte(reason) {
+		if (b < 0x20 && b != 0x09) || b == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 // canonicalPrefix accepts a bare IP or CIDR and returns the canonical

@@ -1,0 +1,112 @@
+# goreleaser config (issues #97, #98).
+#
+# Local testing (never publishes):
+#   goreleaser check
+#   goreleaser release --snapshot --clean
+#
+# Artifact naming is a compatibility contract: scripts/get.sh downloads the
+# raw binaries by the exact names ezyshield-<os>-<arch> and
+# ezyshield-enforcer-<os>-<arch> and greps those names in checksums.txt —
+# do not rename them without updating get.sh in the same PR.
+version: 2
+
+project_name: ezyshield
+
+before:
+  hooks:
+    # Package units are the canonical configs/systemd/ units with ExecStart
+    # rewritten from /usr/local/bin (script installs) to /usr/bin (FHS for
+    # distro packages). Single source of truth for the hardening directives.
+    - ./scripts/package/mk-package-units.sh
+
+builds:
+  - id: ezyshield
+    main: ./cmd/ezyshield
+    binary: ezyshield
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.version=v{{ .Version }} -X main.commit={{ .ShortCommit }} -X main.buildDate={{ .Date }}
+  - id: ezyshield-enforcer
+    main: ./cmd/ezyshield-enforcer
+    binary: ezyshield-enforcer
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.version=v{{ .Version }} -X main.commit={{ .ShortCommit }} -X main.buildDate={{ .Date }}
+
+archives:
+  # Raw binaries under the exact names scripts/get.sh expects.
+  - id: raw-ezyshield
+    ids: [ezyshield]
+    formats: [binary]
+    name_template: "ezyshield-{{ .Os }}-{{ .Arch }}"
+  - id: raw-enforcer
+    ids: [ezyshield-enforcer]
+    formats: [binary]
+    name_template: "ezyshield-enforcer-{{ .Os }}-{{ .Arch }}"
+  # Tarball with both binaries for manual installs.
+  - id: tarball
+    ids: [ezyshield, ezyshield-enforcer]
+    formats: [tar.gz]
+    name_template: "ezyshield_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+nfpms:
+  - id: packages
+    package_name: ezyshield
+    ids: [ezyshield, ezyshield-enforcer]
+    formats: [deb, rpm]
+    vendor: EzyShield
+    homepage: https://github.com/evertramos/ezy-shield
+    maintainer: Evert Ramos <evert.ramos@gmail.com>
+    description: |-
+      Adaptive intrusion blocking for Linux servers.
+      Detects malicious IPs from logs, escalates bans by strikes, enforces
+      locally (nftables) and at the edge (Cloudflare). Dry-run by default.
+    license: AGPL-3.0-only
+    section: net
+    bindir: /usr/bin
+    contents:
+      - src: .gen/pkg-systemd/ezyshield.service
+        dst: /usr/lib/systemd/system/ezyshield.service
+      - src: .gen/pkg-systemd/ezyshield-enforcer.service
+        dst: /usr/lib/systemd/system/ezyshield-enforcer.service
+      # Examples only — `ezyshield init` writes the real files. noreplace so
+      # an upgrade never clobbers anything an operator edited in place.
+      - src: configs/config.yaml
+        dst: /etc/ezyshield/config.yaml.example
+        type: config|noreplace
+      - src: configs/policy.yaml
+        dst: /etc/ezyshield/policy.yaml.example
+        type: config|noreplace
+      - src: configs/rules.yaml
+        dst: /etc/ezyshield/rules.yaml.example
+        type: config|noreplace
+    scripts:
+      postinstall: scripts/package/postinstall.sh
+      preremove: scripts/package/preremove.sh
+    overrides:
+      deb:
+        dependencies: [adduser]
+      rpm:
+        dependencies: [shadow-utils]
+
+changelog:
+  use: github-native
+
+release:
+  # rc/alpha/beta tags become prereleases and never take the "latest" mark —
+  # same behaviour the hand-rolled workflow had.
+  prerelease: auto

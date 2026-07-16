@@ -12,7 +12,11 @@ func (s *Server) routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /login", s.handleLoginGet)
 	mux.HandleFunc("POST /login", s.handleLoginPost)
-	mux.HandleFunc("POST /logout", s.handleLogout)
+	// Logout goes through the same auth + CSRF gates as every other POST:
+	// one invariant for all mutations (issue #86). An expired session lands
+	// on /login via requireAuth — the outcome a stale "Sign out" click
+	// wants anyway.
+	mux.HandleFunc("POST /logout", s.requireAuth(s.handleLogout))
 	// Root redirects authed sessions to the Phase 2 status page and drops
 	// unauthed callers on /login.
 	mux.HandleFunc("GET /", s.requireAuth(s.handleRootRedirect))
@@ -125,6 +129,9 @@ func (s *Server) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if !s.requireCSRF(w, r) {
+		return
+	}
 	if c, err := r.Cookie(sessionCookieName); err == nil {
 		s.sessions.Delete(c.Value)
 	}

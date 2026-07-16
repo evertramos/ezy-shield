@@ -79,7 +79,7 @@ enforce:
 Run the diagnostic command:
 
 ```bash
-ezyshield doctor cloudflare
+ezyshield test enforcer cloudflare
 ```
 
 This command will:
@@ -153,7 +153,7 @@ This is expected if your API token only has Account Filter Lists:Edit (not Zone:
 Verify:
 1. `zone_ids` is configured in `config.yaml`
 2. Your token has `Zone → Firewall Services → Edit` permission
-3. Run `ezyshield doctor cloudflare` to check permission errors
+3. Run `ezyshield test enforcer cloudflare` to check permission errors
 4. Check logs: `ezyshield status` → look for Cloudflare entries
 
 ### "List at capacity" (10k items)

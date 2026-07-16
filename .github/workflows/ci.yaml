@@ -3,9 +3,6 @@ name: CI
 permissions:
   contents: read
 
-env:
-  GO_VERSION: "1.26"
-
 on:
   push:
     branches: [main]
@@ -32,18 +29,34 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
           cache: true
       - name: gofmt
+        id: gofmt
         run: |
           out=$(gofmt -l .)
           if [ -n "$out" ]; then echo "gofmt needed on:"; echo "$out"; exit 1; fi
       - name: go vet
+        id: vet
         run: go vet ./...
       - name: golangci-lint
+        id: golangci
         uses: golangci/golangci-lint-action@v9
         with:
           version: "v2.12"
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "### 🧹 Lint — $(go version | awk '{print $3}')"
+            echo "_Guards code style and static-analysis health: gofmt, go vet, golangci-lint (includes gosec security linting)._"
+            echo ""
+            echo "| Check | Result |"
+            echo "|---|---|"
+            echo "| gofmt | ${{ steps.gofmt.outcome }} |"
+            echo "| go vet | ${{ steps.vet.outcome }} |"
+            echo "| golangci-lint v2.12 | ${{ steps.golangci.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   test:
     needs: detect
@@ -53,12 +66,32 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
           cache: true
       - name: Unit tests (race + coverage)
-        run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
-      - name: Coverage summary
-        run: go tool cover -func=coverage.out | tail -1
+        run: |
+          set -o pipefail
+          go test -race -coverprofile=coverage.out -covermode=atomic ./... | tee test-output.txt
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "### 🧪 Tests — $(go version | awk '{print $3}'), -race"
+            echo "_Full unit suite with the race detector; statement coverage measured per package._"
+            echo ""
+            if [ -f coverage.out ]; then
+              echo "**Total coverage: $(go tool cover -func=coverage.out | tail -1 | awk '{print $3}')**"
+              echo ""
+            fi
+            if [ -f test-output.txt ]; then
+              echo "| Package | Result | Coverage |"
+              echo "|---|---|---|"
+              grep -E '^(ok|FAIL)' test-output.txt | awk 'NF>=3 {
+                cov="—"; for(i=1;i<=NF;i++) if($i=="coverage:") cov=$(i+1)
+                printf "| %s | %s | %s |\n", $2, ($1=="ok" ? "✅" : "❌ FAIL"), cov
+              }'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
   build:
     needs: detect
@@ -71,33 +104,69 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
           cache: true
       - name: Build (static, CGO off)
         env:
           CGO_ENABLED: "0"
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
-        run: go build -trimpath ./...
+        run: |
+          go build -trimpath ./...
+          mkdir -p /tmp/bin
+          go build -trimpath -o /tmp/bin/ezyshield ./cmd/ezyshield
+          go build -trimpath -o /tmp/bin/ezyshield-enforcer ./cmd/ezyshield-enforcer
+      - name: Job summary
+        run: |
+          {
+            echo "### 🏗️ Build linux/${{ matrix.goarch }} — $(go version | awk '{print $3}'), CGO off, -trimpath"
+            echo "_Proves both binaries compile statically for this architecture — the exact shape releases ship._"
+            echo ""
+            echo "| Binary | Size |"
+            echo "|---|---|"
+            for b in /tmp/bin/*; do
+              echo "| $(basename "$b") | $(du -h "$b" | cut -f1) |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
 
   docs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - name: Required docs present
+        id: reqdocs
         run: |
           for f in SECURITY.md LICENSE docs/internal/SECURITY-REVIEW.md; do
             [ -f "$f" ] || { echo "missing $f"; exit 1; }
           done
       - name: Shell scripts pass shellcheck
+        id: shellcheck
         run: |
           sudo apt-get -yqq install shellcheck >/dev/null
           find scripts -name '*.sh' -exec shellcheck {} +
+      - name: No raw placeholder tags in docs markdown (VitePress-safe)
+        id: placeholders
+        run: bash scripts/docs-placeholder-gate.sh
       - name: Validate example configs against JSON schemas
+        id: schemas
         run: |
           pip install check-jsonschema --quiet
           check-jsonschema --schemafile docs/internal/schemas/config/config.schema.json configs/config.yaml
           check-jsonschema --schemafile docs/internal/schemas/config/policy.schema.json configs/policy.yaml
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "### 📚 Docs & scripts"
+            echo "_Required security/legal docs exist, every shell script passes shellcheck, and example configs validate against their JSON schemas._"
+            echo ""
+            echo "| Check | Result |"
+            echo "|---|---|"
+            echo "| required docs present | ${{ steps.reqdocs.outcome }} |"
+            echo "| shellcheck ($(find scripts -name '*.sh' | wc -l) scripts) | ${{ steps.shellcheck.outcome }} |"
+            echo "| example configs vs JSON schemas | ${{ steps.schemas.outcome }} |"
+            echo "| VitePress-safe placeholders | ${{ steps.placeholders.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   fuzz:
     needs: detect
@@ -107,12 +176,31 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
           cache: true
       - name: Fuzz SSH parser (10s)
-        run: go test -fuzz=FuzzSSHParser -fuzztime=10s ./internal/parser/
+        id: fssh
+        run: |
+          set -o pipefail
+          go test -fuzz=FuzzSSHParser -fuzztime=10s ./internal/parser/ | tee fuzz-ssh.txt
       - name: Fuzz Nginx parser (10s)
-        run: go test -fuzz=FuzzNginxParser -fuzztime=10s ./internal/parser/
+        id: fnginx
+        run: |
+          set -o pipefail
+          go test -fuzz=FuzzNginxParser -fuzztime=10s ./internal/parser/ | tee fuzz-nginx.txt
+      - name: Job summary
+        if: always()
+        run: |
+          execs() { grep -oE 'execs: [0-9]+' "$1" 2>/dev/null | tail -1 | awk '{print $2}'; }
+          {
+            echo "### 🐛 Fuzz — panic-safety on hostile bytes (10s each)"
+            echo "_Feeds malformed/hostile input to the log parsers to prove the daemon can never be crashed by a crafted log line._"
+            echo ""
+            echo "| Target | Executions | Result |"
+            echo "|---|---|---|"
+            echo "| FuzzSSHParser | $(execs fuzz-ssh.txt) | ${{ steps.fssh.outcome }} |"
+            echo "| FuzzNginxParser | $(execs fuzz-nginx.txt) | ${{ steps.fnginx.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   govulncheck:
     needs: detect
@@ -122,7 +210,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
           cache: true
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
@@ -137,8 +225,90 @@ jobs:
               echo "::error::Vulnerabilities with available fixes in dependencies. Run: go get -u && go mod tidy"
               exit 1
             fi
-            echo "::notice::All vulnerabilities are in Go stdlib — Go will be updated when fix is released"
+            echo "::warning::All findings are in the Go stdlib and a fixed patch release exists — bump the toolchain directive in go.mod to the 'Fixed in' version above."
           fi
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "### 🛡️ govulncheck — $(go version | awk '{print $3}')"
+            echo "_Scans the module graph for known CVEs that affect code paths actually reachable from this repo._"
+            echo ""
+            if [ ! -f /tmp/vulncheck.out ]; then
+              echo "scan did not produce output (see job log)"
+            elif grep -q "No vulnerabilities found" /tmp/vulncheck.out; then
+              echo "No known vulnerabilities in the module graph. ✅"
+            else
+              n=$(grep -cE "^Vulnerability #" /tmp/vulncheck.out || true)
+              echo "Findings: ${n} — see job log (Go-stdlib-only findings are non-blocking by policy)."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  packages:
+    # Builds the full goreleaser snapshot and install-verifies the resulting
+    # .deb on debian:12 and .rpm on rockylinux:9 (issue #98): version prints,
+    # doctor runs (may fail on missing nftables — asserted to run, not pass),
+    # service user/dirs created by postinstall, units pass systemd-analyze
+    # verify, and removal preserves /var/lib/ezyshield.
+    needs: detect
+    if: needs.detect.outputs.has_go == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: goreleaser snapshot
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --snapshot --clean
+      - name: Verify .deb on debian:12
+        run: |
+          docker run --rm -v "$PWD/dist:/dist:ro" debian:12 bash -ec '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get -qq update >/dev/null && apt-get -qq install -y systemd >/dev/null
+            dpkg -i /dist/ezyshield_*_linux_amd64.deb
+            ezyshield version
+            ezyshield-enforcer --version
+            id ezyshield
+            stat -c "%a %U:%G %n" /etc/ezyshield /var/lib/ezyshield
+            out=$(ezyshield doctor 2>&1 || true); test -n "$out"
+            systemd-analyze verify /usr/lib/systemd/system/ezyshield.service /usr/lib/systemd/system/ezyshield-enforcer.service
+            ls /etc/ezyshield/config.yaml.example /etc/ezyshield/policy.yaml.example /etc/ezyshield/rules.yaml.example
+          '
+      - name: Verify .rpm on rockylinux:9
+        run: |
+          docker run --rm -v "$PWD/dist:/dist:ro" rockylinux:9 bash -ec '
+            dnf -q -y install systemd shadow-utils >/dev/null
+            rpm -i /dist/ezyshield_*_linux_amd64.rpm
+            ezyshield version
+            id ezyshield
+            out=$(ezyshield doctor 2>&1 || true); test -n "$out"
+            systemd-analyze verify /usr/lib/systemd/system/ezyshield.service /usr/lib/systemd/system/ezyshield-enforcer.service
+            rpm -e ezyshield
+            test -d /var/lib/ezyshield
+          '
+      - name: Job summary
+        run: |
+          {
+            echo "### 📦 Packages (goreleaser snapshot)"
+            echo "_Builds the full release snapshot and installs the resulting .deb/.rpm in real containers — packaging breaks here, before any tag exists._"
+            echo ""
+            echo "| Artifact | Size |"
+            echo "|---|---|"
+            for f in dist/*.deb dist/*.rpm dist/*.tar.gz; do
+              [ -e "$f" ] || continue
+              echo "| $(basename "$f") | $(du -h "$f" | cut -f1) |"
+            done
+            echo ""
+            echo "- debian:12 — dpkg install, version, doctor runs, systemd-analyze verify ✅"
+            echo "- rockylinux:9 — rpm install + clean removal, data dir preserved ✅"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   security-review-gate:
     # Reminds/enforces the security review on PRs that touch critical (🔴) paths.
@@ -152,6 +322,11 @@ jobs:
         env:
           BODY: ${{ github.event.pull_request.body }}
         run: |
+          {
+            echo "### 🔐 Security-review gate"
+            echo "_Blocks PRs touching 🔴 critical paths (parser, rules, decision, enforce, ai, plugin, enforcer cmd) unless the PR body carries a filled §-by-§ security review._"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
           base="origin/${{ github.base_ref }}"
           git fetch -q origin "${{ github.base_ref }}"
           changed=$(git diff --name-only "$base"...HEAD)
@@ -162,15 +337,44 @@ jobs:
             # crude but effective: the template's section markers must be present and not all empty
             if ! echo "$BODY" | grep -q 'Security review (per docs/internal/SECURITY-REVIEW.md)'; then
               echo "::error::PR touches a critical area but the security-review section is missing from the description. See docs/internal/SECURITY-REVIEW.md."
+              echo "- 🔴 critical paths touched, review section MISSING ❌" >> "$GITHUB_STEP_SUMMARY"
               exit 1
             fi
             # require at least one section line to be filled beyond the label
             filled=$(echo "$BODY" | grep -E '^- §[0-9]+ .*: .+' | grep -vEi ': *(TODO|TBD)? *$' | wc -l)
             if [ "$filled" -lt 1 ]; then
               echo "::error::Security-review section is present but empty. Fill in FINDING/OK/N/A per section (docs/internal/SECURITY-REVIEW.md)."
+              echo "- 🔴 critical paths touched, review section EMPTY ❌" >> "$GITHUB_STEP_SUMMARY"
               exit 1
             fi
             echo "Security review section present and filled."
+            echo "- 🔴 critical paths touched; review section present and filled (${filled} § lines) ✅" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "No 🔴 critical paths touched; security-review gate is advisory."
+            echo "- no 🔴 critical paths touched (advisory) ✅" >> "$GITHUB_STEP_SUMMARY"
           fi
+
+  ip-hygiene-gate:
+    # Enforces AGENTS.md Hard Rule 8: IP literals added to tests, fixtures/,
+    # or configs/ must be documentation ranges (RFC 5737 / RFC 3849).
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Check added IP literals are documentation ranges
+        run: |
+          git fetch -q origin "${{ github.base_ref }}"
+          bash scripts/ip-hygiene-gate.sh --self-test
+          out=$(bash scripts/ip-hygiene-gate.sh "origin/${{ github.base_ref }}") && rc=0 || rc=$?
+          echo "$out"
+          {
+            echo "### 🧼 IP-hygiene gate (Hard Rule 8)"
+            echo "_IP literals added to tests/fixtures/configs must be documentation ranges (RFC 5737/3849) — no real IP can ever be committed again._"
+            echo ""
+            echo '```'
+            echo "$out"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"

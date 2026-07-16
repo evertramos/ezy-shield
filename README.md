@@ -108,7 +108,7 @@ still escalates today.
 - **Ban rate limit** — `max_bans_per_minute` (default 30) so a bad rule or poisoned feed can't ban the internet
 - **Notifications** — Telegram, Email (SMTP), Slack, Discord, generic webhook
 - **Service & port discovery** — `ezyshield scan` inventories what's actually listening on the host
-- **Audit trail** — every action recorded in SQLite; export to JSON/CSV
+- **Audit trail** — every action recorded in SQLite; JSON output for scripting
 - **Localhost-only dashboard** — small web UI over 127.0.0.1 with status, active bans, allowlist, event log, live WebSocket updates and a strike timeline; CSRF-protected manual ban/unban/allow; access remotely via SSH tunnel or Cloudflare Tunnel (see [docs](docs/content/en/reference/dashboard.md) and the [remote-access guide](docs/content/en/guides/dashboard-remote-access.md))
 - **Scriptable** — `--json` on commands; unix-socket control, no TCP port ever
 
@@ -116,24 +116,33 @@ still escalates today.
 
 ## Install
 
-### From a release (when available)
+### Package manager (apt / dnf)
+
+```sh
+# Debian / Ubuntu
+curl -fsSL https://packages.ezyshield.com/ezyshield.asc | sudo gpg --dearmor -o /usr/share/keyrings/ezyshield.gpg
+echo "deb [signed-by=/usr/share/keyrings/ezyshield.gpg] https://packages.ezyshield.com/apt stable main" | sudo tee /etc/apt/sources.list.d/ezyshield.list
+sudo apt update && sudo apt install ezyshield
+```
+
+GPG-signed repositories with `.deb` and `.rpm` for amd64/arm64 — dnf setup and details in the [install guide](docs/content/en/getting-started/install.md).
+
+### Install script
 
 ```sh
 curl -sfL https://get.ezyshield.com | sudo sh
 ```
 
-The installer fetches the latest signed binaries (`ezyshield` and
-`ezyshield-enforcer`) and verifies checksums.
+Fetches the latest release binaries (`ezyshield` and `ezyshield-enforcer`) and
+verifies their SHA-256 checksums.
 
 ### Specific version (including release candidates)
 
-To install a specific version or release candidate, set `EZYSHIELD_VERSION`:
-
 ```sh
-curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=v0.3.0-rc.1 sh
+curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=v0.1.0 sh
 ```
 
-See [docs/content/en/guides/install.md](docs/content/en/guides/install.md) for complete installation options.
+See the [install guide](docs/content/en/getting-started/install.md) for all options (air-gapped mirrors, from source, upgrading).
 
 ### From source (works today)
 
@@ -230,19 +239,10 @@ rules — is in [docs/content/en/getting-started/index.md](docs/content/en/getti
 
 ## Roadmap
 
-Built today: SSH/Nginx detection, rule engine, nftables bans, Cloudflare edge
-(IP lists), Anthropic/OpenAI/Ollama providers, Telegram/Email/Slack/Discord/
-webhook notifications, dry-run, anti-lockout, audit log.
-
-Planned (not yet shipped — see [issues](https://github.com/evertramos/ezy-shield/issues)):
-
-- More edge backends: Bunny, AWS WAF; ASN- and country-level blocking
-- More local backends: iptables, ufw, firewalld
-- More log sources: Apache, Caddy, Traefik, container logs
-- Localhost-only dashboard (SSH-tunneled, like `kubectl proxy`)
-- Community module/plugin system
-- Host sensor: reverse-shell and egress-anomaly detection
-- Reputation feeds, more notifiers (ntfy, Pushover, WhatsApp/SMS)
+Everything listed under [Features](#features-today) is implemented, tested, and
+shipping in the current release. We are preparing the roadmap for the next
+versions — it will be published here. Ideas and requests are welcome in the
+[issues](https://github.com/evertramos/ezy-shield/issues).
 
 ---
 

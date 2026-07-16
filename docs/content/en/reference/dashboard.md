@@ -117,7 +117,7 @@ data.
 |--------|--------------------------|------------|--------------------------------------------------------------|
 | GET    | `/login`                 | none       | Login form                                                   |
 | POST   | `/login`                 | none       | Form submit; sets session cookie on success                  |
-| POST   | `/logout`                | none       | Clears session cookie                                        |
+| POST   | `/logout`                | required   | CSRF-protected like every mutation; clears the session       |
 | GET    | `/`                      | required   | Redirects authed sessions to `/dashboard`                    |
 | GET    | `/dashboard`             | required   | Status overview: daemon state, mode, uptime, version, active-ban count, per-strike breakdown |
 | GET    | `/dashboard/bans`        | required   | Table of active bans with per-row unban action + manual ban form |
@@ -231,7 +231,7 @@ Read-only — no forms.
 - Session cookies: name `ezyshield_dashboard`, 32-byte hex token from
   `crypto/rand` (256 bits of entropy), `HttpOnly`, `Secure`,
   `SameSite=Strict`, sliding 30-minute inactivity timeout, kept
-  **in memory only** — daemon restart forces re-login.
+  **in memory only** — restarting the dashboard process forces re-login.
 - `Secure` is set even on the default loopback deployment: modern
   browsers treat `http://localhost` as a secure context, so the
   cookie still round-trips on plaintext localhost, and any

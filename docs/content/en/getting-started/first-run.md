@@ -22,7 +22,7 @@ You'll see output like:
 2026-07-08T10:15:23Z INFO starting pipeline
 2026-07-08T10:15:24Z INFO collector[journald]: started
 2026-07-08T10:15:24Z INFO collector[file]: tailing /var/log/nginx/access.log
-2026-07-08T10:15:30Z WARN decision: ssh brute-force attempt from 203.0.113.42 (3 strikes, score 95)
+2026-07-08T10:15:30Z WARN decision: ssh brute-force attempt from 203.0.113.42 (strike 1, score 95)
   verdict: dry_ban (would ban for 5 minutes)
 ```
 
@@ -43,13 +43,14 @@ Run for 24 hours in dry-run and monitor:
 
 ## Step 3: Check audit trail
 
-Query the audit log to see what would have been blocked:
+See what would have been blocked:
 
 ```bash
-ezyshield list --audit | head -20
+ezyshield report | head -30
 ```
 
-This shows the full decision history without actually blocking.
+`report` shows per-IP decision history (strikes, scores, evidence) without
+anything actually being blocked.
 
 ## Step 4: Arm it
 
@@ -70,8 +71,8 @@ EzyShield now blocks in real-time: bans go to nftables (local), Cloudflare (edge
 ## Step 5: Monitor active bans
 
 ```bash
-ezyshield list --bans
-ezyshield list --allowlist
+ezyshield list           # active bans
+ezyshield list --allow   # allowlist entries
 ezyshield status
 ```
 
@@ -85,15 +86,14 @@ A: Add it to the allowlist in `policy.yaml`:
 
 ```yaml
 allowlist:
-  cidrs:
-    - 198.51.100.0/24    # Your office
-    - 192.0.2.100/32     # Specific user
+  - 198.51.100.0/24    # your office
+  - 192.0.2.100        # a specific user
 ```
 
-Reload:
+Apply the change with a restart:
 
 ```bash
-sudo systemctl reload ezyshield
+sudo systemctl restart ezyshield
 ```
 
 **Q: No events being detected**

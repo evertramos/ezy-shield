@@ -175,7 +175,7 @@ O comando de nível superior `ezyshield validate` é mantido como alias e se com
 
 Códigos de saída: `0` válido (pode ter avisos), `1` erros encontrados, `2` arquivo não encontrado / ilegível.
 
-### ezyshield config enforcer <name>
+### ezyshield config enforcer `<name>`
 
 Wizard interativo para adicionar ou reconfigurar um enforcer em uma instalação existente — os mesmos prompts e a mesma validação seca de token do wizard de init, sem regenerar mais nada.
 
@@ -191,7 +191,7 @@ Nomes disponíveis: `cloudflare`.
 
 Códigos de saída: `0` salvo, `1` wizard abortado ou falha de escrita, `2` config.yaml não encontrado (execute `init` primeiro).
 
-### ezyshield config notifier <name>
+### ezyshield config notifier `<name>`
 
 Wizard interativo para adicionar, reconfigurar ou remover um canal de notificação em uma instalação existente.
 
@@ -214,7 +214,7 @@ Nomes disponíveis: `telegram`, `email`, `slack`, `discord`, `webhook`.
 
 Códigos de saída: `0` salvo, `1` wizard abortado ou falha de escrita, `2` config.yaml não encontrado (execute `init` primeiro).
 
-### ezyshield config ai <provider>
+### ezyshield config ai `<provider>`
 
 Wizard interativo para configurar (ou trocar) o provedor de IA em uma instalação existente — os mesmos prompts de modelo e chave de API do wizard de init, sem regenerar mais nada.
 
@@ -232,7 +232,7 @@ Provedores disponíveis: `anthropic`, `openai`, `ollama`.
 
 Códigos de saída: `0` salvo, `1` falha de escrita, `2` config.yaml não encontrado (execute `init` primeiro).
 
-### ezyshield config collector <name>
+### ezyshield config collector `<name>`
 
 Wizard interativo para adicionar, reconfigurar ou remover um coletor de logs em uma instalação existente — os mesmos prompts que o wizard de init executa para aquela fonte, sem regenerar mais nada.
 
@@ -255,7 +255,7 @@ Códigos de saída: `0` salvo, `1` wizard abortado ou falha de escrita, `2` conf
 
 Executa testes de conectividade contra os componentes configurados. Como o `config`, o grupo segue o padrão `<kind> <name>`, então tipos de componente futuros se encaixam nos mesmos verbos.
 
-### ezyshield test enforcer <name>
+### ezyshield test enforcer `<name>`
 
 Testa a configuração e as permissões de um backend de enforcement: validade do token, acesso à conta/zones e as permissões exatas de API que o enforcer precisa — com sugestão de correção para cada verificação que falhar.
 
@@ -270,7 +270,7 @@ Nomes disponíveis: `all`, `cloudflare`, `nftables`.
 
 Código de saída `0` se todas as verificações passarem, diferente de zero se alguma falhar.
 
-### ezyshield test notifier <name>
+### ezyshield test notifier `<name>`
 
 Envia um alerta sintético para verificar um canal de notificação de ponta a ponta (segredos resolvidos do ambiente, mensagem realmente entregue).
 

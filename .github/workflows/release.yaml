@@ -27,6 +27,22 @@ jobs:
     outputs:
       new_tag: ${{ steps.bump.outputs.new_tag }}
     steps:
+      # dev is the DEFAULT branch (development). Stable releases are cut from
+      # main only; rc tags may also be cut from dev — an rc is a rehearsal of
+      # dev's integration state and publishes only to the "testing" package
+      # suite, never to "stable".
+      - name: Refuse stable bumps outside main
+        if: inputs.bump != 'rc' && github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::'${{ inputs.bump }}' releases must be dispatched from 'main' (got '${{ github.ref_name }}'). Select 'main' in the 'Use workflow from' dropdown. Only 'rc' may be cut from dev."
+          exit 1
+
+      - name: Refuse rc bumps outside dev or main
+        if: inputs.bump == 'rc' && github.ref != 'refs/heads/dev' && github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::rc releases are cut from 'dev' (or 'main'), got '${{ github.ref_name }}'."
+          exit 1
+
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
@@ -101,58 +117,46 @@ jobs:
           fetch-depth: 0
           ref: ${{ needs.tag.outputs.new_tag || github.ref }}
 
+      # Defence-in-depth for the push-tag path: a STABLE tag on a commit that
+      # is not on main must never produce a release (covers a manual `git tag`
+      # from the wrong checkout). Prerelease tags (-rc/-alpha/-beta) are
+      # exempt — they may be cut from dev and only feed the "testing" package
+      # suite and prerelease GitHub releases.
+      - name: Verify stable tags are on main
+        run: |
+          TAG="${{ needs.tag.outputs.new_tag || github.ref_name }}"
+          case "$TAG" in
+          *-*)
+            echo "prerelease tag '$TAG' — main ancestry not required (testing channel)"
+            ;;
+          *)
+            git fetch -q origin main
+            if ! git merge-base --is-ancestor HEAD origin/main; then
+              echo "::error::Stable tag '$TAG' points at a commit that is not on main. Stable releases are cut from main only — merge the release PR (dev → main) first."
+              exit 1
+            fi
+            ;;
+          esac
+
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 
-      - name: Build binaries
-        run: |
-          VERSION="${{ needs.tag.outputs.new_tag || github.ref_name }}"
-          COMMIT="$(git rev-parse --short HEAD)"
-          DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          LDFLAGS="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildDate=${DATE}"
-
-          declare -a TARGETS=(
-            "linux/amd64"
-            "linux/arm64"
-          )
-
-          mkdir -p dist
-
-          for target in "${TARGETS[@]}"; do
-            GOOS="${target%/*}"
-            GOARCH="${target#*/}"
-            SUFFIX="${GOOS}-${GOARCH}"
-
-            echo "Building ezyshield-${SUFFIX}..."
-            CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH \
-              go build -trimpath -ldflags "$LDFLAGS" \
-              -o "dist/ezyshield-${SUFFIX}" ./cmd/ezyshield
-
-            echo "Building ezyshield-enforcer-${SUFFIX}..."
-            CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH \
-              go build -trimpath -ldflags "$LDFLAGS" \
-              -o "dist/ezyshield-enforcer-${SUFFIX}" ./cmd/ezyshield-enforcer
-          done
-
-      - name: Generate checksums
-        run: |
-          cd dist
-          sha256sum * > checksums.txt
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
+      # goreleaser (issues #97/#98) builds both binaries for amd64+arm64
+      # (CGO off, -trimpath, ldflags version), publishes raw binaries under
+      # the exact names scripts/get.sh expects, tarballs, checksums.txt, and
+      # .deb/.rpm packages. rc/alpha/beta tags become prereleases and never
+      # take "latest" (release.prerelease: auto in .goreleaser.yaml).
+      # The same snapshot build is install-verified in containers by the
+      # `packages` job in ci.yaml on every PR.
+      - name: Run goreleaser
+        uses: goreleaser/goreleaser-action@v7
         with:
-          tag_name: ${{ needs.tag.outputs.new_tag || github.ref_name }}
-          generate_release_notes: true
-          # Overwrite any pre-existing notes instead of appending to them,
-          # so notes are not duplicated if the release already exists.
-          append_body: false
-          prerelease: ${{ contains(needs.tag.outputs.new_tag || github.ref_name, '-rc') || contains(needs.tag.outputs.new_tag || github.ref_name, '-alpha') || contains(needs.tag.outputs.new_tag || github.ref_name, '-beta') }}
-          make_latest: ${{ !contains(needs.tag.outputs.new_tag || github.ref_name, '-rc') && !contains(needs.tag.outputs.new_tag || github.ref_name, '-alpha') && !contains(needs.tag.outputs.new_tag || github.ref_name, '-beta') }}
-          files: |
-            dist/ezyshield-*
-            dist/checksums.txt
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Release summary
         run: |
@@ -186,3 +190,13 @@ jobs:
             echo "- ezyshield-enforcer-linux-arm64"
             echo "- checksums.txt"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # Chained explicitly because goreleaser's GITHUB_TOKEN-created release does
+  # not emit a workflow-triggering "published" event (anti-recursion rule).
+  publish-repos:
+    needs: [tag, release]
+    if: always() && needs.release.result == 'success'
+    uses: ./.github/workflows/publish-repos.yaml
+    with:
+      tag: ${{ needs.tag.outputs.new_tag || github.ref_name }}
+    secrets: inherit

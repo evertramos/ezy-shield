@@ -52,6 +52,7 @@ jobs:
         run: |
           {
             echo "### 🧹 Lint — $(go version | awk '{print $3}')"
+            echo "_Guards code style and static-analysis health: gofmt, go vet, golangci-lint (includes gosec security linting)._"
             echo ""
             echo "| Check | Result |"
             echo "|---|---|"
@@ -79,6 +80,7 @@ jobs:
         run: |
           {
             echo "### 🧪 Tests — $(go version | awk '{print $3}'), -race"
+            echo "_Full unit suite with the race detector; statement coverage measured per package._"
             echo ""
             if [ -f coverage.out ]; then
               echo "**Total coverage: $(go tool cover -func=coverage.out | tail -1 | awk '{print $3}')**"
@@ -121,6 +123,7 @@ jobs:
         run: |
           {
             echo "### 🏗️ Build linux/${{ matrix.goarch }} — $(go version | awk '{print $3}'), CGO off, -trimpath"
+            echo "_Proves both binaries compile statically for this architecture — the exact shape releases ship._"
             echo ""
             echo "| Binary | Size |"
             echo "|---|---|"
@@ -155,6 +158,7 @@ jobs:
         run: |
           {
             echo "### 📚 Docs & scripts"
+            echo "_Required security/legal docs exist, every shell script passes shellcheck, and example configs validate against their JSON schemas._"
             echo ""
             echo "| Check | Result |"
             echo "|---|---|"
@@ -189,6 +193,7 @@ jobs:
           execs() { grep -oE 'execs: [0-9]+' "$1" 2>/dev/null | tail -1 | awk '{print $2}'; }
           {
             echo "### 🐛 Fuzz — panic-safety on hostile bytes (10s each)"
+            echo "_Feeds malformed/hostile input to the log parsers to prove the daemon can never be crashed by a crafted log line._"
             echo ""
             echo "| Target | Executions | Result |"
             echo "|---|---|---|"
@@ -226,6 +231,7 @@ jobs:
         run: |
           {
             echo "### 🛡️ govulncheck — $(go version | awk '{print $3}')"
+            echo "_Scans the module graph for known CVEs that affect code paths actually reachable from this repo._"
             echo ""
             if [ ! -f /tmp/vulncheck.out ]; then
               echo "scan did not produce output (see job log)"
@@ -290,6 +296,7 @@ jobs:
         run: |
           {
             echo "### 📦 Packages (goreleaser snapshot)"
+            echo "_Builds the full release snapshot and installs the resulting .deb/.rpm in real containers — packaging breaks here, before any tag exists._"
             echo ""
             echo "| Artifact | Size |"
             echo "|---|---|"
@@ -314,6 +321,11 @@ jobs:
         env:
           BODY: ${{ github.event.pull_request.body }}
         run: |
+          {
+            echo "### 🔐 Security-review gate"
+            echo "_Blocks PRs touching 🔴 critical paths (parser, rules, decision, enforce, ai, plugin, enforcer cmd) unless the PR body carries a filled §-by-§ security review._"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
           base="origin/${{ github.base_ref }}"
           git fetch -q origin "${{ github.base_ref }}"
           changed=$(git diff --name-only "$base"...HEAD)
@@ -324,21 +336,21 @@ jobs:
             # crude but effective: the template's section markers must be present and not all empty
             if ! echo "$BODY" | grep -q 'Security review (per docs/internal/SECURITY-REVIEW.md)'; then
               echo "::error::PR touches a critical area but the security-review section is missing from the description. See docs/internal/SECURITY-REVIEW.md."
-              echo "### 🔐 Security-review gate — 🔴 critical paths touched, review section MISSING ❌" >> "$GITHUB_STEP_SUMMARY"
+              echo "- 🔴 critical paths touched, review section MISSING ❌" >> "$GITHUB_STEP_SUMMARY"
               exit 1
             fi
             # require at least one section line to be filled beyond the label
             filled=$(echo "$BODY" | grep -E '^- §[0-9]+ .*: .+' | grep -vEi ': *(TODO|TBD)? *$' | wc -l)
             if [ "$filled" -lt 1 ]; then
               echo "::error::Security-review section is present but empty. Fill in FINDING/OK/N/A per section (docs/internal/SECURITY-REVIEW.md)."
-              echo "### 🔐 Security-review gate — 🔴 critical paths touched, review section EMPTY ❌" >> "$GITHUB_STEP_SUMMARY"
+              echo "- 🔴 critical paths touched, review section EMPTY ❌" >> "$GITHUB_STEP_SUMMARY"
               exit 1
             fi
             echo "Security review section present and filled."
-            echo "### 🔐 Security-review gate — 🔴 critical paths touched; review section present and filled (${filled} § lines) ✅" >> "$GITHUB_STEP_SUMMARY"
+            echo "- 🔴 critical paths touched; review section present and filled (${filled} § lines) ✅" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "No 🔴 critical paths touched; security-review gate is advisory."
-            echo "### 🔐 Security-review gate — no 🔴 critical paths touched (advisory) ✅" >> "$GITHUB_STEP_SUMMARY"
+            echo "- no 🔴 critical paths touched (advisory) ✅" >> "$GITHUB_STEP_SUMMARY"
           fi
 
   ip-hygiene-gate:
@@ -358,6 +370,7 @@ jobs:
           echo "$out"
           {
             echo "### 🧼 IP-hygiene gate (Hard Rule 8)"
+            echo "_IP literals added to tests/fixtures/configs must be documentation ranges (RFC 5737/3849) — no real IP can ever be committed again._"
             echo ""
             echo '```'
             echo "$out"

@@ -149,6 +149,12 @@ cleanup_negative() {
   rm -rf "$NEG_HOME" "$NEG_ASC" "$NEG_GPG" "$NEG_LIST" "$NEG_REPO"
 }
 trap cleanup_negative EXIT
+# Signals must still terminate: exit from the handler (which fires the EXIT
+# trap above) instead of trapping the signal to cleanup directly — that
+# would make the script survive Ctrl-C.
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 info "negative test: repository configured with a key that is NOT ours"
 gpg --homedir "$NEG_HOME" --batch --pinentry-mode loopback --passphrase '' \

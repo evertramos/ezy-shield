@@ -47,7 +47,7 @@ sudo dnf install ezyshield
 Signing key fingerprint (verify after import with `gpg --show-keys`):
 
 ```
-<KEY-FINGERPRINT — maintainer fills in after first publish>
+810E EEB0 1802 38F7 E800  4A9E E1AD 3D15 A121 3612
 ```
 
 To follow release candidates instead, replace `stable` with `testing` in

@@ -84,4 +84,5 @@ Adding a new parser → add a `FuzzXxxParser` with seeds: malformed, oversized (
 - Binding the dashboard to 0.0.0.0 "for convenience" — forbidden
 - Adding a dependency for something stdlib does; justify every new dependency in the PR
 - Writing migrations that edit old migration files — always append a new one
+- Raw `<placeholder>` tags in `docs/content/**.md` (headings or body) — VitePress compiles markdown as Vue and an unbackticked `<name>` aborts the whole site build. Always write placeholders backtick-wrapped: `` `<name>` ``. Enforced by `scripts/docs-placeholder-gate.sh` in the docs CI job
 - Pasting real log lines from a live host straight into a test/fixture without sanitizing the IP/username/key-fingerprint first (Hard Rule 8) — this reached a public commit once already

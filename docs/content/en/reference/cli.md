@@ -326,7 +326,7 @@ The top-level `ezyshield validate` is kept as an alias and behaves identically.
 
 Exit codes: `0` valid (may have warnings), `1` errors found, `2` file not found / unreadable.
 
-### ezyshield config enforcer <name>
+### ezyshield config enforcer `<name>`
 
 Interactive wizard to add or reconfigure one enforcer on an existing installation — the same prompts and dry token validation the init wizard runs, without regenerating anything else.
 
@@ -342,7 +342,7 @@ Available names: `cloudflare`.
 
 Exit codes: `0` saved, `1` wizard aborted or write failed, `2` config.yaml not found (run `init` first).
 
-### ezyshield config notifier <name>
+### ezyshield config notifier `<name>`
 
 Interactive wizard to add, reconfigure, or remove one notification channel on an existing installation.
 
@@ -365,7 +365,7 @@ Available names: `telegram`, `email`, `slack`, `discord`, `webhook`.
 
 Exit codes: `0` saved, `1` wizard aborted or write failed, `2` config.yaml not found (run `init` first).
 
-### ezyshield config ai <provider>
+### ezyshield config ai `<provider>`
 
 Interactive wizard to configure (or switch) the AI provider on an existing installation — the same model and API-key prompts the init wizard runs, without regenerating anything else.
 
@@ -383,7 +383,7 @@ Available providers: `anthropic`, `openai`, `ollama`.
 
 Exit codes: `0` saved, `1` write failed, `2` config.yaml not found (run `init` first).
 
-### ezyshield config collector <name>
+### ezyshield config collector `<name>`
 
 Interactive wizard to add, reconfigure, or remove one log collector on an existing installation — the same prompts the init wizard runs for that source, without regenerating anything else.
 
@@ -430,7 +430,7 @@ ezyshield version --json
 
 Run connectivity tests against configured components. Like `config`, the group follows the `<kind> <name>` pattern, so future component kinds plug into the same verbs.
 
-### ezyshield test enforcer <name>
+### ezyshield test enforcer `<name>`
 
 Test the configuration and permissions of an enforcer backend: token validity, account/zone access, and the exact API permissions the enforcer needs — with a fix suggestion for every failing check.
 
@@ -445,7 +445,7 @@ Available names: `all`, `cloudflare`, `nftables`.
 
 Exit code is `0` if all checks pass, non-zero if any check fails.
 
-### ezyshield test notifier <name>
+### ezyshield test notifier `<name>`
 
 Send a synthetic alert to verify a notification channel end to end (secrets resolved from the environment, message actually delivered).
 

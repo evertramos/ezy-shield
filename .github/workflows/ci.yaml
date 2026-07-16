@@ -35,15 +35,30 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
       - name: gofmt
+        id: gofmt
         run: |
           out=$(gofmt -l .)
           if [ -n "$out" ]; then echo "gofmt needed on:"; echo "$out"; exit 1; fi
       - name: go vet
+        id: vet
         run: go vet ./...
       - name: golangci-lint
+        id: golangci
         uses: golangci/golangci-lint-action@v9
         with:
           version: "v2.12"
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "### 🧹 Lint — $(go version | awk '{print $3}')"
+            echo ""
+            echo "| Check | Result |"
+            echo "|---|---|"
+            echo "| gofmt | ${{ steps.gofmt.outcome }} |"
+            echo "| go vet | ${{ steps.vet.outcome }} |"
+            echo "| golangci-lint v2.12 | ${{ steps.golangci.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   test:
     needs: detect
@@ -56,9 +71,28 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
       - name: Unit tests (race + coverage)
-        run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
-      - name: Coverage summary
-        run: go tool cover -func=coverage.out | tail -1
+        run: |
+          set -o pipefail
+          go test -race -coverprofile=coverage.out -covermode=atomic ./... | tee test-output.txt
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "### 🧪 Tests — $(go version | awk '{print $3}'), -race"
+            echo ""
+            if [ -f coverage.out ]; then
+              echo "**Total coverage: $(go tool cover -func=coverage.out | tail -1 | awk '{print $3}')**"
+              echo ""
+            fi
+            if [ -f test-output.txt ]; then
+              echo "| Package | Result | Coverage |"
+              echo "|---|---|---|"
+              grep -E '^(ok|FAIL)' test-output.txt | awk 'NF>=3 {
+                cov="—"; for(i=1;i<=NF;i++) if($i=="coverage:") cov=$(i+1)
+                printf "| %s | %s | %s |\n", $2, ($1=="ok" ? "✅" : "❌ FAIL"), cov
+              }'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
   build:
     needs: detect
@@ -78,26 +112,56 @@ jobs:
           CGO_ENABLED: "0"
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
-        run: go build -trimpath ./...
+        run: |
+          go build -trimpath ./...
+          mkdir -p /tmp/bin
+          go build -trimpath -o /tmp/bin/ezyshield ./cmd/ezyshield
+          go build -trimpath -o /tmp/bin/ezyshield-enforcer ./cmd/ezyshield-enforcer
+      - name: Job summary
+        run: |
+          {
+            echo "### 🏗️ Build linux/${{ matrix.goarch }} — $(go version | awk '{print $3}'), CGO off, -trimpath"
+            echo ""
+            echo "| Binary | Size |"
+            echo "|---|---|"
+            for b in /tmp/bin/*; do
+              echo "| $(basename "$b") | $(du -h "$b" | cut -f1) |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
 
   docs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - name: Required docs present
+        id: reqdocs
         run: |
           for f in SECURITY.md LICENSE docs/internal/SECURITY-REVIEW.md; do
             [ -f "$f" ] || { echo "missing $f"; exit 1; }
           done
       - name: Shell scripts pass shellcheck
+        id: shellcheck
         run: |
           sudo apt-get -yqq install shellcheck >/dev/null
           find scripts -name '*.sh' -exec shellcheck {} +
       - name: Validate example configs against JSON schemas
+        id: schemas
         run: |
           pip install check-jsonschema --quiet
           check-jsonschema --schemafile docs/internal/schemas/config/config.schema.json configs/config.yaml
           check-jsonschema --schemafile docs/internal/schemas/config/policy.schema.json configs/policy.yaml
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "### 📚 Docs & scripts"
+            echo ""
+            echo "| Check | Result |"
+            echo "|---|---|"
+            echo "| required docs present | ${{ steps.reqdocs.outcome }} |"
+            echo "| shellcheck ($(find scripts -name '*.sh' | wc -l) scripts) | ${{ steps.shellcheck.outcome }} |"
+            echo "| example configs vs JSON schemas | ${{ steps.schemas.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   fuzz:
     needs: detect
@@ -110,9 +174,27 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
       - name: Fuzz SSH parser (10s)
-        run: go test -fuzz=FuzzSSHParser -fuzztime=10s ./internal/parser/
+        id: fssh
+        run: |
+          set -o pipefail
+          go test -fuzz=FuzzSSHParser -fuzztime=10s ./internal/parser/ | tee fuzz-ssh.txt
       - name: Fuzz Nginx parser (10s)
-        run: go test -fuzz=FuzzNginxParser -fuzztime=10s ./internal/parser/
+        id: fnginx
+        run: |
+          set -o pipefail
+          go test -fuzz=FuzzNginxParser -fuzztime=10s ./internal/parser/ | tee fuzz-nginx.txt
+      - name: Job summary
+        if: always()
+        run: |
+          execs() { grep -oE 'execs: [0-9]+' "$1" 2>/dev/null | tail -1 | awk '{print $2}'; }
+          {
+            echo "### 🐛 Fuzz — panic-safety on hostile bytes (10s each)"
+            echo ""
+            echo "| Target | Executions | Result |"
+            echo "|---|---|---|"
+            echo "| FuzzSSHParser | $(execs fuzz-ssh.txt) | ${{ steps.fssh.outcome }} |"
+            echo "| FuzzNginxParser | $(execs fuzz-nginx.txt) | ${{ steps.fnginx.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   govulncheck:
     needs: detect
@@ -139,6 +221,21 @@ jobs:
             fi
             echo "::notice::All vulnerabilities are in Go stdlib — Go will be updated when fix is released"
           fi
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "### 🛡️ govulncheck — $(go version | awk '{print $3}')"
+            echo ""
+            if [ ! -f /tmp/vulncheck.out ]; then
+              echo "scan did not produce output (see job log)"
+            elif grep -q "No vulnerabilities found" /tmp/vulncheck.out; then
+              echo "No known vulnerabilities in the module graph. ✅"
+            else
+              n=$(grep -cE "^Vulnerability #" /tmp/vulncheck.out || true)
+              echo "Findings: ${n} — see job log (Go-stdlib-only findings are non-blocking by policy)."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
   packages:
     # Builds the full goreleaser snapshot and install-verifies the resulting
@@ -189,6 +286,21 @@ jobs:
             rpm -e ezyshield
             test -d /var/lib/ezyshield
           '
+      - name: Job summary
+        run: |
+          {
+            echo "### 📦 Packages (goreleaser snapshot)"
+            echo ""
+            echo "| Artifact | Size |"
+            echo "|---|---|"
+            for f in dist/*.deb dist/*.rpm dist/*.tar.gz; do
+              [ -e "$f" ] || continue
+              echo "| $(basename "$f") | $(du -h "$f" | cut -f1) |"
+            done
+            echo ""
+            echo "- debian:12 — dpkg install, version, doctor runs, systemd-analyze verify ✅"
+            echo "- rockylinux:9 — rpm install + clean removal, data dir preserved ✅"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   security-review-gate:
     # Reminds/enforces the security review on PRs that touch critical (🔴) paths.
@@ -212,17 +324,21 @@ jobs:
             # crude but effective: the template's section markers must be present and not all empty
             if ! echo "$BODY" | grep -q 'Security review (per docs/internal/SECURITY-REVIEW.md)'; then
               echo "::error::PR touches a critical area but the security-review section is missing from the description. See docs/internal/SECURITY-REVIEW.md."
+              echo "### 🔐 Security-review gate — 🔴 critical paths touched, review section MISSING ❌" >> "$GITHUB_STEP_SUMMARY"
               exit 1
             fi
             # require at least one section line to be filled beyond the label
             filled=$(echo "$BODY" | grep -E '^- §[0-9]+ .*: .+' | grep -vEi ': *(TODO|TBD)? *$' | wc -l)
             if [ "$filled" -lt 1 ]; then
               echo "::error::Security-review section is present but empty. Fill in FINDING/OK/N/A per section (docs/internal/SECURITY-REVIEW.md)."
+              echo "### 🔐 Security-review gate — 🔴 critical paths touched, review section EMPTY ❌" >> "$GITHUB_STEP_SUMMARY"
               exit 1
             fi
             echo "Security review section present and filled."
+            echo "### 🔐 Security-review gate — 🔴 critical paths touched; review section present and filled (${filled} § lines) ✅" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "No 🔴 critical paths touched; security-review gate is advisory."
+            echo "### 🔐 Security-review gate — no 🔴 critical paths touched (advisory) ✅" >> "$GITHUB_STEP_SUMMARY"
           fi
 
   ip-hygiene-gate:
@@ -238,4 +354,13 @@ jobs:
         run: |
           git fetch -q origin "${{ github.base_ref }}"
           bash scripts/ip-hygiene-gate.sh --self-test
-          bash scripts/ip-hygiene-gate.sh "origin/${{ github.base_ref }}"
+          out=$(bash scripts/ip-hygiene-gate.sh "origin/${{ github.base_ref }}") && rc=0 || rc=$?
+          echo "$out"
+          {
+            echo "### 🧼 IP-hygiene gate (Hard Rule 8)"
+            echo ""
+            echo '```'
+            echo "$out"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"

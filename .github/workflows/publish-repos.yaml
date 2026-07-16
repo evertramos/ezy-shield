@@ -9,7 +9,18 @@ name: 📦 Publish package repositories
 permissions:
   contents: read
 
+# NOTE: goreleaser publishes releases with the default GITHUB_TOKEN, and
+# events caused by that token do NOT trigger other workflows (GitHub's
+# anti-recursion rule) — so the primary path is the workflow_call from
+# release.yaml. The release trigger below still covers releases published
+# manually (UI / PAT), and workflow_dispatch covers re-publishing.
 on:
+  workflow_call:
+    inputs:
+      tag:
+        description: "Release tag to publish"
+        required: true
+        type: string
   release:
     types: [published]
   workflow_dispatch:

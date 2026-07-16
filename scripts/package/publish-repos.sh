@@ -118,6 +118,7 @@ generate() {
 rclone_r2() {
 	RCLONE_CONFIG_R2_TYPE=s3 \
 		RCLONE_CONFIG_R2_PROVIDER=Cloudflare \
+		RCLONE_CONFIG_R2_REGION=auto \
 		RCLONE_CONFIG_R2_ENDPOINT="${R2_ENDPOINT:?}" \
 		RCLONE_CONFIG_R2_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID:?}" \
 		RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY:?}" \
@@ -146,8 +147,10 @@ sync_down() {
 	local root=$1 bucket="${R2_BUCKET:?}"
 	mkdir -p "$root"
 	# Pull current state so regenerated metadata covers previously published
-	# versions too. An empty/new bucket is fine.
-	rclone_r2 copy "r2:$bucket" "$root" || true
+	# versions too. An EMPTY bucket lists fine and is not an error — so any
+	# failure here is real (bad credentials, wrong endpoint/bucket) and must
+	# fail fast instead of surfacing later as a confusing upload error.
+	rclone_r2 copy "r2:$bucket" "$root"
 	echo "current repo state pulled from r2:$bucket"
 }
 

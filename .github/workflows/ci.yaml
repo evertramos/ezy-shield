@@ -144,6 +144,9 @@ jobs:
         run: |
           sudo apt-get -yqq install shellcheck >/dev/null
           find scripts -name '*.sh' -exec shellcheck {} +
+      - name: No raw placeholder tags in docs markdown (VitePress-safe)
+        id: placeholders
+        run: bash scripts/docs-placeholder-gate.sh
       - name: Validate example configs against JSON schemas
         id: schemas
         run: |
@@ -162,6 +165,7 @@ jobs:
             echo "| required docs present | ${{ steps.reqdocs.outcome }} |"
             echo "| shellcheck ($(find scripts -name '*.sh' | wc -l) scripts) | ${{ steps.shellcheck.outcome }} |"
             echo "| example configs vs JSON schemas | ${{ steps.schemas.outcome }} |"
+            echo "| VitePress-safe placeholders | ${{ steps.placeholders.outcome }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   fuzz:

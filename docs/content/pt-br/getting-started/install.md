@@ -48,7 +48,7 @@ sudo dnf install ezyshield
 Fingerprint da chave de assinatura (confira após importar com `gpg --show-keys`):
 
 ```
-<KEY-FINGERPRINT — mantenedor preenche após a primeira publicação>
+810E EEB0 1802 38F7 E800  4A9E E1AD 3D15 A121 3612
 ```
 
 Para acompanhar release candidates, troque `stable` por `testing` em

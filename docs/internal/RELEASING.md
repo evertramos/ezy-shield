@@ -90,6 +90,28 @@ of `scripts/package/publish-repos.sh` — generate into a temp dir, serve it
 with `python3 -m http.server`, and point debian:12/rockylinux:9 containers
 at it.
 
+## Post-publish install verification (verify-install.yaml)
+
+After every publish, `verify-install.yaml` (issue #165) installs from the
+**published** repositories the way `docs/content/en/getting-started/install.md`
+tells a user to, on a container matrix (Debian 12/13, Ubuntu 22.04/24.04,
+Rocky 9, Alma 9, Fedora 42). It asserts the signing-key fingerprint pinned in
+the install guide (grep-extracted — doc drift fails the gate), runs a
+wrong-key **negative** test proving signatures are required, checks
+`ezyshield version` against the published tag, and verifies the package
+promises: service user, units shipped, nothing enabled or started. It is
+chained from `publish-repos.yaml`, runs weekly against both suites (an
+unpublished suite is reported and skipped), and is dispatchable by hand.
+
+Same legs locally:
+
+```bash
+docker run --rm -v "$PWD:/src:ro" debian:12 \
+  /src/scripts/package/verify-install.sh --suite testing
+docker run --rm -v "$PWD:/src:ro" rockylinux:9 \
+  /src/scripts/package/verify-install.sh --suite testing
+```
+
 ## Follow-ups (tracked)
 
 - #100 cosign keyless signing + SBOM (adds per-package rpm signatures →

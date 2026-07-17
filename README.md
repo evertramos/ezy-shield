@@ -48,16 +48,16 @@ first, arm only once the decisions look right.
 
 ## Why EzyShield
 
-| | fail2ban | CrowdSec | SSHGuard | EzyShield |
+| | EzyShield | fail2ban | CrowdSec | SSHGuard |
 |---|---|---|---|---|
-| Language / runtime | Python | Go | C | Go, single static binary |
-| Setup | jails + regex filters | agent + Local API + remediation components (bouncers) | small config + firewall backend | `ezyshield init`, dry-run by default |
-| Strike escalation | optional (`bantime.increment`, since 0.11) | per-scenario durations via profiles; escalation via custom expressions | yes — block time doubles per repeat offense | built in: 5min → 1h → 24h → 7d → permanent, history kept forever |
-| Edge enforcement (CDN/WAF) | via bundled actions (incl. Cloudflare) | yes — remediation components incl. Cloudflare | no — local firewall backends only | built in (Cloudflare) |
-| Shared threat intel | report-to actions (AbuseIPDB, DShield); no community blocklist | **yes — community blocklist + CTI; this is their core strength** | no | no — not built in today |
-| Mandatory telemetry / account | none | signal sharing on by default (opt-out); console account optional | none | none |
-| Anti-lockout guarantees | manual `ignoreip` | manual whitelists | manual whitelisting | automatic — SSH peer + admin CIDRs allowlisted before every rule write |
-| AI usage | none | none | none | optional, ambiguous cases only; rule engine needs zero AI |
+| Language / runtime | Go, single static binary | Python | Go | C |
+| Setup | `ezyshield init`, dry-run by default | jails + regex filters | agent + Local API + remediation components (bouncers) | small config + firewall backend |
+| Strike escalation | built in: 5min → 1h → 24h → 7d → permanent, history kept forever | optional (`bantime.increment`, since 0.11) | per-scenario durations via profiles; escalation via custom expressions | yes — block time doubles per repeat offense |
+| Edge enforcement (CDN/WAF) | built in (Cloudflare) | via bundled actions (incl. Cloudflare) | yes — remediation components incl. Cloudflare | no — local firewall backends only |
+| Shared threat intel | no — not built in today | report-to actions (AbuseIPDB, DShield); no community blocklist | **yes — community blocklist + CTI; this is their core strength** | no |
+| Mandatory telemetry / account | none | none | signal sharing on by default (opt-out); console account optional | none |
+| Anti-lockout guarantees | automatic — SSH peer + admin CIDRs allowlisted before every rule write | manual `ignoreip` | manual whitelists | manual whitelisting |
+| AI usage | optional, ambiguous cases only; rule engine needs zero AI | none | none | none |
 
 fail2ban is battle-tested and great at what it does; CrowdSec's community
 blocklist is genuinely valuable and something EzyShield simply doesn't have;

@@ -31,20 +31,47 @@ static Go binary — no Python, no Java, no runtime to install.
 
 ---
 
+## Quickstart
+
+```sh
+curl -sfL https://get.ezyshield.com | sudo sh    # install (verifies SHA-256)
+sudo ezyshield init                              # generate config under /etc/ezyshield
+sudo ezyshield run                               # watch logs — dry-run by default
+ezyshield status                                 # see what it *would* have banned
+sudoedit /etc/ezyshield/policy.yaml              # set `armed: true` when you trust it
+```
+
+That's the whole loop: observe in dry-run first, arm only once the decisions
+look right.
+
+---
+
 ## Why EzyShield
 
-| | fail2ban | EzyShield |
-|---|---|---|
-| Bans | local firewall, per-jail bantime | **strike-based escalation** + local **and** edge (Cloudflare) |
-| Detection | regex filters | rule engine + signatures, **optional AI** for ambiguous traffic |
-| Lockout safety | manual `ignoreip` | **anti-lockout**: your SSH session + admin CIDRs auto-allowlisted before every rule write |
-| Default behavior | enforces immediately | **dry-run by default** — observe before you arm it |
-| Runtime | Python | single static binary, no dependencies |
+| | fail2ban | CrowdSec | reaction | SSHGuard | EzyShield |
+|---|---|---|---|---|---|
+| Language / runtime | Python | Go | Go | C | Go, single static binary |
+| Setup | jails + regex filters | agent + Local API + remediation components (bouncers) | one config file; you write regexes + commands | small config + firewall backend | `ezyshield init`, dry-run by default |
+| Strike escalation | optional (`bantime.increment`, since 0.11) | per-scenario durations via profiles; escalation via custom expressions | not built in — you script the actions | yes — block time doubles per repeat offense | built in: 5min → 1h → 24h → 7d → permanent, history kept forever |
+| Edge enforcement (CDN/WAF) | via bundled actions (incl. Cloudflare) | yes — remediation components incl. Cloudflare | possible via custom commands, not built in | no — local firewall backends only | built in (Cloudflare) |
+| Shared threat intel | report-to actions (AbuseIPDB, DShield); no community blocklist | **yes — community blocklist + CTI; this is their core strength** | no | no | no — not built in today |
+| Mandatory telemetry / account | none | signal sharing on by default (opt-out); console account optional | none | none | none |
+| Anti-lockout guarantees | manual `ignoreip` | manual whitelists | not built in | manual whitelisting | automatic — SSH peer + admin CIDRs allowlisted before every rule write |
+| AI usage | none | none | none | none | optional, ambiguous cases only; rule engine needs zero AI |
 
-fail2ban is battle-tested and great at what it does — EzyShield aims one layer
-higher: escalation, edge enforcement, AI-assisted scoring, and guardrails that
-make it hard to ban yourself. You can even run EzyShield as the brain and keep
-fail2ban for enforcement.
+fail2ban is battle-tested and great at what it does; CrowdSec's community
+blocklist is genuinely valuable and something EzyShield simply doesn't have;
+reaction and SSHGuard are admirably small and fast. EzyShield's bet is
+different: strike escalation, local **and** edge enforcement, and guardrails
+that make it hard to ban yourself — out of the box, from a single binary. You
+can even run EzyShield as the brain and keep fail2ban for enforcement.
+
+<sub>Comparison verified against each project's docs as of July 2026 —
+[fail2ban](https://github.com/fail2ban/fail2ban),
+[CrowdSec](https://docs.crowdsec.net),
+[reaction](https://framagit.org/ppom/reaction),
+[SSHGuard](https://www.sshguard.net). Corrections welcome via
+[issues](https://github.com/evertramos/ezy-shield/issues).</sub>
 
 ---
 
@@ -111,6 +138,28 @@ still escalates today.
 - **Audit trail** — every action recorded in SQLite; JSON output for scripting
 - **Localhost-only dashboard** — small web UI over 127.0.0.1 with status, active bans, allowlist, event log, live WebSocket updates and a strike timeline; CSRF-protected manual ban/unban/allow; access remotely via SSH tunnel or Cloudflare Tunnel (see [docs](docs/content/en/reference/dashboard.md) and the [remote-access guide](docs/content/en/guides/dashboard-remote-access.md))
 - **Scriptable** — `--json` on commands; unix-socket control, no TCP port ever
+
+---
+
+## Your data is yours
+
+No telemetry, no phone-home, no account, no data sharing required for any
+feature. The rule engine scores everything offline; the only outbound
+connections are the ones **you** configure (edge enforcement, notifiers, AI
+providers) or run yourself (`ezyshield update`). AI is opt-in, and when
+enabled the provider never sees your logs: it receives only aggregated
+counters per IP (event kinds, counts, GeoIP/ASN flags) — never raw log lines
+— and CI gates enforce that secrets and hostile log content can't reach the
+request ([prompt-injection](internal/ai/prompt_injection_test.go) and
+[secret-leak](internal/ai/secret_leak_test.go) tests).
+
+### Our pledge
+
+The local agent will never lose features to a paywall. The code is and stays
+open under AGPL-3.0. If a paid offering ever exists, it will be about
+coordination at scale — fleets, identity, compliance, support — never about
+the protection itself. If EzyShield defends one server well, that part stays
+free, forever. — [Evert](https://github.com/evertramos)
 
 ---
 

@@ -133,7 +133,6 @@ still escalates today.
 - **Dry-run by default** — nothing is enforced until you set `armed: true`
 - **Ban rate limit** — `max_bans_per_minute` (default 30) so a bad rule or poisoned feed can't ban the internet
 - **Notifications** — Telegram, Email (SMTP), Slack, Discord, generic webhook
-- **Service & port discovery** — `ezyshield scan` inventories what's actually listening on the host
 - **Audit trail** — every action recorded in SQLite; JSON output for scripting
 - **Localhost-only dashboard** — small web UI over 127.0.0.1 with status, active bans, allowlist, event log, live WebSocket updates and a strike timeline; CSRF-protected manual ban/unban/allow; access remotely via SSH tunnel or Cloudflare Tunnel (see [docs](docs/content/en/reference/dashboard.md) and the [remote-access guide](docs/content/en/guides/dashboard-remote-access.md))
 - **Scriptable** — `--json` on commands; unix-socket control, no TCP port ever
@@ -238,9 +237,6 @@ ezyshield list
 
 # Test a notification channel without waiting for a real event
 sudo ezyshield test notifier telegram
-
-# See what's listening on this host
-sudo ezyshield scan
 ```
 
 ---

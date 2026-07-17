@@ -37,7 +37,6 @@ against:
 | `report <ip>` | Object: versioned abuse report (`schema_version`, `ip`, `country`, `asn`, `current_ban`, `strikes`, `actions`, plus `evidence` with `--evidence`) |
 | `report` | Array of offender summaries (`ip`, `first_seen`, `last_seen`, `total_strikes`, `banned`, `permanent`, `country`, `asn`) |
 | `watch` | NDJSON: one event object per line |
-| `scan` | Object: `listeners`, `new_listeners` |
 | `doctor` | Object: `checks` (`name`, `status`, `hint`) and `summary` (`total`, `pass`, `fail`) |
 | `config show` | Object: `config`, `policy` (effective values, secrets redacted) |
 | `version` | Object: `version`, `commit`, `build_date` |
@@ -438,25 +437,6 @@ sudo ezyshield config collector apache
 Available names: `sshd`, `nginx`, `apache`, `traefik`, `caddy`.
 
 Exit codes: `0` saved, `1` wizard aborted or write failed, `2` config.yaml not found (run `init` first).
-
-## ezyshield scan
-
-Discover listening services on this host.
-
-```bash
-sudo ezyshield scan
-
-# JSON output
-sudo ezyshield scan --json
-```
-
-Lists listening ports, protocols, and services, persists a baseline to
-SQLite, and flags **drift** — new listeners that appeared since the previous
-scan.
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--db` | `/var/lib/ezyshield/ezyshield.db` | baseline database path |
 
 ## ezyshield update
 

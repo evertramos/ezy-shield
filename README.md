@@ -24,10 +24,11 @@ consulted only for the ambiguous cases, so decisions stay cheap and the tool
 runs fully offline if you never configure a provider. It ships as a single
 static Go binary — no Python, no Java, no runtime to install.
 
-> **Status: pre-alpha.** The pipeline, rule engine, nftables + Cloudflare
-> enforcement, AI providers, and notifiers work today. Run in dry-run (the
-> default) and please report bugs via [issues](https://github.com/evertramos/ezy-shield/issues).
-> Interfaces may still change before 1.0.
+> **Status: early release (v0.1).** Everything described below is implemented,
+> tested in CI, and dogfooded on the maintainer's production server. Start in
+> dry-run (the default), watch the decisions, and arm it once you trust them.
+> Interfaces may still change before 1.0 — bug reports via
+> [issues](https://github.com/evertramos/ezy-shield/issues) are very welcome.
 
 ---
 

@@ -171,14 +171,35 @@ The AI verdict is always advisory: schema-validated, clamped by policy, and neve
 
 ## enrich
 
-GeoIP/ASN enrichment — enables `block_countries` / `block_asns` in policy and the country/ASN columns in `list` and `report`.
+GeoIP/ASN enrichment — enables `block_countries` / `block_asns` in policy and the country/ASN columns in `list` and `report`. Optional: without an `enrich:` section the daemon runs normally with empty enrichment (no country/ASN anywhere, and those policy keys never match).
 
 | Field | Description |
 |-------|-------------|
-| `db_path` | MaxMind country database path |
-| `asn_path` | MaxMind ASN database path |
-| `auto_update` | keep the databases updated automatically |
-| `license_key` | `env:VARNAME` reference to a MaxMind license key |
+| `db_path` | path to `GeoLite2-Country.mmdb` |
+| `asn_path` | path to `GeoLite2-ASN.mmdb` |
+| `auto_update` | let the daemon download and refresh the databases (weekly) |
+| `license_key` | `env:VARNAME` reference to a MaxMind license key — required when `auto_update: true`, inline values are rejected |
+
+The easiest path is the wizard, which walks through all of the below:
+
+```bash
+sudo ezyshield config enrich maxmind
+sudo systemctl restart ezyshield
+```
+
+**Where the databases come from.** EzyShield uses MaxMind's free GeoLite2 databases, which require a (free) MaxMind account: [sign up](https://www.maxmind.com/en/geolite2/signup), then generate a license key under *Manage License Keys*. With `auto_update: true` the daemon downloads both databases itself on startup when the files are missing and refreshes them weekly — you never handle the files:
+
+```yaml
+enrich:
+  db_path: /var/lib/ezyshield/GeoLite2-Country.mmdb
+  asn_path: /var/lib/ezyshield/GeoLite2-ASN.mmdb
+  auto_update: true
+  license_key: env:MAXMIND_LICENSE_KEY
+```
+
+The key is a secret like any other: put `MAXMIND_LICENSE_KEY=...` in `/etc/ezyshield/.env` (mode 0600 — the wizard does this for you) and reference it as `env:MAXMIND_LICENSE_KEY`. It is only ever used in the download URL and never logged.
+
+**Manual alternative.** With `auto_update: false` no account key is needed at runtime: download `GeoLite2-Country.mmdb` and `GeoLite2-ASN.mmdb` from your MaxMind account (or mirror them from a host that has them) and place them at the configured paths. Missing or unreadable files are not an error — the daemon logs a warning and runs with empty enrichment until they appear.
 
 ## dashboard
 

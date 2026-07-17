@@ -88,10 +88,9 @@ setup does — Docker already stores those logs on the host at:
 /var/lib/docker/containers/<container-id>/<container-id>-json.log
 ```
 
-EzyShield can read these directly. Even better, you don't need to find the path
-by hand: `ezyshield scan` (see §3d) discovers each container, its logging driver,
-and the exact log path for you, then offers to add it to the config. Set a sane
-rotation in your compose so the files don't grow forever:
+EzyShield can read these directly — find the container id with
+`docker ps --no-trunc`. Set a sane rotation in your compose so the files
+don't grow forever:
 
 ```yaml
     logging:
@@ -101,7 +100,8 @@ rotation in your compose so the files don't grow forever:
 
 > Option B is convenient and keeps your compose clean; Option A gives you a stable,
 > human-readable path independent of container IDs (which change on recreate).
-> If you recreate containers often, prefer A or let `ezyshield scan` re-resolve B.
+> If you recreate containers often, prefer A — the path in B changes with the
+> container ID.
 
 ### 3b. Record the real client IP
 If clients hit nginx **directly**, default logs already contain the real IP — done.
@@ -125,44 +125,8 @@ real_ip_recursive on;
 
 ### 3c. Per-container WordPress logs (optional)
 If you'd rather read each WordPress container's own access log, bind-mount each
-one out (or let `ezyshield scan` find them) and add them all in §4. Usually the
-single proxy log is enough and simpler — start there.
-
-### 3d. Let EzyShield discover your services (recommended)
-
-Before configuring anything by hand, run a scan:
-
-```bash
-sudo ezyshield scan      # inventory listeners, containers, and their logs
-```
-
-It walks every listening port and reports something like:
-
-```
-PORT   BIND       OWNER                         LOGS                          NOTE
-443    0.0.0.0    container nginx-proxy (image)  /var/lib/docker/.../*-json.log  public
-80     0.0.0.0    container nginx-proxy          (same)                          public
-3306   127.0.0.1  container wordpress-db         journald                        local-only ✓
-22     0.0.0.0    sshd (systemd)                 journald (sshd.service)         public
-8080   0.0.0.0    container api (image foo)       NOT FOUND                       ⚠ no logs
-```
-
-Two things to act on:
-- **`⚠ no logs`** — EzyShield can't protect what it can't see. It tells you exactly
-  which service is exposed without a log source so you can point it at one (or
-  decide it shouldn't be public at all).
-- **anything public you didn't expect** — a scan is also a free audit of your
-  attack surface. If `8080` shouldn't be open to the world, that's a finding.
-
-If you re-run `ezyshield scan` later and a **new** listener appeared since the
-baseline, EzyShield flags it as suspicious and (once armed) notifies you — an
-unexpected new open port is a classic sign of a backdoor:
-
-```
-⚠ NEW listener since last scan: port 4444, /tmp/.sys (user www-data) — investigate
-```
-
-Re-run `ezyshield scan` whenever your topology changes — the previous scan is stored as a baseline, so it highlights anything new.
+one out and add them all in §4. Usually the single proxy log is enough and
+simpler — start there.
 
 ---
 

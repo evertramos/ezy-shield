@@ -37,7 +37,6 @@ seguros para scripts:
 | `status` | Objeto: `daemon`, `enforcer`, `mode`, `uptime`, `version`, `active_bans`, `bans_by_strike`, `message` |
 | `list` | Envelope: `ok`, `error`, `data` (linhas dentro de `data`) |
 | `watch` | NDJSON: um objeto de evento por linha |
-| `scan` | Objeto: `listeners`, `new_listeners` |
 | `doctor` | Objeto: `checks` (`name`, `status`, `hint`) e `summary` (`total`, `pass`, `fail`) |
 | `config show` | Objeto: `config`, `policy` (valores efetivos, segredos redigidos) |
 | `version` | Objeto: `version`, `commit`, `build_date` |

@@ -250,6 +250,38 @@ Nomes disponíveis: `sshd`, `nginx`, `apache`, `traefik`, `caddy`.
 
 Códigos de saída: `0` salvo, `1` wizard abortado ou falha de escrita, `2` config.yaml não encontrado (execute `init` primeiro).
 
+### ezyshield config enrich `maxmind`
+
+Wizard interativo para configurar (ou remover) o enriquecimento GeoIP/ASN com
+os bancos gratuitos MaxMind GeoLite2 — o fluxo que habilita `block_countries` /
+`block_asns` no `policy.yaml` e as colunas de país/ASN em `list` e `report`.
+
+```bash
+sudo ezyshield config enrich maxmind
+```
+
+- Pergunta os dois caminhos dos bancos (defaults em `/var/lib/ezyshield/`) e se
+  o daemon deve mantê-los atualizados (`auto_update`, default sim).
+- Com `auto_update` ligado, o wizard pede sua license key da MaxMind
+  ([cadastro gratuito GeoLite2](https://www.maxmind.com/en/geolite2/signup))
+  pelo prompt padrão de segredos: cole a chave (guardada no `.env` ao lado do
+  `config.yaml`, modo 0600) ou referencie uma variável de ambiente que você já
+  gerencia — o `config.yaml` só carrega `license_key: env:MAXMIND_LICENSE_KEY`.
+  No próximo start do daemon os bancos são baixados automaticamente se
+  estiverem ausentes, e depois atualizados semanalmente.
+- Com `auto_update` desligado nenhuma chave é necessária: baixe você mesmo
+  `GeoLite2-Country.mmdb` e `GeoLite2-ASN.mmdb` da sua conta MaxMind e coloque
+  nos caminhos configurados. Arquivos ausentes não são erro — o daemon roda com
+  enriquecimento vazio até eles aparecerem.
+- Para desabilitar o enriquecimento, responda `n` no prompt de configuração: o
+  wizard então oferece remover a seção `enrich:` existente (default não).
+- A semântica de escrita é a mesma dos outros wizards: escrita atômica,
+  `config.yaml.bak`, revalidação antes de salvar e resumo das chaves alteradas.
+
+Nomes disponíveis: `maxmind`.
+
+Códigos de saída: `0` salvo, `1` wizard abortado ou falha de escrita, `2` config.yaml não encontrado (execute `init` primeiro).
+
 ## ezyshield test
 
 Executa testes de conectividade contra os componentes configurados. Como o `config`, o grupo segue o padrão `<kind> <name>`, então tipos de componente futuros se encaixam nos mesmos verbos.

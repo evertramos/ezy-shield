@@ -6,8 +6,6 @@ order: 4
 
 # Referência de CLI
 
-[Conteúdo de tradução em andamento - veja docs/content/en/reference/cli.md para a versão em inglês]
-
 Referência completa para a CLI do `ezyshield`.
 
 ## Convenções globais
@@ -36,6 +34,8 @@ seguros para scripts:
 |---------|---------|
 | `status` | Objeto: `daemon`, `enforcer`, `mode`, `uptime`, `version`, `active_bans`, `bans_by_strike`, `message` |
 | `list` | Envelope: `ok`, `error`, `data` (linhas dentro de `data`) |
+| `report <ip>` | Objeto: relatório de abuso versionado (`schema_version`, `ip`, `country`, `asn`, `current_ban`, `strikes`, `actions`, mais `evidence` com `--evidence`) |
+| `report` | Array de resumos de ofensores (`ip`, `first_seen`, `last_seen`, `total_strikes`, `banned`, `permanent`, `country`, `asn`) |
 | `watch` | NDJSON: um objeto de evento por linha |
 | `doctor` | Objeto: `checks` (`name`, `status`, `hint`) e `summary` (`total`, `pass`, `fail`) |
 | `config show` | Objeto: `config`, `policy` (valores efetivos, segredos redigidos) |
@@ -99,6 +99,13 @@ Inicia o daemon em primeiro plano. Lê logs, toma decisões e aplica banimentos.
 sudo ezyshield run
 ```
 
+| Flag | Padrão | Descrição |
+|------|--------|-----------|
+| `--config` | `/etc/ezyshield/config.yaml` | caminho do config.yaml |
+| `--policy` | `/etc/ezyshield/policy.yaml` | caminho do policy.yaml |
+| `--db` | `/var/lib/ezyshield/ezyshield.db` | caminho do banco de dados SQLite |
+| `--socket` | `/run/ezyshield/ezyshield.sock` | caminho do socket de controle |
+
 Executa em modo dry-run por padrão (`armed: false` no policy.yaml).
 
 ## ezyshield watch
@@ -138,6 +145,198 @@ possa forjar saída no seu terminal.
 Se a conexão com o daemon cair (ex.: reinício), o `watch` reconecta
 automaticamente com backoff. Pressione `Ctrl-C` para sair. O daemon precisa
 estar em execução (`ezyshield run` ou `sudo systemctl start ezyshield`).
+
+## ezyshield status
+
+Mostra o status do daemon e do enforcer.
+
+```bash
+ezyshield status
+
+# Saída em JSON
+ezyshield status --json
+```
+
+| Flag | Descrição |
+|------|-----------|
+| `--socket` | override do caminho do socket de controle do daemon |
+| `--enforcer-socket` | override do caminho do socket do enforcer |
+
+Saída:
+- Alcançabilidade do daemon e do enforcer
+- Modo (enforce / dry-run), uptime, versão
+- Total de banimentos ativos e distribuição por strike
+
+## ezyshield list
+
+Lista os banimentos ativos (padrão) ou a allowlist.
+
+```bash
+# Banimentos ativos
+ezyshield list
+
+# Agrupado por país / por ASN
+ezyshield list --by-country
+ezyshield list --by-asn
+
+# Entradas da allowlist
+ezyshield list --allow
+
+# Saída em JSON
+ezyshield list --json
+```
+
+| Flag | Descrição |
+|------|-----------|
+| `--allow` | lista as entradas da allowlist em vez dos banimentos |
+| `--by-country` | agrega os banimentos por país (requer enriquecimento GeoIP) |
+| `--by-asn` | agrega os banimentos por ASN (requer enriquecimento GeoIP) |
+| `--socket` | override do caminho do socket de controle |
+
+Colunas de banimento: `IP / STRIKE / TTL / COUNTRY / ASN / REASON`.
+Colunas da allowlist: `IP/CIDR / EXPIRES / REASON`.
+
+Para o histórico por IP com evidências, use `ezyshield report`.
+
+## ezyshield report
+
+Gera um relatório de abuso completo para um IP ofensor a partir dos registros
+do daemon: identidade e enriquecimento (país, ASN), o banimento atual, o
+histórico completo de strikes com os veredictos de detecção e a trilha de
+ações. Sem um IP, lista todos os ofensores registrados.
+
+```bash
+# Relatório completo de um IP (texto no terminal)
+ezyshield report 203.0.113.7
+
+# Documento markdown, pronto para anexar a uma denúncia de abuse@
+ezyshield report 203.0.113.7 -o md > abuse-203.0.113.7.md
+
+# O mesmo, incluindo trechos brutos de log que mencionam o IP como evidência
+ezyshield report 203.0.113.7 --evidence -o md > abuse-203.0.113.7.md
+
+# Legível por máquina (schema versionado, seguro para scripts)
+ezyshield report 203.0.113.7 --json
+
+# Listar todos os ofensores registrados / apenas os banidos permanentemente
+ezyshield report
+ezyshield report --permanent
+```
+
+Flags:
+- `-o, --output` — formato de saída: `text` (padrão) ou `md` (relatório de
+  abuso em markdown; requer um IP)
+- `--evidence` — inclui trechos brutos de log que mencionam o IP, extraídos
+  sob demanda das fontes de log configuradas no daemon (requer um IP). Fontes
+  de arquivo são varridas diretamente, fontes journald via `journalctl` e
+  fontes docker via o socket do Docker Engine. Os trechos são limitados
+  (janela mais recente, 50 linhas por fonte) e nunca são persistidos; uma
+  fonte que não pode ser lida (log rotacionado, journal vazio, socket do
+  engine inacessível, container removido) degrada para uma nota explicativa
+  em vez de falhar o relatório
+- `--permanent` — modo de listagem: apenas ofensores com banimento ativo
+  permanente
+- `--limit` — máximo de linhas de strike/ação (0 = padrão do servidor, 100)
+- `--no-footer` — omite o rodapé "Generated by EzyShield" da saída em
+  markdown
+- `--socket` — caminho do socket de controle do daemon
+
+O relatório é somente leitura e funciona tanto em modo enforce quanto em
+dry-run. Campos derivados de linhas de log (motivos, categorias) são
+sanitizados antes da exibição — escapes ANSI e caracteres de controle são
+removidos, e células de tabelas markdown são escapadas — para que conteúdo
+hostil de logs não possa forjar saída no seu terminal nem quebrar o documento.
+Os trechos de evidência são renderizados como blocos de código indentados no
+markdown, então uma linha de log não consegue injetar formatação no relatório.
+Timestamps são UTC (RFC 3339).
+
+## ezyshield ban
+
+Bane manualmente um IP ou CIDR.
+
+```bash
+# Banir usando a tabela de strikes da policy (TTL do strike 1)
+sudo ezyshield ban 203.0.113.42
+
+# Duração explícita
+sudo ezyshield ban --ttl 24h --reason "abuse report" 203.0.113.42
+
+# Banir uma sub-rede
+sudo ezyshield ban 203.0.113.0/24
+```
+
+| Flag | Descrição |
+|------|-----------|
+| `--ttl` | duração do banimento (`5m`, `24h`, `7d`); vazio = tabela de strikes da policy |
+| `--reason` | motivo em texto livre armazenado no log de auditoria |
+| `--socket` | override do caminho do socket de controle |
+
+Banimentos manuais contornam o motor de regras, **não** a allowlist — um IP na
+allowlist nunca pode ser banido, manualmente ou de qualquer outra forma
+(invariante de segurança: a allowlist sempre vence).
+
+## ezyshield unban
+
+Remove um banimento ativo.
+
+```bash
+sudo ezyshield unban 203.0.113.42
+
+# Desbanir uma sub-rede
+sudo ezyshield unban 203.0.113.0/24
+```
+
+Não apaga o histórico de auditoria. (`--socket` faz override do caminho do
+socket de controle.)
+
+## ezyshield allow
+
+Adiciona um IP ou CIDR à allowlist de runtime.
+
+```bash
+# Adicionar IP (permanente)
+sudo ezyshield allow 192.0.2.100
+
+# Adicionar CIDR
+sudo ezyshield allow 192.0.2.0/24
+
+# Entradas temporárias
+sudo ezyshield allow --for 2h --reason "vendor maintenance" 198.51.100.7
+sudo ezyshield allow --until 2026-08-01T00:00:00Z 198.51.100.8
+```
+
+| Flag | Descrição |
+|------|-----------|
+| `--for` | expiração relativa (ex.: `2h`, `7d`); mutuamente exclusiva com `--until` |
+| `--until` | expiração absoluta (timestamp RFC 3339) |
+| `--reason` | motivo em texto livre armazenado com a entrada |
+| `--socket` | override do caminho do socket de controle |
+
+A allowlist é verificada primeiro. Nenhuma regra pode banir um IP que está na
+allowlist.
+
+## ezyshield doctor
+
+Valida a configuração, as permissões e as fontes de log.
+
+```bash
+sudo ezyshield doctor
+```
+
+| Flag | Padrão | Descrição |
+|------|--------|-----------|
+| `--config-dir` | `/etc/ezyshield` | diretório de configuração a verificar |
+
+Verificações:
+- config.yaml / policy.yaml existem, fazem parse e têm permissões/dono seguros
+- binário `nft` presente
+- journald legível
+- socket do enforcer alcançável
+- socket do docker presente (quando coletores Docker estão configurados)
+- permissões do arquivo de segredos `.env`
+
+Para exercitar de verdade os enforcers e os canais de notificação, use
+`ezyshield test enforcer` e `ezyshield test notifier`.
 
 ## ezyshield config
 
@@ -282,6 +481,56 @@ Nomes disponíveis: `maxmind`.
 
 Códigos de saída: `0` salvo, `1` wizard abortado ou falha de escrita, `2` config.yaml não encontrado (execute `init` primeiro).
 
+## ezyshield update
+
+Autoatualiza os binários a partir do GitHub Releases (com verificação de
+checksum).
+
+```bash
+# Verificar se existe uma release mais nova
+sudo ezyshield update --check
+
+# Atualizar para a última versão estável
+sudo ezyshield update
+
+# Atualizar/reverter para uma versão específica
+sudo ezyshield update --version v0.1.0
+```
+
+Se você instalou via apt/dnf, prefira o gerenciador de pacotes (veja o guia de
+instalação).
+
+## ezyshield dashboard
+
+Serve o dashboard web restrito ao localhost. Referência completa
+(autenticação, páginas, acesso remoto): [dashboard.md](dashboard.md).
+
+| Flag | Descrição |
+|------|-----------|
+| `--config` | caminho do config.yaml |
+| `--addr` | override do endereço de bind (apenas loopback — endereços não loopback são recusados) |
+| `--auth-db` | override do caminho do banco de autenticação |
+| `--socket` | override do caminho do socket de controle do daemon |
+
+## ezyshield completion
+
+Gera scripts de autocompletar de shell (`bash`, `zsh`, `fish`, `powershell`):
+
+```bash
+ezyshield completion zsh > "${fpath[1]}/_ezyshield"
+```
+
+## ezyshield version
+
+Mostra informações de versão.
+
+```bash
+ezyshield version
+
+# Saída em JSON
+ezyshield version --json
+```
+
 ## ezyshield test
 
 Executa testes de conectividade contra os componentes configurados. Como o `config`, o grupo segue o padrão `<kind> <name>`, então tipos de componente futuros se encaixam nos mesmos verbos.
@@ -320,4 +569,47 @@ Código de saída diferente de zero em caso de falha.
 
 Os verbos pré-1.0 `test-enforce <name>` e `test-notify <name>` continuam funcionando como aliases ocultos de `test enforcer` / `test notifier` — mesmas flags, mesmo comportamento — e imprimem um aviso de migração de uma linha no stderr. Serão removidos na 1.0.
 
-[Traduções a seguir...]
+## Flags globais
+
+| Flag | Descrição |
+|------|-----------|
+| `--json` | Saída em JSON (veja as [convenções globais](#convenções-globais) para os formatos) |
+| `--no-color` | Desabilita a saída colorida (a variável de ambiente `NO_COLOR` também é respeitada) |
+| `--version` | Imprime a versão e sai |
+| `-h, --help` | Mostra o texto de ajuda |
+
+`--config` / `--policy` **não** são globais — existem nos comandos que leem
+esses arquivos (`run`, `config show`, `validate`, `dashboard`), com defaults
+em `/etc/ezyshield`.
+
+## Exemplos
+
+**Monitorar a atividade do daemon ao vivo:**
+
+```bash
+ezyshield watch --kind ban,dry_ban
+```
+
+**Exportar o histórico por IP com evidências para JSON:**
+
+```bash
+ezyshield report --json > report.json
+```
+
+**Verificar se um IP está banido no momento:**
+
+```bash
+ezyshield list --json | jq '.[] | select(.ip == "203.0.113.42")'
+```
+
+**Banir permanentemente uma sub-rede de botnet:**
+
+```bash
+sudo ezyshield ban --ttl 0 203.0.113.0/24
+```
+
+**Adicionar a rede do seu escritório à allowlist:**
+
+```bash
+sudo ezyshield allow 192.0.2.0/24
+```

@@ -35,41 +35,40 @@ static Go binary — no Python, no Java, no runtime to install.
 
 ```sh
 curl -sfL https://get.ezyshield.com | sudo sh    # install (verifies SHA-256)
-sudo ezyshield init                              # generate config under /etc/ezyshield
-sudo ezyshield run                               # watch logs — dry-run by default
-ezyshield status                                 # see what it *would* have banned
+sudo ezyshield init                              # guided setup — installs & starts the service
+ezyshield status                                 # see what it *would* have banned (dry-run)
 sudoedit /etc/ezyshield/policy.yaml              # set `armed: true` when you trust it
+sudo systemctl restart ezyshield                 # apply the new policy
 ```
 
-That's the whole loop: observe in dry-run first, arm only once the decisions
-look right.
+That's the whole loop: `init` leaves the daemon running in dry-run; observe
+first, arm only once the decisions look right.
 
 ---
 
 ## Why EzyShield
 
-| | fail2ban | CrowdSec | reaction | SSHGuard | EzyShield |
-|---|---|---|---|---|---|
-| Language / runtime | Python | Go | Go | C | Go, single static binary |
-| Setup | jails + regex filters | agent + Local API + remediation components (bouncers) | one config file; you write regexes + commands | small config + firewall backend | `ezyshield init`, dry-run by default |
-| Strike escalation | optional (`bantime.increment`, since 0.11) | per-scenario durations via profiles; escalation via custom expressions | not built in — you script the actions | yes — block time doubles per repeat offense | built in: 5min → 1h → 24h → 7d → permanent, history kept forever |
-| Edge enforcement (CDN/WAF) | via bundled actions (incl. Cloudflare) | yes — remediation components incl. Cloudflare | possible via custom commands, not built in | no — local firewall backends only | built in (Cloudflare) |
-| Shared threat intel | report-to actions (AbuseIPDB, DShield); no community blocklist | **yes — community blocklist + CTI; this is their core strength** | no | no | no — not built in today |
-| Mandatory telemetry / account | none | signal sharing on by default (opt-out); console account optional | none | none | none |
-| Anti-lockout guarantees | manual `ignoreip` | manual whitelists | not built in | manual whitelisting | automatic — SSH peer + admin CIDRs allowlisted before every rule write |
-| AI usage | none | none | none | none | optional, ambiguous cases only; rule engine needs zero AI |
+| | fail2ban | CrowdSec | SSHGuard | EzyShield |
+|---|---|---|---|---|
+| Language / runtime | Python | Go | C | Go, single static binary |
+| Setup | jails + regex filters | agent + Local API + remediation components (bouncers) | small config + firewall backend | `ezyshield init`, dry-run by default |
+| Strike escalation | optional (`bantime.increment`, since 0.11) | per-scenario durations via profiles; escalation via custom expressions | yes — block time doubles per repeat offense | built in: 5min → 1h → 24h → 7d → permanent, history kept forever |
+| Edge enforcement (CDN/WAF) | via bundled actions (incl. Cloudflare) | yes — remediation components incl. Cloudflare | no — local firewall backends only | built in (Cloudflare) |
+| Shared threat intel | report-to actions (AbuseIPDB, DShield); no community blocklist | **yes — community blocklist + CTI; this is their core strength** | no | no — not built in today |
+| Mandatory telemetry / account | none | signal sharing on by default (opt-out); console account optional | none | none |
+| Anti-lockout guarantees | manual `ignoreip` | manual whitelists | manual whitelisting | automatic — SSH peer + admin CIDRs allowlisted before every rule write |
+| AI usage | none | none | none | optional, ambiguous cases only; rule engine needs zero AI |
 
 fail2ban is battle-tested and great at what it does; CrowdSec's community
 blocklist is genuinely valuable and something EzyShield simply doesn't have;
-reaction and SSHGuard are admirably small and fast. EzyShield's bet is
-different: strike escalation, local **and** edge enforcement, and guardrails
-that make it hard to ban yourself — out of the box, from a single binary. You
-can even run EzyShield as the brain and keep fail2ban for enforcement.
+SSHGuard is admirably small and fast. EzyShield's bet is different: strike
+escalation, local **and** edge enforcement, and guardrails that make it hard
+to ban yourself — out of the box, from a single binary. You can even run
+EzyShield as the brain and keep fail2ban for enforcement.
 
 <sub>Comparison verified against each project's docs as of July 2026 —
 [fail2ban](https://github.com/fail2ban/fail2ban),
 [CrowdSec](https://docs.crowdsec.net),
-[reaction](https://framagit.org/ppom/reaction),
 [SSHGuard](https://www.sshguard.net). Corrections welcome via
 [issues](https://github.com/evertramos/ezy-shield/issues).</sub>
 
@@ -148,8 +147,9 @@ feature. The rule engine scores everything offline; the only outbound
 connections are the ones **you** configure (edge enforcement, notifiers, AI
 providers) or run yourself (`ezyshield update`). AI is opt-in, and when
 enabled the provider never sees your logs: it receives only aggregated
-counters per IP (event kinds, counts, GeoIP/ASN flags) — never raw log lines
-— and CI gates enforce that secrets and hostile log content can't reach the
+counters per IP — event kinds, counts, and GeoIP/ASN metadata if you've
+configured the MaxMind databases — never raw log lines.
+CI gates enforce that secrets and hostile log content can't reach the
 request ([prompt-injection](internal/ai/prompt_injection_test.go) and
 [secret-leak](internal/ai/secret_leak_test.go) tests).
 
@@ -220,8 +220,8 @@ sudo ezyshield doctor    # validate config, permissions, and dependencies
 ## Basic usage
 
 ```sh
-# Run the pipeline (dry-run until you set armed: true in policy.yaml)
-sudo ezyshield run
+# The daemon runs as a systemd service (installed and started by `init`)
+sudo systemctl status ezyshield
 
 # Inspect the running daemon
 ezyshield status
@@ -281,7 +281,8 @@ notify:
 ```
 
 Start in dry-run (`armed: false` in `policy.yaml`), watch what it *would* block,
-then arm it. The full setup walkthrough — collectors, AI, notifications, custom
+then arm it and restart the daemon (`sudo systemctl restart ezyshield` —
+policy changes are read at startup). The full setup walkthrough — collectors, AI, notifications, custom
 rules — is in [docs/content/en/getting-started/index.md](docs/content/en/getting-started/index.md).
 
 ---

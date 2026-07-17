@@ -25,9 +25,9 @@ runs fully offline if you never configure a provider. It ships as a single
 static Go binary — no Python, no Java, no runtime to install.
 
 > **Status: early release (v0.1).** Everything described below is implemented,
-> tested in CI, and dogfooded on the maintainer's production server. Start in
-> dry-run (the default), watch the decisions, and arm it once you trust them.
-> Interfaces may still change before 1.0 — bug reports via
+> tested in CI, and running today on multiple Linux servers managed by the
+> maintainer. Start in dry-run (the default), watch the decisions, and arm it
+> once you trust them. Interfaces may still change before 1.0 — bug reports via
 > [issues](https://github.com/evertramos/ezy-shield/issues) are very welcome.
 
 ---

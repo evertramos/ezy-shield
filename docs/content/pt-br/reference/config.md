@@ -248,6 +248,8 @@ enforce:
 
 Todo campo de segredo recebe uma referência `env:VARNAME`, resolvida pelo daemon (`ezyshield run`) a partir do ambiente dele. Os wizards gravam os valores em `/etc/ezyshield/.env` (modo 0600), que a unit do systemd carrega via `EnvironmentFile=`. Segredos nunca aparecem no config.yaml, em logs ou em mensagens de erro.
 
+Isso também vale na direção inversa: se um valor colado em um campo *não-secreto* (provider, model, endpoint, ...) parecer uma credencial — um prefixo de chave conhecido como `sk-`, ou um token longo de alta entropia — o config é rejeitado no carregamento com um erro que nomeia o campo mas nunca imprime o valor. Os headers de webhook são a única exceção (valores crus são legais ali e são redigidos no `config show`).
+
 ## Validação
 
 ```bash

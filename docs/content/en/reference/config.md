@@ -225,6 +225,8 @@ enforce:
 
 Every secret field takes an `env:VARNAME` reference and is resolved by the daemon (`ezyshield run`) from its environment. The wizards write secret values to `/etc/ezyshield/.env` (mode 0600), which the systemd unit loads via `EnvironmentFile=`. Secrets never appear in config.yaml, logs, or error messages.
 
+This is also enforced in reverse: if a value pasted into a *non-secret* field (provider, model, endpoint, ...) looks like a credential — a known key prefix such as `sk-`, or a long high-entropy token — the config is rejected at load with an error that names the field but never prints the value. Webhook header values are the one exemption (raw values are legal there and are redacted in `config show`).
+
 ## Validation
 
 ```bash

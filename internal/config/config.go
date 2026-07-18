@@ -286,6 +286,12 @@ var validLogLevels = map[string]bool{
 
 // Validate checks field constraints; it is called automatically by LoadConfigReader.
 func (c *Config) Validate() error {
+	// First: fail closed on credentials pasted into non-secret fields, so no
+	// later validator (or `config show`) ever sees — let alone echoes — a key
+	// that landed in the wrong field (issue #172).
+	if err := scanForMisplacedSecrets(c); err != nil {
+		return err
+	}
 	if c.Log.Level != "" && !validLogLevels[c.Log.Level] {
 		return fmt.Errorf("log.level: %q is not one of debug|info|warn|error", c.Log.Level)
 	}
@@ -336,12 +342,20 @@ var validProviderNames = map[string]bool{
 }
 
 func validateAI(ai *AICfg) error {
+	// Single-provider form: the same name set as the failover array. Was
+	// previously unvalidated, which let a pasted API key load and leak via
+	// `config show` (issue #172).
+	if ai.Provider != "" && !validProviderNames[ai.Provider] {
+		return fmt.Errorf("unknown provider %s (must be anthropic|openai|ollama)",
+			enumValueForError(ai.Provider))
+	}
 	for i, p := range ai.Providers {
 		if p.Name == "" {
 			return fmt.Errorf("ai.providers[%d]: 'name' is required", i)
 		}
 		if !validProviderNames[p.Name] {
-			return fmt.Errorf("ai.providers[%d]: unknown provider %q (must be anthropic|openai|ollama)", i, p.Name)
+			return fmt.Errorf("ai.providers[%d]: unknown provider %s (must be anthropic|openai|ollama)",
+				i, enumValueForError(p.Name))
 		}
 		if p.Priority < 0 {
 			return fmt.Errorf("ai.providers[%d]: priority must be >= 0", i)

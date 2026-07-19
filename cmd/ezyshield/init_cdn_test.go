@@ -68,6 +68,10 @@ type httpFake struct {
 	bodyJSON string
 	err      error
 	byPath   map[string]httpFakeResp
+	// byMethodPath routes on "METHOD /path" and wins over byPath — needed
+	// when the same path must answer differently per verb (the issue #234
+	// preflight GETs and POSTs /rules/lists).
+	byMethodPath map[string]httpFakeResp
 	// requests captures every Do() call for assertions on URL / headers.
 	requests []*http.Request
 }
@@ -82,6 +86,15 @@ func (h *httpFake) Do(req *http.Request) (*http.Response, error) {
 	h.requests = append(h.requests, req)
 	if h.err != nil {
 		return nil, h.err
+	}
+	if h.byMethodPath != nil {
+		if r, ok := h.byMethodPath[req.Method+" "+req.URL.Path]; ok {
+			return &http.Response{
+				StatusCode: r.status,
+				Body:       io.NopCloser(bytes.NewBufferString(r.bodyJSON)),
+				Header:     make(http.Header),
+			}, nil
+		}
 	}
 	if h.byPath != nil {
 		r, ok := h.byPath[req.URL.Path]
@@ -247,8 +260,8 @@ func TestRunCDNStep_HappyPath_Lists(t *testing.T) {
 	// Two-phase probe: (1) account tokens/verify, (2) rules/lists?per_page=1.
 	// No user/tokens/verify request should happen — the account verify
 	// returned 200 on the first shot, so the fallback is skipped.
-	if len(httpc.requests) != 2 {
-		t.Fatalf("http calls=%d, want 2 (identity + scope); paths=%v",
+	if len(httpc.requests) != 4 {
+		t.Fatalf("http calls=%d, want 4 (identity + scope + list find + list create); paths=%v",
 			len(httpc.requests), reqPaths(httpc.requests))
 	}
 	if got := httpc.requests[0].URL.Path; got != "/accounts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/tokens/verify" {
@@ -259,6 +272,20 @@ func TestRunCDNStep_HappyPath_Lists(t *testing.T) {
 	}
 	if got := httpc.requests[1].URL.RawQuery; got != "per_page=1" {
 		t.Errorf("phase-2 query = %q, want per_page=1", got)
+	}
+	// Issue #234 capability preflight: (3) find (GET per_page=100), then —
+	// canned result is empty — (4) create (POST).
+	if got := httpc.requests[2].Method; got != http.MethodGet {
+		t.Errorf("preflight find method = %s, want GET", got)
+	}
+	if got := httpc.requests[2].URL.RawQuery; got != "per_page=100" {
+		t.Errorf("preflight find query = %q, want per_page=100", got)
+	}
+	if got := httpc.requests[3].Method; got != http.MethodPost {
+		t.Errorf("preflight create method = %s, want POST", got)
+	}
+	if !strings.Contains(out, `Created Custom IP List "ezyshield_blocked"`) {
+		t.Errorf("stdout missing list-created line; out=%q", out)
 	}
 	if got := httpc.requests[0].Header.Get("Authorization"); got != "Bearer cf-test-token" {
 		t.Errorf("auth header wrong: %q", got)
@@ -349,8 +376,8 @@ func TestRunCDNStep_HappyPath_Rulesets(t *testing.T) {
 	// zones/{first_zone}/rulesets?per_page=1. No identity probe may run
 	// (no account ID exists to verify against, and /user/tokens/verify
 	// would falsely reject cfat_ account tokens).
-	if len(httpc.requests) != 1 {
-		t.Fatalf("http calls=%d, want 1 (scope probe only); paths=%v",
+	if len(httpc.requests) != 3 {
+		t.Fatalf("http calls=%d, want 3 (scope probe + per-zone rule-count preflight); paths=%v",
 			len(httpc.requests), reqPaths(httpc.requests))
 	}
 	for _, r := range httpc.requests {
@@ -680,8 +707,8 @@ func TestRunCDNStep_HappyPath_UserToken_Lists(t *testing.T) {
 	if !step.cfEnabled {
 		t.Fatalf("cfEnabled false on user-token happy path; out=%q", out)
 	}
-	if len(httpc.requests) != 3 {
-		t.Fatalf("http calls=%d, want 3 (account verify + user verify + scope); paths=%v",
+	if len(httpc.requests) != 5 {
+		t.Fatalf("http calls=%d, want 5 (account verify + user verify + scope + list find + list create); paths=%v",
 			len(httpc.requests), reqPaths(httpc.requests))
 	}
 	if got := httpc.requests[0].URL.Path; got != "/accounts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/tokens/verify" {

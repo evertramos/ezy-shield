@@ -234,7 +234,7 @@ func TestCheckZoneWAFAccess(t *testing.T) {
 			ctx := context.Background()
 			// Extract base URL without the trailing path
 			baseURL := strings.TrimSuffix(server.URL, "/")
-			ok, msg := checkZoneWAFAccess(ctx, "token", baseURL, "zone123")
+			ok, _, msg := checkZoneWAFAccess(ctx, "token", baseURL, "zone123")
 
 			if ok != tt.wantOK {
 				t.Errorf("checkZoneWAFAccess: got ok=%v, want %v", ok, tt.wantOK)

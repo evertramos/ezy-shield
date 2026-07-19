@@ -41,7 +41,7 @@ sudo dnf install ezyshield
 
 > `repo_gpgcheck=1` validates the signed repository metadata, which in turn
 > pins the SHA-256 of every package — integrity is covered end to end.
-> Per-package rpm signatures arrive with the artifact-signing work (#100),
+> Per-package rpm signatures arrive with the upcoming artifact-signing work,
 > at which point `gpgcheck=1` becomes the documented default.
 
 Signing key fingerprint (verify after import with `gpg --show-keys`):
@@ -83,7 +83,7 @@ The version must start with `v`. Available versions are listed at [github.com/ev
 For air-gapped installs or CI environments, point the installer at a custom mirror with both the binaries and `checksums.txt`:
 
 ```bash
-curl -sfL https://get.ezyshield.com | EZYSHIELD_BASE_URL=https://mirror.internal.com/ezyshield/v0.3.0 sudo sh
+curl -sfL https://get.ezyshield.com | EZYSHIELD_BASE_URL=https://mirror.example.com/ezyshield/v0.3.0 sudo sh
 ```
 
 The script will:
@@ -96,7 +96,7 @@ The script will:
 When using `EZYSHIELD_BASE_URL`, you can also set `EZYSHIELD_VERSION` for your own versioning:
 
 ```bash
-curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=internal-rc1 EZYSHIELD_BASE_URL=https://mirror.internal.com/ezyshield/v0.3.0 sh
+curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=internal-rc1 EZYSHIELD_BASE_URL=https://mirror.example.com/ezyshield/v0.3.0 sh
 ```
 
 ---
@@ -163,7 +163,7 @@ sudo rm -rf /etc/ezyshield
 | Variable | Purpose | Example |
 |----------|---------|---------|
 | `EZYSHIELD_VERSION` | Install a specific release (must start with `v`) | `EZYSHIELD_VERSION=v0.3.0-rc.1` |
-| `EZYSHIELD_BASE_URL` | Install from a custom mirror (overrides version selection) | `EZYSHIELD_BASE_URL=https://mirror.internal.com/ezyshield/v0.3.0` |
+| `EZYSHIELD_BASE_URL` | Install from a custom mirror (overrides version selection) | `EZYSHIELD_BASE_URL=https://mirror.example.com/ezyshield/v0.3.0` |
 
 ---
 

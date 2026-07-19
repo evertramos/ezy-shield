@@ -140,7 +140,7 @@ do proxy é suficiente e mais simples — comece por ele.
 sudo ezyshield init      # wizard interativo; escreve /etc/ezyshield/*.yaml
 ```
 
-> **Pre-flight (issue #5):** antes de imprimir o banner
+> **Pre-flight:** antes de imprimir o banner
 > "Detecting environment...", o `ezyshield init` faz stat de
 > `<config-dir>/config.yaml` e `<config-dir>/policy.yaml`. Se qualquer um já
 > existir, o wizard falha rápido (em ~1s) com um único erro listando todos os
@@ -255,9 +255,9 @@ ezyshield watch                  # stream de eventos ao vivo no seu terminal
 Controle manual a qualquer momento:
 
 ```bash
-sudo ezyshield ban 1.2.3.4 --ttl 24h --reason "manual"
-sudo ezyshield unban 1.2.3.4
-sudo ezyshield allow 5.6.7.8     # adiciona à allowlist
+sudo ezyshield ban 203.0.113.7 --ttl 24h --reason "manual"
+sudo ezyshield unban 203.0.113.7
+sudo ezyshield allow 198.51.100.9     # adiciona à allowlist
 ```
 
 ---
@@ -295,7 +295,7 @@ ai:
 ```
 
 Só agregados suspeitos são enviados, já minimizados em resumos como
-`IP 1.2.3.4 → 412 POSTs to /wp-login.php in 60s`, e os vereditos são cacheados —
+`IP 203.0.113.7 → 412 POSTs to /wp-login.php in 60s`, e os vereditos são cacheados —
 então o uso de tokens fica minúsculo.
 
 ---

@@ -142,7 +142,7 @@ Reference: <https://tailscale.com/kb/1017/install/>
 Note that the dashboard's own loopback bind check does **not**
 accept the tailnet interface. You still need to reach the daemon
 through the tailscale interface on the client side, which is what
-Tailscale does transparently — you type `http://kylian-s:9090` and
+Tailscale does transparently — you type `http://my-server:9090` and
 Tailscale routes it to the loopback on that host.
 
 ## Never expose 0.0.0.0

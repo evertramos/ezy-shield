@@ -89,6 +89,15 @@ O EzyShield não abre nenhum listener de rede para controle (o dashboard opciona
 - CLI: `ezyshield ban`, `ezyshield list`, etc. (somente local)
 - Unix socket: `/run/ezyshield/ezyshield.sock` (permissões de filesystem)
 
+## Fluxo de dados
+
+Toda conexão de saída que o EzyShield pode fazer — providers de AI,
+Cloudflare, atualizações de GeoIP, notifiers, `ezyshield update` — é opt-in e
+está documentada, com gatilho, payload e forma de desligar, na
+[Referência de Fluxo de Dados](../reference/data-flow.md). Aquela página
+também traz a configuração exata para rodar totalmente local, com zero
+tráfego de saída. Não há telemetria.
+
 ## Audit trail
 
 Toda ação é registrada em SQLite:

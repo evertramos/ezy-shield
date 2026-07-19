@@ -152,6 +152,9 @@ configured the MaxMind databases — never raw log lines.
 CI gates enforce that secrets and hostile log content can't reach the
 request ([prompt-injection](internal/ai/prompt_injection_test.go) and
 [secret-leak](internal/ai/secret_leak_test.go) tests).
+The complete map — every outbound connection, its trigger and payload, and
+the exact zero-outbound configuration — is in the
+[data-flow reference](docs/content/en/reference/data-flow.md).
 
 ### Our pledge
 

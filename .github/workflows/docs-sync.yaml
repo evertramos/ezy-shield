@@ -3,8 +3,12 @@ name: 📃 Sync docs to site
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, dev]
     paths: ['docs/content/**']
+
+concurrency:
+  group: docs-sync-${{ github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   sync:
@@ -21,9 +25,21 @@ jobs:
             exit 1
           fi
 
+      - name: Resolve target branch
+        id: target
+        run: |
+          case "${GITHUB_REF_NAME}" in
+            main|dev) echo "branch=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT" ;;
+            *)
+              echo "::error::docs-sync only runs from main or dev (got ${GITHUB_REF_NAME})"
+              exit 1
+              ;;
+          esac
+
       - uses: actions/checkout@v7
         with:
           repository: evertramos/ezy-shield-site
+          ref: ${{ steps.target.outputs.branch }}
           path: site
           token: ${{ secrets.SITE_DEPLOY_TOKEN }}
 
@@ -32,6 +48,7 @@ jobs:
         run: |
           SOURCE_BRANCH="${GITHUB_REF_NAME}"
           SOURCE_SHA="$(git rev-parse --short HEAD)"
+          TARGET_BRANCH="${{ steps.target.outputs.branch }}"
 
           rsync -av --delete \
             --exclude='.vitepress/' \
@@ -56,8 +73,8 @@ jobs:
           git add docs/
           git commit -m "docs: sync from ezy-shield ${SOURCE_SHA}"
 
-          if ! git push; then
-            echo "::error::Failed to push docs to ezy-shield-site. Check for conflicts or permission issues with SITE_DEPLOY_TOKEN."
+          if ! git push origin "HEAD:${TARGET_BRANCH}"; then
+            echo "::error::Failed to push docs to ezy-shield-site@${TARGET_BRANCH}. Check for conflicts or permission issues with SITE_DEPLOY_TOKEN."
             exit 1
           fi
 
@@ -65,6 +82,7 @@ jobs:
 
           echo "changed=true" >> "$GITHUB_OUTPUT"
           echo "source_branch=${SOURCE_BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "target_branch=${TARGET_BRANCH}" >> "$GITHUB_OUTPUT"
           echo "source_sha=${SOURCE_SHA}" >> "$GITHUB_OUTPUT"
           echo "site_sha=${SITE_SHA}" >> "$GITHUB_OUTPUT"
           echo "file_count=${FILE_COUNT}" >> "$GITHUB_OUTPUT"
@@ -84,7 +102,7 @@ jobs:
           | | |
           |---|---|
           | **Source** | \`ezy-shield@${{ steps.sync.outputs.source_branch }}\` (${{ steps.sync.outputs.source_sha }}) |
-          | **Target** | \`ezy-shield-site@main\` (${{ steps.sync.outputs.site_sha }}) |
+          | **Target** | \`ezy-shield-site@${{ steps.sync.outputs.target_branch }}\` (${{ steps.sync.outputs.site_sha }}) |
           | **Files** | ${{ steps.sync.outputs.file_count }} changed |
 
           <details><summary>Changed files</summary>
@@ -100,6 +118,6 @@ jobs:
           ## ℹ️ No changes to sync
 
           Source: \`ezy-shield@${GITHUB_REF_NAME}\` ($(git rev-parse --short HEAD))
-          Docs in \`ezy-shield-site@main\` are already up to date.
+          Docs in \`ezy-shield-site@${{ steps.target.outputs.branch }}\` are already up to date.
           EOF
           fi

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -83,6 +84,7 @@ func runDoctor(cmd *cobra.Command, configDir string, jsonOut bool) error {
 		checkDockerSocket(),
 		checkEnvFile(filepath.Join(configDir, envFileName)),
 	}
+	checks = append(checks, checkCloudflareEnforcers(configDir)...)
 
 	summary := DoctorSummary{Total: len(checks)}
 	for _, c := range checks {
@@ -415,4 +417,143 @@ func checkJournaldReadable() CheckResult {
 		}
 	}
 	return CheckResult{Name: "journald: readable", Status: statusPass}
+}
+
+// ── Cloudflare enforcer checks (issue #234) ─────────────────────────────────
+
+// checkCloudflareEnforcers runs read-only capability checks against every
+// configured Cloudflare enforcer: token resolves, token is valid and
+// correctly scoped for the configured mode, the Custom List still exists
+// (lists mode), and per-zone WAF rule-slot usage (rulesets mode). These are
+// the post-setup counterparts of the wizard preflight — they catch the
+// things that break AFTER a good install: a deleted list, a rotated or
+// expired token, quota consumed by something else.
+//
+// Returns a single N/A result when no Cloudflare enforcer is configured
+// (or the config cannot be loaded — the config checks above already report
+// that failure in detail).
+func checkCloudflareEnforcers(configDir string) []CheckResult {
+	cfg, err := config.LoadConfig(filepath.Join(configDir, "config.yaml"))
+	if err != nil || cfg.Enforce == nil || len(cfg.Enforce.Cloudflare) == 0 {
+		return []CheckResult{{
+			Name:   "cloudflare: enforcer",
+			Status: statusNA,
+			Hint:   "no cloudflare enforcer configured",
+		}}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	client := &http.Client{Timeout: 8 * time.Second}
+
+	var out []CheckResult
+	for i := range cfg.Enforce.Cloudflare {
+		out = append(out, checkOneCloudflare(ctx, client,
+			"https://api.cloudflare.com/client/v4", configDir, &cfg.Enforce.Cloudflare[i])...)
+	}
+	return out
+}
+
+// checkOneCloudflare runs the checks for a single Cloudflare enforcer
+// entry. client and base are injectable for tests.
+func checkOneCloudflare(ctx context.Context, client cfClient, base, configDir string, cfcfg *config.CloudflareCfg) []CheckResult {
+	label := "cloudflare"
+	if cfcfg.Name != "" {
+		label = "cloudflare(" + cfcfg.Name + ")"
+	}
+
+	// Work on a copy with the runtime default applied so the shared
+	// validators (which switch on Mode) see the effective mode.
+	eff := *cfcfg
+	if eff.Mode == "" {
+		eff.Mode = "lists"
+	}
+
+	// 1. Token resolution. The doctor CLI usually runs without the
+	// daemon's EnvironmentFile in its environment, so fall back to
+	// reading the env file directly — same file checkEnvFile inspects.
+	token, err := eff.APIToken.Resolve()
+	if err != nil {
+		envVar := strings.TrimPrefix(string(eff.APIToken), "env:")
+		if v, ok := readEnvValue(filepath.Join(configDir, envFileName), envVar); ok &&
+			v != "" && v != config.PlaceholderAPIKey {
+			token = v
+		} else {
+			return []CheckResult{{
+				Name:   label + ": token resolves",
+				Status: statusFail,
+				Hint: fmt.Sprintf("token not found in environment or %s -- re-run '%s config enforcer cloudflare'",
+					filepath.Join(configDir, envFileName), progName),
+			}}
+		}
+	}
+	results := []CheckResult{{Name: label + ": token resolves", Status: statusPass}}
+
+	// 2. Token identity + scope for the effective mode (same two-phase
+	// probe the wizard runs; read-only).
+	deps := cdnDeps{HTTPClient: client, CFAPIBaseURL: base}
+	if err := dryValidateCFToken(ctx, deps, &eff, token); err != nil {
+		results = append(results, CheckResult{
+			Name:   label + ": token valid + scoped",
+			Status: statusFail,
+			Hint:   err.Error(),
+		})
+		return results
+	}
+	results = append(results, CheckResult{Name: label + ": token valid + scoped", Status: statusPass})
+
+	// 3. Mode-specific capability.
+	switch eff.Mode {
+	case "lists":
+		listName := eff.ListName
+		if listName == "" {
+			listName = "ezyshield_blocked"
+		}
+		info, err := cfFindList(ctx, client, base, eff.AccountID, listName, token)
+		switch {
+		case err != nil:
+			results = append(results, CheckResult{
+				Name:   label + ": custom list",
+				Status: statusFail,
+				Hint:   err.Error(),
+			})
+		case info == nil:
+			results = append(results, CheckResult{
+				Name:   label + ": custom list",
+				Status: statusFail,
+				Hint: fmt.Sprintf("list %q not found -- it was deleted or never created; re-run '%s config enforcer cloudflare' to create or adopt it (plan quota can block creation: free accounts get a single custom list)",
+					listName, progName),
+			})
+		default:
+			r := CheckResult{
+				Name:   label + ": custom list",
+				Status: statusPass,
+				Hint:   fmt.Sprintf("list %q, %d item(s)", listName, info.NumItems),
+			}
+			// The account-wide Custom List item quota on free plans is
+			// 10k; warn while there is still room to act.
+			if info.NumItems >= 9000 {
+				r.Hint += " -- approaching the 10k item cap; older bans will be evicted first"
+			}
+			results = append(results, r)
+		}
+	case "rulesets":
+		for _, zone := range eff.ZoneIDs {
+			n, err := cfCountZoneRules(ctx, client, base, zone, token)
+			if err != nil {
+				results = append(results, CheckResult{
+					Name:   label + ": zone " + zone,
+					Status: statusFail,
+					Hint:   err.Error(),
+				})
+				continue
+			}
+			results = append(results, CheckResult{
+				Name:   label + ": zone " + zone,
+				Status: statusPass,
+				Hint:   fmt.Sprintf("%d WAF custom rule(s) in use (free-plan zones allow 5)", n),
+			})
+		}
+	}
+	return results
 }

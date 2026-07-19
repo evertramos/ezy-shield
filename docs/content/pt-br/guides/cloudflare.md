@@ -130,6 +130,36 @@ enforce:
 
 Cada zone recebe sua própria regra WAF Custom com todos os IPs bloqueados. Limites de tamanho de expressão (~3900 bytes) significam aproximadamente 200 IPs por regra; EzyShield divide automaticamente em múltiplas regras se necessário.
 
+## Limites de plano e o que o EzyShield verifica
+
+As quotas da Cloudflare dependem do plano, e um token válido não garante um
+setup que funcione. Dois limites importam aqui:
+
+- **Custom Lists (modo lists):** o número de listas custom depende do plano —
+  **contas free têm uma única lista custom**. Se esse slot já estiver ocupado
+  por outra lista, a lista do EzyShield não pode ser criada e o enforcement
+  nunca vai funcionar.
+- **Regras custom do WAF (ambos os modos):** as regras são limitadas por zona
+  por plano (5 no free). O modo lists precisa de uma regra por zona coberta
+  referenciando a lista; o modo rulesets escreve suas regras diretamente.
+
+O EzyShield verifica a viabilidade em três momentos, para você descobrir na
+hora — não no primeiro sync armado:
+
+1. **No setup** (`init` / `config enforcer cloudflare`): depois de validar o
+   token e o escopo, o wizard **cria ou adota** a Custom List configurada ali
+   mesmo. Uma recusa por quota aborta o setup mostrando as saídas (apagar uma
+   lista sem uso, fazer upgrade do plano, ou trocar para o modo rulesets) —
+   nenhum config quebrado é gravado. No modo rulesets o wizard informa
+   quantas regras custom do WAF cada zona já usa.
+2. **Sob demanda** (`test enforcer cloudflare`): re-executa as checagens de
+   capacidade contra o config atual, incluindo existência da lista, contagem
+   de itens e uso de regras por zona.
+3. **Continuamente** (`doctor`): verifica que o token ainda resolve e é
+   válido, que a lista ainda existe (com aviso de contagem de itens ao se
+   aproximar do teto de 10k) e o uso de regras por zona — pegando listas
+   apagadas por fora do EzyShield e tokens rotacionados ou expirados.
+
 ## Solução de Problemas
 
 ### Erros "Permission denied" ou "Insufficient permissions"

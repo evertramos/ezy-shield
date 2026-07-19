@@ -182,7 +182,7 @@ func testCloudflareListsMode(ctx context.Context, token string, cfcfg *config.Cl
 			Name:    "List access (read)",
 			Status:  "fail",
 			Details: err.Error(),
-			Fix:     "Ensure token has Account Filter Lists:Edit permission; list may not exist yet (will be created on first Sync)",
+			Fix:     fmt.Sprintf("Ensure token has Account Filter Lists:Edit. If the list does not exist, re-run '%s config enforcer cloudflare' to create or adopt it — note your plan's custom-list quota (free accounts: a single custom list); if exhausted, delete an unused list, upgrade, or switch to rulesets mode", progName),
 		})
 		result.Failed++
 	} else {
@@ -201,12 +201,12 @@ func testCloudflareListsMode(ctx context.Context, token string, cfcfg *config.Cl
 	// Check 4: Zone WAF access (if zone_ids configured)
 	if len(cfcfg.ZoneIDs) > 0 {
 		for _, zoneID := range cfcfg.ZoneIDs {
-			ok, errMsg := checkZoneWAFAccess(ctx, token, baseURL, zoneID)
+			ok, ruleCount, errMsg := checkZoneWAFAccess(ctx, token, baseURL, zoneID)
 			if ok {
 				result.Checks = append(result.Checks, checkResult{
 					Name:    "Zone WAF access",
 					Status:  "pass",
-					Details: fmt.Sprintf("Zone %s — WAF rule access OK", zoneID),
+					Details: fmt.Sprintf("Zone %s — WAF rule access OK (%d custom rule(s) in use)", zoneID, ruleCount),
 				})
 				result.Passed++
 			} else {
@@ -255,13 +255,13 @@ func testCloudflareRulesetsMode(ctx context.Context, token string, cfcfg *config
 		})
 		result.Passed++
 
-		// Check 3: Zone WAF access
-		ok, errMsg := checkZoneWAFAccess(ctx, token, baseURL, zoneID)
+		// Check 3: Zone WAF access + slot headroom (issue #234)
+		ok, ruleCount, errMsg := checkZoneWAFAccess(ctx, token, baseURL, zoneID)
 		if ok {
 			result.Checks = append(result.Checks, checkResult{
 				Name:    "Zone WAF access",
 				Status:  "pass",
-				Details: fmt.Sprintf("Zone %s — WAF rule access OK", zoneID),
+				Details: fmt.Sprintf("Zone %s — WAF rule access OK (%d custom rule(s) in use; free-plan zones allow 5)", zoneID, ruleCount),
 			})
 			result.Passed++
 		} else {
@@ -401,28 +401,47 @@ func checkZoneAccess(ctx context.Context, token, baseURL, zoneID string) error {
 	return checkAPIAccess(ctx, token, url)
 }
 
-func checkZoneWAFAccess(ctx context.Context, token, baseURL, zoneID string) (bool, string) {
+// checkZoneWAFAccess probes the zone's custom-rules entrypoint. On success
+// it also reports how many WAF custom rules are already in use, so the
+// operator can see slot headroom (issue #234 — free-plan zones allow 5 and
+// EzyShield needs one free slot). 404 means the entrypoint ruleset was
+// never created: zero rules in use.
+func checkZoneWAFAccess(ctx context.Context, token, baseURL, zoneID string) (bool, int, string) {
 	url := fmt.Sprintf("%s/zones/%s/rulesets/phases/http_request_firewall_custom/entrypoint", baseURL, zoneID)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return false, fmt.Sprintf("request error: %v", err)
+		return false, 0, fmt.Sprintf("request error: %v", err)
 	}
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return false, fmt.Sprintf("network error: %v", err)
+		return false, 0, fmt.Sprintf("network error: %v", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
-	case 200, 404:
-		return true, ""
+	case 200:
+		var data struct {
+			Result struct {
+				Rules []struct {
+					ID string `json:"id"`
+				} `json:"rules"`
+			} `json:"result"`
+		}
+		if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&data); err != nil {
+			// Access is proven by the 200; a parse hiccup only loses the
+			// informational count.
+			return true, 0, ""
+		}
+		return true, len(data.Result.Rules), ""
+	case 404:
+		return true, 0, ""
 	case 403:
-		return false, "403 Forbidden — missing Zone:Firewall Services:Edit permission"
+		return false, 0, "403 Forbidden — missing Zone:Firewall Services:Edit permission"
 	default:
-		return false, fmt.Sprintf("HTTP %d", resp.StatusCode)
+		return false, 0, fmt.Sprintf("HTTP %d", resp.StatusCode)
 	}
 }
 

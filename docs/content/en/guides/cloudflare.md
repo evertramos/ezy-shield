@@ -130,6 +130,36 @@ enforce:
 
 Each zone gets its own WAF Custom Rule with all blocked IPs. Expression size limits (~3900 bytes) mean approximately 200 IPs per rule; EzyShield auto-splits into multiple rules if needed.
 
+## Plan limits and what EzyShield checks
+
+Cloudflare quotas are plan-dependent, and a valid token does not guarantee a
+working setup. Two limits matter here:
+
+- **Custom Lists (lists mode):** the number of custom lists depends on your
+  plan — **free accounts get a single custom list**. If that slot is already
+  taken by another list, EzyShield's list cannot be created and enforcement
+  can never work.
+- **WAF custom rules (both modes):** rules are limited per zone per plan
+  (5 on free). Lists mode needs one rule per covered zone referencing the
+  list; rulesets mode writes its rules directly.
+
+EzyShield checks feasibility at three moments so you find out immediately,
+not during the first armed sync:
+
+1. **Setup** (`init` / `config enforcer cloudflare`): after validating the
+   token and its scope, the wizard **creates or adopts** the configured
+   Custom List on the spot. A quota refusal aborts setup with the ways out
+   (delete an unused list, upgrade the plan, or switch to rulesets mode) —
+   no broken config is ever written. In rulesets mode the wizard reports how
+   many WAF custom rules each zone already uses.
+2. **On demand** (`test enforcer cloudflare`): re-runs the capability checks
+   against your current config, including list existence, item count, and
+   per-zone rule usage.
+3. **Continuously** (`doctor`): verifies the token still resolves and is
+   valid, the list still exists (with an item-count warning as you approach
+   the 10k cap), and per-zone rule usage — catching lists deleted outside
+   EzyShield and rotated or expired tokens.
+
 ## Troubleshooting
 
 ### "Permission denied" or "Insufficient permissions" errors

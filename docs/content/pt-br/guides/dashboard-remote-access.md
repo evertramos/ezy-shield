@@ -138,7 +138,7 @@ Referência: <https://tailscale.com/kb/1017/install/>
 Repare que a guarda de loopback do próprio dashboard **não** aceita
 a interface do tailnet. Você continua chegando no daemon pela
 interface do tailscale do lado do cliente, o que o Tailscale faz de
-forma transparente — você digita `http://kylian-s:9090` e o
+forma transparente — você digita `http://my-server:9090` e o
 Tailscale roteia para o loopback do host destino.
 
 ## Nunca exponha 0.0.0.0

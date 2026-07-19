@@ -42,8 +42,8 @@ sudo dnf install ezyshield
 
 > `repo_gpgcheck=1` valida os metadados assinados do repositório, que por sua
 > vez fixam o SHA-256 de cada pacote — a integridade é coberta de ponta a
-> ponta. Assinatura por pacote rpm chega com o trabalho de assinatura de
-> artefatos (#100), quando `gpgcheck=1` vira o padrão documentado.
+> ponta. Assinatura por pacote rpm chega com o futuro trabalho de assinatura
+> de artefatos, quando `gpgcheck=1` vira o padrão documentado.
 
 Fingerprint da chave de assinatura (confira após importar com `gpg --show-keys`):
 
@@ -84,7 +84,7 @@ A versão deve começar com `v`. As versões disponíveis estão listadas em [gi
 Para instalações em ambientes isolados ou CI, aponte o instalador para um espelho customizado com ambos os binários e `checksums.txt`:
 
 ```bash
-curl -sfL https://get.ezyshield.com | EZYSHIELD_BASE_URL=https://mirror.interno.com/ezyshield/v0.3.0 sudo sh
+curl -sfL https://get.ezyshield.com | EZYSHIELD_BASE_URL=https://mirror.exemplo.com/ezyshield/v0.3.0 sudo sh
 ```
 
 O script irá:
@@ -97,7 +97,7 @@ O script irá:
 Ao usar `EZYSHIELD_BASE_URL`, você também pode configurar `EZYSHIELD_VERSION` para sua própria versão:
 
 ```bash
-curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=internal-rc1 EZYSHIELD_BASE_URL=https://mirror.interno.com/ezyshield/v0.3.0 sh
+curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=internal-rc1 EZYSHIELD_BASE_URL=https://mirror.exemplo.com/ezyshield/v0.3.0 sh
 ```
 
 ---
@@ -164,7 +164,7 @@ sudo rm -rf /etc/ezyshield
 | Variável | Propósito | Exemplo |
 |----------|-----------|---------|
 | `EZYSHIELD_VERSION` | Instalar uma versão específica (deve começar com `v`) | `EZYSHIELD_VERSION=v0.3.0-rc.1` |
-| `EZYSHIELD_BASE_URL` | Instalar a partir de um espelho customizado (sobrescreve seleção de versão) | `EZYSHIELD_BASE_URL=https://mirror.interno.com/ezyshield/v0.3.0` |
+| `EZYSHIELD_BASE_URL` | Instalar a partir de um espelho customizado (sobrescreve seleção de versão) | `EZYSHIELD_BASE_URL=https://mirror.exemplo.com/ezyshield/v0.3.0` |
 
 ---
 

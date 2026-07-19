@@ -4,13 +4,14 @@ description: Entenda como EzyShield evita bans redundantes
 order: 2
 ---
 
-# Deduplicação de Banimentos Ativos — EzyShield
+# Deduplicação de Banimentos Ativos
 
 ## Visão geral
 
-A partir da issue #28, `Engine.Decide` suprime gravações redundantes de
-strikes e chamadas RPC ao enforcer quando o IP alvo já possui um banimento
-ativo em `bans_active`.
+Enquanto um IP possui um banimento ativo, o EzyShield suprime gravações
+redundantes de strikes e chamadas ao enforcer para esse IP. O tráfego que
+continua chegando de um endereço já banido não escala a escada de strikes,
+não emite regras de firewall duplicadas e não inunda o log de auditoria.
 
 ## Semântica
 
@@ -20,28 +21,28 @@ O guard de deduplicação reforça esse limite:
 | Cenário | Comportamento do motor |
 |---|---|
 | IP novo cruza `ban_threshold` | Strike #1 registrado; banimento de 5 minutos aplicado |
-| Mesmo IP re-atinge enquanto o ban está ativo | Suprimido: nenhum novo strike, nenhum RPC ao enforcer; apenas `offenders.last_seen` é atualizado |
-| Banimento ativo expira (`ExpireBans`) | Próxima detecção registra strike #2 (banimento de 1 hora) |
-| IP atinge banimento permanente (strike #5, TTL=0) | Suprimido para sempre — registros permanentes não são varridos pelo `ExpireBans` |
-| Reinicialização do daemon | Supressão retomada a partir de `bans_active` (persistido no SQLite); nenhum estado em memória necessário |
+| Mesmo IP re-atinge enquanto o ban está ativo | Suprimido: nenhum novo strike, nenhuma chamada ao enforcer; apenas o `last_seen` do ofensor é atualizado |
+| Banimento ativo expira | Próxima detecção registra strike #2 (banimento de 1 hora) |
+| IP atinge banimento permanente (strike #5, TTL=0) | Suprimido para sempre — banimentos permanentes nunca expiram |
+| Reinicialização do daemon | Supressão retomada a partir do armazenamento de bans persistido (SQLite); nenhum estado em memória necessário |
 
 ## Valores do campo `Op` nas ações
 
 | Valor de `Op` | Significado |
 |---|---|
-| `"ban"` | Strike registrado; RPC ao enforcer emitido; banimento ativo |
+| `"ban"` | Strike registrado; enforcer acionado; banimento ativo |
 | `"dry_ban"` | Seria banido; `armed=false`; sem gravações |
-| `"already_banned"` | Suprimido: IP já está em `bans_active`; apenas `last_seen` atualizado |
+| `"already_banned"` | Suprimido: IP já possui banimento ativo; apenas `last_seen` atualizado |
 | `"notify_only"` | Score na faixa de observação; sem banimento |
 | `"record"` | Abaixo do limiar de observação, ou na allowlist |
 
-## Impacto em `offenders.total_strikes`
+## O que `total_strikes` mede
 
-Antes desta correção, `total_strikes` contava requisições maliciosas brutas
-(por exemplo, 60 para um burst de scanner de 66 segundos a 1 req/s). Com a
-deduplicação, `total_strikes` conta episódios distintos de ataque — o número
-de vezes que um IP retornou e atacou após um período de resfriamento. Isso
-torna o campo um indicador significativo de reincidência.
+O `total_strikes` de um ofensor conta episódios distintos de ataque — o
+número de vezes que um IP retornou e atacou após um período de resfriamento
+— e não requisições maliciosas brutas. Um burst de scanner com 60
+requisições em 66 segundos é um strike, não 60. Isso torna o campo um
+indicador significativo de reincidência.
 
 ## Camadas de Detecção: Burst vs Sustentado
 
@@ -62,13 +63,13 @@ O EzyShield usa um modelo de detecção em duas camadas para capturar tanto atac
 
 **Objetivo**: Capturar atacantes que distribuem suas sondagens ao longo de horas (estratégia "low & slow").
 
-**Exemplo real** (Issue #48): Um atacante mirando WordPress com 30 tentativas de login distribuídas ao longo de 6 horas em rajadas de 2–3 hits. Cada rajada fica abaixo do limiar da camada burst (3 hits/min), mas acumula 10+ hits em 1 hora, acionando a detecção sustentada.
+**Exemplo real**: Um atacante mirando WordPress com 30 tentativas de login distribuídas ao longo de 6 horas em rajadas de 2–3 hits. Cada rajada fica abaixo do limiar da camada burst (3 hits/min), mas acumula 10+ hits em 1 hora, acionando a detecção sustentada.
 
 **Exemplos**:
 - WordPress: 10+ hits em `/wp-login` distribuídos ao longo de 1 hora
 - Abuso XML-RPC: 8+ sondagens em `/xmlrpc.php` ao longo de 1 hora
 - Scanning HTTP: 60+ 404s distintos ao longo de 1 hora
-- SSH: 15+ logins falhados ao longo de 1 hora
+- SSH: 10+ falhas de login ao longo de 1 hora
 
 **Ajuste**: Limiares definidos conservadoramente para evitar atividade de usuários legítimos:
 - Um administrador que faz login no WordPress 3–4 vezes por hora não acionará a regra
@@ -79,11 +80,11 @@ O EzyShield usa um modelo de detecção em duas camadas para capturar tanto atac
 
 1. **Regra burst ativa primeiro**: Captura sondadores agressivos imediatamente
 2. **Regra sustentada ativa depois**: Captura atacantes pacientes que escapam
-3. **Deduplicação previne duplo-banimento**: Uma vez que um IP está em `bans_active`, hits sustentados são suprimidos (veja Deduplicação de Banimentos Ativos acima)
+3. **Deduplicação previne duplo-banimento**: Uma vez que um IP possui banimento ativo, hits sustentados são suprimidos (veja Deduplicação de Banimentos Ativos acima)
 
 ### Ajustando Limiares
 
-Para customizar os limiares, edite `configs/rules.yaml` e ajuste os campos `window` e `threshold`:
+Para customizar os limiares, aponte `rules_path` no config.yaml para o seu próprio arquivo de regras (comece a partir do `/etc/ezyshield/rules.yaml.example` distribuído) e ajuste os campos `window` e `threshold` — as regras embutidas fazem parte do binário, então editar arquivos do repositório não tem efeito em um daemon instalado:
 
 ```yaml
 - name: http_wp_probe_sustained
@@ -106,16 +107,16 @@ O EzyShield inclui uma terceira camada de detecção para caminhos RCE e exploit
 **Objetivo**: Detecção imediata de caminhos de exploit conhecidos.
 
 **Limiar**: 1 (uma única requisição dispara)  
-**Score**: 95 (ultrapassa a faixa ambígua; regras sempre vençam)  
+**Score**: 95 (ultrapassa a faixa ambígua; regras sempre vencem)  
 **Categoria**: `exploit_probe`
 
-**Caminhos detectados**: `phpunit`, `.git`, `.aws`, `cgi-bin`, endpoints actuator, variantes `.env`, shells de plugins WordPress, estado Terraform, configs de banco de dados, etc.
+**Caminhos detectados**: `phpunit`, `.git`, `.aws`, endpoints actuator, shells de plugins WordPress, estado Terraform, etc. (Sondagens de `.env` são cobertas pela regra separada `http_env_probe`.)
 
-**Por que limiar=1**: Estes caminhos têm zero uso legítimo em produção. Uma única requisição a `/.git/config` ou `/admin.php` é sempre suspeita.
+**Por que limiar=1**: Estes caminhos têm zero uso legítimo em produção. Uma única requisição a `/.git/config` é sempre suspeita.
 
-**Por que score=95**: Colocado acima da faixa ambígua (0–90), então o motor de decisão nunca consulta IA — o veredicto de regras é final.
+**Por que score=95**: Colocado acima da faixa ambígua, então o motor de decisão nunca consulta IA — o veredicto de regras é final.
 
-**Sem risco de duplo-banimento**: Sondagens exploit disparam instantaneamente com score=95, então entram em `bans_active` antes de qualquer regra de burst. Hits subsequentes são suprimidos por deduplicação.
+**Sem risco de duplo-banimento**: Sondagens exploit disparam instantaneamente com score=95, então entram no armazenamento de bans antes de qualquer regra de burst. Hits subsequentes são suprimidos por deduplicação.
 
 ### Detecção relacionada a exploits
 
@@ -127,9 +128,4 @@ Estas operam na camada burst e permitem mais requisições antes de disparar, j�
 
 ## Referências
 
-- Issue #28: implementação e evidências do kylian-s (03–04/07/2026)
-- Issue #47: suporte contains_any e detecção de sondagens exploit (08/07/2026)
-- Issue #48: regras sustentadas para detecção low & slow (08/07/2026)
-- `internal/decision/engine.go`: `Engine.Decide` — guard de banimento ativo
-- `internal/store/store.go`: `GetBanInfo`, `BumpLastSeen`
-- `docs/content/pt-br/getting-started/index.md`: tabela de strikes e semântica de deduplicação
+- [Primeiros passos](../getting-started/index.md): tabela de strikes e escada de escalonamento de banimentos

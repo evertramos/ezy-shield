@@ -221,8 +221,8 @@ Cloudflare enforcer (mode: lists): pass
 ✓ Token validity: Token ID: abc...def, status: active
 ✓ Account access: Account ID: 0123456789abcdef
 ✓ List access (read): List "ezyshield_blocked" found (147 items, ID: lstxxxxx)
-✓ Zone WAF access: Zone unaids.org.br (zone_id: aaa111) — WAF rule access OK
-✗ Zone WAF access: Zone deupositivo.org (zone_id: ccc333) — 403 Forbidden
+✓ Zone WAF access: Zone example.com (zone_id: aaa111) — WAF rule access OK
+✗ Zone WAF access: Zone shop.example.org (zone_id: ccc333) — 403 Forbidden
   └─ Ensure token has Zone:Firewall Services:Edit on this zone
 
 Result: 4/5 checks passed, 1 failed

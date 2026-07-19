@@ -136,7 +136,7 @@ simpler — start there.
 sudo ezyshield init      # interactive wizard; writes /etc/ezyshield/*.yaml
 ```
 
-> **Pre-flight (issue #5):** before printing the "Detecting environment..."
+> **Pre-flight:** before printing the "Detecting environment..."
 > banner, `ezyshield init` stats `<config-dir>/config.yaml` and
 > `<config-dir>/policy.yaml`. If either already exists, the wizard fails fast
 > (within ~1s) with a single error listing every pre-existing path — so you
@@ -249,9 +249,9 @@ ezyshield watch                  # live event stream in your terminal
 Manual control any time:
 
 ```bash
-sudo ezyshield ban 1.2.3.4 --ttl 24h --reason "manual"
-sudo ezyshield unban 1.2.3.4
-sudo ezyshield allow 5.6.7.8     # add to allowlist
+sudo ezyshield ban 203.0.113.7 --ttl 24h --reason "manual"
+sudo ezyshield unban 203.0.113.7
+sudo ezyshield allow 198.51.100.9     # add to allowlist
 ```
 
 ---
@@ -289,7 +289,7 @@ ai:
 ```
 
 Only suspicious aggregates get sent, already minimized to summaries like
-`IP 1.2.3.4 → 412 POSTs to /wp-login.php in 60s`, and verdicts are cached — so
+`IP 203.0.113.7 → 412 POSTs to /wp-login.php in 60s`, and verdicts are cached — so
 token usage stays tiny.
 
 ---

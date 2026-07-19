@@ -4,12 +4,14 @@ description: Understand how EzyShield avoids redundant bans
 order: 3
 ---
 
-# Active-Ban Deduplication — EzyShield
+# Active-Ban Deduplication
 
 ## Overview
 
-Since issue #28, `Engine.Decide` suppresses redundant strike/enforcer writes
-when a target IP already has an active ban in `bans_active`.
+While an IP has an active ban, EzyShield suppresses redundant strike and
+enforcer writes for that IP. Traffic that keeps arriving from an
+already-banned address does not escalate the strike ladder, does not issue
+duplicate firewall rules, and does not flood the audit log.
 
 ## Semantics
 
@@ -19,28 +21,27 @@ deduplication guard enforces this boundary:
 | Scenario | Engine behaviour |
 |---|---|
 | Fresh IP crosses `ban_threshold` | Strike #1 recorded; 5-minute ban applied |
-| Same IP re-hits while ban is active | Suppressed: no new strike, no enforcer RPC; `offenders.last_seen` bumped only |
-| Active ban expires (`ExpireBans`) | Next hit records strike #2 (1-hour ban) |
-| IP reaches permanent ban (strike #5, TTL=0) | Suppressed forever — permanent rows are never swept by `ExpireBans` |
-| Daemon restart | Suppression resumes from `bans_active` (persisted in SQLite); no in-memory state required |
+| Same IP re-hits while ban is active | Suppressed: no new strike, no enforcer call; the offender's `last_seen` is bumped only |
+| Active ban expires | Next hit records strike #2 (1-hour ban) |
+| IP reaches permanent ban (strike #5, TTL=0) | Suppressed forever — permanent bans never expire |
+| Daemon restart | Suppression resumes from the persisted ban store (SQLite); no in-memory state required |
 
 ## Action `Op` values
 
 | `Op` value | Meaning |
 |---|---|
-| `"ban"` | Strike recorded; enforcer RPC issued; ban active |
+| `"ban"` | Strike recorded; enforcer called; ban active |
 | `"dry_ban"` | Would ban; `armed=false`; no writes |
-| `"already_banned"` | Suppressed: IP already in `bans_active`; only `last_seen` bumped |
+| `"already_banned"` | Suppressed: IP already has an active ban; only `last_seen` bumped |
 | `"notify_only"` | Score in observe band; no ban |
 | `"record"` | Below observe threshold, or allowlisted |
 
-## Impact on `offenders.total_strikes`
+## What `total_strikes` measures
 
-Before this fix, `total_strikes` counted raw malicious requests (e.g. 60 for
-a 66-second scanner burst at 1 req/s). With deduplication, `total_strikes`
-counts distinct attack episodes — the number of times an IP came back and
-attacked after a cooling-off period. This makes the field a meaningful
-recidivism indicator.
+An offender's `total_strikes` counts distinct attack episodes — the number
+of times an IP came back and attacked after a cooling-off period — not raw
+malicious requests. A scanner burst of 60 requests in 66 seconds is one
+strike, not 60. This makes the field a meaningful recidivism indicator.
 
 ## Burst vs Sustained Detection Tiers
 
@@ -61,7 +62,7 @@ EzyShield uses a two-tier detection model to catch both rapid attackers and "low
 
 **Purpose**: Catch attackers who spread their probes across hours ("low & slow" strategy).
 
-**Real-world example** (Issue #48): An attacker targeting WordPress with 30 login attempts across 6 hours in 2–3 hit bursts. Each burst falls below the burst-tier threshold (3 hits/min) but accumulates 10+ hits in 1 hour, triggering sustained detection.
+**Real-world example**: An attacker targeting WordPress with 30 login attempts across 6 hours in 2–3 hit bursts. Each burst falls below the burst-tier threshold (3 hits/min) but accumulates 10+ hits in 1 hour, triggering sustained detection.
 
 **Examples**:
 - WordPress: 10+ `/wp-login` hits spread across 1 hour
@@ -78,7 +79,7 @@ EzyShield uses a two-tier detection model to catch both rapid attackers and "low
 
 1. **Burst rule fires first**: Catches aggressive probers immediately
 2. **Sustained rule fires later**: Catches patient attackers that slip through
-3. **Deduplication prevents double-banning**: Once an IP is in `bans_active`, sustained hits are suppressed (see Active-Ban Deduplication above)
+3. **Deduplication prevents double-banning**: Once an IP has an active ban, sustained hits are suppressed (see Active-Ban Deduplication above)
 
 ### Adjusting Thresholds
 
@@ -114,7 +115,7 @@ EzyShield includes a third detection tier for known RCE and exploit paths that h
 
 **Why score=95**: Placed above the ambiguous band, so the decision engine never consults AI — the rules verdict is final.
 
-**No double-ban risk**: Exploit probes trigger instantly with score=95, so they enter `bans_active` before any burst-tier rule. Subsequent hits are suppressed by deduplication.
+**No double-ban risk**: Exploit probes trigger instantly with score=95, so they enter the ban store before any burst-tier rule. Subsequent hits are suppressed by deduplication.
 
 ### Related exploit detection
 
@@ -126,9 +127,4 @@ These operate on the burst tier and allow more requests before triggering, since
 
 ## Related
 
-- Issue #28: implementation and live evidence from kylian-s (2026-07-03/04)
-- Issue #47: contains_any support and exploit probe detection (2026-07-08)
-- Issue #48: sustained-tier rules for low & slow detection (2026-07-08)
-- `internal/decision/engine.go`: `Engine.Decide` — active-ban guard
-- `internal/store/store.go`: `GetBanInfo`, `BumpLastSeen`
-- `docs/content/en/getting-started/index.md`: strike table and deduplication semantics
+- [Getting started](../getting-started/index.md): strike table and ban escalation ladder

@@ -71,7 +71,7 @@ Isso cria:
 
 - `/etc/ezyshield/config.yaml`
 - `/etc/ezyshield/policy.yaml`
-- `/etc/ezyshield/rules.yaml` (quando containers WordPress são detectados)
+- `/etc/ezyshield/rules.d/` (customizações de regras via drop-in; instalações WordPress também recebem um template de tuning comentado `10-wordpress.yaml`)
 - `/etc/ezyshield/.env` (chave de API do AI, modo 0600)
 - `/etc/systemd/system/ezyshield.service.d/env.conf` (drop-in systemd)
 - `/var/lib/ezyshield/` (dados de runtime, SQLite)
@@ -212,9 +212,13 @@ max_bans_per_minute: 30 # segurança: pausa enforcement se exceder
 
 ---
 
-## 6. Regras customizadas — rules.yaml
+## 6. Regras customizadas — drop-ins em rules.d
 
-Arquivo em `/etc/ezyshield/rules.yaml`. Define regras de detecção.
+As regras de detecção são embutidas no binário e atualizam com ele. Para
+ajustar ou adicionar regras, coloque um arquivo `*.yaml` em
+`/etc/ezyshield/rules.d/` — as entradas fazem merge sobre as regras
+embutidas por `name` e sobrevivem a updates. Guia completo:
+[Customizando Regras de Detecção](../guides/rules-customization.md).
 
 ### Estrutura de uma regra
 
@@ -258,8 +262,10 @@ rules:
     category: scanner
 ```
 
-> **Nota**: O arquivo de regras customizadas substitui os padrões por completo.
-> Copie as regras built-in que deseja manter.
+> **Nota**: Um drop-in só toca as regras que ele nomeia — todo o resto
+> continua recebendo updates do binário. Um drop-in inválido impede o daemon
+> de iniciar (fail-closed). O `rules_path` legado (substituição do arquivo
+> inteiro) está deprecated.
 
 ---
 

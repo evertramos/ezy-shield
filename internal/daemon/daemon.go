@@ -164,11 +164,15 @@ func New(dcfg Config) (*Daemon, error) {
 		return nil, fmt.Errorf("daemon: Store must not be nil")
 	}
 
-	rulesPath := ""
+	// RulesDir is defaulted by config.LoadConfigReader; a nil/hand-built
+	// Cfg (tests) gets no overlay dir, which means embed-only — identical
+	// to the pre-#136 behavior.
+	rulesPath, rulesDir := "", ""
 	if dcfg.Cfg != nil {
 		rulesPath = dcfg.Cfg.RulesPath
+		rulesDir = dcfg.Cfg.RulesDir
 	}
-	ruleEng, err := rules.New(rulesPath)
+	ruleEng, err := rules.New(rulesPath, rulesDir)
 	if err != nil {
 		return nil, fmt.Errorf("daemon: rule engine: %w", err)
 	}

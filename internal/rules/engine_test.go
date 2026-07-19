@@ -24,7 +24,7 @@ var (
 // on error.
 func mustEngine(t *testing.T) *rules.Engine {
 	t.Helper()
-	e, err := rules.New("")
+	e, err := rules.New("", "")
 	if err != nil {
 		t.Fatalf("rules.New: %v", err)
 	}
@@ -321,7 +321,7 @@ rules:
 		t.Fatal(err)
 	}
 
-	e, err := rules.New(tmp)
+	e, err := rules.New(tmp, "")
 	if err != nil {
 		t.Fatalf("New(override): %v", err)
 	}
@@ -343,7 +343,7 @@ func TestNew_InvalidYAML(t *testing.T) {
 	if err := os.WriteFile(tmp, []byte("not: valid: yaml: [[["), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := rules.New(tmp); err == nil {
+	if _, err := rules.New(tmp, ""); err == nil {
 		t.Error("expected error on invalid YAML")
 	}
 }
@@ -422,7 +422,7 @@ func TestNew_ValidationErrors(t *testing.T) {
 			if err := os.WriteFile(tmp, []byte(tc.content), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := rules.New(tmp); err == nil {
+			if _, err := rules.New(tmp, ""); err == nil {
 				t.Errorf("expected validation error for %q", tc.name)
 			}
 		})
@@ -562,7 +562,7 @@ rules:
 		t.Fatal(err)
 	}
 
-	e, err := rules.New(tmp)
+	e, err := rules.New(tmp, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -597,7 +597,7 @@ rules:
 		t.Fatal(err)
 	}
 
-	e, err := rules.New(tmp)
+	e, err := rules.New(tmp, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -632,7 +632,7 @@ rules:
 		t.Fatal(err)
 	}
 
-	e, err := rules.New(tmp)
+	e, err := rules.New(tmp, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -703,7 +703,7 @@ func TestNew_ContainsAndContainsAny_MutualExclusion(t *testing.T) {
 			if err := os.WriteFile(tmp, []byte(tc.content), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := rules.New(tmp); err == nil {
+			if _, err := rules.New(tmp, ""); err == nil {
 				t.Errorf("expected validation error for %q", tc.name)
 			}
 		})

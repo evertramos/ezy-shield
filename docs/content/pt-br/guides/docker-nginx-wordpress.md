@@ -193,8 +193,9 @@ admin_cidrs:
 
 As assinaturas de WordPress (floods em wp-login.php / xmlrpc.php, caminhos de
 sondagem de exploits) já vêm embutidas nas rules distribuídas — nenhuma
-configuração é necessária. Para customizar thresholds, aponte `rules_path` no
-config.yaml para a sua própria cópia de `/etc/ezyshield/rules.yaml.example`.
+configuração é necessária. Para customizar thresholds, descomente a regra
+relevante em `/etc/ezyshield/rules.d/10-wordpress.yaml` (gravado pelo `init`)
+e ajuste — veja [Customizando Regras de Detecção](rules-customization.md).
 
 Segredos vão num arquivo env que a unit do systemd carrega (o `ezyshield init` o
 cria com modo 0600; o `doctor` checa suas permissões):

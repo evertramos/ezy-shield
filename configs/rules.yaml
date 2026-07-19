@@ -1,6 +1,8 @@
-# EzyShield built-in detection rules.
-# To override, set rules_path in config.yaml; the custom file replaces these
-# defaults entirely — it is not merged.
+# EzyShield built-in detection rules (embedded in the binary).
+# To add or tune rules, drop a *.yaml file in /etc/ezyshield/rules.d/ —
+# drop-ins merge over this base by rule `name` and survive binary updates.
+# (Legacy: rules_path in config.yaml still replaces this file entirely, but
+# that freezes the install out of upstream rule tuning — prefer rules.d.)
 rules:
   - name: ssh_bruteforce
     description: "Repeated SSH authentication failures"

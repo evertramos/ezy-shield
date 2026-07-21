@@ -100,7 +100,7 @@ func New(overridePath, rulesDir string) (*Engine, error) {
 		if err := decodeRules(f, &rf); err != nil {
 			return nil, err
 		}
-		if err := validateRules(rf.Rules); err != nil {
+		if err := validateRules(rf.Rules, nil); err != nil {
 			return nil, err
 		}
 		return &Engine{rules: rf.Rules}, nil
@@ -115,12 +115,12 @@ func New(overridePath, rulesDir string) (*Engine, error) {
 		return nil, err
 	}
 
-	merged, err := applyDropins(base.Rules, rulesDir)
+	merged, origin, err := applyDropins(base.Rules, rulesDir)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := validateRules(merged); err != nil {
+	if err := validateRules(merged, origin); err != nil {
 		return nil, err
 	}
 	return &Engine{rules: merged}, nil
@@ -128,17 +128,20 @@ func New(overridePath, rulesDir string) (*Engine, error) {
 
 // applyDropins overlays every *.yaml / *.yml drop-in from dir onto base,
 // merged by rule name in lexical file order. A missing dir returns base
-// unchanged; any other read/parse error fails closed.
-func applyDropins(base []spec, dir string) ([]spec, error) {
+// unchanged; any other read/parse error fails closed. The returned origin
+// map records which drop-in file contributed each rule name ("" = embedded
+// base) so validation failures on the merged set can name the file the
+// operator must fix.
+func applyDropins(base []spec, dir string) ([]spec, map[string]string, error) {
 	if dir == "" {
-		return base, nil
+		return base, nil, nil
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return base, nil
+			return base, nil, nil
 		}
-		return nil, fmt.Errorf("rules: read drop-in dir %q: %w", dir, err)
+		return nil, nil, fmt.Errorf("rules: read drop-in dir %q: %w", dir, err)
 	}
 
 	var files []string
@@ -172,13 +175,13 @@ func applyDropins(base []spec, dir string) ([]spec, error) {
 		path := filepath.Join(dir, name)
 		f, err := os.Open(path) //nolint:gosec // path is operator-owned config dir content, not attacker input
 		if err != nil {
-			return nil, fmt.Errorf("rules: open drop-in %q: %w", path, err)
+			return nil, nil, fmt.Errorf("rules: open drop-in %q: %w", path, err)
 		}
 		var rf rulesFile
 		decErr := decodeRules(f, &rf)
 		_ = f.Close()
 		if decErr != nil {
-			return nil, fmt.Errorf("rules: drop-in %q: %w", path, decErr)
+			return nil, nil, fmt.Errorf("rules: drop-in %q: %w", path, decErr)
 		}
 		for _, r := range rf.Rules {
 			if i, ok := index[r.Name]; ok {
@@ -201,7 +204,7 @@ func applyDropins(base []spec, dir string) ([]spec, error) {
 			origin[r.Name] = path
 		}
 	}
-	return merged, nil
+	return merged, origin, nil
 }
 
 // Windows returns the unique window durations referenced by the loaded rules.
@@ -325,29 +328,42 @@ func decodeRules(r io.Reader, out *rulesFile) error {
 	return nil
 }
 
-func validateRules(rules []spec) error {
+// validateRules checks the final rule set. origin, when non-nil, maps a rule
+// name to the drop-in file that contributed it ("" = embedded base) — a
+// failure on a drop-in-owned rule then names the file the operator must fix.
+func validateRules(rules []spec, origin map[string]string) error {
 	for i, r := range rules {
-		if r.Name == "" {
-			return fmt.Errorf("rules[%d]: name is required", i)
+		if err := validateRule(i, r); err != nil {
+			if from := origin[r.Name]; from != "" {
+				return fmt.Errorf("drop-in %q: %w", from, err)
+			}
+			return err
 		}
-		if len(r.Kinds) == 0 {
-			return fmt.Errorf("rule %q: kinds must be non-empty", r.Name)
-		}
-		if r.Threshold <= 0 {
-			return fmt.Errorf("rule %q: threshold must be > 0, got %d", r.Name, r.Threshold)
-		}
-		if r.Score < 0 || r.Score > 100 {
-			return fmt.Errorf("rule %q: score must be 0–100, got %d", r.Name, r.Score)
-		}
-		if time.Duration(r.Window) <= 0 {
-			return fmt.Errorf("rule %q: window must be > 0", r.Name)
-		}
-		if (r.Value != "" && r.Contains != "") || (r.Value != "" && len(r.ContainsAny) > 0) || (r.Contains != "" && len(r.ContainsAny) > 0) {
-			return fmt.Errorf("rule %q: value, contains, and contains_any are mutually exclusive", r.Name)
-		}
-		if r.Category == "" {
-			return fmt.Errorf("rule %q: category is required", r.Name)
-		}
+	}
+	return nil
+}
+
+func validateRule(i int, r spec) error {
+	if r.Name == "" {
+		return fmt.Errorf("rules[%d]: name is required", i)
+	}
+	if len(r.Kinds) == 0 {
+		return fmt.Errorf("rule %q: kinds must be non-empty", r.Name)
+	}
+	if r.Threshold <= 0 {
+		return fmt.Errorf("rule %q: threshold must be > 0, got %d", r.Name, r.Threshold)
+	}
+	if r.Score < 0 || r.Score > 100 {
+		return fmt.Errorf("rule %q: score must be 0–100, got %d", r.Name, r.Score)
+	}
+	if time.Duration(r.Window) <= 0 {
+		return fmt.Errorf("rule %q: window must be > 0", r.Name)
+	}
+	if (r.Value != "" && r.Contains != "") || (r.Value != "" && len(r.ContainsAny) > 0) || (r.Contains != "" && len(r.ContainsAny) > 0) {
+		return fmt.Errorf("rule %q: value, contains, and contains_any are mutually exclusive", r.Name)
+	}
+	if r.Category == "" {
+		return fmt.Errorf("rule %q: category is required", r.Name)
 	}
 	return nil
 }

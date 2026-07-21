@@ -169,8 +169,15 @@ func TestDropin_FailClosed(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
 			writeDropin(t, dir, "50-broken.yaml", tt.content)
-			if _, err := rules.New("", dir); err == nil {
+			_, err := rules.New("", dir)
+			if err == nil {
 				t.Fatal("want fail-closed error, got nil")
+			}
+			// The operator may have several drop-ins — the error must name
+			// the file to fix, whether it failed at decode or at merged-set
+			// validation.
+			if !strings.Contains(err.Error(), "50-broken.yaml") {
+				t.Errorf("error does not name the offending drop-in file: %v", err)
 			}
 		})
 	}

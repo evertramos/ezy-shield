@@ -9,9 +9,13 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
+	"gopkg.in/yaml.v3"
+
+	"github.com/evertramos/ezy-shield/configs"
 	"github.com/evertramos/ezy-shield/internal/rules"
 )
 
@@ -74,14 +78,12 @@ func TestWriteWordPressDropin_WritesCommentedTemplate(t *testing.T) {
 	}
 }
 
-// TestWriteWordPressDropin_TemplateValidatesWhenUncommented guards the
-// template against drifting from the engine schema: the commented rules
-// block, once uncommented, must load and validate as a real drop-in that
-// overrides the built-in WordPress rules.
-func TestWriteWordPressDropin_TemplateValidatesWhenUncommented(t *testing.T) {
-	t.Parallel()
-	tmpl := t.TempDir()
-	path := filepath.Join(tmpl, "10-wordpress.yaml")
+// uncommentedTemplateYAML writes a fresh WordPress template to a temp file
+// and returns its commented rules block with the comment prefix stripped —
+// i.e. the YAML an operator gets by uncommenting the whole block.
+func uncommentedTemplateYAML(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "10-wordpress.yaml")
 	if _, err := writeWordPressDropin(path); err != nil {
 		t.Fatal(err)
 	}
@@ -90,9 +92,7 @@ func TestWriteWordPressDropin_TemplateValidatesWhenUncommented(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Extract the commented YAML: from the "# rules:" line onward, strip
-	// the comment prefix.
-	var yaml []string
+	var lines []string
 	in := false
 	for _, line := range strings.Split(string(data), "\n") {
 		if strings.HasPrefix(line, "# rules:") {
@@ -103,23 +103,92 @@ func TestWriteWordPressDropin_TemplateValidatesWhenUncommented(t *testing.T) {
 		}
 		switch {
 		case strings.HasPrefix(line, "# "):
-			yaml = append(yaml, strings.TrimPrefix(line, "# "))
+			lines = append(lines, strings.TrimPrefix(line, "# "))
 		case line == "#":
-			yaml = append(yaml, "")
+			lines = append(lines, "")
 		default:
-			yaml = append(yaml, line)
+			lines = append(lines, line)
 		}
 	}
-	if len(yaml) == 0 {
+	if len(lines) == 0 {
 		t.Fatal("template has no commented rules block")
 	}
+	return strings.Join(lines, "\n")
+}
 
+// TestWriteWordPressDropin_TemplateValidatesWhenUncommented guards the
+// template against drifting from the engine schema: the commented rules
+// block, once uncommented, must load and validate as a real drop-in that
+// overrides the built-in WordPress rules.
+func TestWriteWordPressDropin_TemplateValidatesWhenUncommented(t *testing.T) {
+	t.Parallel()
 	dropDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dropDir, "10-wordpress.yaml"), //nolint:gosec // test-owned temp path
-		[]byte(strings.Join(yaml, "\n")), 0o600); err != nil {
+		[]byte(uncommentedTemplateYAML(t)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := rules.New("", dropDir); err != nil {
 		t.Fatalf("uncommented template failed to load/validate — it drifted from the engine schema: %v", err)
+	}
+}
+
+// TestWriteWordPressDropin_TemplateValuesMatchEmbeddedBase pins the
+// template's commented values to the current embedded base. The template
+// header promises "current built-in values as of the version that generated
+// this file" — so retuning a base rule (threshold, score, matcher, …) must
+// fail here until the template in writeWordPressDropin is refreshed to
+// match. Schema validity alone (the test above) would let the template
+// silently advertise stale defaults.
+func TestWriteWordPressDropin_TemplateValuesMatchEmbeddedBase(t *testing.T) {
+	t.Parallel()
+	// One permissive struct for both sides: unknown fields in the embedded
+	// base (e.g. matchers the template doesn't use) are ignored, which is
+	// fine — we compare exactly the fields the template shows.
+	type rule struct {
+		Name        string   `yaml:"name"`
+		Description string   `yaml:"description"`
+		Kinds       []string `yaml:"kinds"`
+		Field       string   `yaml:"field"`
+		Contains    string   `yaml:"contains"`
+		Window      string   `yaml:"window"`
+		Threshold   int      `yaml:"threshold"`
+		Score       int      `yaml:"score"`
+		Category    string   `yaml:"category"`
+	}
+	type file struct {
+		Rules []rule `yaml:"rules"`
+	}
+
+	var tmpl file
+	if err := yaml.Unmarshal([]byte(uncommentedTemplateYAML(t)), &tmpl); err != nil {
+		t.Fatalf("parse uncommented template: %v", err)
+	}
+	if len(tmpl.Rules) == 0 {
+		t.Fatal("uncommented template has no rules")
+	}
+
+	data, err := configs.FS.ReadFile("rules.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var base file
+	if err := yaml.Unmarshal(data, &base); err != nil {
+		t.Fatalf("parse embedded rules.yaml: %v", err)
+	}
+	baseByName := make(map[string]rule, len(base.Rules))
+	for _, r := range base.Rules {
+		baseByName[r.Name] = r
+	}
+
+	for _, tr := range tmpl.Rules {
+		br, ok := baseByName[tr.Name]
+		if !ok {
+			t.Errorf("template rule %q does not exist in the embedded base", tr.Name)
+			continue
+		}
+		if !reflect.DeepEqual(tr, br) {
+			t.Errorf("template values for %q drifted from the embedded base — update the template in writeWordPressDropin\n  template: %+v\n  base:     %+v",
+				tr.Name, tr, br)
+		}
 	}
 }

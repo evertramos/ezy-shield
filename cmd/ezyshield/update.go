@@ -310,7 +310,35 @@ func fetchTargetRelease(ctx context.Context, c *update.Client, pinned string) (*
 	if pinned != "" {
 		return c.ReleaseByTag(ctx, pinned)
 	}
-	return c.LatestRelease(ctx)
+	rel, err := c.LatestRelease(ctx)
+	if err != nil && errors.Is(err, update.ErrNoStableRelease) {
+		return nil, noStableReleaseError(ctx, c)
+	}
+	return rel, err
+}
+
+// noStableReleaseError builds the actionable message shown in place of a
+// bare "release not found" when GitHub's releases/latest has nothing to
+// return — every published release is still a release candidate, ahead of
+// the first stable v0.1.0 tag (issue #235). It best-effort resolves the
+// newest RC via the releases list so the suggested --version is copy-paste
+// ready; a failure there degrades to a generic pointer at the releases page
+// rather than failing the whole command.
+func noStableReleaseError(ctx context.Context, c *update.Client) error {
+	tagHint := "<tag>   (see " + releasesURL(c.Repo) + ")"
+	if newest, err := c.NewestRelease(ctx); err == nil && newest.TagName != "" {
+		tagHint = newest.TagName
+	}
+	return fmt.Errorf(`no stable release published yet — you're on the release-candidate (RC) channel ahead of v0.1.0
+
+  Pin a specific RC:      sudo %s update --version %s
+  Use a private mirror:   export %s=https://your-mirror.example/api
+  Or simply wait for v0.1.0 to ship — this command works with no flags once it does`,
+		progName, tagHint, envUpdateURL)
+}
+
+func releasesURL(repo string) string {
+	return "https://github.com/" + repo + "/releases"
 }
 
 // verifyBinary execs path with --version under a short timeout. Returning nil

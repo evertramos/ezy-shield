@@ -42,6 +42,11 @@ sudoedit /etc/ezyshield/policy.yaml              # set `armed: true` when you tr
 sudo systemctl restart ezyshield                 # apply the new policy
 ```
 
+> Before v0.1.0 ships, every release is a release candidate — the install
+> command above detects that and prints instructions instead of installing;
+> see [Install](#install) for the release-candidate command that works
+> today. No flags will be needed the moment v0.1.0 ships.
+
 That's the whole loop: `init` leaves the daemon running in dry-run; observe
 first, arm only once the decisions look right.
 
@@ -173,11 +178,19 @@ free, forever. — [Evert](https://github.com/evertramos)
 ```sh
 # Debian / Ubuntu
 curl -fsSL https://packages.ezyshield.com/ezyshield.asc | sudo gpg --dearmor -o /usr/share/keyrings/ezyshield.gpg
-echo "deb [signed-by=/usr/share/keyrings/ezyshield.gpg] https://packages.ezyshield.com/apt stable main" | sudo tee /etc/apt/sources.list.d/ezyshield.list
+echo "deb [signed-by=/usr/share/keyrings/ezyshield.gpg] https://packages.ezyshield.com/apt testing main" | sudo tee /etc/apt/sources.list.d/ezyshield.list
 sudo apt update && sudo apt install ezyshield
 ```
 
-GPG-signed repositories with `.deb` and `.rpm` for amd64/arm64 — dnf setup and details in the [install guide](docs/content/en/getting-started/install.md).
+GPG-signed repositories with `.deb` and `.rpm` for amd64/arm64 — dnf setup and details in the [install guide](docs/content/en/getting-started/install.md). Every release today is a release candidate, so this uses the `testing` suite; switch to `stable` once v0.1.0 ships.
+
+### Specific version (including release candidates)
+
+```sh
+curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=v0.1.0-rc.N sh
+```
+
+Check the [releases page](https://github.com/evertramos/ezy-shield/releases) for the current tag. This is the install-script method that works today, before v0.1.0 ships.
 
 ### Install script
 
@@ -186,13 +199,7 @@ curl -sfL https://get.ezyshield.com | sudo sh
 ```
 
 Fetches the latest release binaries (`ezyshield` and `ezyshield-enforcer`) and
-verifies their SHA-256 checksums.
-
-### Specific version (including release candidates)
-
-```sh
-curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=v0.1.0 sh
-```
+verifies their SHA-256 checksums. Before v0.1.0 ships (every release today is a release candidate), this prints install instructions instead — see "Specific version" above.
 
 See the [install guide](docs/content/en/getting-started/install.md) for all options (air-gapped mirrors, from source, upgrading).
 

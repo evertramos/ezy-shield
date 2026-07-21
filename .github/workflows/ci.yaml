@@ -147,6 +147,9 @@ jobs:
       - name: No raw placeholder tags in docs markdown (VitePress-safe)
         id: placeholders
         run: bash scripts/docs-placeholder-gate.sh
+      - name: get.sh no-stable-release message path (mocked GitHub API)
+        id: getsh
+        run: bash scripts/get-sh-message-test.sh
       - name: Validate example configs against JSON schemas
         id: schemas
         run: |
@@ -158,12 +161,13 @@ jobs:
         run: |
           {
             echo "### 📚 Docs & scripts"
-            echo "_Required security/legal docs exist, every shell script passes shellcheck, and example configs validate against their JSON schemas._"
+            echo "_Required security/legal docs exist, every shell script passes shellcheck, get.sh's no-stable-release messaging is regression-tested against a mocked GitHub API, and example configs validate against their JSON schemas._"
             echo ""
             echo "| Check | Result |"
             echo "|---|---|"
             echo "| required docs present | ${{ steps.reqdocs.outcome }} |"
             echo "| shellcheck ($(find scripts -name '*.sh' | wc -l) scripts) | ${{ steps.shellcheck.outcome }} |"
+            echo "| get.sh no-stable-release message (#235) | ${{ steps.getsh.outcome }} |"
             echo "| example configs vs JSON schemas | ${{ steps.schemas.outcome }} |"
             echo "| VitePress-safe placeholders | ${{ steps.placeholders.outcome }} |"
           } >> "$GITHUB_STEP_SUMMARY"

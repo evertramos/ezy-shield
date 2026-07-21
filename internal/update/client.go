@@ -34,6 +34,21 @@ const (
 	MaxBinarySize = 100 << 20 // 100 MiB
 )
 
+// ErrNoStableRelease is returned by LatestRelease when GitHub's
+// releases/latest endpoint has nothing to return. That endpoint only ever
+// considers non-prerelease releases — during the release-candidate phase
+// before the first stable tag ships, every published release is a
+// prerelease, so it 404s. This is an expected, named condition (issue
+// #235), distinct from a genuine "release not found" on ReleaseByTag.
+var ErrNoStableRelease = errors.New("no stable (non-prerelease) release has been published yet")
+
+// errReleaseAPINotFound is the internal 404 signal from fetchRelease.
+// LatestRelease translates it into the more specific ErrNoStableRelease;
+// ReleaseByTag's 404 (a bad/nonexistent tag) keeps its own message — the
+// sentinel is plumbing between fetchRelease and LatestRelease only and
+// never escapes to a caller directly.
+var errReleaseAPINotFound = errors.New("release API 404")
+
 // Asset mirrors the GitHub Releases "assets[]" entries we care about.
 type Asset struct {
 	Name string `json:"name"`
@@ -84,10 +99,60 @@ func NewClient() *Client {
 	}
 }
 
-// LatestRelease fetches /repos/{repo}/releases/latest.
+// LatestRelease fetches /repos/{repo}/releases/latest. GitHub excludes
+// prereleases from this endpoint by design — a 404 during the RC phase
+// (before any stable tag exists) is translated to ErrNoStableRelease so
+// callers can give an actionable message instead of a bare "not found".
 func (c *Client) LatestRelease(ctx context.Context) (*Release, error) {
 	u := fmt.Sprintf("%s/repos/%s/releases/latest", c.APIBaseURL, c.Repo)
-	return c.fetchRelease(ctx, u)
+	rel, err := c.fetchRelease(ctx, u)
+	if err != nil && errors.Is(err, errReleaseAPINotFound) {
+		return nil, ErrNoStableRelease
+	}
+	return rel, err
+}
+
+// NewestRelease fetches the single most recent release regardless of
+// prerelease status (GET /releases?per_page=1 — GitHub returns releases
+// newest-first). Used only to surface an actionable "pin this exact tag"
+// suggestion when LatestRelease finds no stable release; the result is
+// NEVER auto-installed.
+func (c *Client) NewestRelease(ctx context.Context) (*Release, error) {
+	u := fmt.Sprintf("%s/repos/%s/releases?per_page=1", c.APIBaseURL, c.Repo)
+	if err := requireHTTPS(u); err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", userAgent)
+
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch releases list: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("releases list API returned status %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxJSONSize))
+	if err != nil {
+		return nil, fmt.Errorf("read releases list body: %w", err)
+	}
+	var releases []Release
+	if err := json.Unmarshal(body, &releases); err != nil {
+		return nil, fmt.Errorf("parse releases list JSON: %w", err)
+	}
+	if len(releases) == 0 {
+		return nil, errors.New("no releases published yet")
+	}
+	if releases[0].TagName == "" {
+		return nil, errors.New("newest release has no tag_name")
+	}
+	return &releases[0], nil
 }
 
 // ReleaseByTag fetches /repos/{repo}/releases/tags/{tag}. tag must be a
@@ -120,7 +185,7 @@ func (c *Client) fetchRelease(ctx context.Context, u string) (*Release, error) {
 	switch resp.StatusCode {
 	case http.StatusOK:
 	case http.StatusNotFound:
-		return nil, fmt.Errorf("release not found at %s", redactURL(u))
+		return nil, fmt.Errorf("release not found at %s: %w", redactURL(u), errReleaseAPINotFound)
 	default:
 		return nil, fmt.Errorf("release API returned status %d", resp.StatusCode)
 	}

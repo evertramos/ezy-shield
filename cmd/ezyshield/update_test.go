@@ -303,6 +303,120 @@ func TestRunUpdate_TempBinaryIsExecutable(t *testing.T) {
 	}
 }
 
+// TestRunUpdate_NoStableReleaseYet reproduces issue #235 end to end through
+// runUpdate: GitHub's /releases/latest 404s (no stable tag exists), and the
+// operator must see an actionable message — not the bare "release not
+// found at ..." — naming the RC channel, a --version pin (resolved via the
+// releases-list API), EZYSHIELD_UPDATE_URL, and that binaries are untouched.
+func TestRunUpdate_NoStableReleaseYet(t *testing.T) {
+	t.Parallel()
+	var assetBase string
+	mux := http.NewServeMux()
+	// /releases/latest deliberately unregistered => 404, matching GitHub's
+	// real behavior when only prereleases exist.
+	mux.HandleFunc("/repos/test/repo/releases", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/test/repo/releases" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]update.Release{
+			{TagName: "v0.1.0-rc.21", Assets: []update.Asset{
+				{Name: "ezyshield-linux-amd64", URL: assetBase + "/ezyshield-linux-amd64"},
+			}},
+		})
+	})
+	srv := httptest.NewTLSServer(mux)
+	t.Cleanup(srv.Close)
+	assetBase = srv.URL + "/dl"
+
+	tmpDir := t.TempDir()
+	mainPath := filepath.Join(tmpDir, "ezyshield")
+	if err := os.WriteFile(mainPath, []byte("OLD_MAIN"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts := updateOptions{
+		currentVersion: "v0.1.0-rc.20",
+		apiBaseURL:     srv.URL,
+		repo:           "test/repo",
+		binaryPath:     mainPath,
+		enforcerPath:   filepath.Join(tmpDir, "ezyshield-enforcer"),
+		goos:           "linux",
+		arch:           "amd64",
+		isRoot:         func() bool { return true },
+		out:            &bytes.Buffer{},
+	}
+	prev := newClientHook
+	newClientHook = func() *update.Client {
+		c := update.NewClient()
+		c.HTTP = srv.Client()
+		return c
+	}
+	t.Cleanup(func() { newClientHook = prev })
+
+	err := runUpdate(context.Background(), opts)
+	if err == nil {
+		t.Fatal("want an error — no stable release exists yet")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"no stable release published yet",
+		"--version v0.1.0-rc.21", // dynamically resolved via NewestRelease
+		"EZYSHIELD_UPDATE_URL",
+		"v0.1.0",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error message missing %q; got:\n%s", want, msg)
+		}
+	}
+	if strings.Contains(msg, "release not found at") {
+		t.Errorf("message regressed to the bare not-found form: %s", msg)
+	}
+	got, _ := os.ReadFile(mainPath) //nolint:gosec // G304: test-owned temp path
+	if string(got) != "OLD_MAIN" {
+		t.Errorf("binary must not be touched; got %q", got)
+	}
+}
+
+// TestRunUpdate_NoStableReleaseYet_NewestReleaseAlsoFails checks the
+// degrade path: if the best-effort NewestRelease lookup itself fails, the
+// message still names the condition and points at the releases page
+// instead of erroring out entirely or omitting guidance.
+func TestRunUpdate_NoStableReleaseYet_NewestReleaseAlsoFails(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux() // /releases/latest AND /releases both unregistered => both 404
+	srv := httptest.NewTLSServer(mux)
+	t.Cleanup(srv.Close)
+
+	opts := updateOptions{
+		currentVersion: "v0.1.0-rc.20",
+		apiBaseURL:     srv.URL,
+		repo:           "test/repo",
+		binaryPath:     filepath.Join(t.TempDir(), "ezyshield"),
+		goos:           "linux",
+		arch:           "amd64",
+		isRoot:         func() bool { return true },
+		out:            &bytes.Buffer{},
+	}
+	if err := os.WriteFile(opts.binaryPath, []byte("OLD"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prev := newClientHook
+	newClientHook = func() *update.Client {
+		c := update.NewClient()
+		c.HTTP = srv.Client()
+		return c
+	}
+	t.Cleanup(func() { newClientHook = prev })
+
+	err := runUpdate(context.Background(), opts)
+	if err == nil || !strings.Contains(err.Error(), "no stable release published yet") {
+		t.Fatalf("want the actionable no-stable-release message even when NewestRelease fails, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "test/repo/releases") {
+		t.Errorf("degrade path should still point at the releases page: %v", err)
+	}
+}
+
 func TestResolveUpdateSource(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

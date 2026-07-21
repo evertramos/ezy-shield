@@ -17,11 +17,16 @@ serviço `ezyshield` e upgrades limpos. Os metadados do repositório são
 assinados com GPG; releases estáveis ficam na suite `stable`, release
 candidates em `testing`.
 
+> **Antes do v0.1.0 ser lançado:** toda release publicada é um release
+> candidate, então os snippets abaixo usam a suite `testing` — a que
+> funciona hoje. Quando o v0.1.0 sair, troque `testing` por `stable` nos
+> dois para acompanhar só releases estáveis.
+
 **Debian / Ubuntu:**
 
 ```bash
 curl -fsSL https://packages.ezyshield.com/ezyshield.asc | sudo gpg --dearmor -o /usr/share/keyrings/ezyshield.gpg
-echo "deb [signed-by=/usr/share/keyrings/ezyshield.gpg] https://packages.ezyshield.com/apt stable main" | sudo tee /etc/apt/sources.list.d/ezyshield.list
+echo "deb [signed-by=/usr/share/keyrings/ezyshield.gpg] https://packages.ezyshield.com/apt testing main" | sudo tee /etc/apt/sources.list.d/ezyshield.list
 sudo apt update && sudo apt install ezyshield
 ```
 
@@ -31,7 +36,7 @@ sudo apt update && sudo apt install ezyshield
 sudo tee /etc/yum.repos.d/ezyshield.repo <<'EOF'
 [ezyshield]
 name=EzyShield
-baseurl=https://packages.ezyshield.com/rpm/stable/$basearch
+baseurl=https://packages.ezyshield.com/rpm/testing/$basearch
 enabled=1
 gpgcheck=0
 repo_gpgcheck=1
@@ -51,31 +56,43 @@ Fingerprint da chave de assinatura (confira após importar com `gpg --show-keys`
 810E EEB0 1802 38F7 E800  4A9E E1AD 3D15 A121 3612
 ```
 
-Para acompanhar release candidates, troque `stable` por `testing` em
-qualquer dos snippets. Os pacotes **não** habilitam nem iniciam serviço
-algum — rode `sudo ezyshield init` depois de instalar.
-
----
-
-## Instalação rápida (última versão estável)
-
-```bash
-curl -sfL https://get.ezyshield.com | sudo sh
-```
-
-Isso faz download da última versão estável, verifica checksums e instala os binários em `/usr/local/bin/`.
+Para trocar para o canal estável quando o v0.1.0 sair, troque `testing`
+por `stable` em qualquer dos snippets. Os pacotes **não** habilitam nem
+iniciam serviço algum — rode `sudo ezyshield init` depois de instalar.
 
 ---
 
 ## Instalando uma versão específica ou candidata a lançamento
 
-Se você quer uma versão específica (incluindo candidatos a lançamento como `v0.3.0-rc.1`), configure `EZYSHIELD_VERSION`:
+Se você quer uma versão específica (incluindo candidatos a lançamento como
+`v0.1.0-rc.N` — confira a [página de releases](https://github.com/evertramos/ezy-shield/releases)
+para o tag atual), configure `EZYSHIELD_VERSION`:
 
 ```bash
-curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=v0.3.0-rc.1 sh
+curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=v0.1.0-rc.N sh
 ```
 
 A versão deve começar com `v`. As versões disponíveis estão listadas em [github.com/evertramos/ezy-shield/releases](https://github.com/evertramos/ezy-shield/releases).
+
+> **Antes do v0.1.0 ser lançado:** este é o método via install-script que
+> funciona hoje — toda release publicada é um release candidate. Copie o
+> tag exato da página de releases acima.
+
+---
+
+## Instalação rápida
+
+```bash
+curl -sfL https://get.ezyshield.com | sudo sh
+```
+
+Isso faz download da última versão estável, verifica checksums e instala
+os binários em `/usr/local/bin/`.
+
+> **Antes do v0.1.0 ser lançado:** o comando acima detecta que ainda não
+> existe uma release estável e imprime instruções de instalação em vez de
+> instalar (veja acima, ou o repositório de pacotes `testing` mais acima)
+> — nenhuma flag será necessária assim que o v0.1.0 sair.
 
 ---
 
@@ -140,8 +157,9 @@ sudo systemctl restart ezyshield-enforcer ezyshield
 # Última versão estável
 curl -sfL https://get.ezyshield.com | sudo sh
 
-# Ou versão específica
-curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=v0.1.0 sh
+# Ou versão específica (confira a página de releases para o tag atual,
+# ex. v0.1.0-rc.N antes do v0.1.0 sair)
+curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=v0.1.0-rc.N sh
 
 sudo systemctl restart ezyshield-enforcer ezyshield
 ```
@@ -163,8 +181,9 @@ sudo rm -rf /etc/ezyshield
 
 | Variável | Propósito | Exemplo |
 |----------|-----------|---------|
-| `EZYSHIELD_VERSION` | Instalar uma versão específica (deve começar com `v`) | `EZYSHIELD_VERSION=v0.3.0-rc.1` |
-| `EZYSHIELD_BASE_URL` | Instalar a partir de um espelho customizado (sobrescreve seleção de versão) | `EZYSHIELD_BASE_URL=https://mirror.exemplo.com/ezyshield/v0.3.0` |
+| `EZYSHIELD_VERSION` | Instalar uma versão específica (deve começar com `v`) | `EZYSHIELD_VERSION=v0.1.0-rc.N` |
+| `EZYSHIELD_BASE_URL` | Instalar a partir de um espelho customizado (sobrescreve seleção de versão) | `EZYSHIELD_BASE_URL=https://mirror.exemplo.com/ezyshield/v0.1.0` |
+| `EZYSHIELD_API_BASE_URL` | Sobrescreve a base da API do GitHub usada para resolver metadados de release (espelhos privados de API, testes) | `EZYSHIELD_API_BASE_URL=https://api.mirror.exemplo.com` |
 
 ---
 

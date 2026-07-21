@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -63,6 +64,87 @@ func TestClient_LatestRelease(t *testing.T) {
 	}
 	if _, ok := rel.FindAsset("ezyshield-linux-amd64"); !ok {
 		t.Error("expected linux-amd64 asset in release")
+	}
+}
+
+// TestClient_LatestRelease_NoStableYet reproduces issue #235: before any
+// stable tag exists, GitHub's /releases/latest 404s. LatestRelease must
+// translate that into the named ErrNoStableRelease, not a bare "not found".
+func TestClient_LatestRelease_NoStableYet(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/test/repo/releases/latest", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+	})
+	_, c := httpsTestServer(t, mux)
+
+	_, err := c.LatestRelease(context.Background())
+	if !errors.Is(err, ErrNoStableRelease) {
+		t.Fatalf("LatestRelease error = %v, want errors.Is(err, ErrNoStableRelease)", err)
+	}
+}
+
+// TestClient_ReleaseByTag_NotFoundIsNotConfusedWithNoStableRelease guards
+// against the sentinel leaking into the wrong context: a bad/nonexistent
+// tag on ReleaseByTag is a different condition (typo, deleted release) and
+// must NOT be mistaken for "no stable release published yet".
+func TestClient_ReleaseByTag_NotFoundIsNotConfusedWithNoStableRelease(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/test/repo/releases/tags/v9.9.9", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+	})
+	_, c := httpsTestServer(t, mux)
+
+	_, err := c.ReleaseByTag(context.Background(), "v9.9.9")
+	if err == nil {
+		t.Fatal("want error for nonexistent tag")
+	}
+	if errors.Is(err, ErrNoStableRelease) {
+		t.Errorf("ReleaseByTag 404 must not be classified as ErrNoStableRelease: %v", err)
+	}
+	if !strings.Contains(err.Error(), "release not found") {
+		t.Errorf("expected a release-not-found style message, got %v", err)
+	}
+}
+
+func TestClient_NewestRelease(t *testing.T) {
+	t.Parallel()
+	var assetBase string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/test/repo/releases", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("per_page"); got != "1" {
+			t.Errorf("per_page = %q, want 1", got)
+		}
+		_ = json.NewEncoder(w).Encode([]Release{
+			fakeRelease("v0.1.0-rc.21", assetBase),
+			fakeRelease("v0.1.0-rc.20", assetBase),
+		})
+	})
+	srv, c := httpsTestServer(t, mux)
+	assetBase = srv.URL + "/dl"
+
+	rel, err := c.NewestRelease(context.Background())
+	if err != nil {
+		t.Fatalf("NewestRelease: %v", err)
+	}
+	if rel.TagName != "v0.1.0-rc.21" {
+		t.Errorf("TagName = %q, want the first (newest) entry v0.1.0-rc.21", rel.TagName)
+	}
+}
+
+func TestClient_NewestRelease_EmptyList(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/test/repo/releases", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]Release{})
+	})
+	_, c := httpsTestServer(t, mux)
+
+	if _, err := c.NewestRelease(context.Background()); err == nil {
+		t.Error("NewestRelease with zero releases published should error")
 	}
 }
 

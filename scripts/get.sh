@@ -4,8 +4,12 @@
 # For a specific version: curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=vX.Y.Z sh
 #
 # Environment variables:
-#   EZYSHIELD_VERSION    Install a specific release (e.g., v0.3.0-rc.1). Must start with 'v'.
-#   EZYSHIELD_BASE_URL   Install from a custom mirror. Overrides version selection.
+#   EZYSHIELD_VERSION      Install a specific release (e.g., v0.1.0-rc.21). Must start with 'v'.
+#   EZYSHIELD_BASE_URL     Install from a custom mirror. Overrides version selection.
+#   EZYSHIELD_API_BASE_URL Override the GitHub API base (default https://api.github.com)
+#                          used to resolve release metadata. For private API mirrors
+#                          and testing only — asset downloads still use github.com
+#                          unless EZYSHIELD_BASE_URL is also set.
 set -eu
 
 REPO="evertramos/ezy-shield"
@@ -61,12 +65,50 @@ elif [ -n "${EZYSHIELD_VERSION:-}" ]; then
   BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
   echo "Installing EzyShield ${VERSION} (${SUFFIX})..."
 else
-  # Default: fetch latest version
+  # Default: fetch the latest STABLE release. GitHub's releases/latest
+  # endpoint only ever returns non-prerelease releases; while every
+  # published tag is still a release candidate (pre-v0.1.0), it 404s, and
+  # that needs a clear, actionable message instead of a bare failure
+  # (issue #235). This self-heals the moment v0.1.0 ships — no changes
+  # needed here once a stable tag exists.
   echo "Fetching latest release..."
-  VERSION=$(curl -sfL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed 's/.*"tag_name": *"//;s/".*//')
+  API_BASE="${EZYSHIELD_API_BASE_URL:-https://api.github.com}"
+
+  LATEST_RESP=$(curl -sL -w '\n%{http_code}' "${API_BASE}/repos/${REPO}/releases/latest" 2>/dev/null) || LATEST_RESP=""
+  LATEST_HTTP_CODE=$(printf '%s' "$LATEST_RESP" | tail -n1)
+  LATEST_BODY=$(printf '%s' "$LATEST_RESP" | sed '$d')
+
+  VERSION=""
+  if [ "$LATEST_HTTP_CODE" = "200" ]; then
+    VERSION=$(printf '%s' "$LATEST_BODY" | grep '"tag_name"' | head -n1 | sed 's/.*"tag_name": *"//;s/".*//')
+  fi
 
   if [ -z "$VERSION" ]; then
-    echo "Error: could not determine latest version"
+    if [ "$LATEST_HTTP_CODE" = "404" ]; then
+      echo ""
+      echo "No stable release has been published yet — every EzyShield release"
+      echo "today is a release candidate (v0.1.0 is coming; this one-liner works"
+      echo "with no extra flags the moment it ships)."
+      echo ""
+      echo "Two ways to install right now:"
+      echo ""
+      echo "  1) apt/dnf 'testing' repository (see the install docs for setup):"
+      echo "     https://github.com/${REPO}#install"
+      echo ""
+      RC_TAG=$(curl -sfL "${API_BASE}/repos/${REPO}/releases?per_page=1" 2>/dev/null | grep '"tag_name"' | head -n1 | sed 's/.*"tag_name": *"//;s/".*//')
+      if [ -n "$RC_TAG" ]; then
+        echo "  2) Pin the latest release candidate explicitly:"
+        echo "     curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=${RC_TAG} sh"
+      else
+        echo "  2) Pin a specific release candidate (pick a tag from the list):"
+        echo "     https://github.com/${REPO}/releases"
+        echo "     curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=v0.1.0-rc.N sh"
+      fi
+      echo ""
+    else
+      echo "Error: could not determine latest version (HTTP ${LATEST_HTTP_CODE:-unreachable} from the GitHub API)"
+      echo "Available releases: https://github.com/${REPO}/releases"
+    fi
     exit 1
   fi
 

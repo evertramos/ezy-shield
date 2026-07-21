@@ -96,6 +96,14 @@ else
       echo "     https://github.com/${REPO}#install"
       echo ""
       RC_TAG=$(curl -sfL "${API_BASE}/repos/${REPO}/releases?per_page=1" 2>/dev/null | grep '"tag_name"' | head -n1 | sed 's/.*"tag_name": *"//;s/".*//')
+      # RC_TAG is API response data printed into a command line the operator
+      # will copy-paste — only trust it if it looks like a plain release tag
+      # (v + alphanumerics/dots/dashes); anything else degrades to the
+      # generic pointer below, same as a failed lookup.
+      case "$RC_TAG" in
+        v*) case "$RC_TAG" in *[!A-Za-z0-9.-]*) RC_TAG="" ;; esac ;;
+        *) RC_TAG="" ;;
+      esac
       if [ -n "$RC_TAG" ]; then
         echo "  2) Pin the latest release candidate explicitly:"
         echo "     curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=${RC_TAG} sh"

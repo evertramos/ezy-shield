@@ -309,7 +309,11 @@ func TestRunUpdate_TempBinaryIsExecutable(t *testing.T) {
 // found at ..." — naming the RC channel, a --version pin (resolved via the
 // releases-list API), EZYSHIELD_UPDATE_URL, and that binaries are untouched.
 func TestRunUpdate_NoStableReleaseYet(t *testing.T) {
-	t.Parallel()
+	// No t.Parallel(): this test overrides the package-level newClientHook
+	// (see withTestClient's doc comment) — the existing tests that touch
+	// the same hook are sequential for the same reason; running two such
+	// overrides in parallel is a data race on newClientHook itself, not a
+	// flake (caught by -race in CI).
 	var assetBase string
 	mux := http.NewServeMux()
 	// /releases/latest deliberately unregistered => 404, matching GitHub's
@@ -382,7 +386,8 @@ func TestRunUpdate_NoStableReleaseYet(t *testing.T) {
 // message still names the condition and points at the releases page
 // instead of erroring out entirely or omitting guidance.
 func TestRunUpdate_NoStableReleaseYet_NewestReleaseAlsoFails(t *testing.T) {
-	t.Parallel()
+	// No t.Parallel() — see the note in TestRunUpdate_NoStableReleaseYet:
+	// this also overrides the shared newClientHook.
 	mux := http.NewServeMux() // /releases/latest AND /releases both unregistered => both 404
 	srv := httptest.NewTLSServer(mux)
 	t.Cleanup(srv.Close)

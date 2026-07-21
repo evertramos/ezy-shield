@@ -50,6 +50,9 @@ var componentWizards = map[string]map[string]componentWizard{
 		"traefik": wizardCollectorWeb("traefik"),
 		"caddy":   wizardCollectorWeb("caddy"),
 	},
+	"enrich": {
+		"maxmind": wizardEnrichMaxmind,
+	},
 	"notifier": {
 		"telegram": wizardNotifierTelegram,
 		"email":    wizardNotifierEmail,

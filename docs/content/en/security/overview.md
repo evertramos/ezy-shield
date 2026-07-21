@@ -89,6 +89,15 @@ EzyShield opens no network listener for control (the optional dashboard binds to
 - CLI: `ezyshield ban`, `ezyshield list`, etc. (local only)
 - Unix socket: `/run/ezyshield/ezyshield.sock` (filesystem permissions)
 
+## Data flow
+
+Every outbound connection EzyShield can make — AI providers, Cloudflare,
+GeoIP updates, notifiers, `ezyshield update` — is opt-in and documented, with
+its trigger, payload, and off switch, in the
+[Data Flow Reference](../reference/data-flow.md). That page also gives the
+exact configuration for running fully local, with zero outbound traffic.
+There is no telemetry.
+
 ## Audit trail
 
 Every action is logged to SQLite:

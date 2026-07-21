@@ -37,6 +37,9 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      suite: ${{ steps.meta.outputs.suite }}
     steps:
       - uses: actions/checkout@v7
 
@@ -116,3 +119,12 @@ jobs:
             echo "- apt: \`deb [signed-by=…] https://packages.ezyshield.com/apt $SUITE main\`"
             echo "- yum: \`https://packages.ezyshield.com/rpm/$SUITE/\$basearch\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # A publish only counts if a real user can install from it: run the
+  # documented install flow against what was just uploaded (issue #165).
+  verify-install:
+    needs: publish
+    uses: ./.github/workflows/verify-install.yaml
+    with:
+      tag: ${{ needs.publish.outputs.tag }}
+      suite: ${{ needs.publish.outputs.suite }}

@@ -547,6 +547,14 @@ func runCloudflareSubflow(
 	}
 	p.println("  Cloudflare token validated OK.")
 
+	// Capability preflight (issue #234): a valid, correctly-scoped token
+	// does not mean the chosen configuration can work — plan quotas can
+	// still make it a guaranteed runtime failure. Prove feasibility now,
+	// while the operator is at the prompt, or refuse to write the config.
+	if !runCFCapabilityPreflight(ctx, p, deps, cfg, tok) {
+		return
+	}
+
 	// Success. Commit to the state; the writer step (in init.go) reads
 	// step.cfEnabled and emits the yaml.
 	step.cfCfg = cfg
@@ -564,6 +572,68 @@ func runCloudflareSubflow(
 		p.printf("    Expression: %s\n", step.cfWAFRuleExpression)
 		p.println("")
 	}
+}
+
+// runCFCapabilityPreflight proves the chosen mode can actually operate on
+// this account before any config is written (issue #234). Returns false
+// when setup must abort — the caller's deferred banner then fires and no
+// enforce.cloudflare section is emitted.
+//
+// Lists mode: create-or-adopt the configured Custom List right now. The
+// canonical failure this catches is a plan-quota refusal (free accounts get
+// a single custom list); it is rendered with the ways out instead of the
+// raw API error alone.
+//
+// Rulesets mode: report each zone's current WAF custom-rule count so the
+// operator can see slot headroom (free-plan zones allow 5 custom rules and
+// EzyShield needs one free slot). Informational — plan caps are not
+// queryable with the enforcer's own token scope, so counts cannot hard-fail
+// the wizard; a read error on any zone does abort (it means the zone ID or
+// scope is wrong in a way the earlier probe missed).
+func runCFCapabilityPreflight(ctx context.Context, p *wPrinter, deps cdnDeps, cfg *config.CloudflareCfg, token string) bool {
+	base := deps.CFAPIBaseURL
+	if base == "" {
+		base = "https://api.cloudflare.com/client/v4"
+	}
+	switch cfg.Mode {
+	case "lists":
+		res, err := cfEnsureList(ctx, deps.HTTPClient, base, cfg.AccountID, cfg.ListName, token)
+		if err != nil {
+			p.printf("  %v\n", err)
+			if res.QuotaExceeded {
+				p.println("")
+				p.println("  This usually means your Cloudflare plan's custom-list quota is")
+				p.println("  exhausted — free accounts get a single custom list. Ways out:")
+				p.println("    • delete an unused list in the CF dashboard (Manage Account →")
+				p.println("      Configurations → Lists) and re-run this setup, or")
+				p.println("    • upgrade the Cloudflare plan, or")
+				p.println("    • re-run and choose 'rulesets' mode (needs no custom list).")
+			}
+			p.println("  Refusing to write a Cloudflare config that cannot enforce.")
+			return false
+		}
+		if res.Adopted {
+			p.printf("  Adopting existing Custom IP List %q (%d item(s)).\n", cfg.ListName, res.Items)
+		} else {
+			p.printf("  Created Custom IP List %q on account %s.\n", cfg.ListName, cfg.AccountID)
+		}
+		return true
+
+	case "rulesets":
+		for _, zone := range cfg.ZoneIDs {
+			n, err := cfCountZoneRules(ctx, deps.HTTPClient, base, zone, token)
+			if err != nil {
+				p.printf("  %v\n", err)
+				p.println("  Refusing to write a Cloudflare config that cannot enforce.")
+				return false
+			}
+			p.printf("  Zone %s: %d WAF custom rule(s) currently in use.\n", zone, n)
+		}
+		p.println("  Note: EzyShield needs one free custom-rule slot per zone")
+		p.println("  (free-plan zones allow 5 WAF custom rules in total).")
+		return true
+	}
+	return true
 }
 
 // cfEnvVarForName picks the env-var NAME for a given CF account label.

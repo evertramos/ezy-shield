@@ -37,7 +37,6 @@ against:
 | `report <ip>` | Object: versioned abuse report (`schema_version`, `ip`, `country`, `asn`, `current_ban`, `strikes`, `actions`, plus `evidence` with `--evidence`) |
 | `report` | Array of offender summaries (`ip`, `first_seen`, `last_seen`, `total_strikes`, `banned`, `permanent`, `country`, `asn`) |
 | `watch` | NDJSON: one event object per line |
-| `scan` | Object: `listeners`, `new_listeners` |
 | `doctor` | Object: `checks` (`name`, `status`, `hint`) and `summary` (`total`, `pass`, `fail`) |
 | `config show` | Object: `config`, `policy` (effective values, secrets redacted) |
 | `version` | Object: `version`, `commit`, `build_date` |
@@ -439,24 +438,38 @@ Available names: `sshd`, `nginx`, `apache`, `traefik`, `caddy`.
 
 Exit codes: `0` saved, `1` wizard aborted or write failed, `2` config.yaml not found (run `init` first).
 
-## ezyshield scan
+### ezyshield config enrich `maxmind`
 
-Discover listening services on this host.
+Interactive wizard to set up (or remove) GeoIP/ASN enrichment with the free
+MaxMind GeoLite2 databases — the workflow that enables `block_countries` /
+`block_asns` in `policy.yaml` and the country/ASN columns in `list` and
+`report`.
 
 ```bash
-sudo ezyshield scan
-
-# JSON output
-sudo ezyshield scan --json
+sudo ezyshield config enrich maxmind
 ```
 
-Lists listening ports, protocols, and services, persists a baseline to
-SQLite, and flags **drift** — new listeners that appeared since the previous
-scan.
+- Asks for the two database paths (defaults under `/var/lib/ezyshield/`) and
+  whether the daemon should keep them updated (`auto_update`, default yes).
+- With `auto_update` on, the wizard asks for your MaxMind license key
+  ([free GeoLite2 signup](https://www.maxmind.com/en/geolite2/signup)) via the
+  standard secret prompt: paste it (stored in `.env` next to `config.yaml`,
+  mode 0600) or reference an env var you already manage — `config.yaml` only
+  ever carries `license_key: env:MAXMIND_LICENSE_KEY`. On the next daemon
+  start the databases are downloaded automatically if missing, then refreshed
+  weekly.
+- With `auto_update` off no key is needed: download `GeoLite2-Country.mmdb`
+  and `GeoLite2-ASN.mmdb` from your MaxMind account yourself and place them at
+  the configured paths. Missing files are not an error — the daemon runs with
+  empty enrichment until they appear.
+- To disable enrichment, answer `n` at the configure prompt: the wizard then
+  offers to remove the existing `enrich:` section (default no).
+- Write semantics match the other wizards: atomic write, `config.yaml.bak`,
+  re-validation before saving, changed-keys summary on success.
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--db` | `/var/lib/ezyshield/ezyshield.db` | baseline database path |
+Available names: `maxmind`.
+
+Exit codes: `0` saved, `1` wizard aborted or write failed, `2` config.yaml not found (run `init` first).
 
 ## ezyshield update
 

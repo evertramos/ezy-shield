@@ -1,0 +1,106 @@
+name: 🔏 Verify published packages install
+
+# Installs EzyShield from the signed repositories at packages.ezyshield.com
+# exactly as docs/content/en/getting-started/install.md tells a user to,
+# across the main distributions, and verifies the signature chain end to
+# end (fingerprint pinned in the docs, wrong-key negative test) — issue #165.
+# scripts/package/verify-install.sh does the actual work and is runnable
+# locally in docker (see its header / docs/internal/RELEASING.md).
+#
+# Three entry points:
+#   - workflow_call: chained after publish-repos.yaml — a release is only
+#     green if a real user could install it.
+#   - workflow_dispatch: verify a suite by hand.
+#   - schedule: weekly, both suites — catches R2 bit-rot and key expiry.
+#     An unpublished suite is reported and skipped (--allow-missing-suite),
+#     so the stable legs stay quiet until the first stable release exists.
+
+permissions:
+  contents: read
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: "Release tag just published (ezyshield version must match)"
+        required: true
+        type: string
+      suite:
+        description: "Suite the tag was published to (stable | testing)"
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: "Suite to verify"
+        required: true
+        default: testing
+        type: choice
+        options: [testing, stable]
+      tag:
+        description: "Expected release tag (optional, e.g. v0.1.0-rc.19)"
+        required: false
+  schedule:
+    - cron: "17 6 * * 1" # Mondays 06:17 UTC
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      suites: ${{ steps.plan.outputs.suites }}
+      tag: ${{ steps.plan.outputs.tag }}
+      allow_missing: ${{ steps.plan.outputs.allow_missing }}
+    steps:
+      - name: Resolve suites and expected tag
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_SUITE: ${{ inputs.suite }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [ "$EVENT" = "schedule" ]; then
+            echo 'suites=["testing","stable"]' >> "$GITHUB_OUTPUT"
+            echo 'tag=' >> "$GITHUB_OUTPUT"
+            echo 'allow_missing=true' >> "$GITHUB_OUTPUT"
+          else
+            case "$INPUT_SUITE" in
+              stable|testing) ;;
+              *) echo "::error::invalid suite '$INPUT_SUITE'"; exit 1 ;;
+            esac
+            printf 'suites=["%s"]\n' "$INPUT_SUITE" >> "$GITHUB_OUTPUT"
+            printf 'tag=%s\n' "$INPUT_TAG" >> "$GITHUB_OUTPUT"
+            echo 'allow_missing=false' >> "$GITHUB_OUTPUT"
+          fi
+
+  verify:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: ${{ fromJSON(needs.plan.outputs.suites) }}
+        image:
+          - "debian:12"
+          - "debian:13"
+          - "ubuntu:22.04"
+          - "ubuntu:24.04"
+          - "rockylinux:9"
+          - "almalinux:9"
+          - "fedora:42"
+    container:
+      image: ${{ matrix.image }}
+    name: verify (${{ matrix.image }}, ${{ matrix.suite }})
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install from published repo, verify signature chain
+        shell: bash
+        env:
+          SUITE: ${{ matrix.suite }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          ALLOW_MISSING: ${{ needs.plan.outputs.allow_missing }}
+        run: |
+          args=(--suite "$SUITE")
+          [ -n "$TAG" ] && args+=(--expect-version "$TAG")
+          [ "$ALLOW_MISSING" = "true" ] && args+=(--allow-missing-suite)
+          scripts/package/verify-install.sh "${args[@]}"

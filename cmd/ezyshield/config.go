@@ -28,7 +28,8 @@ Subcommands:
   enforcer   interactive wizard for one enforcer (e.g. cloudflare)
   notifier   interactive wizard for a notification channel (telegram/slack/...)
   ai         interactive wizard for an AI provider (anthropic/openai/ollama)
-  collector  interactive wizard for a log collector (sshd/nginx/apache/...)`,
+  collector  interactive wizard for a log collector (sshd/nginx/apache/...)
+  enrich     interactive wizard for GeoIP/ASN enrichment (maxmind)`,
 	}
 	cmd.AddCommand(
 		newConfigShowCmd(),
@@ -37,6 +38,7 @@ Subcommands:
 		newConfigComponentCmd("notifier", "Configure a notification channel interactively"),
 		newConfigComponentCmd("ai", "Configure an AI provider interactively"),
 		newConfigComponentCmd("collector", "Configure a log collector interactively"),
+		newConfigComponentCmd("enrich", "Configure GeoIP/ASN enrichment interactively"),
 	)
 	return cmd
 }

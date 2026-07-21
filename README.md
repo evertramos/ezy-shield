@@ -24,27 +24,59 @@ consulted only for the ambiguous cases, so decisions stay cheap and the tool
 runs fully offline if you never configure a provider. It ships as a single
 static Go binary — no Python, no Java, no runtime to install.
 
-> **Status: pre-alpha.** The pipeline, rule engine, nftables + Cloudflare
-> enforcement, AI providers, and notifiers work today. Run in dry-run (the
-> default) and please report bugs via [issues](https://github.com/evertramos/ezy-shield/issues).
-> Interfaces may still change before 1.0.
+> **Status: early release (v0.1).** Everything described below is implemented,
+> tested in CI, and running today on multiple Linux servers managed by the
+> maintainer. Start in dry-run (the default), watch the decisions, and arm it
+> once you trust them. Interfaces may still change before 1.0 — bug reports via
+> [issues](https://github.com/evertramos/ezy-shield/issues) are very welcome.
+
+---
+
+## Quickstart
+
+```sh
+curl -sfL https://get.ezyshield.com | sudo sh    # install (verifies SHA-256)
+sudo ezyshield init                              # guided setup — installs & starts the service
+ezyshield status                                 # see what it *would* have banned (dry-run)
+sudoedit /etc/ezyshield/policy.yaml              # set `armed: true` when you trust it
+sudo systemctl restart ezyshield                 # apply the new policy
+```
+
+> Before v0.1.0 ships, every release is a release candidate — the install
+> command above detects that and prints instructions instead of installing;
+> see [Install](#install) for the release-candidate command that works
+> today. No flags will be needed the moment v0.1.0 ships.
+
+That's the whole loop: `init` leaves the daemon running in dry-run; observe
+first, arm only once the decisions look right.
 
 ---
 
 ## Why EzyShield
 
-| | fail2ban | EzyShield |
-|---|---|---|
-| Bans | local firewall, per-jail bantime | **strike-based escalation** + local **and** edge (Cloudflare) |
-| Detection | regex filters | rule engine + signatures, **optional AI** for ambiguous traffic |
-| Lockout safety | manual `ignoreip` | **anti-lockout**: your SSH session + admin CIDRs auto-allowlisted before every rule write |
-| Default behavior | enforces immediately | **dry-run by default** — observe before you arm it |
-| Runtime | Python | single static binary, no dependencies |
+| | EzyShield | fail2ban | CrowdSec | SSHGuard |
+|---|---|---|---|---|
+| Language / runtime | Go, single static binary | Python | Go | C |
+| Setup | `ezyshield init`, dry-run by default | jails + regex filters | agent + Local API + remediation components (bouncers) | small config + firewall backend |
+| Strike escalation | built in: 5min → 1h → 24h → 7d → permanent, history kept forever | optional (`bantime.increment`, since 0.11) | per-scenario durations via profiles; escalation via custom expressions | yes — block time doubles per repeat offense |
+| Edge enforcement (CDN/WAF) | built in (Cloudflare) | via bundled actions (incl. Cloudflare) | yes — remediation components incl. Cloudflare | no — local firewall backends only |
+| Shared threat intel | no — not built in today | report-to actions (AbuseIPDB, DShield); no community blocklist | **yes — community blocklist + CTI; this is their core strength** | no |
+| Mandatory telemetry / account | none | none | signal sharing on by default (opt-out); console account optional | none |
+| Anti-lockout guarantees | automatic — SSH peer + admin CIDRs allowlisted before every rule write | manual `ignoreip` | manual whitelists | manual whitelisting |
+| AI usage | optional, ambiguous cases only; rule engine needs zero AI | none | none | none |
 
-fail2ban is battle-tested and great at what it does — EzyShield aims one layer
-higher: escalation, edge enforcement, AI-assisted scoring, and guardrails that
-make it hard to ban yourself. You can even run EzyShield as the brain and keep
-fail2ban for enforcement.
+fail2ban is battle-tested and great at what it does; CrowdSec's community
+blocklist is genuinely valuable and something EzyShield simply doesn't have;
+SSHGuard is admirably small and fast. EzyShield's bet is different: strike
+escalation, local **and** edge enforcement, and guardrails that make it hard
+to ban yourself — out of the box, from a single binary. You can even run
+EzyShield as the brain and keep fail2ban for enforcement.
+
+<sub>Comparison verified against each project's docs as of July 2026 —
+[fail2ban](https://github.com/fail2ban/fail2ban),
+[CrowdSec](https://docs.crowdsec.net),
+[SSHGuard](https://www.sshguard.net). Corrections welcome via
+[issues](https://github.com/evertramos/ezy-shield/issues).</sub>
 
 ---
 
@@ -107,10 +139,35 @@ still escalates today.
 - **Dry-run by default** — nothing is enforced until you set `armed: true`
 - **Ban rate limit** — `max_bans_per_minute` (default 30) so a bad rule or poisoned feed can't ban the internet
 - **Notifications** — Telegram, Email (SMTP), Slack, Discord, generic webhook
-- **Service & port discovery** — `ezyshield scan` inventories what's actually listening on the host
 - **Audit trail** — every action recorded in SQLite; JSON output for scripting
 - **Localhost-only dashboard** — small web UI over 127.0.0.1 with status, active bans, allowlist, event log, live WebSocket updates and a strike timeline; CSRF-protected manual ban/unban/allow; access remotely via SSH tunnel or Cloudflare Tunnel (see [docs](docs/content/en/reference/dashboard.md) and the [remote-access guide](docs/content/en/guides/dashboard-remote-access.md))
 - **Scriptable** — `--json` on commands; unix-socket control, no TCP port ever
+
+---
+
+## Your data is yours
+
+No telemetry, no phone-home, no account, no data sharing required for any
+feature. The rule engine scores everything offline; the only outbound
+connections are the ones **you** configure (edge enforcement, notifiers, AI
+providers) or run yourself (`ezyshield update`). AI is opt-in, and when
+enabled the provider never sees your logs: it receives only aggregated
+counters per IP — event kinds, counts, and GeoIP/ASN metadata if you've
+configured the MaxMind databases — never raw log lines.
+CI gates enforce that secrets and hostile log content can't reach the
+request ([prompt-injection](internal/ai/prompt_injection_test.go) and
+[secret-leak](internal/ai/secret_leak_test.go) tests).
+The complete map — every outbound connection, its trigger and payload, and
+the exact zero-outbound configuration — is in the
+[data-flow reference](docs/content/en/reference/data-flow.md).
+
+### Our pledge
+
+The local agent will never lose features to a paywall. The code is and stays
+open under AGPL-3.0. If a paid offering ever exists, it will be about
+coordination at scale — fleets, identity, compliance, support — never about
+the protection itself. If EzyShield defends one server well, that part stays
+free, forever. — [Evert](https://github.com/evertramos)
 
 ---
 
@@ -121,11 +178,19 @@ still escalates today.
 ```sh
 # Debian / Ubuntu
 curl -fsSL https://packages.ezyshield.com/ezyshield.asc | sudo gpg --dearmor -o /usr/share/keyrings/ezyshield.gpg
-echo "deb [signed-by=/usr/share/keyrings/ezyshield.gpg] https://packages.ezyshield.com/apt stable main" | sudo tee /etc/apt/sources.list.d/ezyshield.list
+echo "deb [signed-by=/usr/share/keyrings/ezyshield.gpg] https://packages.ezyshield.com/apt testing main" | sudo tee /etc/apt/sources.list.d/ezyshield.list
 sudo apt update && sudo apt install ezyshield
 ```
 
-GPG-signed repositories with `.deb` and `.rpm` for amd64/arm64 — dnf setup and details in the [install guide](docs/content/en/getting-started/install.md).
+GPG-signed repositories with `.deb` and `.rpm` for amd64/arm64 — dnf setup and details in the [install guide](docs/content/en/getting-started/install.md). Every release today is a release candidate, so this uses the `testing` suite; switch to `stable` once v0.1.0 ships.
+
+### Specific version (including release candidates)
+
+```sh
+curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=v0.1.0-rc.N sh
+```
+
+Check the [releases page](https://github.com/evertramos/ezy-shield/releases) for the current tag. This is the install-script method that works today, before v0.1.0 ships.
 
 ### Install script
 
@@ -134,13 +199,7 @@ curl -sfL https://get.ezyshield.com | sudo sh
 ```
 
 Fetches the latest release binaries (`ezyshield` and `ezyshield-enforcer`) and
-verifies their SHA-256 checksums.
-
-### Specific version (including release candidates)
-
-```sh
-curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=v0.1.0 sh
-```
+verifies their SHA-256 checksums. Before v0.1.0 ships (every release today is a release candidate), this prints install instructions instead — see "Specific version" above.
 
 See the [install guide](docs/content/en/getting-started/install.md) for all options (air-gapped mirrors, from source, upgrading).
 
@@ -171,8 +230,8 @@ sudo ezyshield doctor    # validate config, permissions, and dependencies
 ## Basic usage
 
 ```sh
-# Run the pipeline (dry-run until you set armed: true in policy.yaml)
-sudo ezyshield run
+# The daemon runs as a systemd service (installed and started by `init`)
+sudo systemctl status ezyshield
 
 # Inspect the running daemon
 ezyshield status
@@ -189,9 +248,6 @@ ezyshield list
 
 # Test a notification channel without waiting for a real event
 sudo ezyshield test notifier telegram
-
-# See what's listening on this host
-sudo ezyshield scan
 ```
 
 ---
@@ -232,7 +288,8 @@ notify:
 ```
 
 Start in dry-run (`armed: false` in `policy.yaml`), watch what it *would* block,
-then arm it. The full setup walkthrough — collectors, AI, notifications, custom
+then arm it and restart the daemon (`sudo systemctl restart ezyshield` —
+policy changes are read at startup). The full setup walkthrough — collectors, AI, notifications, custom
 rules — is in [docs/content/en/getting-started/index.md](docs/content/en/getting-started/index.md).
 
 ---

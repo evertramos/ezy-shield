@@ -116,6 +116,43 @@ admin_cidrs:
   - 10.0.0.0/8
 ```
 
+Because an allowlisted range can **never** be banned, keep entries as narrow
+as the traffic you actually need to exempt — a broad private range silently
+removes enforcement from everything inside it, permanently.
+
+### Docker hosts
+
+When `ezyshield init` detects Docker, it allowlists only the bridge network
+subnets that actually exist on the host (enumerated via the Docker API/CLI),
+never a blanket RFC1918 range. If enumeration fails, it falls back to
+Docker's own default bridge subnet (`172.17.0.0/16`) alone — still never the
+entire `172.16.0.0/12`. Hosts without Docker get no docker-related allowlist
+entry at all.
+
+The generated `policy.yaml` includes a commented-out example for adding a
+broader internal range (VPN, office LAN, a multi-host docker overlay)
+deliberately:
+
+```yaml
+# To allow a broader internal range (VPN, office LAN, a multi-host docker
+# overlay) deliberately, uncomment and edit the line below.
+# Trade-off: an allowlisted range can NEVER be banned (allowlist always wins
+# over rules, AI, and geo blocking) — the broader the range, the more of your
+# network permanently loses enforcement coverage.
+# 'ezyshield doctor' warns if any private allowlist entry is /16 or broader.
+#   - 10.0.0.0/8
+```
+
+`ezyshield doctor` warns (not fails) when the allowlist contains a private
+(RFC1918/ULA) range at `/16` or broader, whatever put it there.
+
+> **Upgrading from an older EzyShield?** `init` never rewrites an existing
+> `policy.yaml`, so a config generated before this fix keeps its
+> `172.16.0.0/12` entry unchanged. Review the `allowlist` section of your
+> `policy.yaml` and narrow that entry to your real docker bridge subnet(s)
+> (`docker network ls` / `docker network inspect`) — `ezyshield doctor` flags
+> the old entry as a WARN to remind you.
+
 ## Geo blocking
 
 | Field | Type | Description |

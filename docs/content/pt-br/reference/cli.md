@@ -37,7 +37,7 @@ seguros para scripts:
 | `report <ip>` | Objeto: relatório de abuso versionado (`schema_version`, `ip`, `country`, `asn`, `current_ban`, `strikes`, `actions`, mais `evidence` com `--evidence`) |
 | `report` | Array de resumos de ofensores (`ip`, `first_seen`, `last_seen`, `total_strikes`, `banned`, `permanent`, `country`, `asn`) |
 | `watch` | NDJSON: um objeto de evento por linha |
-| `doctor` | Objeto: `checks` (`name`, `status`, `hint`) e `summary` (`total`, `pass`, `fail`) |
+| `doctor` | Objeto: `checks` (`name`, `status`, `hint`) e `summary` (`total`, `pass`, `fail`, `warn`) |
 | `config show` | Objeto: `config`, `policy` (valores efetivos, segredos redigidos) |
 | `version` | Objeto: `version`, `commit`, `build_date` |
 
@@ -69,6 +69,16 @@ no host), **Collectors**, **Allowlist**, **Edge enforcers**, **AI analysis**,
 **Policy**, **Files** e **System services** — com marcas de status `✓`/`✗`/`!`
 por linha. A estilização segue as [convenções globais de cores](#cores);
 saída por pipe permanece texto puro.
+
+Quando o Docker é detectado, a seção **Environment** enumera as sub-redes de
+bridge do Docker que realmente existem no host e coloca na allowlist apenas
+essas — nunca uma faixa RFC1918 genérica. Se a enumeração falhar, o wizard
+recua para a sub-rede padrão do bridge do Docker (`172.17.0.0/16`) sozinha e
+imprime um aviso `!`. Hosts sem Docker não recebem nenhuma entrada
+relacionada a Docker na allowlist. Veja a seção de allowlist na
+[Referência de Policy](policy.md) para o trade-off de ampliar isso
+deliberadamente, e rode `ezyshield doctor` depois — ele avisa sobre qualquer
+entrada privada da allowlist `/16` ou mais ampla.
 
 Ao final, imprime uma seção **Summary**:
 
@@ -334,6 +344,11 @@ Verificações:
 - socket do enforcer alcançável
 - socket do docker presente (quando coletores Docker estão configurados)
 - permissões do arquivo de segredos `.env`
+- amplitude da allowlist: **WARN** (não FAIL) quando a allowlist do
+  `policy.yaml` contém uma faixa privada (RFC1918/ULA) `/16` ou mais ampla —
+  essa faixa nunca pode ser banida, então ela isenta silenciosamente um
+  pedaço grande do espaço de endereços do enforcement para sempre. Veja a
+  seção de allowlist na [Referência de Policy](policy.md).
 
 Para exercitar de verdade os enforcers e os canais de notificação, use
 `ezyshield test enforcer` e `ezyshield test notifier`.

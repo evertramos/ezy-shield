@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,14 +24,15 @@ import (
 const (
 	statusPass = "PASS"
 	statusFail = "FAIL"
+	statusWarn = "WARN"
 	statusNA   = "N/A"
 )
 
 // CheckResult is the result of a single doctor check.
 type CheckResult struct {
 	Name   string `json:"name"`
-	Status string `json:"status"`         // PASS | FAIL | N/A
-	Hint   string `json:"hint,omitempty"` // human-readable hint shown on FAIL/N/A
+	Status string `json:"status"`         // PASS | FAIL | WARN | N/A
+	Hint   string `json:"hint,omitempty"` // human-readable hint shown on FAIL/WARN/N/A
 }
 
 // DoctorSummary aggregates all check counts.
@@ -38,6 +40,7 @@ type DoctorSummary struct {
 	Total int `json:"total"`
 	Pass  int `json:"pass"`
 	Fail  int `json:"fail"`
+	Warn  int `json:"warn"`
 }
 
 func newDoctorCmd() *cobra.Command {
@@ -84,6 +87,7 @@ func runDoctor(cmd *cobra.Command, configDir string, jsonOut bool) error {
 		checkDockerSocket(),
 		checkEnvFile(filepath.Join(configDir, envFileName)),
 	}
+	checks = append(checks, checkAllowlistBreadth(configDir)...)
 	checks = append(checks, checkCloudflareEnforcers(configDir)...)
 
 	summary := DoctorSummary{Total: len(checks)}
@@ -93,6 +97,8 @@ func runDoctor(cmd *cobra.Command, configDir string, jsonOut bool) error {
 			summary.Pass++
 		case statusFail:
 			summary.Fail++
+		case statusWarn:
+			summary.Warn++
 		}
 	}
 
@@ -189,6 +195,69 @@ func checkFilePerms(path, label string) CheckResult {
 		}
 	}
 	return CheckResult{Name: label + ": permissions", Status: statusPass}
+}
+
+// maxSafeAllowlistPrefixLen is the narrowest (numerically largest) private
+// prefix length this check treats as "safe": anything at or below this bit
+// count (i.e. /16, /12, /8, ...) covers 65k+ addresses. Issue #210: an
+// allowlisted range can never be banned (allowlist always wins, hard rule
+// #1), so a blanket private-range entry silently exempts a large swath of
+// address space from enforcement forever.
+const maxSafeAllowlistPrefixLen = 16
+
+// checkAllowlistBreadth warns when policy.yaml's allowlist contains a very
+// broad private (RFC1918 / IPv6 ULA) range -- prefix length <= 16 (i.e.
+// /16, /12, /8). This is the same failure mode issue #210 fixed for
+// `ezyshield init`-generated policies (which used to write the entire
+// 172.16.0.0/12 for docker); this check catches the pattern in hand-edited
+// policies and in policies generated before the fix, which init does not
+// rewrite (see writeGeneratedPolicy's commented example and the docs note
+// in docs/content/en/reference/policy.md).
+//
+// Returns N/A when policy.yaml is absent or fails to parse -- checkFileExists
+// / checkFileParses already surface those failures. Never FAILs: a broad
+// allowlist entry may be a deliberate, informed operator choice (the
+// commented example `init` now writes explains the trade-off), so this is
+// advisory, not blocking.
+func checkAllowlistBreadth(configDir string) []CheckResult {
+	path := filepath.Join(configDir, "policy.yaml")
+	name := "policy.yaml: allowlist breadth"
+
+	pol, err := config.LoadPolicy(path)
+	if err != nil {
+		return []CheckResult{{
+			Name:   name,
+			Status: statusNA,
+			Hint:   "policy.yaml missing or invalid -- see the policy.yaml: exists / parses checks above",
+		}}
+	}
+
+	var results []CheckResult
+	for _, entry := range pol.Allowlist {
+		prefix, err := netip.ParsePrefix(entry)
+		if err != nil {
+			continue // bare IPs (host routes) are always narrow; skip non-CIDR entries
+		}
+		if !prefix.Addr().IsPrivate() {
+			continue // public ranges are out of scope for this check
+		}
+		if prefix.Bits() > maxSafeAllowlistPrefixLen {
+			continue // narrow enough
+		}
+		results = append(results, CheckResult{
+			Name:   name,
+			Status: statusWarn,
+			Hint: fmt.Sprintf(
+				"%q is a broad private range (/%d) that can never be banned -- "+
+					"allowlist always wins over rules, AI, and geo blocking. If this isn't deliberate, "+
+					"narrow it in %s; see the commented example there for the opt-in trade-off",
+				entry, prefix.Bits(), path),
+		})
+	}
+	if len(results) == 0 {
+		return []CheckResult{{Name: name, Status: statusPass}}
+	}
+	return results
 }
 
 // checkNFTPresent returns PASS when the nft binary is found in PATH.

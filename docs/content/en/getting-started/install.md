@@ -85,13 +85,44 @@ The version must start with `v`. Available versions are listed at [github.com/ev
 curl -sfL https://get.ezyshield.com | sudo sh
 ```
 
-This downloads the latest stable release, verifies checksums, and installs
-binaries to `/usr/local/bin/`.
+This one-liner is **package-first**: on a host with `apt-get` or `dnf`/`yum`
+where the package repository is reachable, it sets up the same repo shown
+above (GPG key + source entry) and installs via the package manager —
+identical result to following the apt/dnf steps by hand. Raw binaries in
+`/usr/local/bin/` are used only when:
 
-> **Before v0.1.0 ships:** the command above detects that no stable release
-> exists yet and prints install instructions instead of installing (see
-> above, or the `testing` package repo further up) — no flags needed once
-> v0.1.0 ships.
+- the host has no `apt-get`/`dnf`/`yum` at all,
+- `EZYSHIELD_BASE_URL` points at a custom mirror (air-gapped install), or
+- the package repo setup or reachability check fails — the script prints a
+  warning and falls back automatically so the install still completes.
+
+One exception: if the host **already runs a package-managed EzyShield
+install**, every binary-mode path refuses instead of installing (raw
+binaries in `/usr/local/bin` would shadow the package's `/usr/bin` ones) —
+upgrade with `apt`/`dnf` there, or set `EZYSHIELD_FORCE_SCRIPT=1` to
+override with a loud warning.
+
+You can force either path explicitly with `EZYSHIELD_METHOD`:
+
+```bash
+# Always install packages (fails loudly if that's not possible)
+curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_METHOD=packages sh
+
+# Always install raw binaries, even if a package manager is present
+curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_METHOD=binary sh
+```
+
+If the script finds a previous script install (binaries in
+`/usr/local/bin`, units in `/etc/systemd/system`) while routing to a
+package install, it prints the exact cleanup commands so the new package
+isn't silently shadowed — see
+[Migrating from the script install to packages](#migrating-from-the-script-install-to-packages)
+below.
+
+> **Before v0.1.0 ships:** when neither install method resolves a stable
+> release, the command above prints install instructions instead of
+> installing (see the `testing` package repo further up) — no flags needed
+> once v0.1.0 ships.
 
 ---
 
@@ -150,25 +181,93 @@ Config files in `/etc/ezyshield` are never touched by package upgrades. Restart 
 sudo systemctl restart ezyshield-enforcer ezyshield
 ```
 
-**Installed via the install script** (binaries in `/usr/local/bin`) — re-run it; it replaces the binaries in place:
+**Installed via the install script** (binaries in `/usr/local/bin`) — re-run
+it. On a host with `apt-get`/`dnf` now available, the script is
+package-first by default (see [Quick install](#quick-install)) and will
+offer to migrate you to packages instead of just replacing the binaries —
+see the next section. To keep upgrading in binary mode explicitly:
 
 ```bash
-# Latest stable
-curl -sfL https://get.ezyshield.com | sudo sh
+# Latest stable, staying on the raw-binary install
+curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_METHOD=binary sh
 
 # Or a specific version (check the releases page for the current tag,
 # e.g. v0.1.0-rc.N before v0.1.0 ships)
-curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=v0.1.0-rc.N sh
+curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_METHOD=binary EZYSHIELD_VERSION=v0.1.0-rc.N sh
 
 sudo systemctl restart ezyshield-enforcer ezyshield
 ```
 
 ---
 
-## Uninstalling
+## Migrating from the script install to packages
+
+A host first installed via the script (binaries in `/usr/local/bin`, units
+in `/etc/systemd/system`) that later gets `apt install`/`dnf install`
+ezyshield can end up silently running the **old** build everywhere:
+`/usr/local/bin` precedes `/usr/bin` in `PATH`, and unit files in
+`/etc/systemd/system` take precedence over the package's units in
+`/usr/lib/systemd/system` — the package manager reports the new version
+installed, but the binary and service that actually run are the old ones.
+
+Two ways to fix or avoid this:
+
+**Let get.sh do it.** Re-running the one-liner on a host with `apt-get`/`dnf`
+routes to the package install by default (see [Quick install](#quick-install))
+and detects a shadowing script install automatically, printing the exact
+cleanup commands:
 
 ```bash
-sudo rm /usr/local/bin/ezyshield /usr/local/bin/ezyshield-enforcer
+curl -sfL https://get.ezyshield.com | sudo sh
+```
+
+It only executes the cleanup when you opt in — pass `EZYSHIELD_CLEANUP=1`
+for a non-interactive run, or answer the interactive prompt:
+
+```bash
+curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_CLEANUP=1 sh
+```
+
+**Or clean up manually** (same commands the script prints):
+
+```bash
+sudo systemctl stop ezyshield ezyshield-enforcer
+sudo rm -f /usr/local/bin/ezyshield /usr/local/bin/ezyshield-enforcer
+sudo rm -f /etc/systemd/system/ezyshield.service /etc/systemd/system/ezyshield-enforcer.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now ezyshield-enforcer ezyshield
+```
+
+Either way, run `ezyshield doctor` afterwards — it FAILs loudly if a script
+install is still shadowing the package (binary present in more than one
+`PATH` location with differing content, or a `/etc/systemd/system` unit
+override whose `ExecStart` still points at `/usr/local/bin`), and the hint
+it prints repeats the exact cleanup commands above.
+
+---
+
+## Uninstalling
+
+**Installed via apt / dnf:**
+
+```bash
+# Debian / Ubuntu
+sudo apt remove ezyshield
+
+# RHEL / Rocky / Alma
+sudo dnf remove ezyshield
+
+# Also remove configuration (if desired)
+sudo rm -rf /etc/ezyshield
+```
+
+**Installed via the install script** — `get.sh` itself removes exactly the
+files it installed (binaries in `/usr/local/bin`, units in
+`/etc/systemd/system`) and never touches package-managed files:
+
+```bash
+curl -sfL https://get.ezyshield.com | sudo sh -s -- --uninstall
+# equivalent: curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_UNINSTALL=1 sh
 
 # Also remove configuration (if desired)
 sudo rm -rf /etc/ezyshield
@@ -180,9 +279,14 @@ sudo rm -rf /etc/ezyshield
 
 | Variable | Purpose | Example |
 |----------|---------|---------|
-| `EZYSHIELD_VERSION` | Install a specific release (must start with `v`) | `EZYSHIELD_VERSION=v0.1.0-rc.N` |
-| `EZYSHIELD_BASE_URL` | Install from a custom mirror (overrides version selection) | `EZYSHIELD_BASE_URL=https://mirror.example.com/ezyshield/v0.1.0` |
+| `EZYSHIELD_METHOD` | `auto` (default), `packages`, or `binary` — force the install method instead of auto-detecting | `EZYSHIELD_METHOD=binary` |
+| `EZYSHIELD_VERSION` | Install a specific release (must start with `v`). Binary mode only | `EZYSHIELD_VERSION=v0.1.0-rc.N` |
+| `EZYSHIELD_BASE_URL` | Install from a custom mirror (overrides version selection, forces binary mode) | `EZYSHIELD_BASE_URL=https://mirror.example.com/ezyshield/v0.1.0` |
 | `EZYSHIELD_API_BASE_URL` | Override the GitHub API base used to resolve release metadata (private API mirrors, testing) | `EZYSHIELD_API_BASE_URL=https://api.mirror.example.com` |
+| `EZYSHIELD_PACKAGES_BASE_URL` | Override the package repo base used for repo setup and the reachability check (private mirrors, testing) | `EZYSHIELD_PACKAGES_BASE_URL=https://packages.mirror.example.com` |
+| `EZYSHIELD_CLEANUP` | Set to `1` to non-interactively remove a shadowing script install when routing to a package install | `EZYSHIELD_CLEANUP=1` |
+| `EZYSHIELD_UNINSTALL` | Set to `1` (equivalent to `--uninstall`) to remove script-install artifacts and exit | `EZYSHIELD_UNINSTALL=1` |
+| `EZYSHIELD_FORCE_SCRIPT` | Set to `1` to force a raw-binary install onto a host that already has a package-managed install — by default every binary-mode path refuses there, because `/usr/local/bin` binaries would shadow the package's | `EZYSHIELD_FORCE_SCRIPT=1` |
 
 ---
 

@@ -54,6 +54,8 @@ func newDoctorCmd() *cobra.Command {
   - file permissions -- config files are not world-readable
   - nft binary -- nftables is installed
   - journald -- journalctl is present and accessible
+  - install shadowing -- a previous script install (scripts/get.sh) isn't
+    silently shadowing a package install via PATH or systemd unit precedence
 
 Each check prints PASS, FAIL, or N/A with a remediation hint on failure.`,
 		Args: cobra.NoArgs,
@@ -89,6 +91,10 @@ func runDoctor(cmd *cobra.Command, configDir string, jsonOut bool) error {
 	}
 	checks = append(checks, checkAllowlistBreadth(configDir)...)
 	checks = append(checks, checkCloudflareEnforcers(configDir)...)
+	// issue #240: PATH/systemd shadowing between a script install and a
+	// package install. New function + this single registration line only --
+	// see doctor_shadow.go.
+	checks = append(checks, checkInstallShadowing(os.Getenv("PATH"))...)
 
 	summary := DoctorSummary{Total: len(checks)}
 	for _, c := range checks {

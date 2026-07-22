@@ -86,13 +86,46 @@ A versão deve começar com `v`. As versões disponíveis estão listadas em [gi
 curl -sfL https://get.ezyshield.com | sudo sh
 ```
 
-Isso faz download da última versão estável, verifica checksums e instala
-os binários em `/usr/local/bin/`.
+Esse one-liner é **package-first**: em um host com `apt-get` ou `dnf`/`yum`
+onde o repositório de pacotes está acessível, ele configura o mesmo
+repositório mostrado acima (chave GPG + entrada de source) e instala via
+gerenciador de pacotes — resultado idêntico a seguir os passos de apt/dnf
+manualmente. Os binários crus em `/usr/local/bin/` só são usados quando:
 
-> **Antes do v0.1.0 ser lançado:** o comando acima detecta que ainda não
-> existe uma release estável e imprime instruções de instalação em vez de
-> instalar (veja acima, ou o repositório de pacotes `testing` mais acima)
-> — nenhuma flag será necessária assim que o v0.1.0 sair.
+- o host não tem `apt-get`/`dnf`/`yum` algum,
+- `EZYSHIELD_BASE_URL` aponta para um espelho customizado (instalação air-gapped), ou
+- a configuração do repositório ou a checagem de acessibilidade falha — o
+  script imprime um aviso e cai para o modo binário automaticamente, então a
+  instalação ainda é concluída.
+
+Uma exceção: se o host **já roda uma instalação de EzyShield gerenciada por
+pacote**, todo caminho de modo binário se recusa em vez de instalar
+(binários crus em `/usr/local/bin` esconderiam os do pacote em `/usr/bin`)
+— atualize com `apt`/`dnf` nesse caso, ou defina `EZYSHIELD_FORCE_SCRIPT=1`
+para sobrepor com um aviso ruidoso.
+
+Você pode forçar qualquer um dos dois caminhos explicitamente com `EZYSHIELD_METHOD`:
+
+```bash
+# Sempre instalar via pacotes (falha ruidosamente se não for possível)
+curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_METHOD=packages sh
+
+# Sempre instalar binários crus, mesmo com um gerenciador de pacotes presente
+curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_METHOD=binary sh
+```
+
+Se o script encontrar uma instalação via script anterior (binários em
+`/usr/local/bin`, units em `/etc/systemd/system`) ao rotear para uma
+instalação via pacote, ele imprime os comandos exatos de limpeza para que o
+novo pacote não fique escondido atrás da instalação antiga — veja
+[Migrando da instalação via script para pacotes](#migrando-da-instalação-via-script-para-pacotes)
+abaixo.
+
+> **Antes do v0.1.0 ser lançado:** quando nenhum dos dois métodos de
+> instalação resolve uma release estável, o comando acima imprime
+> instruções de instalação em vez de instalar (veja o repositório de
+> pacotes `testing` mais acima) — nenhuma flag será necessária assim que o
+> v0.1.0 sair.
 
 ---
 
@@ -151,25 +184,96 @@ Os arquivos de configuração em `/etc/ezyshield` nunca são tocados pelo upgrad
 sudo systemctl restart ezyshield-enforcer ezyshield
 ```
 
-**Instalado via script** (binários em `/usr/local/bin`) — rode o script de novo; ele substitui os binários no lugar:
+**Instalado via script** (binários em `/usr/local/bin`) — rode o script de
+novo. Em um host com `apt-get`/`dnf` disponível agora, o script é
+package-first por padrão (veja [Instalação rápida](#instalação-rápida)) e vai
+oferecer migrar você para pacotes em vez de só substituir os binários — veja
+a próxima seção. Para continuar atualizando em modo binário explicitamente:
 
 ```bash
-# Última versão estável
-curl -sfL https://get.ezyshield.com | sudo sh
+# Última versão estável, permanecendo na instalação via binário
+curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_METHOD=binary sh
 
 # Ou versão específica (confira a página de releases para o tag atual,
 # ex. v0.1.0-rc.N antes do v0.1.0 sair)
-curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=v0.1.0-rc.N sh
+curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_METHOD=binary EZYSHIELD_VERSION=v0.1.0-rc.N sh
 
 sudo systemctl restart ezyshield-enforcer ezyshield
 ```
 
 ---
 
-## Desinstalando
+## Migrando da instalação via script para pacotes
+
+Um host instalado primeiro via script (binários em `/usr/local/bin`, units em
+`/etc/systemd/system`) que depois recebe `apt install`/`dnf install`
+ezyshield pode acabar rodando silenciosamente a build **antiga** em tudo:
+`/usr/local/bin` vem antes de `/usr/bin` no `PATH`, e os arquivos de unit em
+`/etc/systemd/system` têm precedência sobre as units do pacote em
+`/usr/lib/systemd/system` — o gerenciador de pacotes reporta a versão nova
+instalada, mas o binário e o serviço que realmente rodam são os antigos.
+
+Duas formas de corrigir ou evitar isso:
+
+**Deixe o get.sh fazer isso.** Rodar o one-liner de novo em um host com
+`apt-get`/`dnf` roteia para a instalação via pacote por padrão (veja
+[Instalação rápida](#instalação-rápida)) e detecta uma instalação via script
+que esteja escondendo o pacote automaticamente, imprimindo os comandos
+exatos de limpeza:
 
 ```bash
-sudo rm /usr/local/bin/ezyshield /usr/local/bin/ezyshield-enforcer
+curl -sfL https://get.ezyshield.com | sudo sh
+```
+
+Ele só executa a limpeza quando você opta por isso — passe
+`EZYSHIELD_CLEANUP=1` para uma execução não interativa, ou responda ao
+prompt interativo:
+
+```bash
+curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_CLEANUP=1 sh
+```
+
+**Ou limpe manualmente** (os mesmos comandos que o script imprime):
+
+```bash
+sudo systemctl stop ezyshield ezyshield-enforcer
+sudo rm -f /usr/local/bin/ezyshield /usr/local/bin/ezyshield-enforcer
+sudo rm -f /etc/systemd/system/ezyshield.service /etc/systemd/system/ezyshield-enforcer.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now ezyshield-enforcer ezyshield
+```
+
+De qualquer forma, rode `ezyshield doctor` depois — ele FAIL ruidosamente se
+uma instalação via script ainda estiver escondendo o pacote (binário
+presente em mais de um local do `PATH` com conteúdo diferente, ou uma
+override de unit em `/etc/systemd/system` cujo `ExecStart` ainda aponta para
+`/usr/local/bin`), e a dica que ele imprime repete os comandos exatos de
+limpeza acima.
+
+---
+
+## Desinstalando
+
+**Instalado via apt / dnf:**
+
+```bash
+# Debian / Ubuntu
+sudo apt remove ezyshield
+
+# RHEL / Rocky / Alma
+sudo dnf remove ezyshield
+
+# Também remover configuração (se desejado)
+sudo rm -rf /etc/ezyshield
+```
+
+**Instalado via script** — o próprio `get.sh` remove exatamente os arquivos
+que ele instalou (binários em `/usr/local/bin`, units em
+`/etc/systemd/system`) e nunca toca em arquivos gerenciados pelo pacote:
+
+```bash
+curl -sfL https://get.ezyshield.com | sudo sh -s -- --uninstall
+# equivalente: curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_UNINSTALL=1 sh
 
 # Também remover configuração (se desejado)
 sudo rm -rf /etc/ezyshield
@@ -181,9 +285,14 @@ sudo rm -rf /etc/ezyshield
 
 | Variável | Propósito | Exemplo |
 |----------|-----------|---------|
-| `EZYSHIELD_VERSION` | Instalar uma versão específica (deve começar com `v`) | `EZYSHIELD_VERSION=v0.1.0-rc.N` |
-| `EZYSHIELD_BASE_URL` | Instalar a partir de um espelho customizado (sobrescreve seleção de versão) | `EZYSHIELD_BASE_URL=https://mirror.exemplo.com/ezyshield/v0.1.0` |
+| `EZYSHIELD_METHOD` | `auto` (padrão), `packages`, ou `binary` — força o método de instalação em vez de auto-detectar | `EZYSHIELD_METHOD=binary` |
+| `EZYSHIELD_VERSION` | Instalar uma versão específica (deve começar com `v`). Só no modo binário | `EZYSHIELD_VERSION=v0.1.0-rc.N` |
+| `EZYSHIELD_BASE_URL` | Instalar a partir de um espelho customizado (sobrescreve seleção de versão, força modo binário) | `EZYSHIELD_BASE_URL=https://mirror.exemplo.com/ezyshield/v0.1.0` |
 | `EZYSHIELD_API_BASE_URL` | Sobrescreve a base da API do GitHub usada para resolver metadados de release (espelhos privados de API, testes) | `EZYSHIELD_API_BASE_URL=https://api.mirror.exemplo.com` |
+| `EZYSHIELD_PACKAGES_BASE_URL` | Sobrescreve a base do repositório de pacotes usada na configuração do repo e na checagem de acessibilidade (espelhos privados, testes) | `EZYSHIELD_PACKAGES_BASE_URL=https://packages.mirror.exemplo.com` |
+| `EZYSHIELD_CLEANUP` | Defina como `1` para remover uma instalação via script que esteja escondendo o pacote, sem interação, ao rotear para uma instalação via pacote | `EZYSHIELD_CLEANUP=1` |
+| `EZYSHIELD_UNINSTALL` | Defina como `1` (equivalente a `--uninstall`) para remover os artefatos da instalação via script e sair | `EZYSHIELD_UNINSTALL=1` |
+| `EZYSHIELD_FORCE_SCRIPT` | Defina como `1` para forçar uma instalação via binário em um host que já tem uma instalação gerenciada por pacote — por padrão todo caminho de modo binário se recusa nesse caso, porque binários em `/usr/local/bin` esconderiam os do pacote | `EZYSHIELD_FORCE_SCRIPT=1` |
 
 ---
 

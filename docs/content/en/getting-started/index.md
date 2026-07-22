@@ -322,8 +322,10 @@ sudo ezyshield test notifier email
 sudo ezyshield run
 ```
 
-While `armed: false`, EzyShield runs in **dry-run**: it processes everything and
-logs what *would* be blocked, without touching the firewall.
+While `armed: false`, EzyShield runs in **dry-run**: it processes everything,
+records strikes and simulated bans so escalation mirrors production exactly
+(ADR-0009), and logs what *would* be blocked — without ever touching the
+firewall.
 
 ### As a systemd service
 

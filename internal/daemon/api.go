@@ -59,8 +59,13 @@ type StatusData struct {
 	Uptime string `json:"uptime"`
 	// Armed mirrors policy.Armed: true means bans are enforced, false = dry-run.
 	Armed bool `json:"armed"`
-	// ActiveBans is the count of IPs currently in bans_active.
+	// ActiveBans is the count of IPs currently in bans_active that are
+	// really enforced. Simulated dry-run bans are excluded — counting them
+	// as "active" would overstate protection.
 	ActiveBans int `json:"active_bans"`
+	// SimulatedBans is the count of dry-run simulated bans (ADR-0009 §5):
+	// IPs that WOULD be banned right now if the daemon were armed.
+	SimulatedBans int `json:"simulated_bans,omitempty"`
 	// Version is the daemon binary version string.
 	Version string `json:"version"`
 	// AISpendToday is the estimated USD cost of AI provider calls today.
@@ -81,6 +86,9 @@ type BanEntry struct {
 	// ASN is the autonomous system number string (e.g. "AS12345"), or "" when
 	// enrichment is not configured.
 	ASN string `json:"asn,omitempty"`
+	// Simulated is true for dry-run bans (ADR-0009 §5): recorded for
+	// escalation/suppression while armed=false, never enforced.
+	Simulated bool `json:"simulated,omitempty"`
 }
 
 // EventEntry is one element in the array returned by the "events" verb.

@@ -39,14 +39,17 @@ func newStatusCmd() *cobra.Command {
 
 // StatusOutput is the stable schema for --json output.
 type StatusOutput struct {
-	Daemon       string         `json:"daemon"`
-	Enforcer     string         `json:"enforcer"`
-	Mode         string         `json:"mode,omitempty"`
-	Uptime       string         `json:"uptime,omitempty"`
-	Version      string         `json:"version,omitempty"`
-	ActiveBans   int            `json:"active_bans"`
-	BansByStrike map[string]int `json:"bans_by_strike,omitempty"`
-	Message      string         `json:"message,omitempty"`
+	Daemon     string `json:"daemon"`
+	Enforcer   string `json:"enforcer"`
+	Mode       string `json:"mode,omitempty"`
+	Uptime     string `json:"uptime,omitempty"`
+	Version    string `json:"version,omitempty"`
+	ActiveBans int    `json:"active_bans"`
+	// SimulatedBans counts dry-run simulated bans (ADR-0009 §5): IPs that
+	// would be banned right now if the daemon were armed. Never enforced.
+	SimulatedBans int            `json:"simulated_bans,omitempty"`
+	BansByStrike  map[string]int `json:"bans_by_strike,omitempty"`
+	Message       string         `json:"message,omitempty"`
 }
 
 func runStatus(cmd *cobra.Command, socketPath, enforcerSocketPath string) error {
@@ -69,6 +72,7 @@ func runStatus(cmd *cobra.Command, socketPath, enforcerSocketPath string) error 
 	out.Uptime = sd.Uptime
 	out.Version = sd.Version
 	out.ActiveBans = sd.ActiveBans
+	out.SimulatedBans = sd.SimulatedBans
 	if sd.Armed {
 		out.Mode = "enforce"
 	} else {
@@ -145,6 +149,9 @@ func printStatusText(cmd *cobra.Command, out StatusOutput) error {
 	fmt.Fprintf(w, "uptime:    %s\n", out.Uptime)     //nolint:errcheck
 	fmt.Fprintf(w, "version:   %s\n", out.Version)    //nolint:errcheck
 	fmt.Fprintf(w, "bans:      %d\n", out.ActiveBans) //nolint:errcheck
+	if out.SimulatedBans > 0 {
+		fmt.Fprintf(w, "simulated: %d (dry-run — would be banned if armed)\n", out.SimulatedBans) //nolint:errcheck
+	}
 	if len(out.BansByStrike) > 0 {
 		keys := make([]string, 0, len(out.BansByStrike))
 		for k := range out.BansByStrike {

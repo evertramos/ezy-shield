@@ -841,7 +841,7 @@ func TestGetBanInfo_NotPresent(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
 
-	_, _, found, err := db.GetBanInfo(ctx, ip1)
+	_, _, _, found, err := db.GetBanInfo(ctx, ip1)
 	if err != nil {
 		t.Fatalf("GetBanInfo on empty DB: %v", err)
 	}
@@ -860,7 +860,7 @@ func TestGetBanInfo_PresentAfterStrike(t *testing.T) {
 	if err := db.RecordStrike(ctx, action(ip1, 2, time.Hour)); err != nil {
 		t.Fatalf("RecordStrike: %v", err)
 	}
-	bannedAt, strike, found, err := db.GetBanInfo(ctx, ip1)
+	bannedAt, strike, _, found, err := db.GetBanInfo(ctx, ip1)
 	if err != nil {
 		t.Fatalf("GetBanInfo: %v", err)
 	}
@@ -891,7 +891,7 @@ func TestGetBanInfo_FalseAfterExpiry(t *testing.T) {
 		t.Fatalf("ExpireBans: %v", err)
 	}
 
-	_, _, found, err := db.GetBanInfo(ctx, ip1)
+	_, _, _, found, err := db.GetBanInfo(ctx, ip1)
 	if err != nil {
 		t.Fatalf("GetBanInfo post-expiry: %v", err)
 	}
@@ -915,7 +915,7 @@ func TestGetBanInfo_PermanentNeverExpires(t *testing.T) {
 		t.Fatalf("ExpireBans: %v", err)
 	}
 
-	_, strike, found, err := db.GetBanInfo(ctx, ip1)
+	_, strike, _, found, err := db.GetBanInfo(ctx, ip1)
 	if err != nil {
 		t.Fatalf("GetBanInfo post-expire: %v", err)
 	}
@@ -1185,5 +1185,90 @@ func TestHadIneffectiveBan_Default(t *testing.T) {
 	}
 	if had {
 		t.Error("want false for offender without ineffective bans")
+	}
+}
+
+// ── dry-run simulated bans (ADR-0009 §5, issue #145) ─────────────────────────
+
+// dryAction mirrors action() with Op="dry_ban" — a dry-run simulated ban.
+func dryAction(ip netip.Addr, strike int, ttl time.Duration) sdk.Action {
+	a := action(ip, strike, ttl)
+	a.Op = "dry_ban"
+	return a
+}
+
+// TestDryRunBan_FlagRoundTrip verifies a dry_ban strike stores dry_run=1 and
+// GetBanInfo/ActiveBans both report it as simulated, and that a subsequent
+// real strike overwrites the flag (the armed engine falls through leftover
+// simulated bans and records a real one).
+func TestDryRunBan_FlagRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	if err := db.RecordStrike(ctx, dryAction(ip1, 1, time.Hour)); err != nil {
+		t.Fatalf("RecordStrike dry: %v", err)
+	}
+
+	_, strike, dryRun, found, err := db.GetBanInfo(ctx, ip1)
+	if err != nil || !found {
+		t.Fatalf("GetBanInfo: found=%v err=%v", found, err)
+	}
+	if !dryRun {
+		t.Error("GetBanInfo dryRun = false, want true for a dry_ban row")
+	}
+	if strike != 1 {
+		t.Errorf("strike = %d, want 1", strike)
+	}
+
+	bans, err := db.ActiveBans(ctx)
+	if err != nil {
+		t.Fatalf("ActiveBans: %v", err)
+	}
+	if len(bans) != 1 || bans[0].Op != "dry_ban" {
+		t.Fatalf("ActiveBans = %+v, want one entry with Op=dry_ban", bans)
+	}
+
+	// A real strike for the same IP must clear the flag via the upsert.
+	if err := db.RecordStrike(ctx, action(ip1, 2, time.Hour)); err != nil {
+		t.Fatalf("RecordStrike real: %v", err)
+	}
+	_, _, dryRun, found, err = db.GetBanInfo(ctx, ip1)
+	if err != nil || !found {
+		t.Fatalf("GetBanInfo after real strike: found=%v err=%v", found, err)
+	}
+	if dryRun {
+		t.Error("dry_run still set after a real strike — the enforcer sync would skip a REAL ban")
+	}
+}
+
+// TestDryRunBan_ExpiresWithDistinctAuditReason verifies simulated bans expire
+// through the normal sweep and the audit entry names the simulated TTL.
+func TestDryRunBan_ExpiresWithDistinctAuditReason(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	if err := db.RecordStrike(ctx, dryAction(ip1, 1, time.Millisecond)); err != nil {
+		t.Fatalf("RecordStrike dry: %v", err)
+	}
+	n, err := db.ExpireBans(ctx, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("ExpireBans: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("expired = %d, want 1", n)
+	}
+
+	entries, err := db.ListAuditLog(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListAuditLog: %v", err)
+	}
+	var found bool
+	for _, e := range entries {
+		if e.Op == "expire" && e.Reason == "simulated ttl expired" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no audit entry with reason 'simulated ttl expired'; entries=%+v", entries)
 	}
 }

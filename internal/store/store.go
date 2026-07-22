@@ -147,10 +147,19 @@ func parseMigrationVersion(name string) (int, error) {
 // RecordStrike records a new strike for the IP in a, upserts the offender row
 // (preserving first_seen), inserts a ban into bans_active, and appends an
 // audit entry — all in one transaction.
+//
+// When a.Op is "dry_ban" (ADR-0009 §5) the bans_active row is marked
+// dry_run=1: a simulated ban that drives suppression in dry-run mode but is
+// never handed to an enforcer. A later real strike for the same IP
+// overwrites the row with dry_run=0 via the upsert.
 func (s *DB) RecordStrike(ctx context.Context, a sdk.Action) error {
 	ip := a.IP.String()
 	now := nowRFC3339()
 	ttlSec := int64(a.TTL.Seconds())
+	dryRun := 0
+	if a.Op == "dry_ban" {
+		dryRun = 1
+	}
 
 	verdictsJSON, err := json.Marshal(a.Verdicts)
 	if err != nil {
@@ -190,17 +199,18 @@ func (s *DB) RecordStrike(ctx context.Context, a sdk.Action) error {
 	// A new ban resets the suppression counters: they are per-ban state for
 	// the ban_ineffective diagnostic (ADR-0009).
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO bans_active (ip, banned_at, expires_at, strike_num, reason)
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO bans_active (ip, banned_at, expires_at, strike_num, reason, dry_run)
+		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(ip) DO UPDATE SET
 			banned_at              = excluded.banned_at,
 			expires_at             = excluded.expires_at,
 			strike_num             = excluded.strike_num,
 			reason                 = excluded.reason,
+			dry_run                = excluded.dry_run,
 			suppressed_total       = 0,
 			suppressed_after_grace = 0,
 			ineffective_fired      = 0
-	`, ip, now, expiresAt, a.Strike, a.Reason); err != nil {
+	`, ip, now, expiresAt, a.Strike, a.Reason, dryRun); err != nil {
 		return fmt.Errorf("store: upsert ban: %w", err)
 	}
 
@@ -216,27 +226,28 @@ func (s *DB) RecordStrike(ctx context.Context, a sdk.Action) error {
 }
 
 // GetBanInfo returns the active-ban metadata for ip: when the ban was
-// applied and at which strike. found is false when ip has no row in
-// bans_active (permanent or not-yet-expired — callers rely on the daemon's
-// expiry ticker to keep stale rows pruned). All SQL uses parameterized
-// queries; ip is never interpolated into the query string (Hard Rule §4).
-func (s *DB) GetBanInfo(ctx context.Context, ip netip.Addr) (time.Time, int, bool, error) {
+// applied, at which strike, and whether it is a simulated (dry-run) ban.
+// found is false when ip has no row in bans_active (permanent or
+// not-yet-expired — callers rely on the daemon's expiry ticker to keep
+// stale rows pruned). All SQL uses parameterized queries; ip is never
+// interpolated into the query string (Hard Rule §4).
+func (s *DB) GetBanInfo(ctx context.Context, ip netip.Addr) (time.Time, int, bool, bool, error) {
 	var bannedAtStr string
-	var strike int
+	var strike, dryRun int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT banned_at, strike_num FROM bans_active WHERE ip = ?`,
-		ip.String()).Scan(&bannedAtStr, &strike)
+		`SELECT banned_at, strike_num, dry_run FROM bans_active WHERE ip = ?`,
+		ip.String()).Scan(&bannedAtStr, &strike, &dryRun)
 	if err == sql.ErrNoRows {
-		return time.Time{}, 0, false, nil
+		return time.Time{}, 0, false, false, nil
 	}
 	if err != nil {
-		return time.Time{}, 0, false, fmt.Errorf("store: GetBanInfo %s: %w", ip, err)
+		return time.Time{}, 0, false, false, fmt.Errorf("store: GetBanInfo %s: %w", ip, err)
 	}
 	bannedAt, err := time.Parse(time.RFC3339Nano, bannedAtStr)
 	if err != nil {
-		return time.Time{}, 0, false, fmt.Errorf("store: GetBanInfo parse banned_at: %w", err)
+		return time.Time{}, 0, false, false, fmt.Errorf("store: GetBanInfo parse banned_at: %w", err)
 	}
-	return bannedAt, strike, true, nil
+	return bannedAt, strike, dryRun != 0, true, nil
 }
 
 // RecordSuppressed increments the suppression counters on ip's active ban row
@@ -394,11 +405,14 @@ func (s *DB) GetStrikeCount(ctx context.Context, ip netip.Addr) (int, error) {
 	return count, nil
 }
 
-// ActiveBans returns all bans currently in bans_active (including permanent ones).
+// ActiveBans returns all bans currently in bans_active (including permanent
+// ones). Simulated dry-run bans are returned with Op="dry_ban" so callers can
+// tell them apart — enforcement paths MUST skip everything but Op=="ban"
+// (ADR-0009 §5: a simulated ban is never enforced).
 // Callers should call ExpireBans first to flush stale entries.
 func (s *DB) ActiveBans(ctx context.Context) ([]sdk.Action, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT ip, banned_at, expires_at, strike_num, reason FROM bans_active
+		SELECT ip, banned_at, expires_at, strike_num, reason, dry_run FROM bans_active
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("store: ActiveBans: %w", err)
@@ -413,8 +427,9 @@ func (s *DB) ActiveBans(ctx context.Context) ([]sdk.Action, error) {
 			expiresAt sql.NullString
 			strikeNum int
 			reason    string
+			dryRun    int
 		)
-		if err := rows.Scan(&ipStr, &bannedAt, &expiresAt, &strikeNum, &reason); err != nil {
+		if err := rows.Scan(&ipStr, &bannedAt, &expiresAt, &strikeNum, &reason, &dryRun); err != nil {
 			return nil, fmt.Errorf("store: ActiveBans scan: %w", err)
 		}
 
@@ -436,9 +451,13 @@ func (s *DB) ActiveBans(ctx context.Context) ([]sdk.Action, error) {
 			ttl = remaining
 		}
 
+		op := "ban"
+		if dryRun != 0 {
+			op = "dry_ban"
+		}
 		out = append(out, sdk.Action{
 			IP:     ip,
-			Op:     "ban",
+			Op:     op,
 			TTL:    ttl,
 			Strike: strikeNum,
 			Reason: reason,
@@ -452,10 +471,12 @@ func (s *DB) ActiveBans(ctx context.Context) ([]sdk.Action, error) {
 func (s *DB) ExpireBans(ctx context.Context, now time.Time) (int, error) {
 	nowStr := now.UTC().Format(time.RFC3339Nano)
 
-	// Audit expired bans before deleting them.
+	// Audit expired bans before deleting them. Simulated (dry-run) bans
+	// expire through the same sweep — only the audit reason differs.
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO audit_log (recorded_at, op, ip, ttl_seconds, strike_num, reason)
-		SELECT ?, 'expire', ip, 0, strike_num, 'ttl expired'
+		SELECT ?, 'expire', ip, 0, strike_num,
+		       CASE WHEN dry_run = 1 THEN 'simulated ttl expired' ELSE 'ttl expired' END
 		FROM bans_active
 		WHERE expires_at IS NOT NULL AND expires_at < ?
 	`, nowStr, nowStr)

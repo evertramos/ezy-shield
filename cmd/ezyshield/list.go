@@ -114,8 +114,13 @@ func printBanTable(cmd *cobra.Command, entries []daemon.BanEntry) error {
 	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "IP\tSTRIKE\tTTL\tCOUNTRY\tASN\tREASON") //nolint:errcheck
 	for _, e := range entries {
+		ttl := e.TTL
+		if e.Simulated {
+			// Dry-run simulated ban (ADR-0009 §5): recorded, never enforced.
+			ttl += " (simulated)"
+		}
 		fmt.Fprintf(w, "%s\t%d\t%s\t%s\t%s\t%s\n", //nolint:errcheck
-			e.IP, e.Strike, e.TTL, e.Country, e.ASN, e.Reason)
+			e.IP, e.Strike, ttl, e.Country, e.ASN, e.Reason)
 	}
 	return w.Flush()
 }

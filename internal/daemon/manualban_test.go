@@ -33,7 +33,7 @@ func newManualBanDaemon(t *testing.T, maxBans int) (*Daemon, *store.DB, *fakeEnf
 			ObserveThreshold: config.DefaultObserveThreshold,
 			MaxBansPerMinute: maxBans,
 			Strikes:          config.DefaultStrikes,
-			Allowlist:        []string{"198.51.100.0/24"},
+			Allowlist:        []string{"198.51.100.0/25"},
 			AdminCIDRs:       []string{"192.0.2.0/28"},
 		},
 		Store:      db,
@@ -67,9 +67,9 @@ func TestHandleBan_AllowlistedTargetRefused(t *testing.T) {
 	ctx := context.Background()
 
 	cases := []string{
-		"198.51.100.7",  // inside allowlisted CIDR
-		"198.51.0.0/16", // CIDR containing the allowlisted CIDR
-		"192.0.2.5",     // inside admin_cidrs
+		"198.51.100.7",    // inside allowlisted CIDR
+		"198.51.100.0/24", // CIDR containing the allowlisted CIDR
+		"192.0.2.5",       // inside admin_cidrs
 	}
 	for _, target := range cases {
 		resp := d.handleBan(ctx, SocketRequest{Verb: "ban", IP: target})

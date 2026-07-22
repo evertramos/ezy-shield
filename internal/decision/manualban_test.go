@@ -21,7 +21,7 @@ func hostPrefix(ip string) netip.Prefix {
 
 func TestAuthorizeManualBan_AllowlistWins(t *testing.T) {
 	pol := armedPolicy()
-	pol.Allowlist = []string{"203.0.113.10", "198.51.100.0/24"}
+	pol.Allowlist = []string{"203.0.113.10", "198.51.100.64/27"}
 	pol.AdminCIDRs = []string{"192.0.2.0/28"}
 	eng := mustEngine(t, pol, newMock(nil))
 
@@ -32,7 +32,7 @@ func TestAuthorizeManualBan_AllowlistWins(t *testing.T) {
 		{"exact allowlisted IP", hostPrefix("203.0.113.10")},
 		{"IP inside allowlisted CIDR", hostPrefix("198.51.100.77")},
 		{"CIDR containing an allowlisted IP", netip.MustParsePrefix("203.0.113.0/24")},
-		{"CIDR containing an allowlisted CIDR", netip.MustParsePrefix("198.51.0.0/16")},
+		{"CIDR containing an allowlisted CIDR", netip.MustParsePrefix("198.51.100.0/24")},
 		{"IP inside admin_cidrs", hostPrefix("192.0.2.5")},
 		{"CIDR overlapping admin_cidrs", netip.MustParsePrefix("192.0.2.0/24")},
 	}

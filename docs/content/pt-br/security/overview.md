@@ -34,9 +34,17 @@ O EzyShield tem uma regra dura: **sua sessão SSH ativa e os CIDRs de admin nunc
 
 Antes de qualquer ban ser gravado no firewall:
 
-1. Detecta o IP do peer SSH a partir da variável de ambiente `SSH_CLIENT`
+1. Detecta os peers SSH ativos — pela tabela de conexões do kernel
+   (`/proc/net/tcp` e `/proc/net/tcp6`, pontas remotas de conexões
+   estabelecidas na(s) porta(s) do sshd — funciona sob systemd, sem depender
+   de ambiente; portas lidas do `sshd_config`, fallback 22) e, em contextos
+   interativos, pela variável de ambiente `SSH_CLIENT`
 2. Checa os CIDRs de admin do policy.yaml
 3. Se qualquer um deles casar com o IP alvo, o ban é rejeitado
+
+Bans manuais (`ezyshield ban`) passam exatamente pelos mesmos guards —
+incluindo o rate limit de bans — e tentativas recusadas ficam registradas
+no audit log.
 
 Isso é garantido em código, não por uma rule. Nenhum threshold mal configurado consegue te trancar fora.
 

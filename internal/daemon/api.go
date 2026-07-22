@@ -29,9 +29,10 @@ type SocketRequest struct {
 	// Force lets the arm verb proceed past failing pre-flight checks
 	// (except the self-ban check, which is never bypassable).
 	Force bool `json:"force,omitempty"`
-	// Peer is the operator's own client IP for the arm verb's self-ban
-	// check, derived by the CLI from SSH_CLIENT. Used only to make the
-	// pre-flight stricter; never stored.
+	// Peer is the operator's own client IP, derived by the CLI from
+	// SSH_CLIENT: the arm verb uses it for the self-ban pre-flight, the ban
+	// verb for the manual-ban anti-lockout guard (issue #211). Used only to
+	// make safety checks stricter; never stored.
 	Peer string `json:"peer,omitempty"`
 	// Until is an absolute time for the allow verb in ISO 8601 form
 	// ("2026-07-15" or "2026-07-15T18:00:00[Z]"). Mutually exclusive with For.

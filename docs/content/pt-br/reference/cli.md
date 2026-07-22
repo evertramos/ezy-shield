@@ -297,6 +297,15 @@ Timestamps são UTC (RFC 3339).
 
 Bane manualmente um IP ou CIDR.
 
+Bans manuais passam pelos **mesmos guards de segurança das decisões
+automáticas** (issue #211): um alvo que sobrepõe a allowlist, os
+`admin_cidrs` ou uma entrada `allow` de runtime é recusado; um alvo que
+cobre uma sessão SSH ativa (inclusive a sua — a CLI encaminha o IP do seu
+cliente) é recusado; e bans manuais contam contra `max_bans_per_minute`.
+Recusas nomeiam o guard, saem com código ≠ 0 e são registradas no audit
+log como `ban_refused`. Não há override — allowlist e anti-lockout são
+hard rules, e o botão do rate limit é o `max_bans_per_minute` da policy.
+
 ```bash
 # Banir usando a tabela de strikes da policy (TTL do strike 1)
 sudo ezyshield ban 203.0.113.42

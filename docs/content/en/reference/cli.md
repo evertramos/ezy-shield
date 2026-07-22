@@ -286,6 +286,15 @@ so a log line cannot inject formatting into the report. Timestamps are UTC
 
 Manually ban an IP or CIDR.
 
+Manual bans pass the **same safety guards as automatic decisions** (issue
+#211): a target that overlaps the allowlist, `admin_cidrs`, or a runtime
+`allow` entry is refused; a target covering an active SSH session (yours
+included — the CLI forwards your client IP) is refused; and manual bans
+count against `max_bans_per_minute`. Refusals name the guard, exit
+non-zero, and are recorded in the audit log as `ban_refused`. There is no
+override — allowlist and anti-lockout are hard rules, and the rate-limit
+knob is the policy's `max_bans_per_minute`.
+
 ```bash
 # Ban using the policy strike table (strike #1 TTL)
 sudo ezyshield ban 203.0.113.42

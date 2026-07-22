@@ -320,8 +320,14 @@ func (d *Daemon) handleList(ctx context.Context) SocketResponse {
 	return SocketResponse{OK: true, Data: raw}
 }
 
-// handleBan manually bans an IP or CIDR, bypassing the rule engine.
-// The target is still checked against the allowlist in the enforcer.
+// handleBan manually bans an IP or CIDR. It bypasses the rule engine's
+// scoring, but NOT its safety guards: every manual ban passes the same
+// allowlist / anti-lockout / rate-limit gate as automatic decisions
+// (issue #211, decision.AuthorizeManualBan) plus the daemon's runtime
+// allowlist. Refusals are audited (op "ban_refused") and returned to the
+// CLI naming the guard that fired. There is no override — allowlist and
+// anti-lockout are hard rules, and the rate-limit knob is policy's
+// max_bans_per_minute.
 func (d *Daemon) handleBan(ctx context.Context, req SocketRequest) SocketResponse {
 	prefix, err := parseSocketTarget(req.IP)
 	if err != nil {
@@ -334,6 +340,23 @@ func (d *Daemon) handleBan(ctx context.Context, req SocketRequest) SocketRespons
 		if err != nil {
 			return SocketResponse{Error: fmt.Sprintf("invalid ttl %q: %v", req.TTL, err)}
 		}
+	}
+
+	// ── Manual-ban guards (issue #211) ──────────────────────────────────
+	// Runtime allowlist (operator 'allow' entries) first — it lives in the
+	// daemon, outside the engine's static set.
+	if hit, entry := d.runtimeAllowlistOverlap(prefix); hit {
+		return d.refuseManualBan(ctx, prefix, ttl,
+			fmt.Sprintf("target %s overlaps runtime allowlist entry %s", prefix, entry))
+	}
+	// Engine guards: static allowlist/admin_cidrs, SSH-peer anti-lockout
+	// (daemon env + the CLI's own forwarded peer), shared ban rate limit.
+	var peers []netip.Addr
+	if p, perr := netip.ParseAddr(strings.TrimSpace(req.Peer)); perr == nil {
+		peers = append(peers, p)
+	}
+	if err := d.decEng.AuthorizeManualBan(ctx, prefix, peers...); err != nil {
+		return d.refuseManualBan(ctx, prefix, ttl, err.Error())
 	}
 
 	if d.enforcer != nil && d.policy.IsArmed() {
@@ -402,6 +425,19 @@ func (d *Daemon) handleBan(ctx context.Context, req SocketRequest) SocketRespons
 	d.publishActionEvent(op, prefixDisplay(prefix), 0, ttl, reason, "cli")
 
 	return SocketResponse{OK: true}
+}
+
+// refuseManualBan audits and reports a manual ban blocked by a safety
+// guard (issue #211). The refusal is recorded in the append-only audit_log
+// (op "ban_refused", reason names the guard) and published on the event
+// stream, then returned as a clear error to the CLI.
+func (d *Daemon) refuseManualBan(ctx context.Context, prefix netip.Prefix, ttl time.Duration, reason string) SocketResponse {
+	slog.WarnContext(ctx, "daemon: manual ban refused", "prefix", prefix, "reason", reason)
+	if err := d.store.AuditOp(ctx, "ban_refused", prefix, ttl, reason); err != nil {
+		slog.ErrorContext(ctx, "daemon: audit ban_refused", "prefix", prefix, "err", err)
+	}
+	d.publishActionEvent("ban_refused", prefixDisplay(prefix), 0, ttl, reason, "cli")
+	return SocketResponse{Error: "refusing manual ban: " + reason}
 }
 
 // handleUnban removes a single IP or every IP within a CIDR from the ban set

@@ -252,18 +252,30 @@ func (d *Daemon) handleSubscribe(ctx context.Context, conn net.Conn) {
 	}
 }
 
-// handleStatus returns daemon health and current ban count.
+// handleStatus returns daemon health and current ban count. Simulated
+// dry-run bans are reported separately from enforced ones — status must
+// never claim a simulated ban as active protection (ADR-0009 §5).
 func (d *Daemon) handleStatus(ctx context.Context) SocketResponse {
 	bans, err := d.store.ActiveBans(ctx)
 	if err != nil {
 		return SocketResponse{Error: fmt.Sprintf("active bans: %v", err)}
 	}
 
+	active, simulated := 0, 0
+	for _, b := range bans {
+		if b.Op == "dry_ban" {
+			simulated++
+		} else {
+			active++
+		}
+	}
+
 	data := StatusData{
-		Uptime:     time.Since(d.startTime).Round(time.Second).String(),
-		Armed:      d.policy.Armed,
-		ActiveBans: len(bans),
-		Version:    d.version,
+		Uptime:        time.Since(d.startTime).Round(time.Second).String(),
+		Armed:         d.policy.Armed,
+		ActiveBans:    active,
+		SimulatedBans: simulated,
+		Version:       d.version,
 	}
 	raw, _ := json.Marshal(data)
 	return SocketResponse{OK: true, Data: raw}
@@ -284,10 +296,11 @@ func (d *Daemon) handleList(ctx context.Context) SocketResponse {
 			ttl = b.TTL.Round(time.Second).String()
 		}
 		e := BanEntry{
-			IP:     b.IP.String(),
-			TTL:    ttl,
-			Strike: b.Strike,
-			Reason: b.Reason,
+			IP:        b.IP.String(),
+			TTL:       ttl,
+			Strike:    b.Strike,
+			Reason:    b.Reason,
+			Simulated: b.Op == "dry_ban",
 		}
 		if d.enricher != nil {
 			enr := d.enricher.Lookup(b.IP)

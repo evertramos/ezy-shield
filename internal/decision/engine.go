@@ -5,7 +5,11 @@
 // Safety invariants (AGENTS.md Hard Rule §1):
 //   - Allowlist always wins: checked before any other logic, unbypassable.
 //   - Anti-lockout: active SSH peer (SSH_CLIENT) is re-derived before every ban.
-//   - Dry-run default: Op="dry_ban", no store writes, until policy.Armed=true.
+//   - Dry-run default: Op="dry_ban", nothing is ever enforced, until
+//     policy.Armed=true. Dry-run mirrors armed semantics (ADR-0009 §5):
+//     strikes and simulated bans ARE recorded so escalation, suppression,
+//     and the rate-limit cap behave exactly as production would — but a
+//     simulated ban never reaches an enforcer.
 //   - Max-bans-per-minute cap: breach returns ErrRateLimited, never silently drops.
 package decision
 
@@ -31,11 +35,11 @@ var ErrRateLimited = errors.New("decision: global ban rate limit exceeded")
 // Store is the persistence interface required by Engine.
 // The concrete *store.DB satisfies this interface.
 type Store interface {
-	// GetBanInfo returns when ip's active ban was applied and at which strike.
-	// found is false when ip has no active ban. The engine calls this before
-	// GetStrikeCount to suppress redundant strike/enforcer writes for
-	// already-banned IPs.
-	GetBanInfo(ctx context.Context, ip netip.Addr) (bannedAt time.Time, strike int, found bool, err error)
+	// GetBanInfo returns when ip's active ban was applied, at which strike,
+	// and whether it is a simulated dry-run ban (ADR-0009 §5). found is false
+	// when ip has no active ban. The engine calls this before GetStrikeCount
+	// to suppress redundant strike/enforcer writes for already-banned IPs.
+	GetBanInfo(ctx context.Context, ip netip.Addr) (bannedAt time.Time, strike int, dryRun bool, found bool, err error)
 	// RecordSuppressed increments ip's per-ban suppression counters and
 	// returns the updated totals plus whether ban_ineffective already fired
 	// for this ban. Zero counts when ip has no active ban row (expiry race).
@@ -164,23 +168,36 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 	// as "active" in observability. bans_active remains the enforcer source
 	// of truth; the Sync loop handles expiry races.
 	//
-	// Dry-run is handled further below — we still skip the store check in
-	// dry-run mode because RecordStrike is also skipped there. The guard runs
-	// only when armed=true to preserve the current dry-run semantics unchanged.
-	if e.policy.Armed {
-		bannedAt, banStrike, banned, err := e.store.GetBanInfo(ctx, ip)
-		if err != nil {
+	// The guard runs in BOTH modes (ADR-0009 §5: dry-run mirrors armed), with
+	// one asymmetry: an ARMED engine ignores simulated (dry-run) bans. Nothing
+	// is enforced for a simulated ban, so suppressing a real offense on its
+	// account would leave the attacker unblocked; falling through lets the
+	// strike path record a real ban, overwriting the simulated row.
+	{
+		bannedAt, banStrike, dryBan, banned, err := e.store.GetBanInfo(ctx, ip)
+		switch {
+		case err != nil:
 			// Non-fatal: log and fall through to the normal strike path rather
 			// than silently suppressing a verdict on a DB error.
 			slog.ErrorContext(ctx, "decision: GetBanInfo failed — falling through to strike path",
 				"ip", ip, "err", err)
-		} else if banned {
-			// Suppression path: IP is actively banned.
+		case banned && e.policy.Armed && dryBan:
+			// Leftover simulated ban from before arming — fall through.
+			slog.InfoContext(ctx, "decision: ignoring simulated dry-run ban while armed",
+				"ip", ip, "strike", banStrike)
+		case banned:
+			// Suppression path: IP is actively banned (really, or simulated
+			// while in dry-run — the mirror that keeps escalation honest).
+			reason := "active ban in bans_active"
+			if dryBan {
+				reason = "active simulated ban (dry-run)"
+			}
 			slog.InfoContext(ctx, "decision: already_banned — suppressing strike/enforcer",
-				"ip", ip)
-			act := sdk.Action{IP: ip, Op: "already_banned", Reason: "active ban in bans_active", Verdicts: verdicts}
+				"ip", ip, "dry_run", dryBan)
+			act := sdk.Action{IP: ip, Op: "already_banned", Reason: reason, Verdicts: verdicts}
 
-			// Track suppressed events for ban_ineffective (ADR-0009)
+			// Track suppressed events; ban_ineffective firing is armed-only
+			// (gated inside — ADR-0009 §5).
 			e.trackSuppressedEvent(ctx, ip, bannedAt, banStrike)
 
 			if err := e.store.BumpLastSeen(ctx, ip); err != nil {
@@ -217,14 +234,22 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 		Verdicts: verdicts,
 	}
 
-	// ── Safety invariant §1: dry-run must enforce nothing and write nothing ────
+	// ── Safety invariant §1: dry-run must enforce nothing ─────────────────────
+	// It DOES record (ADR-0009 §5): the strike, the simulated ban row
+	// (dry_run=1), and the audit entry are written below through the same
+	// RecordStrike path as armed mode, so dry-run shows exactly the
+	// escalation production would apply. Enforcement is excluded twice over:
+	// the daemon dispatches enforcer calls only for Op=="ban", and every
+	// enforcer sync skips dry_run rows.
 	if op == "dry_ban" {
-		slog.InfoContext(ctx, "decision: dry_ban (armed=false)",
-			"ip", ip, "would_strike", nextStrike, "would_ttl", ttl)
-		return act, nil
+		slog.InfoContext(ctx, "decision: dry_ban (armed=false) — recording simulated ban",
+			"ip", ip, "strike", nextStrike, "ttl", ttl)
 	}
 
-	// ── Safety invariant §1: rate limit enforced before every real ban ─────────
+	// ── Safety invariant §1: rate limit enforced before every ban ─────────────
+	// Applies to dry_ban too — the cap is part of the semantics dry-run must
+	// mirror: an operator observing dry-run should see the pause production
+	// would take (and it bounds store writes during a runaway either way).
 	// Exception (ADR-0009 §3, amended): an escalation is exempt only when the
 	// previous ban ended within escalation_exempt_window — re-blocking an IP
 	// that was blocked until moments ago adds no new-lockout exposure. A strike
@@ -331,6 +356,13 @@ func (e *Engine) trackSuppressedEvent(ctx context.Context, ip netip.Addr, banned
 	total, afterCount, fired, err := e.store.RecordSuppressed(ctx, ip, afterGrace)
 	if err != nil {
 		slog.ErrorContext(ctx, "decision: RecordSuppressed failed", "ip", ip, "err", err)
+		return
+	}
+	// ADR-0009 §5: ban_ineffective is armed-only. During a simulated ban
+	// traffic is EXPECTED (nothing blocks it), not an enforcement anomaly.
+	// Counters above are still recorded so dry-run observability shows what
+	// a real ban would have suppressed.
+	if !e.policy.Armed {
 		return
 	}
 	if !afterGrace || fired || afterCount < e.policy.BanIneffectiveMinEvents {

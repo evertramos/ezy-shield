@@ -12,6 +12,13 @@ After installation, you've configured EzyShield with at least one log source. No
 
 By default, EzyShield runs in **dry-run mode** — it analyzes logs and makes decisions, but never blocks anything. This is intentional: observe first, arm second.
 
+Dry-run mirrors armed semantics exactly: a `dry_ban` records its strike and a
+**simulated ban** with the same TTL a real ban would get, and further events
+from that IP are suppressed until the simulated TTL expires — so the escalation
+you observe (strike 1 → 2 → 3 …) is exactly what production would apply.
+Nothing is ever enforced: simulated bans never reach the firewall, and
+`ezyshield status` reports them separately from active bans.
+
 ```bash
 sudo ezyshield run
 ```
@@ -35,6 +42,7 @@ Each verdict line tells you:
 - **The attacker's IP**: 203.0.113.42
 - **Strike count and score**: how many times this IP has attacked, and the confidence level
 - **The action**: `dry_ban` (what would happen if armed), or `allow` (allowlist matched)
+- Re-hits during a simulated ban show as `already_banned` — one episode, one strike, exactly like armed mode
 
 Run for 24 hours in dry-run and monitor:
 - False positives: legitimate IPs being scored high

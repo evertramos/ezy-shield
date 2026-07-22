@@ -199,8 +199,13 @@ func TestAntiLockout_UnprotectedIP_CanBeBanned(t *testing.T) {
 	}
 }
 
-// TestAntiLockout_DryRunNeverBans verifies that dry-run mode (Armed=false) never
-// calls RecordStrike for any IP, including ones that are NOT allowlisted.
+// TestAntiLockout_DryRunNeverBans verifies that dry-run mode (Armed=false)
+// never produces an enforceable action for any IP, including ones that are
+// NOT allowlisted. Since ADR-0009 §5 the store write itself is allowed —
+// dry-run records strikes and simulated bans — so the enforcement invariant
+// is carried by the Op: every action and every recorded row from a dry-run
+// engine MUST say "dry_ban", because the daemon dispatches enforcer calls
+// only for Op=="ban" and enforcer syncs skip dry_run rows.
 func TestAntiLockout_DryRunNeverBans(t *testing.T) {
 	pol := antiLockoutPolicy()
 	pol.Armed = false
@@ -216,8 +221,15 @@ func TestAntiLockout_DryRunNeverBans(t *testing.T) {
 	if act.Op != "dry_ban" {
 		t.Errorf("dry-run: got Op=%q, want dry_ban", act.Op)
 	}
-	if len(st.banned) > 0 {
-		t.Errorf("dry-run: RecordStrike called %d time(s) — enforcement invariant broken", len(st.banned))
+	for _, rec := range st.banned {
+		if rec.Op != "dry_ban" {
+			t.Errorf("dry-run: recorded Op=%q — enforcement invariant broken (only dry_ban rows may be written while armed=false)", rec.Op)
+		}
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if !st.banDry[target.String()] {
+		t.Error("dry-run: bans_active row not flagged dry_run — enforcer sync would enforce it")
 	}
 }
 

@@ -674,6 +674,10 @@ func (d *Daemon) reloadAllowlist(ctx context.Context) error {
 }
 
 // syncEnforcer loads active bans from the store and calls Enforcer.Sync.
+// Simulated dry-run bans (Op=="dry_ban", ADR-0009 §5) are NEVER handed to
+// the enforcer: they exist only to mirror suppression/escalation while
+// armed=false, and must not materialise as real firewall rules — not even
+// after the operator flips armed=true and the daemon restarts.
 func (d *Daemon) syncEnforcer(ctx context.Context) error {
 	if d.enforcer == nil {
 		return nil
@@ -684,6 +688,9 @@ func (d *Daemon) syncEnforcer(ctx context.Context) error {
 	}
 	targets := make([]sdk.Target, 0, len(bans))
 	for _, b := range bans {
+		if b.Op != "ban" {
+			continue
+		}
 		targets = append(targets, sdk.Target{IP: b.IP, TTL: b.TTL})
 	}
 	return d.enforcer.Sync(ctx, targets)

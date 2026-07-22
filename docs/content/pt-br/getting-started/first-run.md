@@ -12,6 +12,13 @@ Após a instalação, você configurou o EzyShield com pelo menos uma fonte de l
 
 Por padrão, o EzyShield roda em modo **dry-run** — analisa logs e toma decisões, mas nunca bloqueia nada. Isso é intencional: observe primeiro, arme depois.
 
+O dry-run espelha exatamente a semântica do modo armado: um `dry_ban` registra
+o strike e um **ban simulado** com o mesmo TTL que um ban real teria, e novos
+eventos daquele IP são suprimidos até o TTL simulado expirar — a escalada que
+você observa (strike 1 → 2 → 3 …) é exatamente a que a produção aplicaria.
+Nada é jamais aplicado no firewall: bans simulados nunca chegam ao enforcer, e
+o `ezyshield status` os reporta separados dos bans ativos.
+
 ```bash
 sudo ezyshield run
 ```
@@ -35,6 +42,7 @@ Cada linha de veredito informa:
 - **O IP do atacante**: 203.0.113.42
 - **Contagem de strikes e score**: quantas vezes esse IP já atacou e o nível de confiança
 - **A ação**: `dry_ban` (o que aconteceria se estivesse armado) ou `allow` (bateu na allowlist)
+- Novos hits durante um ban simulado aparecem como `already_banned` — um episódio, um strike, exatamente como no modo armado
 
 Rode por 24 horas em dry-run e monitore:
 - Falsos positivos: IPs legítimos recebendo score alto

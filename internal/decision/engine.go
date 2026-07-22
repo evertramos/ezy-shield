@@ -4,7 +4,8 @@
 //
 // Safety invariants (AGENTS.md Hard Rule §1):
 //   - Allowlist always wins: checked before any other logic, unbypassable.
-//   - Anti-lockout: active SSH peer (SSH_CLIENT) is re-derived before every ban.
+//   - Anti-lockout: active SSH peers are re-derived before every ban, from
+//     SSH_CLIENT (interactive) and /proc/net/tcp{,6} (systemd — issue #175).
 //   - Dry-run default: Op="dry_ban", nothing is ever enforced, until
 //     policy.Armed=true. Dry-run mirrors armed semantics (ADR-0009 §5):
 //     strikes and simulated bans ARE recorded so escalation, suppression,
@@ -78,6 +79,11 @@ type Engine struct {
 	mu          sync.Mutex
 	bansInWin   int
 	windowStart time.Time
+
+	// sshPeers caches kernel-derived SSH peers (/proc/net/tcp{,6}) for the
+	// anti-lockout checks — the detection path that works under systemd,
+	// where SSH_CLIENT does not exist (issue #175).
+	sshPeers sshPeerCache
 }
 
 // New creates an Engine from policy and a store.
@@ -131,14 +137,19 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 		return act, nil
 	}
 
-	// ── Safety invariant §1: anti-lockout — re-derive SSH peer before every ban ─
-	if peer := sshClientIP(); peer.IsValid() && peer == ip {
-		slog.WarnContext(ctx, "decision: anti-lockout — refusing to ban active SSH peer", "ip", ip)
-		act := sdk.Action{IP: ip, Op: "record", Reason: "anti-lockout: active SSH peer", Verdicts: verdicts}
-		if err := e.store.Audit(ctx, act); err != nil {
-			slog.ErrorContext(ctx, "decision: audit anti-lockout", "ip", ip, "err", err)
+	// ── Safety invariant §1: anti-lockout — re-derive SSH peers before every ban ─
+	// Peers come from SSH_CLIENT (interactive contexts) AND from the kernel's
+	// established-connection table (/proc/net/tcp{,6}) — the source that
+	// exists under systemd, where the env var does not (issue #175).
+	for _, peer := range e.activeSSHPeers() {
+		if peer == ip {
+			slog.WarnContext(ctx, "decision: anti-lockout — refusing to ban active SSH peer", "ip", ip)
+			act := sdk.Action{IP: ip, Op: "record", Reason: "anti-lockout: active SSH peer", Verdicts: verdicts}
+			if err := e.store.Audit(ctx, act); err != nil {
+				slog.ErrorContext(ctx, "decision: audit anti-lockout", "ip", ip, "err", err)
+			}
+			return act, nil
 		}
-		return act, nil
 	}
 
 	score := best.Score

@@ -21,6 +21,7 @@ import (
 
 	"github.com/evertramos/ezy-shield/configs"
 	"github.com/evertramos/ezy-shield/internal/config"
+	"github.com/evertramos/ezy-shield/internal/decision"
 	"github.com/evertramos/ezy-shield/internal/ownership"
 )
 
@@ -613,10 +614,26 @@ func askQuestions(out io.Writer, sc *bufio.Scanner, state *wizardState, yes bool
 	p.println(st.header("Allowlist"))
 	defaultAdmin := state.sshSourceIP
 	if defaultAdmin == "" {
+		// No SSH_CLIENT (sudo su -, console, automation): fall back to the
+		// kernel-derived SSH peers — the same source the daemon's
+		// anti-lockout uses under systemd (issue #175).
+		if peers := decision.ProcSSHPeers(); len(peers) > 0 {
+			defaultAdmin = peers[0].String()
+			p.println(st.ok("detected your SSH client via /proc: " + defaultAdmin))
+		}
+	}
+	if defaultAdmin == "" {
 		defaultAdmin = state.publicIP
 	}
 	if rawAdmin := ask("Admin IP(s) to allowlist (space or comma separated)", defaultAdmin); rawAdmin != "" {
-		state.adminIPs = splitIPs(rawAdmin)
+		state.adminIPs = validAdminEntries(p, st, splitIPs(rawAdmin))
+	}
+	if len(state.adminIPs) == 0 {
+		// Strong recommendation (issue #175): admin_cidrs is the durable
+		// anti-lockout protection; live-session detection alone only covers
+		// connections that exist at decision time.
+		p.println(st.warn("admin_cidrs will be EMPTY — strongly recommended to add your management"))
+		p.println(st.warn("IPs later in policy.yaml; 'ezyshield arm' will flag this before arming."))
 	}
 
 	// CDN detection + Cloudflare subflow — runs BEFORE AI so the loud-skip
@@ -1428,6 +1445,25 @@ func normalizeToPrefix(ip string) string {
 }
 
 // splitIPs splits a space- or comma-separated string of IPs/CIDRs.
+// validAdminEntries keeps only entries that parse as an IP or CIDR
+// (netip validation, issue #175); invalid ones are reported and dropped so
+// a typo never lands in policy.yaml as a dead allowlist entry.
+func validAdminEntries(p *wPrinter, st styler, entries []string) []string {
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if _, err := netip.ParseAddr(e); err == nil {
+			out = append(out, e)
+			continue
+		}
+		if _, err := netip.ParsePrefix(e); err == nil {
+			out = append(out, e)
+			continue
+		}
+		p.println(st.warn("ignoring invalid admin IP/CIDR: " + e))
+	}
+	return out
+}
+
 func splitIPs(s string) []string {
 	s = strings.ReplaceAll(s, ",", " ")
 	fields := strings.Fields(s)

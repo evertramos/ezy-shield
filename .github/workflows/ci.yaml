@@ -192,6 +192,11 @@ jobs:
         run: |
           set -o pipefail
           go test -fuzz=FuzzNginxParser -fuzztime=10s ./internal/parser/ | tee fuzz-nginx.txt
+      - name: Fuzz proc SSH-peer parser (10s)
+        id: fproc
+        run: |
+          set -o pipefail
+          go test -fuzz=FuzzProcTCPPeers -fuzztime=10s ./internal/decision/ | tee fuzz-proc.txt
       - name: Job summary
         if: always()
         run: |
@@ -204,6 +209,7 @@ jobs:
             echo "|---|---|---|"
             echo "| FuzzSSHParser | $(execs fuzz-ssh.txt) | ${{ steps.fssh.outcome }} |"
             echo "| FuzzNginxParser | $(execs fuzz-nginx.txt) | ${{ steps.fnginx.outcome }} |"
+            echo "| FuzzProcTCPPeers | $(execs fuzz-proc.txt) | ${{ steps.fproc.outcome }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   govulncheck:

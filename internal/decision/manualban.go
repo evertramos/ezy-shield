@@ -59,10 +59,13 @@ func (e *Engine) AuthorizeManualBan(_ context.Context, target netip.Prefix, peer
 	}
 
 	// ── Safety invariant §1: anti-lockout — every known operator session ──
-	// The daemon-side derivation is re-checked on every call (sessions that
-	// started after daemon startup), then every CLI-forwarded peer.
-	if peer := sshClientIP(); peer.IsValid() && target.Contains(peer) {
-		return fmt.Errorf("%w: %s contains SSH peer %s", ErrManualBanSSHPeer, target, peer)
+	// Daemon-side derivation re-checked on every call: SSH_CLIENT plus the
+	// kernel-derived peers that exist under systemd (issue #175), then every
+	// CLI-forwarded peer.
+	for _, peer := range e.activeSSHPeers() {
+		if target.Contains(peer) {
+			return fmt.Errorf("%w: %s contains SSH peer %s", ErrManualBanSSHPeer, target, peer)
+		}
 	}
 	for _, peer := range peers {
 		if peer.IsValid() && target.Contains(peer) {

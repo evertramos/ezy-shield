@@ -82,6 +82,25 @@
         "type": "string",
         "description": "CIDR prefix in standard notation."
       }
+    },
+    "block_countries": {
+      "type": "array",
+      "description": "ISO 3166-1 alpha-2 country codes whose traffic gets an immediate score boost (+100) toward ban_threshold. Requires GeoIP enrichment; silently skipped when enrichment is inactive.",
+      "items": {
+        "type": "string",
+        "minLength": 2,
+        "maxLength": 2,
+        "description": "ISO 3166-1 alpha-2 country code (e.g. 'CN', 'RU', 'KP')."
+      }
+    },
+    "block_asns": {
+      "type": "array",
+      "description": "Autonomous system numbers to block. Same score-boost semantics as block_countries; requires GeoIP/ASN enrichment.",
+      "items": {
+        "type": "string",
+        "pattern": "^[Aa][Ss][0-9]+$",
+        "description": "ASN in the form 'AS<number>' (e.g. 'AS16276', 'AS14061')."
+      }
     }
   }
 }

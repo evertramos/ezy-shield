@@ -188,8 +188,9 @@ admin_cidrs:
 
 WordPress signatures (wp-login.php / xmlrpc.php floods, exploit-probe paths)
 are built into the shipped rules — no configuration needed. To customize
-thresholds, point `rules_path` in config.yaml at your own copy of
-`/etc/ezyshield/rules.yaml.example`.
+thresholds, uncomment the relevant rule in
+`/etc/ezyshield/rules.d/10-wordpress.yaml` (written by `init`) and adjust —
+see [Customizing Detection Rules](rules-customization.md).
 
 Secrets go in an env file the systemd unit loads (`ezyshield init` creates it
 at mode 0600; `doctor` checks its permissions):

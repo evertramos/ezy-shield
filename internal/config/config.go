@@ -11,12 +11,25 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// DefaultRulesDir is the drop-in overlay directory scanned for rule
+// customizations (*.yaml, lexical order) when rules_dir is not set in
+// config.yaml. See internal/rules.New for the layering semantics.
+const DefaultRulesDir = "/etc/ezyshield/rules.d"
+
 // Config holds the main runtime configuration loaded from config.yaml.
 // No secrets appear here; credential fields use SecretRef.
 type Config struct {
-	DataDir    string         `yaml:"data_dir"`
-	SocketPath string         `yaml:"socket_path"`
-	RulesPath  string         `yaml:"rules_path"`
+	DataDir    string `yaml:"data_dir"`
+	SocketPath string `yaml:"socket_path"`
+	// RulesPath is the DEPRECATED whole-file rule replacement: when set,
+	// the file replaces the embedded base entirely and rules.d drop-ins
+	// are ignored — the install stops receiving upstream rule tuning.
+	// Prefer RulesDir drop-ins.
+	RulesPath string `yaml:"rules_path"`
+	// RulesDir overrides the rules.d drop-in directory (default
+	// DefaultRulesDir). Drop-ins merge over the embedded base by rule
+	// name and survive binary updates.
+	RulesDir   string         `yaml:"rules_dir"`
 	Log        LogConfig      `yaml:"log"`
 	Collectors []CollectorCfg `yaml:"collectors"`
 	Enforce    *EnforceCfg    `yaml:"enforce"`
@@ -276,6 +289,13 @@ func LoadConfigReader(r io.Reader, name string) (*Config, error) {
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validating %s: %w", name, err)
+	}
+	// Default the rules.d overlay dir here (not in the daemon) so directly
+	// constructed Configs in tests opt in explicitly, while every loaded
+	// production config gets the overlay. The legacy exclusive rules_path,
+	// when set, disables the overlay entirely inside rules.New.
+	if cfg.RulesDir == "" {
+		cfg.RulesDir = DefaultRulesDir
 	}
 	return &cfg, nil
 }

@@ -8,6 +8,12 @@ data_dir: /var/lib/ezyshield
 # Control socket path (unix); CLI commands connect here
 socket_path: /run/ezyshield/ezyshield.sock
 
+# Detection rules are embedded in the binary and update with it. To tune or
+# add rules, drop *.yaml files in rules.d — they merge over the built-in
+# rules by `name` and survive updates (docs: guides/rules-customization).
+# rules_dir: /etc/ezyshield/rules.d      # default
+# rules_path: /etc/ezyshield/rules.yaml  # DEPRECATED: replaces ALL rules, disables rules.d
+
 # Structured logging
 log:
   level: info   # debug | info | warn | error

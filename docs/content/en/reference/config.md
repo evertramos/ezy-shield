@@ -16,7 +16,8 @@ Complete reference for `/etc/ezyshield/config.yaml` — log sources, enforcement
 |-------|------|---------|-------------|
 | `data_dir` | string | `/var/lib/ezyshield` | State directory; the SQLite database lives at `<data_dir>/ezyshield.db` |
 | `socket_path` | string | `/run/ezyshield/ezyshield.sock` | Daemon control socket (unix socket — there is never a TCP listener for control) |
-| `rules_path` | string | — | Optional path to a custom `rules.yaml` (defaults to the rules embedded in the binary) |
+| `rules_dir` | string | `/etc/ezyshield/rules.d` | Drop-in rule customizations: every `*.yaml` here merges over the built-in rules by `name` and survives updates (see the [rules guide](../guides/rules-customization.md)) |
+| `rules_path` | string | — | **Deprecated.** Replaces the built-in rules entirely (no merge; `rules.d` ignored) — freezes the install out of upstream rule tuning |
 | `log.level` | string | `info` | `debug` \| `info` \| `warn` \| `error` |
 | `collectors` | list | `[]` | Log sources to tail (see below) |
 | `enforce` | object | — | Enforcement backends (optional — without it, decisions are log-only) |

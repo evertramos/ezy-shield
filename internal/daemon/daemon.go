@@ -678,6 +678,22 @@ func (d *Daemon) isRuntimeAllowlisted(ip netip.Addr) bool {
 	return false
 }
 
+// runtimeAllowlistOverlap reports whether prefix overlaps any entry of the
+// in-memory runtime allowlist (operator 'allow' entries), returning the
+// first overlapping entry. Overlap in either direction counts: a manual ban
+// of a range that CONTAINS an allowlisted prefix would lock those hosts out
+// just as surely as banning them directly (issue #211).
+func (d *Daemon) runtimeAllowlistOverlap(prefix netip.Prefix) (bool, netip.Prefix) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	for _, p := range d.runtimeAllowlist {
+		if p.Overlaps(prefix) {
+			return true, p
+		}
+	}
+	return false, netip.Prefix{}
+}
+
 // reloadAllowlist rebuilds the in-memory runtime allowlist from the store.
 // Called at startup and after expiry sweeps so the in-memory view never lags
 // behind the persisted state.

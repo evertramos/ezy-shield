@@ -48,7 +48,10 @@ recorded in the audit log but no firewall rule is written.`,
 
 func runBan(cmd *cobra.Command, socketPath, target, ttl, reason string) error {
 	resp, err := daemonRPC(context.Background(), socketPath,
-		daemon.SocketRequest{Verb: "ban", IP: target, TTL: ttl, Reason: reason})
+		// Peer forwards this session's SSH client IP so the daemon's
+		// manual-ban anti-lockout guard can protect it (issue #211) — the
+		// daemon has no SSH_CLIENT of its own under systemd.
+		daemon.SocketRequest{Verb: "ban", IP: target, TTL: ttl, Reason: reason, Peer: sshClientPeer()})
 	if err != nil {
 		return err
 	}

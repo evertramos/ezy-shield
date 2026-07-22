@@ -62,19 +62,42 @@ anything actually being blocked.
 
 ## Step 4: Arm it
 
-Once you're confident, edit `policy.yaml`:
-
-```yaml
-armed: true
-```
-
-Then reload the daemon:
+Once you're confident, arm with the dedicated command — no config editing,
+no restart:
 
 ```bash
-sudo systemctl restart ezyshield
+sudo ezyshield arm
 ```
 
-EzyShield now blocks in real-time: bans go to nftables (local), Cloudflare (edge), and notifications are sent.
+`arm` runs a mandatory pre-flight before flipping anything: enforcer
+health, `admin_cidrs`/allowlist coverage, a "would I ban myself?" check for
+your own SSH client IP, and a summary of recent dry-run activity. Failing
+checks refuse the transition (`--force` overrides everything except the
+self-ban check — that one is never bypassable).
+
+The safest way to arm for the first time is with an auto-revert window:
+
+```bash
+sudo ezyshield arm --for 1h
+```
+
+For the next hour EzyShield enforces for real. If everything looks good,
+make it permanent:
+
+```bash
+sudo ezyshield arm --keep
+```
+
+If you do nothing — or you locked yourself out and can't do anything —
+the daemon reverts to dry-run by itself when the window expires and sends
+a notification. The revert runs inside the daemon, so it fires even if
+your SSH session is gone.
+
+Both transitions are persisted to `policy.yaml` and recorded in the audit
+log; `sudo ezyshield disarm` returns to dry-run at any moment.
+
+Once armed, EzyShield blocks in real-time: bans go to nftables (local),
+Cloudflare (edge), and notifications are sent.
 
 ## Step 5: Monitor active bans
 

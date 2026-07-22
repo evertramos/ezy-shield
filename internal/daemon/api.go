@@ -22,9 +22,17 @@ type SocketRequest struct {
 	// TTL is a Go duration string (e.g. "5m", "24h") for the ban verb.
 	// Zero or absent means the policy strike table decides.
 	TTL string `json:"ttl,omitempty"`
-	// For is a duration string (e.g. "24h", "7d") for the allow verb.
-	// Mutually exclusive with Until. Empty = permanent allow.
+	// For is a duration string (e.g. "24h", "7d") for the allow verb, and
+	// the auto-revert window for the arm verb. Mutually exclusive with
+	// Until. Empty = permanent allow / unconditional arm.
 	For string `json:"for,omitempty"`
+	// Force lets the arm verb proceed past failing pre-flight checks
+	// (except the self-ban check, which is never bypassable).
+	Force bool `json:"force,omitempty"`
+	// Peer is the operator's own client IP for the arm verb's self-ban
+	// check, derived by the CLI from SSH_CLIENT. Used only to make the
+	// pre-flight stricter; never stored.
+	Peer string `json:"peer,omitempty"`
 	// Until is an absolute time for the allow verb in ISO 8601 form
 	// ("2026-07-15" or "2026-07-15T18:00:00[Z]"). Mutually exclusive with For.
 	Until string `json:"until,omitempty"`
@@ -66,6 +74,9 @@ type StatusData struct {
 	// SimulatedBans is the count of dry-run simulated bans (ADR-0009 §5):
 	// IPs that WOULD be banned right now if the daemon were armed.
 	SimulatedBans int `json:"simulated_bans,omitempty"`
+	// ArmedUntil is the RFC3339 auto-revert deadline when an arm window is
+	// active (issue #228); empty otherwise.
+	ArmedUntil string `json:"armed_until,omitempty"`
 	// Version is the daemon binary version string.
 	Version string `json:"version"`
 	// AISpendToday is the estimated USD cost of AI provider calls today.

@@ -1272,3 +1272,55 @@ func TestDryRunBan_ExpiresWithDistinctAuditReason(t *testing.T) {
 		t.Errorf("no audit entry with reason 'simulated ttl expired'; entries=%+v", entries)
 	}
 }
+
+// // ── daemon_state kv + system audits (issue #228) ─────────────────────────────
+
+func TestDaemonState_RoundTrip(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	if _, found, err := db.GetState(ctx, "arm_window_expires_at"); err != nil || found {
+		t.Fatalf("empty state: found=%v err=%v, want absent", found, err)
+	}
+	if err := db.SetState(ctx, "arm_window_expires_at", "2026-07-22T10:00:00Z"); err != nil {
+		t.Fatalf("SetState: %v", err)
+	}
+	v, found, err := db.GetState(ctx, "arm_window_expires_at")
+	if err != nil || !found || v != "2026-07-22T10:00:00Z" {
+		t.Fatalf("GetState = (%q, %v, %v)", v, found, err)
+	}
+	// Upsert overwrites.
+	if err := db.SetState(ctx, "arm_window_expires_at", "2026-07-23T10:00:00Z"); err != nil {
+		t.Fatalf("SetState upsert: %v", err)
+	}
+	v, _, _ = db.GetState(ctx, "arm_window_expires_at")
+	if v != "2026-07-23T10:00:00Z" {
+		t.Errorf("after upsert = %q", v)
+	}
+	if err := db.DeleteState(ctx, "arm_window_expires_at"); err != nil {
+		t.Fatalf("DeleteState: %v", err)
+	}
+	if _, found, _ := db.GetState(ctx, "arm_window_expires_at"); found {
+		t.Error("state still present after delete")
+	}
+	// Deleting a missing key is not an error.
+	if err := db.DeleteState(ctx, "never-existed"); err != nil {
+		t.Errorf("DeleteState missing key: %v", err)
+	}
+}
+
+func TestAuditSystem_AppendsRow(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	if err := db.AuditSystem(ctx, "arm", "operator armed"); err != nil {
+		t.Fatalf("AuditSystem: %v", err)
+	}
+	entries, err := db.ListAuditLog(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListAuditLog: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Op != "arm" || entries[0].IP != "system" {
+		t.Errorf("entries = %+v, want one op=arm ip=system row", entries)
+	}
+}

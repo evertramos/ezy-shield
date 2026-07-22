@@ -148,6 +148,38 @@ If the daemon connection drops (e.g. a restart), `watch` reconnects
 automatically with backoff. Press `Ctrl-C` to exit. The daemon must be running
 (`ezyshield run` or `sudo systemctl start ezyshield`).
 
+## ezyshield arm
+
+Arm enforcement after a mandatory pre-flight (issue #228). The daemon flips
+from dry-run to live blocking; the transition is persisted to `policy.yaml`
+and audited — no config editing, no restart.
+
+```bash
+sudo ezyshield arm [--for 1h] [--keep] [--force]
+```
+
+The pre-flight reports pass/warn/fail for: enforcer configured, `admin_cidrs`
+and allowlist coverage, a self-ban simulation for your own SSH client IP, and
+recent dry-run activity. Failing checks refuse the transition.
+
+| Flag | Meaning |
+|------|---------|
+| `--for <dur>` | Arm temporarily (1m–7d): unless confirmed with `--keep`, the daemon reverts to dry-run when the window expires and notifies. The revert is daemon-side — it survives losing your session. |
+| `--keep` | Confirm the active window; armed becomes unconditional |
+| `--force` | Override failing checks — except the self-ban check, which is never bypassable |
+| `--socket` | Daemon control socket path |
+
+`ezyshield status` shows the auto-revert deadline while a window is active.
+
+## ezyshield disarm
+
+Return to dry-run mode. No pre-flight — moving toward dry-run is always the
+safe direction. Persisted to `policy.yaml` and audited.
+
+```bash
+sudo ezyshield disarm
+```
+
 ## ezyshield status
 
 Show daemon and enforcer status.

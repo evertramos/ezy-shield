@@ -341,4 +341,4 @@ sudo systemctl enable --now ezyshield
 3. ✅ `admin_cidrs` includes your SSH IP
 4. ✅ Notifications tested with `test notifier`
 5. ✅ Ran in dry-run, reviewed the logs
-6. ⬜ Set `armed: true` in `policy.yaml`
+6. ⬜ Run `sudo ezyshield arm --for 1h` (pre-flight + auto-revert window), then `sudo ezyshield arm --keep` once you're confident

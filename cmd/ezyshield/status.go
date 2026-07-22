@@ -47,9 +47,12 @@ type StatusOutput struct {
 	ActiveBans int    `json:"active_bans"`
 	// SimulatedBans counts dry-run simulated bans (ADR-0009 §5): IPs that
 	// would be banned right now if the daemon were armed. Never enforced.
-	SimulatedBans int            `json:"simulated_bans,omitempty"`
-	BansByStrike  map[string]int `json:"bans_by_strike,omitempty"`
-	Message       string         `json:"message,omitempty"`
+	SimulatedBans int `json:"simulated_bans,omitempty"`
+	// ArmedUntil is the RFC3339 auto-revert deadline when an arm window is
+	// active (issue #228).
+	ArmedUntil   string         `json:"armed_until,omitempty"`
+	BansByStrike map[string]int `json:"bans_by_strike,omitempty"`
+	Message      string         `json:"message,omitempty"`
 }
 
 func runStatus(cmd *cobra.Command, socketPath, enforcerSocketPath string) error {
@@ -73,6 +76,7 @@ func runStatus(cmd *cobra.Command, socketPath, enforcerSocketPath string) error 
 	out.Version = sd.Version
 	out.ActiveBans = sd.ActiveBans
 	out.SimulatedBans = sd.SimulatedBans
+	out.ArmedUntil = sd.ArmedUntil
 	if sd.Armed {
 		out.Mode = "enforce"
 	} else {
@@ -145,7 +149,10 @@ func printStatusText(cmd *cobra.Command, out StatusOutput) error {
 		}
 		return nil
 	}
-	fmt.Fprintf(w, "mode:      %s\n", out.Mode)       //nolint:errcheck
+	fmt.Fprintf(w, "mode:      %s\n", out.Mode) //nolint:errcheck
+	if out.ArmedUntil != "" {
+		fmt.Fprintf(w, "auto-revert: %s (confirm with 'ezyshield arm --keep')\n", out.ArmedUntil) //nolint:errcheck
+	}
 	fmt.Fprintf(w, "uptime:    %s\n", out.Uptime)     //nolint:errcheck
 	fmt.Fprintf(w, "version:   %s\n", out.Version)    //nolint:errcheck
 	fmt.Fprintf(w, "bans:      %d\n", out.ActiveBans) //nolint:errcheck

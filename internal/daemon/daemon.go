@@ -48,6 +48,11 @@ type daemonStore interface {
 	Unban(ctx context.Context, ip netip.Addr) error
 	UnbanPrefix(ctx context.Context, prefix netip.Prefix) (int, error)
 	AuditOp(ctx context.Context, op string, prefix netip.Prefix, ttl time.Duration, reason string) error
+	// Arm/disarm support (issue #228): persisted runtime state + system audits.
+	SetState(ctx context.Context, key, value string) error
+	GetState(ctx context.Context, key string) (string, bool, error)
+	DeleteState(ctx context.Context, key string) error
+	AuditSystem(ctx context.Context, op, reason string) error
 	RecordManualBan(ctx context.Context, ip netip.Addr, ttl time.Duration, reason string) error
 	AddAllow(ctx context.Context, prefix netip.Prefix, expiresAt *time.Time, reason string) error
 	RemoveAllow(ctx context.Context, prefix netip.Prefix) (int, error)
@@ -86,6 +91,13 @@ type Config struct {
 	SocketPath string             // defaults to DefaultSocketPath
 	Version    string
 	MaxIPs     int // LRU cap; 0 = DefaultMaxIPs
+	// PolicyPath is the policy.yaml location; the arm/disarm verbs persist
+	// armed-state changes there (issue #228). Empty = runtime-only flips
+	// (tests).
+	PolicyPath string
+	// ArmWindowTick overrides the auto-revert poll interval (tests only;
+	// 0 = default 15s).
+	ArmWindowTick time.Duration
 }
 
 // enricherFrom converts a *enrich.Enricher into the geoLookup interface, or
@@ -123,8 +135,12 @@ type Daemon struct {
 	aiBudgetWarned atomic.Bool // guards the single "budget exceeded" WARN
 
 	socketPath string
-	startTime  time.Time
-	version    string
+	// policyPath is where arm/disarm persist the armed flag ("" = skip).
+	policyPath string
+	// armWindowTick is the auto-revert poll interval (0 = default 15s).
+	armWindowTick time.Duration
+	startTime     time.Time
+	version       string
 
 	// evidenceJournalctl and evidenceDockerSocket override the journalctl
 	// binary and Docker engine socket used by on-demand evidence extraction
@@ -219,6 +235,8 @@ func New(dcfg Config) (*Daemon, error) {
 		socketPath:      socketPath,
 		version:         dcfg.Version,
 		startTime:       time.Now(),
+		policyPath:      dcfg.PolicyPath,
+		armWindowTick:   dcfg.ArmWindowTick,
 	}
 
 	if dcfg.Cfg != nil && dcfg.Cfg.AI != nil {
@@ -249,7 +267,7 @@ func (d *Daemon) Run(parentCtx context.Context) error {
 
 	slog.InfoContext(ctx, "daemon: starting",
 		"version", d.version,
-		"armed", d.policy.Armed,
+		"armed", d.policy.IsArmed(),
 		"socket", d.socketPath,
 	)
 
@@ -318,6 +336,11 @@ func (d *Daemon) Run(parentCtx context.Context) error {
 
 	// Expire temporal allowlist entries periodically.
 	go d.runExpireAllows(ctx)
+
+	// Settle an arm window whose deadline passed while the daemon was down,
+	// then keep watching it (issue #228).
+	d.checkArmWindow(ctx, time.Now())
+	go d.runArmWindow(ctx)
 
 	// Signal handling.
 	sigCh := make(chan os.Signal, 1)

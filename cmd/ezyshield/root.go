@@ -49,6 +49,8 @@ Commands read as:  ` + progName + ` <verb>   (equivalent to: ezy shield <verb>)`
 		newDeprecatedTestAliasCmd("test-notify", "notifier", runTestNotify),
 		newDeprecatedTestAliasCmd("test-enforce", "enforcer", runTestEnforce),
 		newRunCmd(),
+		newArmCmd(),
+		newDisarmCmd(),
 		newWatchCmd(),
 		newBanCmd(),
 		newUnbanCmd(),

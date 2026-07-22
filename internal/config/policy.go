@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/netip"
 	"os"
+	"regexp"
+	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -51,7 +53,16 @@ var DefaultStrikes = []StrikeEntry{
 }
 
 // Policy holds enforcement policy loaded from policy.yaml.
+//
+// Armed is the only field that can change at runtime (the arm/disarm socket
+// verbs, issue #228). Runtime readers MUST use IsArmed(); mutations go
+// through SetArmed(). Direct access to the Armed field is safe only during
+// load/validate, before the daemon's goroutines start.
 type Policy struct {
+	// armedMu guards Armed for runtime flips. It sits next to the field it
+	// protects; Policy must never be copied by value after startup.
+	armedMu sync.RWMutex `yaml:"-"`
+
 	Armed            bool          `yaml:"armed"`
 	BanThreshold     int           `yaml:"ban_threshold"`
 	ObserveThreshold int           `yaml:"observe_threshold"`
@@ -82,6 +93,65 @@ type Policy struct {
 	// ban ended within this window. Defaults to 24h if omitted or <= 0;
 	// values above 7d are clamped down (widening weakens the safety cap).
 	EscalationExemptWindow Duration `yaml:"escalation_exempt_window"`
+}
+
+// IsArmed reports whether enforcement is live. It is the required accessor
+// for every runtime read of the armed state (the arm/disarm verbs flip it
+// while the pipeline is running).
+func (p *Policy) IsArmed() bool {
+	p.armedMu.RLock()
+	defer p.armedMu.RUnlock()
+	return p.Armed
+}
+
+// SetArmed flips the armed state at runtime. Callers are responsible for
+// persisting the change (RewriteArmed) and auditing it.
+func (p *Policy) SetArmed(armed bool) {
+	p.armedMu.Lock()
+	defer p.armedMu.Unlock()
+	p.Armed = armed
+}
+
+// armedLineRe matches the top-level `armed:` line of policy.yaml, capturing
+// indentation and any trailing comment so a rewrite preserves both.
+var armedLineRe = regexp.MustCompile(`(?m)^(armed[ \t]*:[ \t]*)(true|false)([ \t]*(?:#.*)?)$`)
+
+// RewriteArmed surgically rewrites the `armed:` value in the policy file at
+// path, preserving every other byte — comments, ordering, and formatting are
+// operator property. It refuses (returning an error, changing nothing) when
+// the file does not contain exactly one recognisable top-level armed line:
+// guessing on an ambiguous file could flip the wrong thing in a security
+// policy. The write is atomic (temp file + rename) and preserves the
+// original file mode.
+func RewriteArmed(path string, armed bool) error {
+	data, err := os.ReadFile(path) //nolint:gosec // path is admin-controlled config location
+	if err != nil {
+		return fmt.Errorf("reading policy %s: %w", path, err)
+	}
+	matches := armedLineRe.FindAllIndex(data, -1)
+	if len(matches) != 1 {
+		return fmt.Errorf("policy %s: expected exactly one top-level 'armed:' line, found %d — edit the file manually", path, len(matches))
+	}
+
+	val := "false"
+	if armed {
+		val = "true"
+	}
+	updated := armedLineRe.ReplaceAll(data, []byte("${1}"+val+"${3}"))
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("stat policy %s: %w", path, err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, updated, info.Mode().Perm()); err != nil { //nolint:gosec // G703: path is the admin-controlled policy location (daemon config), not user input
+		return fmt.Errorf("writing policy temp file: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("replacing policy %s: %w", path, err)
+	}
+	return nil
 }
 
 // GeoBlockScore is the score added to verdicts from blocked countries or ASNs.

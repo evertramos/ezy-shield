@@ -96,6 +96,12 @@ identical result to following the apt/dnf steps by hand. Raw binaries in
 - the package repo setup or reachability check fails — the script prints a
   warning and falls back automatically so the install still completes.
 
+One exception: if the host **already runs a package-managed EzyShield
+install**, every binary-mode path refuses instead of installing (raw
+binaries in `/usr/local/bin` would shadow the package's `/usr/bin` ones) —
+upgrade with `apt`/`dnf` there, or set `EZYSHIELD_FORCE_SCRIPT=1` to
+override with a loud warning.
+
 You can force either path explicitly with `EZYSHIELD_METHOD`:
 
 ```bash
@@ -280,6 +286,7 @@ sudo rm -rf /etc/ezyshield
 | `EZYSHIELD_PACKAGES_BASE_URL` | Override the package repo base used for repo setup and the reachability check (private mirrors, testing) | `EZYSHIELD_PACKAGES_BASE_URL=https://packages.mirror.example.com` |
 | `EZYSHIELD_CLEANUP` | Set to `1` to non-interactively remove a shadowing script install when routing to a package install | `EZYSHIELD_CLEANUP=1` |
 | `EZYSHIELD_UNINSTALL` | Set to `1` (equivalent to `--uninstall`) to remove script-install artifacts and exit | `EZYSHIELD_UNINSTALL=1` |
+| `EZYSHIELD_FORCE_SCRIPT` | Set to `1` to force a raw-binary install onto a host that already has a package-managed install — by default every binary-mode path refuses there, because `/usr/local/bin` binaries would shadow the package's | `EZYSHIELD_FORCE_SCRIPT=1` |
 
 ---
 

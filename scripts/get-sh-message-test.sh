@@ -101,11 +101,14 @@ srv.serve_forever()
 # EZYSHIELD_METHOD=binary is forced here so these scenarios stay scoped to
 # the release-resolution messaging (issue #235) regardless of whether the
 # runner happens to have apt/dnf — the package-routing behavior (issue #240)
-# is exercised separately below via run_get_sh.
+# is exercised separately below via run_get_sh_only. EZYSHIELD_ROOT points
+# at an empty temp dir so the package-owned-host refusal guard (also #240)
+# can never fire from the runner's real filesystem state.
 run_against_mock() {
   local mode="$1"
-  local portfile pid port
+  local portfile pid port emptyroot
   portfile="$(mktemp)"
+  emptyroot="$(mktemp -d)"
 
   python3 -c "$MOCK_SERVER_PY" "$mode" >"$portfile" 2>/dev/null &
   pid=$!
@@ -120,6 +123,7 @@ run_against_mock() {
 
   if [ -z "$port" ]; then
     kill "$pid" 2>/dev/null || true
+    rm -rf "$emptyroot"
     bad "mock server ($mode) never reported its port"
     OUT=""
     RC=99
@@ -132,21 +136,26 @@ run_against_mock() {
     HTTP_PROXY="http://127.0.0.1:1" HTTPS_PROXY="http://127.0.0.1:1" \
     no_proxy="127.0.0.1" NO_PROXY="127.0.0.1" \
     EZYSHIELD_METHOD=binary \
+    EZYSHIELD_ROOT="$emptyroot" \
     EZYSHIELD_API_BASE_URL="http://127.0.0.1:${port}" sh "$GET_SH" 2>&1)"
   RC=$?
   set -e
 
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
+  rm -rf "$emptyroot"
 }
 
 # setup_fakebin creates a temp directory with fake, logged, no-op apt-get,
-# gpg, and systemctl scripts, and points FAKEBIN at it. Every invocation is
-# appended to CALLLOG (one line per call) so scenarios can assert exactly
-# what did or did not run — in particular, that no real package-manager or
-# systemd mutation ever happens in this test. The fake gpg mimics `gpg
-# --dearmor -o <file>` by copying stdin to <file> verbatim (the mock's
-# /ezyshield.asc body is not a real key, so real gpg would reject it).
+# gpg, systemctl, and dpkg scripts, and points FAKEBIN at it. Every
+# invocation is appended to CALLLOG (one line per call) so scenarios can
+# assert exactly what did or did not run — in particular, that no real
+# package-manager or systemd mutation ever happens in this test. The fake
+# gpg mimics `gpg --dearmor -o <file>` by copying stdin to <file> verbatim
+# (the mock's /ezyshield.asc body is not a real key, so real gpg would
+# reject it). The fake dpkg answers exit 0 to every query — i.e. "yes, a
+# package owns that file" — which the refusal-guard scenarios rely on; it
+# is only ever consulted when ${EZYSHIELD_ROOT}/usr/bin/ezyshield exists.
 setup_fakebin() {
   FAKEBIN="$(mktemp -d)"
   CALLLOG="$FAKEBIN/.calls"
@@ -174,7 +183,12 @@ EOF
 echo "systemctl $*" >>"$EZY_TEST_CALLLOG"
 exit 0
 EOF
-  chmod +x "$FAKEBIN/apt-get" "$FAKEBIN/gpg" "$FAKEBIN/systemctl"
+  cat >"$FAKEBIN/dpkg" <<'EOF'
+#!/bin/sh
+echo "dpkg $*" >>"$EZY_TEST_CALLLOG"
+exit 0
+EOF
+  chmod +x "$FAKEBIN/apt-get" "$FAKEBIN/gpg" "$FAKEBIN/systemctl" "$FAKEBIN/dpkg"
 }
 
 # start_mock <mode> — launches the mock server (same one run_against_mock
@@ -344,11 +358,13 @@ rm -rf "$FAKEBIN" "$SANDBOX"
 echo
 echo "▸ Scenario: repo unreachable — falls back to binary install with a loud warning, packages never touched"
 setup_fakebin
+SANDBOX="$(mktemp -d)" # empty root: no package-owned install, guard must stay silent
 start_mock 404
 EXTRA_ENV=(
   EZY_TEST_CALLLOG="$CALLLOG"
   EZYSHIELD_METHOD=packages
   EZYSHIELD_API_BASE_URL="http://127.0.0.1:${MOCK_PORT}"
+  EZYSHIELD_ROOT="$SANDBOX"
   # EZYSHIELD_PACKAGES_BASE_URL intentionally left unset: it defaults to the
   # real packages.ezyshield.com, which the dead proxy blocks instantly —
   # this IS the "repo unreachable" condition, no separate mock needed.
@@ -369,17 +385,19 @@ esac
 CALLS="$(cat "$CALLLOG")"
 if [ -z "$CALLS" ]; then ok "apt-get/gpg were never invoked (repo setup correctly skipped)"; else bad "unexpected package-manager calls:
 $CALLS"; fi
-rm -rf "$FAKEBIN"
+rm -rf "$FAKEBIN" "$SANDBOX"
 
 echo
 echo "▸ Scenario: EZYSHIELD_METHOD=binary skips packages entirely, even with apt-get present and repo reachable"
 setup_fakebin
+SANDBOX="$(mktemp -d)" # empty root: no package-owned install, guard must stay silent
 start_mock 404
 EXTRA_ENV=(
   EZY_TEST_CALLLOG="$CALLLOG"
   EZYSHIELD_METHOD=binary
   EZYSHIELD_API_BASE_URL="http://127.0.0.1:${MOCK_PORT}"
   EZYSHIELD_PACKAGES_BASE_URL="http://127.0.0.1:${MOCK_PORT}"
+  EZYSHIELD_ROOT="$SANDBOX"
 )
 run_get_sh_only
 stop_mock
@@ -400,7 +418,7 @@ esac
 CALLS="$(cat "$CALLLOG")"
 if [ -z "$CALLS" ]; then ok "apt-get/gpg were never invoked"; else bad "unexpected package-manager calls:
 $CALLS"; fi
-rm -rf "$FAKEBIN"
+rm -rf "$FAKEBIN" "$SANDBOX"
 
 echo
 echo "▸ Scenario: previous script install is cleaned up on transition to packages (EZYSHIELD_CLEANUP=1)"
@@ -495,6 +513,131 @@ if [ -f "$SANDBOX/usr/bin/ezyshield" ] && [ -f "$SANDBOX/usr/lib/systemd/system/
   ok "package-managed files (/usr/bin, /usr/lib/systemd/system) left untouched"
 else
   bad "uninstall removed a package-managed file it does not own"
+fi
+rm -rf "$FAKEBIN" "$SANDBOX"
+
+echo
+echo "▸ Scenario: package-owned host + EZYSHIELD_METHOD=binary — refuses by default, points at apt/dnf"
+setup_fakebin
+SANDBOX="$(mktemp -d)"
+mkdir -p "$SANDBOX/usr/bin"
+printf '#!/bin/sh\necho package\n' >"$SANDBOX/usr/bin/ezyshield" # fake dpkg (exit 0) confirms ownership
+start_mock 404
+EXTRA_ENV=(
+  EZY_TEST_CALLLOG="$CALLLOG"
+  EZYSHIELD_METHOD=binary
+  EZYSHIELD_API_BASE_URL="http://127.0.0.1:${MOCK_PORT}"
+  EZYSHIELD_ROOT="$SANDBOX"
+)
+run_get_sh_only
+stop_mock
+if [ "$RC" -eq 1 ]; then ok "exits 1 (refused)"; else bad "exit code = $RC, want 1; output:
+$OUT"; fi
+case "$OUT" in
+  *"already has a package-managed EzyShield install"*) ok "prints the refusal message" ;;
+  *) bad "missing the refusal message; output:
+$OUT" ;;
+esac
+case "$OUT" in
+  *"apt install --only-upgrade ezyshield"*) ok "names the apt upgrade command" ;;
+  *) bad "refusal does not name the apt upgrade command" ;;
+esac
+case "$OUT" in
+  *"dnf upgrade ezyshield"*) ok "names the dnf upgrade command" ;;
+  *) bad "refusal does not name the dnf upgrade command" ;;
+esac
+case "$OUT" in
+  *"EZYSHIELD_FORCE_SCRIPT=1"*) ok "mentions the EZYSHIELD_FORCE_SCRIPT=1 override" ;;
+  *) bad "refusal does not mention the override" ;;
+esac
+case "$OUT" in
+  *"No stable release has been published yet"* | *"Fetching latest release"*) bad "reached the release lookup — refusal must come before any download step" ;;
+  *) ok "refused before any release lookup or download" ;;
+esac
+if [ ! -e "$SANDBOX/usr/local/bin/ezyshield" ] && [ ! -e "$SANDBOX/usr/local/bin/ezyshield-enforcer" ]; then
+  ok "nothing written to \${ROOT}/usr/local/bin"
+else
+  bad "refusal still wrote binaries under $SANDBOX/usr/local/bin"
+fi
+CALLS="$(cat "$CALLLOG")"
+case "$CALLS" in
+  *"dpkg -S /usr/bin/ezyshield"*) ok "consulted dpkg to confirm package ownership" ;;
+  *) bad "dpkg ownership query never ran; calls:
+$CALLS" ;;
+esac
+rm -rf "$FAKEBIN" "$SANDBOX"
+
+echo
+echo "▸ Scenario: package-owned host + EZYSHIELD_FORCE_SCRIPT=1 — proceeds past the refusal with a loud warning"
+setup_fakebin
+SANDBOX="$(mktemp -d)"
+mkdir -p "$SANDBOX/usr/bin"
+printf '#!/bin/sh\necho package\n' >"$SANDBOX/usr/bin/ezyshield"
+start_mock 404
+EXTRA_ENV=(
+  EZY_TEST_CALLLOG="$CALLLOG"
+  EZYSHIELD_METHOD=binary
+  EZYSHIELD_FORCE_SCRIPT=1
+  EZYSHIELD_API_BASE_URL="http://127.0.0.1:${MOCK_PORT}"
+  EZYSHIELD_ROOT="$SANDBOX"
+)
+run_get_sh_only
+stop_mock
+case "$OUT" in
+  *"already has a package-managed EzyShield install"*) bad "refusal message printed despite EZYSHIELD_FORCE_SCRIPT=1" ;;
+  *) ok "refusal message absent (override honored)" ;;
+esac
+case "$OUT" in
+  *"WILL shadow the package's /usr/bin ones"*) ok "prints the loud force-script shadowing warning" ;;
+  *) bad "missing the force-script warning; output:
+$OUT" ;;
+esac
+case "$OUT" in
+  *"No stable release has been published yet"*) ok "proceeded to the normal binary-mode path (dies on the 404 guidance as usual)" ;;
+  *) bad "did not reach the binary-mode release lookup; output:
+$OUT" ;;
+esac
+if [ "$RC" -eq 1 ]; then ok "exits 1 (no stable release — nothing installed by this test)"; else bad "exit code = $RC, want 1"; fi
+rm -rf "$FAKEBIN" "$SANDBOX"
+
+echo
+echo "▸ Scenario: repo-unreachable fallback on a package-owned host — the guard still refuses (fallback cannot bypass it)"
+setup_fakebin
+SANDBOX="$(mktemp -d)"
+mkdir -p "$SANDBOX/usr/bin"
+printf '#!/bin/sh\necho package\n' >"$SANDBOX/usr/bin/ezyshield"
+start_mock 404
+EXTRA_ENV=(
+  EZY_TEST_CALLLOG="$CALLLOG"
+  EZYSHIELD_METHOD=packages
+  EZYSHIELD_API_BASE_URL="http://127.0.0.1:${MOCK_PORT}"
+  EZYSHIELD_ROOT="$SANDBOX"
+  # EZYSHIELD_PACKAGES_BASE_URL left unset: the dead proxy makes the real
+  # repo host unreachable, forcing the binary fallback — which must then
+  # hit the refusal guard instead of installing.
+)
+run_get_sh_only
+stop_mock
+if [ "$RC" -eq 1 ]; then ok "exits 1 (refused)"; else bad "exit code = $RC, want 1; output:
+$OUT"; fi
+case "$OUT" in
+  *"could not reach the EzyShield package repository"*) ok "took the repo-unreachable fallback path first" ;;
+  *) bad "missing the repo-unreachable warning; output:
+$OUT" ;;
+esac
+case "$OUT" in
+  *"already has a package-managed EzyShield install"*) ok "fallback hit the refusal guard" ;;
+  *) bad "fallback bypassed the refusal guard; output:
+$OUT" ;;
+esac
+case "$OUT" in
+  *"No stable release has been published yet"* | *"Fetching latest release"*) bad "fallback reached the release lookup on a package-owned host" ;;
+  *) ok "no release lookup or download was attempted" ;;
+esac
+if [ ! -e "$SANDBOX/usr/local/bin/ezyshield" ]; then
+  ok "nothing written to \${ROOT}/usr/local/bin"
+else
+  bad "fallback still wrote binaries under $SANDBOX/usr/local/bin"
 fi
 rm -rf "$FAKEBIN" "$SANDBOX"
 

@@ -98,6 +98,12 @@ manualmente. Os binários crus em `/usr/local/bin/` só são usados quando:
   script imprime um aviso e cai para o modo binário automaticamente, então a
   instalação ainda é concluída.
 
+Uma exceção: se o host **já roda uma instalação de EzyShield gerenciada por
+pacote**, todo caminho de modo binário se recusa em vez de instalar
+(binários crus em `/usr/local/bin` esconderiam os do pacote em `/usr/bin`)
+— atualize com `apt`/`dnf` nesse caso, ou defina `EZYSHIELD_FORCE_SCRIPT=1`
+para sobrepor com um aviso ruidoso.
+
 Você pode forçar qualquer um dos dois caminhos explicitamente com `EZYSHIELD_METHOD`:
 
 ```bash
@@ -286,6 +292,7 @@ sudo rm -rf /etc/ezyshield
 | `EZYSHIELD_PACKAGES_BASE_URL` | Sobrescreve a base do repositório de pacotes usada na configuração do repo e na checagem de acessibilidade (espelhos privados, testes) | `EZYSHIELD_PACKAGES_BASE_URL=https://packages.mirror.exemplo.com` |
 | `EZYSHIELD_CLEANUP` | Defina como `1` para remover uma instalação via script que esteja escondendo o pacote, sem interação, ao rotear para uma instalação via pacote | `EZYSHIELD_CLEANUP=1` |
 | `EZYSHIELD_UNINSTALL` | Defina como `1` (equivalente a `--uninstall`) para remover os artefatos da instalação via script e sair | `EZYSHIELD_UNINSTALL=1` |
+| `EZYSHIELD_FORCE_SCRIPT` | Defina como `1` para forçar uma instalação via binário em um host que já tem uma instalação gerenciada por pacote — por padrão todo caminho de modo binário se recusa nesse caso, porque binários em `/usr/local/bin` esconderiam os do pacote | `EZYSHIELD_FORCE_SCRIPT=1` |
 
 ---
 

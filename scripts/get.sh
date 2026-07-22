@@ -12,7 +12,9 @@
 # no deb/rpm tooling, EZYSHIELD_BASE_URL points at a custom mirror,
 # EZYSHIELD_METHOD=binary is set explicitly, or the package repo setup /
 # reachability check fails (loud warning, automatic fallback — the install
-# still completes).
+# still completes). Exception: if the host ALREADY has a package-managed
+# EzyShield install, every binary-mode path refuses (EZYSHIELD_FORCE_SCRIPT=1
+# overrides) — installing to /usr/local/bin there would shadow the package.
 #
 # Environment variables:
 #   EZYSHIELD_VERSION          Install a specific release (e.g., v0.1.0-rc.21).
@@ -38,6 +40,12 @@
 #   EZYSHIELD_UNINSTALL          Set to 1 (equivalent to --uninstall) to remove
 #                               script-install artifacts and exit. Never
 #                               touches package-managed files.
+#   EZYSHIELD_FORCE_SCRIPT       Set to 1 to force a raw-binary install onto a
+#                               host that already has a package-managed
+#                               EzyShield install (/usr/bin/ezyshield owned by
+#                               dpkg/rpm). Without it, binary mode refuses on
+#                               such hosts: /usr/local/bin binaries would
+#                               shadow the package install (issue #240).
 #   EZYSHIELD_ROOT               Internal/test-only path prefix (DESTDIR-style)
 #                               applied to every filesystem path this script
 #                               writes to or reads from (/usr/local/bin,
@@ -199,6 +207,68 @@ maybe_cleanup_shadowing() {
   echo "  Cleanup complete."
 }
 
+# package_owned_install reports whether this host already runs a
+# package-managed EzyShield: /usr/bin/ezyshield exists AND dpkg/rpm confirms
+# a package owns it. When neither dpkg nor rpm is available to ask, the
+# file's presence in ${ROOT}/usr/bin is treated as package-managed (nothing
+# else installs there; refusing is the safe default). The dpkg/rpm queries
+# are read-only and their output is never parsed or interpolated — only the
+# exit code is used (issue #240 security review §1).
+package_owned_install() {
+  [ -f "${ROOT}/usr/bin/ezyshield" ] || return 1
+  have_pkg_query=0
+  if command -v dpkg >/dev/null 2>&1; then
+    have_pkg_query=1
+    if dpkg -S /usr/bin/ezyshield >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+  if command -v rpm >/dev/null 2>&1; then
+    have_pkg_query=1
+    if rpm -qf /usr/bin/ezyshield >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+  # /usr/bin/ezyshield exists but neither dpkg nor rpm was available to
+  # confirm ownership: treat it as package-managed (refuse). When a tool
+  # WAS available and answered "not owned", don't refuse — an unowned
+  # /usr/bin/ezyshield is a manual copy, not a package install.
+  [ "$have_pkg_query" -eq 0 ]
+}
+
+# refuse_binary_over_package prints the refusal message (or the
+# EZYSHIELD_FORCE_SCRIPT warning) when a package-managed install exists.
+# Called at the top of every binary-mode path, BEFORE any download.
+refuse_binary_over_package() {
+  if ! package_owned_install; then
+    return 0
+  fi
+  if [ "${EZYSHIELD_FORCE_SCRIPT:-0}" = "1" ]; then
+    echo ""
+    echo "Warning: EZYSHIELD_FORCE_SCRIPT=1 — installing script binaries to ${INSTALL_DIR}"
+    echo "         on a host with a package-managed EzyShield install. These binaries"
+    echo "         WILL shadow the package's /usr/bin ones (PATH order); 'ezyshield doctor'"
+    echo "         will FAIL on this until you remove one of the two installs."
+    echo ""
+    return 0
+  fi
+  echo ""
+  echo "Error: this host already has a package-managed EzyShield install"
+  echo "(/usr/bin/ezyshield). Installing script binaries to ${INSTALL_DIR} would"
+  echo "shadow it via PATH order — the exact failure 'ezyshield doctor' flags."
+  echo ""
+  echo "Upgrade with your package manager instead:"
+  echo "  # Debian / Ubuntu"
+  echo "  sudo apt update && sudo apt install --only-upgrade ezyshield"
+  echo "  # RHEL / Rocky / Alma"
+  echo "  sudo dnf upgrade ezyshield"
+  echo ""
+  echo "To force a script install anyway (it will shadow the package install):"
+  echo "  ... | sudo EZYSHIELD_FORCE_SCRIPT=1 sh"
+  echo ""
+  exit 1
+}
+
 # ── package-first install (issue #240) ──────────────────────────────────────
 
 # packages_repo_reachable does a cheap, bounded probe against the signing
@@ -346,6 +416,13 @@ if [ "$USE_PACKAGES" = "1" ]; then
 fi
 
 # ── binary-mode install (fallback / explicit / air-gapped / no tooling) ─────
+
+# Guard (issue #240, original acceptance criterion b): never drop script
+# binaries onto a host that already runs the packages — that recreates the
+# shadowing bug in reverse. Applies to EVERY binary-mode path, including the
+# automatic fallback above and EZYSHIELD_BASE_URL mirrors; runs before any
+# download. EZYSHIELD_FORCE_SCRIPT=1 overrides with a loud warning.
+refuse_binary_over_package
 
 # Source override: point the installer at a local mirror (air-gapped installs,
 # CI, or the QEMU e2e harness) instead of GitHub Releases. When set, the

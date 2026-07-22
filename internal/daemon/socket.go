@@ -179,6 +179,12 @@ func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
 		// Long-lived, read-only event stream; writes its own ack + events.
 		d.handleSubscribe(ctx, conn)
 		return
+	case "arm":
+		resp = d.handleArm(ctx, req)
+	case "arm_keep":
+		resp = d.handleArmKeep(ctx)
+	case "disarm":
+		resp = d.handleDisarm(ctx)
 	case "ban":
 		resp = d.handleBan(ctx, req)
 	case "unban":
@@ -186,7 +192,7 @@ func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
 	case "allow":
 		resp = d.handleAllow(ctx, req)
 	default:
-		resp = SocketResponse{Error: fmt.Sprintf("unknown verb %q; valid: status list list_allow events subscribe report ban unban allow", req.Verb)}
+		resp = SocketResponse{Error: fmt.Sprintf("unknown verb %q; valid: status list list_allow events subscribe report arm arm_keep disarm ban unban allow", req.Verb)}
 	}
 
 	writeResponse(conn, resp)
@@ -272,9 +278,10 @@ func (d *Daemon) handleStatus(ctx context.Context) SocketResponse {
 
 	data := StatusData{
 		Uptime:        time.Since(d.startTime).Round(time.Second).String(),
-		Armed:         d.policy.Armed,
+		Armed:         d.policy.IsArmed(),
 		ActiveBans:    active,
 		SimulatedBans: simulated,
+		ArmedUntil:    d.armedUntil(ctx),
 		Version:       d.version,
 	}
 	raw, _ := json.Marshal(data)
@@ -329,7 +336,7 @@ func (d *Daemon) handleBan(ctx context.Context, req SocketRequest) SocketRespons
 		}
 	}
 
-	if d.enforcer != nil && d.policy.Armed {
+	if d.enforcer != nil && d.policy.IsArmed() {
 		t := targetFromPrefix(prefix, ttl)
 		if err := d.enforcer.Ban(ctx, t); err != nil {
 			return SocketResponse{Error: fmt.Sprintf("enforcer ban: %v", err)}
@@ -337,7 +344,7 @@ func (d *Daemon) handleBan(ctx context.Context, req SocketRequest) SocketRespons
 	}
 
 	op := "ban"
-	if !d.policy.Armed {
+	if !d.policy.IsArmed() {
 		op = "dry_ban"
 	}
 
@@ -362,7 +369,7 @@ func (d *Daemon) handleBan(ctx context.Context, req SocketRequest) SocketRespons
 	// the audit-fallback ERROR-log branch already surfaces the failure, and a
 	// duplicate INFO there would falsely suggest the action was recorded.
 	stored := false
-	if prefix.Bits() == prefix.Addr().BitLen() && d.policy.Armed {
+	if prefix.Bits() == prefix.Addr().BitLen() && d.policy.IsArmed() {
 		if err := d.store.RecordManualBan(ctx, prefix.Addr(), ttl, reason); err != nil {
 			slog.ErrorContext(ctx, "daemon: record manual ban failed, falling back to audit-only",
 				"ip", prefix.Addr(), "err", err)

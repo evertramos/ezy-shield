@@ -867,3 +867,58 @@ func (s *DB) TodayUsage(ctx context.Context, provider string) (sdk.Usage, error)
 func nowRFC3339() string {
 	return time.Now().UTC().Format(time.RFC3339Nano)
 }
+
+// SetState upserts a daemon_state key/value pair. Keys are engine-internal
+// identifiers (never log-derived data); values are opaque strings owned by
+// the caller. All SQL is parameterized (Hard Rule §4).
+func (s *DB) SetState(ctx context.Context, key, value string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO daemon_state (key, value, updated_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(key) DO UPDATE SET
+			value      = excluded.value,
+			updated_at = excluded.updated_at
+	`, key, value, nowRFC3339())
+	if err != nil {
+		return fmt.Errorf("store: SetState %s: %w", key, err)
+	}
+	return nil
+}
+
+// GetState returns the value for key; found is false when the key is absent.
+func (s *DB) GetState(ctx context.Context, key string) (string, bool, error) {
+	var value string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT value FROM daemon_state WHERE key = ?`, key).Scan(&value)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("store: GetState %s: %w", key, err)
+	}
+	return value, true, nil
+}
+
+// DeleteState removes key from daemon_state. Missing keys are not an error.
+func (s *DB) DeleteState(ctx context.Context, key string) error {
+	if _, err := s.db.ExecContext(ctx,
+		`DELETE FROM daemon_state WHERE key = ?`, key); err != nil {
+		return fmt.Errorf("store: DeleteState %s: %w", key, err)
+	}
+	return nil
+}
+
+// AuditSystem appends an audit entry for a system-level operation that has
+// no target IP (arm, disarm, arm_revert, ...). The ip column carries the
+// literal "system" so existing audit consumers keep working unchanged.
+// audit_log remains append-only.
+func (s *DB) AuditSystem(ctx context.Context, op, reason string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO audit_log (recorded_at, op, ip, ttl_seconds, strike_num, reason)
+		VALUES (?, ?, 'system', 0, 0, ?)
+	`, nowRFC3339(), op, reason)
+	if err != nil {
+		return fmt.Errorf("store: AuditSystem %s: %w", op, err)
+	}
+	return nil
+}

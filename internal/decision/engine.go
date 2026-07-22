@@ -181,7 +181,7 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 			// than silently suppressing a verdict on a DB error.
 			slog.ErrorContext(ctx, "decision: GetBanInfo failed — falling through to strike path",
 				"ip", ip, "err", err)
-		case banned && e.policy.Armed && dryBan:
+		case banned && e.policy.IsArmed() && dryBan:
 			// Leftover simulated ban from before arming — fall through.
 			slog.InfoContext(ctx, "decision: ignoring simulated dry-run ban while armed",
 				"ip", ip, "strike", banStrike)
@@ -221,7 +221,7 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 	ttl := e.policy.Strikes[idx].TTL.AsDuration()
 
 	op := "ban"
-	if !e.policy.Armed {
+	if !e.policy.IsArmed() {
 		op = "dry_ban"
 	}
 
@@ -362,7 +362,7 @@ func (e *Engine) trackSuppressedEvent(ctx context.Context, ip netip.Addr, banned
 	// traffic is EXPECTED (nothing blocks it), not an enforcement anomaly.
 	// Counters above are still recorded so dry-run observability shows what
 	// a real ban would have suppressed.
-	if !e.policy.Armed {
+	if !e.policy.IsArmed() {
 		return
 	}
 	if !afterGrace || fired || afterCount < e.policy.BanIneffectiveMinEvents {

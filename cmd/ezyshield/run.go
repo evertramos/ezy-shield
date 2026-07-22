@@ -259,6 +259,7 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 		Enricher:   enricher,
 		SocketPath: socketPath,
 		Version:    version,
+		PolicyPath: policyPath,
 	})
 	if err != nil {
 		return fmt.Errorf("run: create daemon: %w", err)

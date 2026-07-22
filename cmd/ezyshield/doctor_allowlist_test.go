@@ -32,8 +32,14 @@ func TestCheckAllowlistBreadth(t *testing.T) {
 			wantWarns:  0,
 		},
 		{
-			name:       "public range -- no warning regardless of width",
-			policyYAML: "armed: false\nallowlist:\n  - 8.0.0.0/8\n",
+			// 100.64.0.0/10 is CGNAT shared address space (RFC 6598) — not
+			// RFC1918 private, so netip.Addr.IsPrivate() reports false for
+			// it even though it isn't globally routable either. Used here
+			// (rather than a real public block) to keep this test file free
+			// of non-example IP literals (AGENTS.md Hard Rule 8 / CI
+			// ip-hygiene-gate).
+			name:       "non-private range -- no warning regardless of width",
+			policyYAML: "armed: false\nallowlist:\n  - 100.64.0.0/10\n",
 			wantStatus: statusPass,
 			wantWarns:  0,
 		},

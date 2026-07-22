@@ -117,6 +117,46 @@ admin_cidrs:
   - 10.0.0.0/8
 ```
 
+Como uma faixa na allowlist **nunca** pode ser banida, mantenha as entradas
+tão estreitas quanto o tráfego que você realmente precisa isentar — uma faixa
+privada ampla remove o enforcement de tudo o que está dentro dela, de forma
+permanente.
+
+### Hosts com Docker
+
+Quando o `ezyshield init` detecta Docker, ele coloca na allowlist apenas as
+sub-redes de rede bridge que realmente existem no host (enumeradas via
+API/CLI do Docker), nunca uma faixa RFC1918 genérica. Se a enumeração falhar,
+ele recua para a sub-rede padrão do bridge do próprio Docker
+(`172.17.0.0/16`) sozinha — ainda assim nunca o `172.16.0.0/12` inteiro.
+Hosts sem Docker não recebem nenhuma entrada relacionada a Docker na
+allowlist.
+
+O `policy.yaml` gerado inclui um exemplo comentado para adicionar
+deliberadamente uma faixa interna mais ampla (VPN, LAN do escritório, um
+overlay Docker multi-host):
+
+```yaml
+# To allow a broader internal range (VPN, office LAN, a multi-host docker
+# overlay) deliberately, uncomment and edit the line below.
+# Trade-off: an allowlisted range can NEVER be banned (allowlist always wins
+# over rules, AI, and geo blocking) — the broader the range, the more of your
+# network permanently loses enforcement coverage.
+# 'ezyshield doctor' warns if any private allowlist entry is /16 or broader.
+#   - 10.0.0.0/8
+```
+
+O `ezyshield doctor` avisa (não falha) quando a allowlist contém uma faixa
+privada (RFC1918/ULA) `/16` ou mais ampla, seja qual for a origem dela.
+
+> **Atualizando de uma versão anterior do EzyShield?** O `init` nunca
+> reescreve um `policy.yaml` existente, então uma config gerada antes desta
+> correção mantém a entrada `172.16.0.0/12` sem alteração. Revise a seção
+> `allowlist` do seu `policy.yaml` e estreite essa entrada para a(s) sua(s)
+> sub-rede(s) real(is) de bridge do Docker (`docker network ls` /
+> `docker network inspect`) — o `ezyshield doctor` sinaliza a entrada antiga
+> como WARN para te lembrar.
+
 ## Bloqueio geográfico
 
 | Campo | Tipo | Descrição |

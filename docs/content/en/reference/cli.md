@@ -37,7 +37,7 @@ against:
 | `report <ip>` | Object: versioned abuse report (`schema_version`, `ip`, `country`, `asn`, `current_ban`, `strikes`, `actions`, plus `evidence` with `--evidence`) |
 | `report` | Array of offender summaries (`ip`, `first_seen`, `last_seen`, `total_strikes`, `banned`, `permanent`, `country`, `asn`) |
 | `watch` | NDJSON: one event object per line |
-| `doctor` | Object: `checks` (`name`, `status`, `hint`) and `summary` (`total`, `pass`, `fail`) |
+| `doctor` | Object: `checks` (`name`, `status`, `hint`) and `summary` (`total`, `pass`, `fail`, `warn`) |
 | `config show` | Object: `config`, `policy` (effective values, secrets redacted) |
 | `version` | Object: `version`, `commit`, `build_date` |
 
@@ -66,6 +66,15 @@ on the host), **Collectors**, **Allowlist**, **Edge enforcers**, **AI
 analysis**, **Policy**, **Files**, and **System services** — with `✓`/`✗`/`!`
 status marks per line. Styling follows the global
 [color conventions](#color); piped output stays plain.
+
+When Docker is detected, the **Environment** section enumerates the docker
+bridge network subnets that actually exist on the host and allowlists only
+those — never a blanket RFC1918 range. If enumeration fails, it falls back to
+Docker's default bridge subnet (`172.17.0.0/16`) alone and prints a `!`
+warning. Hosts without Docker get no docker-related allowlist entry at all.
+See the allowlist section in [Policy Reference](policy.md) for the trade-off
+if you want to broaden this deliberately, and re-run `ezyshield doctor`
+afterwards — it warns on any private allowlist entry `/16` or broader.
 
 At the end it prints a **Summary** section:
 
@@ -323,6 +332,10 @@ Checks:
 - enforcer socket reachable
 - docker socket present (when Docker collectors are configured)
 - `.env` secret file permissions
+- allowlist breadth: **WARN** (not FAIL) when `policy.yaml`'s allowlist contains
+  a private (RFC1918/ULA) range at `/16` or broader — such a range can never be
+  banned, so it silently exempts a large chunk of address space from
+  enforcement forever. See the allowlist section in [Policy Reference](policy.md).
 
 To exercise enforcers and notification channels for real, use
 `ezyshield test enforcer` and `ezyshield test notifier`.

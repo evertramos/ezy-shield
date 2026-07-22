@@ -4,10 +4,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -110,9 +112,17 @@ type wizardState struct {
 	nftPath       string
 	hasDocker     bool
 	allContainers []dockerContainer
-	sshUnit       string
-	publicIP      string
-	sshSourceIP   string
+	// dockerAllowlist holds the docker bridge subnets to write into the
+	// generated policy allowlist (issue #210). Populated by
+	// detectDockerBridgeSubnets() during environment detection — empty when
+	// docker isn't detected, so buildAllowlist never needs its own docker
+	// gate. Never the whole 172.16.0.0/12 supernet: either the subnets that
+	// actually exist on the host, or (enumeration failure only) the single
+	// default bridge subnet.
+	dockerAllowlist []string
+	sshUnit         string
+	publicIP        string
+	sshSourceIP     string
 
 	hasWordPress bool
 	wpRulesPath  string
@@ -221,6 +231,24 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 	state.hasDocker = len(state.allContainers) > 0
 	if state.hasDocker {
 		p.println(st.ok(fmt.Sprintf("docker: %d container(s) running", len(state.allContainers))))
+
+		// Allowlist only the docker bridge subnets that actually exist on
+		// this host (issue #210) — never the whole 172.16.0.0/12 supernet,
+		// which would exempt >1M RFC1918 addresses from enforcement forever
+		// (allowlist always wins).
+		subnets, usedFallback := detectDockerBridgeSubnets()
+		state.dockerAllowlist = subnets
+		switch {
+		case usedFallback:
+			p.println(st.warn(fmt.Sprintf(
+				"docker networks: could not enumerate — allowlisting the default bridge subnet only (%s)",
+				defaultDockerBridgeSubnet)))
+		case len(subnets) == 0:
+			p.println(st.ok("docker networks: no bridge subnets found — no docker allowlist entry added"))
+		default:
+			p.println(st.ok(fmt.Sprintf("docker networks: allowlisting %d bridge subnet(s): %s",
+				len(subnets), strings.Join(subnets, ", "))))
+		}
 	} else {
 		p.println(st.fail("docker: not running / no containers"))
 	}
@@ -796,6 +824,18 @@ func writeGeneratedPolicy(path string, state *wizardState) error {
 	for _, ip := range buildAllowlist(state) {
 		fmt.Fprintf(&b, "  - %s\n", ip)
 	}
+	// Issue #210: only real, detected subnets are written above. Broader
+	// internal ranges are opt-in — the commented example below (written
+	// into policy.yaml itself, not just this source file) shows how, and
+	// spells out the trade-off so a future editor doesn't uncomment it
+	// without understanding the consequence.
+	b.WriteString("# To allow a broader internal range (VPN, office LAN, a multi-host docker\n")
+	b.WriteString("# overlay) deliberately, uncomment and edit the line below.\n")
+	b.WriteString("# Trade-off: an allowlisted range can NEVER be banned (allowlist always wins\n")
+	b.WriteString("# over rules, AI, and geo blocking) — the broader the range, the more of your\n")
+	b.WriteString("# network permanently loses enforcement coverage.\n")
+	b.WriteString("# 'ezyshield doctor' warns if any private allowlist entry is /16 or broader.\n")
+	b.WriteString("#   - 10.0.0.0/8\n")
 
 	if len(state.adminIPs) > 0 {
 		b.WriteString("admin_cidrs:\n")
@@ -1137,6 +1177,126 @@ func detectDockerContainers() []dockerContainer {
 	return containers
 }
 
+// defaultDockerBridgeSubnet is Docker Engine's out-of-the-box default bridge
+// subnet (the "docker0" bridge). Used ONLY as a fallback when network
+// enumeration fails (issue #210) — never as a substitute for the actual
+// host subnets, and never widened to the 172.16.0.0/12 supernet.
+const defaultDockerBridgeSubnet = "172.17.0.0/16"
+
+// dockerNetworkLister enumerates the docker bridge network subnets present
+// on the host. It is a package-level var so tests can override it without a
+// real docker daemon (see init_allowlist_test.go); production code always
+// uses listDockerBridgeSubnets.
+var dockerNetworkLister = listDockerBridgeSubnets
+
+// dockerNetworkInspect mirrors the subset of `docker network inspect` JSON
+// output this package needs. Docker's own output is treated as untrusted
+// external input, same as any other subprocess result: it is decoded with
+// encoding/json (never interpolated into a shell command or trusted as a
+// pre-validated CIDR), and every subnet string is re-validated with
+// netip.ParsePrefix before being accepted (§1 SECURITY-REVIEW: input
+// handling).
+type dockerNetworkInspect struct {
+	Driver string `json:"Driver"`
+	IPAM   struct {
+		Config []struct {
+			Subnet string `json:"Subnet"`
+		} `json:"Config"`
+	} `json:"IPAM"`
+}
+
+// listDockerBridgeSubnets asks the docker CLI for every network's inspect
+// payload and returns the deduplicated subnets of bridge-driver networks
+// only — the networks that place container IPs on a host-routed subnet and
+// therefore need an enforcement exemption. host/none/overlay/macvlan
+// networks are skipped: they either have no subnet of their own or aren't
+// what the original 172.16.0.0/12 entry was meant to cover.
+//
+// Returns an error on any failure (docker not reachable, malformed output,
+// timeout). Callers MUST fall back to defaultDockerBridgeSubnet in that
+// case — never skip the allowlist entry silently, and never widen it.
+func listDockerBridgeSubnets(ctx context.Context) ([]string, error) {
+	//nolint:gosec // fixed args, no user input
+	idsOut, err := exec.CommandContext(ctx, "docker", "network", "ls", "-q").Output()
+	if err != nil {
+		return nil, fmt.Errorf("docker network ls: %w", err)
+	}
+	var ids []string
+	for _, line := range strings.Split(strings.TrimSpace(string(idsOut)), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			ids = append(ids, line)
+		}
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	// ids come from docker's own output, not from a shell string — they are
+	// passed as separate argv entries below (exec.Command never invokes a
+	// shell), so there is no command-injection surface regardless of their
+	// content. We still never trust them as anything other than opaque
+	// tokens: they are neither parsed nor interpolated, only forwarded.
+	args := append([]string{"network", "inspect"}, ids...)
+	//nolint:gosec // args are argv entries (no shell), see comment above
+	out, err := exec.CommandContext(ctx, "docker", args...).Output()
+	if err != nil {
+		return nil, fmt.Errorf("docker network inspect: %w", err)
+	}
+
+	return parseDockerBridgeSubnets(out)
+}
+
+// parseDockerBridgeSubnets decodes the JSON payload from `docker network
+// inspect` and returns the deduplicated subnets of bridge-driver networks
+// only, in first-seen order. Split out from listDockerBridgeSubnets so the
+// untrusted-input handling (§1 SECURITY-REVIEW) can be unit tested without a
+// real docker daemon: malformed JSON, non-bridge drivers, and unparsable
+// subnet strings are all exercised directly in init_allowlist_test.go.
+func parseDockerBridgeSubnets(data []byte) ([]string, error) {
+	var networks []dockerNetworkInspect
+	if err := json.Unmarshal(data, &networks); err != nil {
+		return nil, fmt.Errorf("parsing docker network inspect output: %w", err)
+	}
+
+	seen := make(map[string]bool)
+	var subnets []string
+	for _, n := range networks {
+		if n.Driver != "bridge" {
+			continue
+		}
+		for _, c := range n.IPAM.Config {
+			prefix, err := netip.ParsePrefix(strings.TrimSpace(c.Subnet))
+			if err != nil {
+				// Never trust docker's output blindly — skip anything that
+				// doesn't parse as a CIDR rather than writing it verbatim
+				// into policy.yaml.
+				continue
+			}
+			cidr := prefix.String()
+			if !seen[cidr] {
+				seen[cidr] = true
+				subnets = append(subnets, cidr)
+			}
+		}
+	}
+	return subnets, nil
+}
+
+// detectDockerBridgeSubnets enumerates the docker bridge subnets that
+// actually exist on the host, falling back to the single default bridge
+// subnet (never the /12 supernet) on any enumeration failure. The bool
+// return reports whether the fallback was used, so the caller can surface a
+// warning to the operator instead of silently narrowing coverage.
+func detectDockerBridgeSubnets() (subnets []string, usedFallback bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	got, err := dockerNetworkLister(ctx)
+	if err != nil {
+		return []string{defaultDockerBridgeSubnet}, true
+	}
+	return got, false
+}
+
 // confirmWebServerCollectors prompts the operator for each detected web
 // server and returns the collector list to write into config.yaml.
 //
@@ -1227,13 +1387,24 @@ func sshSourceIP() string {
 
 // ── Policy helpers ───────────────────────────────────────────────────────────
 
-// buildAllowlist returns loopback + docker bridge range + server public IP.
+// buildAllowlist returns loopback + real docker bridge subnets (if any) +
+// server public IP.
+//
+// Issue #210: this intentionally does NOT add a blanket RFC1918 entry.
+// Non-docker hosts get no docker-related entry at all; docker hosts get
+// only the subnets detected in state.dockerAllowlist (populated during
+// environment detection — see the "docker networks" block in
+// runInitWizard and detectDockerBridgeSubnets below). Allowlisted ranges
+// can never be banned (allowlist always wins, hard rule #1), so this stays
+// as narrow as possible by default — see the commented example
+// writeGeneratedPolicy appends for how an operator opts into something
+// broader.
 func buildAllowlist(state *wizardState) []string {
 	list := []string{
 		"127.0.0.1/32",
 		"::1/128",
-		"172.16.0.0/12",
 	}
+	list = append(list, state.dockerAllowlist...)
 	if state.publicIP != "" {
 		list = append(list, state.publicIP+"/32")
 	}

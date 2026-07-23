@@ -145,8 +145,8 @@ type wizardState struct {
 
 	// cdn holds CDN-detection + CF-subflow state. Populated by runCDNStep
 	// during askQuestions (see init_cdn.go). Non-nil after askQuestions
-	// returns so downstream writers can rely on nil checks on cdn.cfCfg
-	// alone. Its String() masks the CF token.
+	// returns so downstream writers can rely on len(cdn.cfAccounts) checks
+	// alone. Its String() masks every CF token.
 	cdn *cdnStep
 }
 
@@ -360,21 +360,27 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 		envTouched = envTouched || wrote || kept
 	}
 
-	// Cloudflare token: written to the same .env file, one line per token.
-	// Merge semantics preserve any AI KEY= line written above (issue #43).
-	// The token itself is NEVER logged — only "wrote" / "kept".
-	if state.cdn != nil && state.cdn.cfEnabled && state.cdn.cfToken != "" && state.cdn.cfTokenEnvVar != "" {
-		wrote, kept, err := writeCloudflareEnvFile(configDir, state.cdn.cfTokenEnvVar, state.cdn.cfToken)
-		if err != nil {
-			return err
+	// Cloudflare tokens: written to the same .env file, one line per account
+	// token. Merge semantics preserve any AI KEY= line written above (issue
+	// #43). The tokens themselves are NEVER logged — only "wrote" / "kept".
+	if state.cdn != nil && state.cdn.cfEnabled {
+		for i := range state.cdn.cfAccounts {
+			acct := &state.cdn.cfAccounts[i]
+			if acct.token == "" || acct.tokenEnvVar == "" {
+				continue
+			}
+			wrote, kept, err := writeCloudflareEnvFile(configDir, acct.tokenEnvVar, acct.token)
+			if err != nil {
+				return err
+			}
+			switch {
+			case kept:
+				p.println(st.ok("kept " + envPath + " (existing " + acct.tokenEnvVar + " preserved)"))
+			case wrote:
+				p.println(st.ok("wrote " + envPath + " (chmod 600, " + acct.tokenEnvVar + " merged)"))
+			}
+			envTouched = envTouched || wrote || kept
 		}
-		switch {
-		case kept:
-			p.println(st.ok("kept " + envPath + " (existing Cloudflare token preserved)"))
-		case wrote:
-			p.println(st.ok("wrote " + envPath + " (chmod 600, Cloudflare token merged)"))
-		}
-		envTouched = envTouched || wrote || kept
 	}
 	if envTouched {
 		sum.files = append(sum.files, envPath+" (mode 0600 — secret tokens live here, never in config.yaml)")
@@ -500,10 +506,16 @@ func summarizeChoices(state *wizardState, sum *initSummary, yes bool) {
 	switch {
 	case state.cdn == nil:
 		// askQuestions always sets cdn; nil only in unit tests.
-	case state.cdn.cfEnabled && state.cdn.cfCfg != nil:
-		sum.configured = append(sum.configured,
-			fmt.Sprintf("enforcer: cloudflare (mode %s, action %s)",
-				state.cdn.cfCfg.Mode, state.cdn.cfCfg.Action))
+	case state.cdn.cfEnabled && len(state.cdn.cfAccounts) > 0:
+		for _, acct := range state.cdn.cfAccounts {
+			label := "cloudflare"
+			if acct.cfg.Name != "" {
+				label = "cloudflare/" + acct.cfg.Name
+			}
+			sum.configured = append(sum.configured,
+				fmt.Sprintf("enforcer: %s (mode %s, action %s)",
+					label, acct.cfg.Mode, acct.cfg.Action))
+		}
 	case state.cdn.cfAttempted:
 		// The loud abort banner (issue #93) already printed the specific
 		// reason; this line makes sure the failure also survives into the
@@ -773,7 +785,7 @@ func writeGeneratedConfig(path string, state *wizardState) error {
 		}
 	}
 
-	hasCF := state.cdn != nil && state.cdn.cfEnabled && state.cdn.cfCfg != nil
+	hasCF := state.cdn != nil && state.cdn.cfEnabled && len(state.cdn.cfAccounts) > 0
 	if state.nftPath != "" || hasCF {
 		b.WriteString("enforce:\n")
 		if state.nftPath != "" {

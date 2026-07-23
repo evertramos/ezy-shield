@@ -12,7 +12,7 @@ Este guia mostra como configurar o EzyShield para bloquear IPs maliciosos na edg
 
 EzyShield oferece dois modos de bloqueio na Cloudflare:
 
-| Recurso | Lists (Recomendado) | Rulesets (Legado) |
+| Recurso | Lists | Rulesets |
 |---------|------------------|-------------------|
 | **Chamadas de API por bloqueio** | 1 (account-level) | 1 por zone |
 | **Capacidade de IPs** | 10.000 | ~200 por rule |
@@ -21,7 +21,12 @@ EzyShield oferece dois modos de bloqueio na Cloudflare:
 | **Plano gratuito** | ✅ (1 list, 10k items) | ✅ |
 | **Menor privilégio** | ❌ (precisa token account-level) | ✅ (token zone-level) |
 
-O modo **Lists** é recomendado a menos que você precise de controle por zone ou não possa usar tokens account-level.
+Os dois modos são totalmente suportados — escolha por implantação (e, em
+configurações multi-conta, por conta). **Lists** atende a maioria das
+implantações multi-zone; **rulesets** atende controle por zone, tokens de
+menor privilégio (zone-level) ou contas cuja cota de custom lists já está
+ocupada. Rodar uma conta em lists e outra em rulesets é uma configuração
+perfeitamente normal.
 
 ## Configuração do Modo Lists
 
@@ -104,9 +109,9 @@ Este comando irá:
 
 Se você configurou `zone_ids`, este passo é **automático** — as regras são criadas no primeiro Sync.
 
-## Configuração do Modo Rulesets (Legado)
+## Configuração do Modo Rulesets
 
-Para implantações que precisam de controle por zone ou não podem usar tokens account-level:
+Para implantações que querem controle por zone ou não podem usar tokens account-level:
 
 ### Passo 1: Criar Token de API de Nível de Zone
 
@@ -194,25 +199,43 @@ Se você atingir o limite de 10k items do plano gratuito, você tem duas opçõe
 
 ## Configuração Multi-Conta
 
-Para gerenciar múltiplas contas da Cloudflare a partir de um único daemon EzyShield:
+Agências e freelancers costumam gerenciar sites espalhados por contas
+Cloudflare separadas, cada uma com seu próprio token de API. Um único daemon
+EzyShield cuida de todas: cada ban é aplicado em todas as contas
+configuradas, e uma falha em uma conta nunca bloqueia as demais.
+
+Os wizards fazem essa configuração por você — tanto `ezyshield init` (etapa
+de CDN) quanto `ezyshield config enforcer cloudflare` perguntam **"Add
+another Cloudflare account?"** depois de cada conta. Cada conta recebe seu
+próprio nome, modo (lists ou rulesets — misturar é normal), token validado e
+sua própria variável no `.env` (`CLOUDFLARE_API_TOKEN` para uma única conta
+sem nome, `CLOUDFLARE_API_TOKEN_<NOME>` para contas nomeadas). Rodar
+`config enforcer cloudflare` de novo permite escolher uma conta existente
+para reconfigurar ou adicionar outra.
+
+A config resultante:
 
 ```yaml
 enforce:
   cloudflare:
     # Conta 1
     - name: cliente_a
-      api_token: env:EZYSHIELD_CF_TOKEN_A
+      api_token: env:CLOUDFLARE_API_TOKEN_CLIENTE_A
       mode: lists
       account_id: account_a_id
       zone_ids: [zone_a1, zone_a2]
-    # Conta 2
+    # Conta 2 — um modo diferente por conta é normal
     - name: cliente_b
-      api_token: env:EZYSHIELD_CF_TOKEN_B
-      mode: lists
-      account_id: account_b_id
+      api_token: env:CLOUDFLARE_API_TOKEN_CLIENTE_B
+      mode: rulesets
+      zone_ids: [zone_b1]
 ```
 
-Cada conta recebe gerenciamento independente de lista. Os logs mostrarão `enforce/cloudflare[cliente_a]` e `enforce/cloudflare[cliente_b]` para clareza.
+Com mais de uma conta, cada entrada precisa de um `name` único (o wizard
+garante isso, e se oferece para nomear uma entrada pré-existente sem nome).
+Cada conta recebe gerenciamento independente de listas/regras e status
+por conta em `test enforcer cloudflare` e `doctor`. Os logs mostram
+`enforce/cloudflare[cliente_a]` e `enforce/cloudflare[cliente_b]` para clareza.
 
 ## Limitação de Taxa
 

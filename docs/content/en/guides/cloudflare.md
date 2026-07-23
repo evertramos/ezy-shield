@@ -12,7 +12,7 @@ This guide walks you through setting up EzyShield to block malicious IPs at the 
 
 EzyShield supports two Cloudflare enforcement modes:
 
-| Feature | Lists (Recommended) | Rulesets (Legacy) |
+| Feature | Lists | Rulesets |
 |---------|------------------|-------------------|
 | **API calls per ban** | 1 (account-level) | 1 per zone |
 | **IP capacity** | 10,000 | ~200 per rule |
@@ -21,7 +21,11 @@ EzyShield supports two Cloudflare enforcement modes:
 | **Free plan** | ✅ (1 list, 10k items) | ✅ |
 | **Least privilege** | ❌ (needs account-level token) | ✅ (zone-level token) |
 
-**Lists mode** is recommended unless you need per-zone control or cannot use account-level tokens.
+Both modes are fully supported — pick per deployment (and, in multi-account
+setups, per account). **Lists** suits most multi-zone deployments; **rulesets**
+suits per-zone control, least-privilege zone tokens, or accounts whose
+custom-list quota is already taken. Running one account in lists mode and
+another in rulesets mode is a perfectly normal setup.
 
 ## Lists Mode Setup
 
@@ -104,9 +108,9 @@ This command will:
 
 If you configured `zone_ids`, this step is **automatic** — rules are created on first Sync.
 
-## Rulesets Mode Setup (Legacy)
+## Rulesets Mode Setup
 
-For deployments that need per-zone control or cannot use account-level tokens:
+For deployments that want per-zone control or cannot use account-level tokens:
 
 ### Step 1: Create Zone-Level API Token
 
@@ -194,25 +198,43 @@ If you hit the 10k-item free-plan limit, you have two options:
 
 ## Multi-Account Setup
 
-To manage multiple Cloudflare accounts from a single EzyShield daemon:
+Agencies and freelancers often manage sites spread across separate Cloudflare
+accounts, each with its own API token. A single EzyShield daemon handles them
+all: every ban is applied to every configured account, and a failure on one
+account never blocks the others.
+
+The wizards set this up for you — both `ezyshield init` (CDN step) and
+`ezyshield config enforcer cloudflare` ask **"Add another Cloudflare
+account?"** after each account. Each account gets its own name, mode (lists
+or rulesets — mixing is fine), validated token, and its own env var in
+`.env` (`CLOUDFLARE_API_TOKEN` for a single unnamed account,
+`CLOUDFLARE_API_TOKEN_<NAME>` for named ones). Re-running
+`config enforcer cloudflare` lets you pick an existing account to
+reconfigure or add another.
+
+The resulting config:
 
 ```yaml
 enforce:
   cloudflare:
     # Account 1
     - name: client_a
-      api_token: env:EZYSHIELD_CF_TOKEN_A
+      api_token: env:CLOUDFLARE_API_TOKEN_CLIENT_A
       mode: lists
       account_id: account_a_id
       zone_ids: [zone_a1, zone_a2]
-    # Account 2
+    # Account 2 — a different mode per account is fine
     - name: client_b
-      api_token: env:EZYSHIELD_CF_TOKEN_B
-      mode: lists
-      account_id: account_b_id
+      api_token: env:CLOUDFLARE_API_TOKEN_CLIENT_B
+      mode: rulesets
+      zone_ids: [zone_b1]
 ```
 
-Each account gets independent list management. Logs will show `enforce/cloudflare[client_a]` and `enforce/cloudflare[client_b]` for clarity.
+With more than one account, every entry needs a unique `name` (the wizard
+enforces this, and offers to name a pre-existing unnamed entry). Each account
+gets independent list/rule management and per-account status in
+`test enforcer cloudflare` and `doctor`. Logs show
+`enforce/cloudflare[client_a]` and `enforce/cloudflare[client_b]` for clarity.
 
 ## Rate Limiting
 

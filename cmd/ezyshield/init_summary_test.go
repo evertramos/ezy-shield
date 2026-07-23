@@ -32,8 +32,8 @@ func TestSummarizeChoices_HappyPath(t *testing.T) {
 		aiProvider: "openai",
 		aiModel:    "gpt-4o-mini",
 		cdn: &cdnStep{
-			cfEnabled: true,
-			cfCfg:     &config.CloudflareCfg{Mode: "lists", Action: "block"},
+			cfEnabled:  true,
+			cfAccounts: []cfAccountSetup{{cfg: config.CloudflareCfg{Mode: "lists", Action: "block"}}},
 		},
 	}
 	sum := &initSummary{}
@@ -199,7 +199,7 @@ func TestInitSummary_CFAbortBannerThenSummary(t *testing.T) {
 	// Invalid mode answer → subflow aborts on its first prompt; the
 	// deferred banner fires because cfEnabled stayed false.
 	step := &cdnStep{}
-	runCloudflareSubflow(context.Background(), p, &scriptedPrompter{strings: []string{"bogus"}}, step, cdnDeps{}, nil)
+	runCloudflareSubflow(context.Background(), p, &scriptedPrompter{strings: []string{"bogus"}}, step, cdnDeps{}, nil, cfSubflowOpts{})
 
 	if step.cfEnabled {
 		t.Fatal("cfEnabled=true after invalid mode")

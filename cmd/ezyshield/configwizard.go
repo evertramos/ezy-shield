@@ -243,12 +243,36 @@ func runConfigComponent(ctx context.Context, p *wPrinter, pr prompter, deps cdnD
 // wizardEnforcerCloudflare adapts the init CDN sub-flow (init_cdn.go) to
 // post-install reconfiguration: same prompts, same dry token validation,
 // same .env merge semantics — but merging into an existing Config instead
-// of generating a fresh file.
+// of generating a fresh file. With accounts already configured (issue #217)
+// the operator first picks between reconfiguring one of them and adding a
+// new one; account entries merge by name (same name = replace).
 func wizardEnforcerCloudflare(ctx context.Context, p *wPrinter, pr prompter, deps cdnDeps,
 	cfg *config.Config, configDir string) ([]string, func() error, error) {
+	var existing []config.CloudflareCfg
+	if cfg.Enforce != nil {
+		existing = cfg.Enforce.Cloudflare
+	}
+
+	opts := cfSubflowOpts{existing: existing}
+	if len(existing) > 0 {
+		p.println("  Existing Cloudflare account(s):")
+		for _, ex := range existing {
+			p.printf("    • %s — mode %s\n", cfAccountDisplayName(ex.Name), cfModeOrDefault(ex.Mode))
+		}
+		target, ok := pickCFReconfigureTarget(p, pr, existing)
+		if !ok {
+			p.println("  Nothing selected; no changes made.")
+			return nil, nil, nil
+		}
+		if target != nil {
+			opts.reconfigureName = *target
+			opts.hasReconfigure = true
+		}
+	}
+
 	step := &cdnStep{}
-	runCloudflareSubflow(ctx, p, pr, step, deps, nil)
-	if !step.cfEnabled || step.cfCfg == nil {
+	runCloudflareSubflow(ctx, p, pr, step, deps, nil, opts)
+	if !step.cfEnabled || len(step.cfAccounts) == 0 {
 		// The sub-flow already printed the specific reason and the aborted
 		// banner (issue #93); nothing was decided, nothing to save.
 		return nil, nil, nil
@@ -257,49 +281,145 @@ func wizardEnforcerCloudflare(ctx context.Context, p *wPrinter, pr prompter, dep
 	if cfg.Enforce == nil {
 		cfg.Enforce = &config.EnforceCfg{}
 	}
-	verb := "added"
-	replaced := false
-	for i := range cfg.Enforce.Cloudflare {
-		if cfg.Enforce.Cloudflare[i].Name == step.cfCfg.Name {
-			cfg.Enforce.Cloudflare[i] = *step.cfCfg
-			verb = "replaced"
-			replaced = true
-			break
+	var changed []string
+	for i := range step.cfAccounts {
+		acct := &step.cfAccounts[i]
+		verb := "added"
+		replaced := false
+		for j := range cfg.Enforce.Cloudflare {
+			if cfg.Enforce.Cloudflare[j].Name == acct.cfg.Name {
+				cfg.Enforce.Cloudflare[j] = acct.cfg
+				verb = "replaced"
+				replaced = true
+				break
+			}
 		}
-	}
-	if !replaced {
-		cfg.Enforce.Cloudflare = append(cfg.Enforce.Cloudflare, *step.cfCfg)
+		if !replaced {
+			cfg.Enforce.Cloudflare = append(cfg.Enforce.Cloudflare, acct.cfg)
+		}
+		changed = append(changed, cfChangedLines(verb, acct)...)
 	}
 
-	changed := []string{
-		fmt.Sprintf("enforce.cloudflare — %s entry (mode=%s, action=%s, api_token=env:%s)",
-			verb, step.cfCfg.Mode, step.cfCfg.Action, step.cfTokenEnvVar),
-	}
-	switch step.cfCfg.Mode {
-	case "lists":
-		changed = append(changed,
-			"enforce.cloudflare.account_id = "+step.cfCfg.AccountID,
-			"enforce.cloudflare.list_name = "+step.cfCfg.ListName)
-	case "rulesets":
-		changed = append(changed,
-			"enforce.cloudflare.zone_ids = "+strings.Join(step.cfCfg.ZoneIDs, ", "))
+	// Going multi-account can leave a legacy unnamed entry behind, which
+	// config validation rejects (every account needs a unique name once
+	// there is more than one). Name it now rather than failing the write.
+	if len(cfg.Enforce.Cloudflare) > 1 {
+		if err := nameUnnamedCFAccounts(p, pr, cfg.Enforce.Cloudflare); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	postSave := func() error {
-		wrote, kept, err := writeCloudflareEnvFile(configDir, step.cfTokenEnvVar, step.cfToken)
-		if err != nil {
-			return err
-		}
 		envPath := filepath.Join(configDir, envFileName)
-		switch {
-		case kept:
-			p.printf("  kept %s (existing Cloudflare token preserved)\n", envPath)
-		case wrote:
-			p.printf("  wrote %s (chmod 600, Cloudflare token merged)\n", envPath)
+		for i := range step.cfAccounts {
+			acct := &step.cfAccounts[i]
+			wrote, kept, err := writeCloudflareEnvFile(configDir, acct.tokenEnvVar, acct.token)
+			if err != nil {
+				return err
+			}
+			switch {
+			case kept:
+				p.printf("  kept %s (existing %s preserved)\n", envPath, acct.tokenEnvVar)
+			case wrote:
+				p.printf("  wrote %s (chmod 600, %s merged)\n", envPath, acct.tokenEnvVar)
+			}
 		}
 		return nil
 	}
 	return changed, postSave, nil
+}
+
+// cfAccountDisplayName renders an account label for terminal listings; the
+// legacy single-account shape has no name.
+func cfAccountDisplayName(name string) string {
+	if name == "" {
+		return "(unnamed)"
+	}
+	return name
+}
+
+// cfModeOrDefault mirrors the config loader's defaulting (empty = lists).
+func cfModeOrDefault(mode string) string {
+	if mode == "" {
+		return "lists"
+	}
+	return mode
+}
+
+// pickCFReconfigureTarget asks which existing account the operator wants to
+// redo. Returns (nil, true) for "add a new account", (&name, true) to
+// reconfigure that entry, and (nil, false) when the answer matches nothing.
+func pickCFReconfigureTarget(p *wPrinter, pr prompter, existing []config.CloudflareCfg) (*string, bool) {
+	if len(existing) == 1 {
+		if pr.askBool("Reconfigure this account (yes) or add a new one (no)?", true) {
+			name := existing[0].Name
+			return &name, true
+		}
+		return nil, true
+	}
+	ans := strings.TrimSpace(pr.ask("Account to reconfigure (exact name; ENTER to add a new one)", ""))
+	if ans == "" {
+		return nil, true
+	}
+	for _, ex := range existing {
+		if ex.Name == ans {
+			name := ex.Name
+			return &name, true
+		}
+	}
+	p.printf("  no account named %q exists.\n", ans)
+	return nil, false
+}
+
+// cfChangedLines renders the changed-keys summary for one merged account.
+func cfChangedLines(verb string, acct *cfAccountSetup) []string {
+	label := "enforce.cloudflare"
+	if acct.cfg.Name != "" {
+		label = "enforce.cloudflare[" + acct.cfg.Name + "]"
+	}
+	lines := []string{
+		fmt.Sprintf("%s — %s entry (mode=%s, action=%s, api_token=env:%s)",
+			label, verb, acct.cfg.Mode, acct.cfg.Action, acct.tokenEnvVar),
+	}
+	switch acct.cfg.Mode {
+	case "lists":
+		lines = append(lines,
+			label+".account_id = "+acct.cfg.AccountID,
+			label+".list_name = "+acct.cfg.ListName)
+	case "rulesets":
+		lines = append(lines,
+			label+".zone_ids = "+strings.Join(acct.cfg.ZoneIDs, ", "))
+	}
+	return lines
+}
+
+// nameUnnamedCFAccounts prompts a name for any unnamed entry once the config
+// holds more than one account. The entry keeps its api_token reference —
+// account labels and env-var names are independent, so no .env change is
+// needed. Returns an error (aborting the whole write) when the operator
+// cannot supply a valid unique name: writing a config that fails validation
+// is never an option.
+func nameUnnamedCFAccounts(p *wPrinter, pr prompter, accounts []config.CloudflareCfg) error {
+	used := make(map[string]bool, len(accounts))
+	for _, a := range accounts {
+		if a.Name != "" {
+			used[a.Name] = true
+		}
+	}
+	for i := range accounts {
+		if accounts[i].Name != "" {
+			continue
+		}
+		p.println("  The pre-existing account has no name; with multiple accounts every entry needs one.")
+		name := strings.TrimSpace(pr.ask("Name for the pre-existing account (e.g. main)", "main"))
+		if !cfNameRe.MatchString(name) || used[name] {
+			return fmt.Errorf("invalid or duplicate account name %q — aborting without changes", name)
+		}
+		accounts[i].Name = name
+		used[name] = true
+		p.printf("  named the pre-existing account %q (its api_token env var is unchanged)\n", name)
+	}
+	return nil
 }
 
 // wizardAIProvider adapts the init AI sub-flow (init_ai.go) to post-install

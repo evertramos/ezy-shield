@@ -266,3 +266,168 @@ func TestNewAskFuncs_YesModeAndDefaults(t *testing.T) {
 		t.Errorf("prompt formatting changed: %q", buf.String())
 	}
 }
+
+// TestRunConfigComponent_CloudflareAddSecondAccount (issue #217): a config
+// with the legacy single unnamed account gains a second, named account. The
+// wizard must (a) offer add-vs-reconfigure, (b) require a name for the new
+// account, (c) name the pre-existing entry so the strict loader accepts the
+// now-multi-account config, and (d) keep each token in its own env var.
+func TestRunConfigComponent_CloudflareAddSecondAccount(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	existing := validConfig + `enforce:
+  cloudflare:
+    api_token: env:CLOUDFLARE_API_TOKEN
+    mode: rulesets
+    zone_ids:
+      - bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+`
+	cfgPath := writeFile(t, dir, "config.yaml", existing)
+	const token = "cf-clientb-token-secret" //nolint:gosec // G101: test fake, not a real credential
+
+	prompt := &scriptedPrompter{
+		strings: []string{
+			"client_b",          // name for the new account
+			"lists",             // mode
+			"block",             // action
+			cfTestAccountID,     // account_id
+			"ezyshield_blocked", // list name
+			"main",              // name for the pre-existing unnamed account
+		},
+		bools: []bool{
+			false, // Reconfigure existing (yes) or add new (no)? → add new
+			// exhausted → "Add another?" defaults to false
+		},
+	}
+	httpc := &httpFake{
+		byPath: map[string]httpFakeResp{
+			"/accounts/" + cfTestAccountID + "/tokens/verify": {status: 200, bodyJSON: `{"success":true}`},
+			"/accounts/" + cfTestAccountID + "/rules/lists":   {status: 200, bodyJSON: `{"success":true,"result":[]}`},
+		},
+	}
+	deps := cdnDeps{
+		HTTPClient:   httpc,
+		TokenReader:  func(string) (string, error) { return token, nil },
+		CFAPIBaseURL: "http://cf.example",
+	}
+
+	out := captureStep(t, func(p *wPrinter) {
+		if code := runConfigComponent(context.Background(), p, prompt, deps,
+			"enforcer", "cloudflare", cfgPath); code != validateExitOK {
+			t.Errorf("exit code = %d, want 0", code)
+		}
+	})
+
+	cfg, err := config.LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("saved config does not load: %v\nout=%s", err, out)
+	}
+	if len(cfg.Enforce.Cloudflare) != 2 {
+		t.Fatalf("cloudflare entries = %d, want 2; out=%s", len(cfg.Enforce.Cloudflare), out)
+	}
+	first, second := cfg.Enforce.Cloudflare[0], cfg.Enforce.Cloudflare[1]
+	if first.Name != "main" || first.Mode != "rulesets" {
+		t.Errorf("pre-existing entry = %+v, want name=main mode=rulesets", first)
+	}
+	if string(first.APIToken) != "env:CLOUDFLARE_API_TOKEN" {
+		t.Errorf("pre-existing api_token changed: %q", string(first.APIToken))
+	}
+	if second.Name != "client_b" || second.Mode != "lists" {
+		t.Errorf("new entry = %+v, want name=client_b mode=lists", second)
+	}
+	if string(second.APIToken) != "env:CLOUDFLARE_API_TOKEN_CLIENT_B" {
+		t.Errorf("new api_token = %q, want env:CLOUDFLARE_API_TOKEN_CLIENT_B", string(second.APIToken))
+	}
+
+	envRaw, err := os.ReadFile(filepath.Join(dir, envFileName)) //nolint:gosec // test path
+	if err != nil {
+		t.Fatalf("expected .env: %v", err)
+	}
+	if !strings.Contains(string(envRaw), "CLOUDFLARE_API_TOKEN_CLIENT_B="+token) {
+		t.Errorf(".env missing per-account token line:\n%s", envRaw)
+	}
+	if strings.Contains(out, token) {
+		t.Errorf("stdout leaks the token: %q", out)
+	}
+	raw, _ := os.ReadFile(cfgPath) //nolint:gosec // test path
+	if strings.Contains(string(raw), token) {
+		t.Errorf("config.yaml contains the raw token:\n%s", raw)
+	}
+}
+
+// TestRunConfigComponent_CloudflareReconfigureNamed: with several accounts
+// configured, answering with an exact name replaces just that entry, leaving
+// the other untouched.
+func TestRunConfigComponent_CloudflareReconfigureNamed(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	existing := validConfig + `enforce:
+  cloudflare:
+    - name: main
+      api_token: env:CLOUDFLARE_API_TOKEN_MAIN
+      mode: rulesets
+      zone_ids:
+        - bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    - name: client_b
+      api_token: env:CLOUDFLARE_API_TOKEN_CLIENT_B
+      mode: rulesets
+      zone_ids:
+        - cccccccccccccccccccccccccccccccc
+`
+	cfgPath := writeFile(t, dir, "config.yaml", existing)
+
+	prompt := &scriptedPrompter{
+		strings: []string{
+			"main",              // which account to reconfigure
+			"lists",             // new mode
+			"block",             // action
+			cfTestAccountID,     // account_id
+			"ezyshield_blocked", // list name
+		},
+	}
+	httpc := &httpFake{
+		byPath: map[string]httpFakeResp{
+			"/accounts/" + cfTestAccountID + "/tokens/verify": {status: 200, bodyJSON: `{"success":true}`},
+			"/accounts/" + cfTestAccountID + "/rules/lists":   {status: 200, bodyJSON: `{"success":true,"result":[]}`},
+		},
+	}
+	deps := cdnDeps{
+		HTTPClient:   httpc,
+		TokenReader:  func(string) (string, error) { return "cf-rotated", nil },
+		CFAPIBaseURL: "http://cf.example",
+	}
+
+	out := captureStep(t, func(p *wPrinter) {
+		if code := runConfigComponent(context.Background(), p, prompt, deps,
+			"enforcer", "cloudflare", cfgPath); code != validateExitOK {
+			t.Errorf("exit code = %d, want 0", code)
+		}
+	})
+
+	cfg, err := config.LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("saved config does not load: %v\nout=%s", err, out)
+	}
+	if len(cfg.Enforce.Cloudflare) != 2 {
+		t.Fatalf("cloudflare entries = %d, want 2 (replace, not append); out=%s", len(cfg.Enforce.Cloudflare), out)
+	}
+	var main, clientB *config.CloudflareCfg
+	for i := range cfg.Enforce.Cloudflare {
+		switch cfg.Enforce.Cloudflare[i].Name {
+		case "main":
+			main = &cfg.Enforce.Cloudflare[i]
+		case "client_b":
+			clientB = &cfg.Enforce.Cloudflare[i]
+		}
+	}
+	if main == nil || main.Mode != "lists" {
+		t.Errorf("main entry not replaced: %+v", main)
+	}
+	if clientB == nil || clientB.Mode != "rulesets" ||
+		string(clientB.APIToken) != "env:CLOUDFLARE_API_TOKEN_CLIENT_B" {
+		t.Errorf("client_b entry must be untouched: %+v", clientB)
+	}
+	if !strings.Contains(out, "replaced entry") {
+		t.Errorf("summary should say 'replaced entry':\n%s", out)
+	}
+}

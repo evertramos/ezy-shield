@@ -427,6 +427,7 @@ sudo ezyshield config enforcer cloudflare
 
 - The write is atomic (temp file + rename); the previous file is kept as `config.yaml.bak` and the merged configuration is re-validated before anything touches disk. Comments are not carried over — recover them from the `.bak` if needed.
 - Secret tokens go to the `.env` file next to `config.yaml` (mode 0600), never into `config.yaml` itself (`api_token: env:CLOUDFLARE_API_TOKEN`).
+- Multiple Cloudflare accounts are supported: with accounts already configured, the wizard asks whether to reconfigure an existing one or add another; each account keeps its own token env var (`CLOUDFLARE_API_TOKEN_<NAME>`). See the Cloudflare guide's multi-account section.
 - On success the command prints the changed keys and next steps (`config validate`, restart the daemon). If the wizard aborts, nothing is written.
 
 Available names: `cloudflare`.

@@ -51,34 +51,53 @@ type cdnStep struct {
 	// cfAttempted && !cfEnabled means the subflow aborted (the loud banner
 	// from issue #93 fired); used only by the init summary (issue #102).
 	cfAttempted bool
-	// cfCfg is the CF config the wizard will emit into config.yaml, only
-	// populated when cfEnabled is true and validation succeeded.
-	cfCfg *config.CloudflareCfg
-	// cfTokenEnvVar is the exact env-var name the wizard wrote to .env; the
-	// yaml gets `api_token: env:<cfTokenEnvVar>`.
-	cfTokenEnvVar string
-	// cfToken holds the raw token between the prompt and the .env write.
-	// Same discipline as wizardState.aiToken — never appears in any log
-	// path, never printed to stdout, redacted by String() (see below).
-	cfToken string
-	// cfWAFRuleExpression is the WAF Custom Rule expression printed to the
-	// operator in lists mode so they can paste it into the CF dashboard.
-	cfWAFRuleExpression string
+	// cfAccounts holds one entry per Cloudflare account the operator
+	// configured (issue #217: agencies commonly manage several client
+	// accounts, each with its own token). Only populated when cfEnabled is
+	// true and every entry passed validation.
+	cfAccounts []cfAccountSetup
 }
 
-// String on *cdnStep masks the CF token, mirroring wizardState.String().
+// cfAccountSetup is one configured Cloudflare account: the config.yaml entry
+// plus the secret material that goes to .env instead.
+type cfAccountSetup struct {
+	// cfg is the entry the wizard will emit into enforce.cloudflare.
+	cfg config.CloudflareCfg
+	// tokenEnvVar is the exact env-var name the wizard writes to .env; the
+	// yaml gets `api_token: env:<tokenEnvVar>`.
+	tokenEnvVar string
+	// token holds the raw token between the prompt and the .env write.
+	// Same discipline as wizardState.aiToken — never appears in any log
+	// path, never printed to stdout, redacted by cdnStep.String().
+	token string
+	// wafRuleExpression is the WAF Custom Rule expression printed to the
+	// operator in lists mode so they can paste it into the CF dashboard.
+	wafRuleExpression string
+}
+
+// String on *cdnStep masks every CF token, mirroring wizardState.String().
 // A `slog.Debug("state", "s", cdnStep)` or a %+v in tests must never leak
-// the paste.
+// a paste.
 func (c *cdnStep) String() string {
 	if c == nil {
 		return "<nil cdnStep>"
 	}
+	accts := make([]string, 0, len(c.cfAccounts))
+	for _, a := range c.cfAccounts {
+		accts = append(accts, a.String())
+	}
+	return fmt.Sprintf("cdnStep{vhosts=%d detected=%d cfEnabled=%v accounts=[%s]}",
+		len(c.vhosts), len(c.detected), c.cfEnabled, strings.Join(accts, " "))
+}
+
+// String on cfAccountSetup masks the token for the same reason.
+func (a cfAccountSetup) String() string {
 	tokMark := "<empty>"
-	if c.cfToken != "" {
+	if a.token != "" {
 		tokMark = "<redacted>"
 	}
-	return fmt.Sprintf("cdnStep{vhosts=%d detected=%d cfEnabled=%v tokenEnvVar=%q token=%s}",
-		len(c.vhosts), len(c.detected), c.cfEnabled, c.cfTokenEnvVar, tokMark)
+	return fmt.Sprintf("cfAccount{name=%q mode=%s tokenEnvVar=%q token=%s}",
+		a.cfg.Name, a.cfg.Mode, a.tokenEnvVar, tokMark)
 }
 
 // prompter is the tiny surface the CDN subflow needs from askQuestions.
@@ -163,7 +182,7 @@ func runCDNStep(
 		// still ask the generic "behind a CDN?" question so the operator
 		// isn't silently skipped.
 		if pr.askBool("Does this server sit behind a CDN (Cloudflare, Bunny, …)?", false) {
-			runCloudflareSubflow(ctx, p, pr, step, deps, nil)
+			runCloudflareSubflow(ctx, p, pr, step, deps, nil, cfSubflowOpts{})
 		}
 		return
 	}
@@ -181,7 +200,7 @@ func runCDNStep(
 		// question — the range table may be out of date, or the user
 		// might be on a CDN we haven't populated yet.
 		if pr.askBool("Does this server sit behind a CDN (Cloudflare, Bunny, …)?", false) {
-			runCloudflareSubflow(ctx, p, pr, step, deps, nil)
+			runCloudflareSubflow(ctx, p, pr, step, deps, nil, cfSubflowOpts{})
 		}
 		return
 	}
@@ -197,7 +216,7 @@ func runCDNStep(
 	if hasCF {
 		want := pr.askBool("Configure the Cloudflare edge enforcer now? (recommended)", true)
 		if want {
-			runCloudflareSubflow(ctx, p, pr, step, deps, cfDomains)
+			runCloudflareSubflow(ctx, p, pr, step, deps, cfDomains, cfSubflowOpts{})
 		}
 	} else {
 		p.println("  Detected CDNs do not have an EzyShield enforcer wired yet in this release.")
@@ -403,10 +422,33 @@ var cfListNameRe = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
 // call so an operator with a fat-fingered ID sees the mistake immediately.
 var cfHexIDRe = regexp.MustCompile(`^[a-f0-9]{32}$`)
 
+// cfSubflowOpts parameterizes runCloudflareSubflow for its two entry points.
+// The init wizard passes the zero value (no pre-existing accounts); the
+// `config enforcer cloudflare` wizard passes the accounts already present in
+// config.yaml plus, when the operator chose to reconfigure one of them, the
+// exact name to replace.
+type cfSubflowOpts struct {
+	// existing lists the accounts already configured in config.yaml. Their
+	// names/env vars are reserved; typing an existing name means "replace".
+	existing []config.CloudflareCfg
+	// reconfigureName, when set (hasReconfigure), pins the FIRST prompted
+	// account to this exact name — the operator picked an existing account
+	// to redo, so the name prompt is skipped. May pin the empty name (the
+	// legacy unnamed single-account shape).
+	reconfigureName string
+	hasReconfigure  bool
+}
+
+// cfNameRe matches config.validateCFInstanceName's constraint (1..32 of
+// [A-Za-z0-9_-]) so the wizard rejects a bad label before write-time
+// validation would.
+var cfNameRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,32}$`)
+
 // runCloudflareSubflow drives the CF-specific prompts and, on success,
-// populates step.cfCfg + step.cfTokenEnvVar + step.cfToken. It never
-// returns an error: on any failure it prints the reason and leaves
-// step.cfEnabled=false so the loud-skip warning fires.
+// populates step.cfAccounts (one entry per configured account, issue #217).
+// It never returns an error: on any failure it prints the reason; if NO
+// account was completed, step.cfEnabled stays false so the loud banner and
+// the skip warning fire.
 //
 // detectedCFDomains lists the CF-fronted domains the operator will be
 // covering — used purely for the display prompt so the operator sees why
@@ -418,6 +460,7 @@ func runCloudflareSubflow(
 	step *cdnStep,
 	deps cdnDeps,
 	detectedCFDomains []string,
+	opts cfSubflowOpts,
 ) {
 	// Mark the attempt so the init summary can distinguish "operator entered
 	// the subflow and it aborted" from "operator declined at the yes/no
@@ -442,46 +485,143 @@ func runCloudflareSubflow(
 		p.printf("  Configuring Cloudflare enforcer for detected domain(s): %s\n",
 			strings.Join(detectedCFDomains, ", "))
 	}
+	printCFModeHelp(p)
+
+	// Name/env-var bookkeeping across the loop. Existing accounts reserve
+	// their names (typing one = replace intent, allowed with a note) and
+	// their env vars; session accounts reserve both outright.
+	sessionNames := make(map[string]bool)
+	existingNames := make(map[string]bool)
+	takenEnvVars := make(map[string]bool)
+	for _, ex := range opts.existing {
+		if ex.Name != "" {
+			existingNames[ex.Name] = true
+		}
+		if v, ok := strings.CutPrefix(string(ex.APIToken), "env:"); ok {
+			// The account being reconfigured keeps its own env var free.
+			if !opts.hasReconfigure || ex.Name != opts.reconfigureName {
+				takenEnvVars[v] = true
+			}
+		}
+	}
+
+	for {
+		first := len(step.cfAccounts) == 0
+		nameCtx := cfNamePromptCtx{
+			// The very first overall account may stay unnamed; anything
+			// beyond it (existing accounts count) needs a unique name.
+			required:      !first || len(opts.existing) > 0,
+			sessionNames:  sessionNames,
+			existingNames: existingNames,
+			takenEnvVars:  takenEnvVars,
+		}
+		if first && opts.hasReconfigure {
+			nameCtx.forcedName = opts.reconfigureName
+			nameCtx.hasForced = true
+		}
+
+		acct, ok := promptOneCFAccount(ctx, p, pr, deps, nameCtx)
+		if !ok {
+			if first {
+				// Nothing configured at all — the deferred banner fires.
+				return
+			}
+			p.println("  This account was NOT added; keeping the account(s) configured above.")
+			break
+		}
+		step.cfAccounts = append(step.cfAccounts, *acct)
+		if acct.cfg.Name != "" {
+			sessionNames[acct.cfg.Name] = true
+		}
+		takenEnvVars[acct.tokenEnvVar] = true
+
+		if !pr.askBool("Add another Cloudflare account (separate token, e.g. another client)?", false) {
+			break
+		}
+		// Going multi-account: config validation requires every entry to
+		// carry a unique name, so a still-unnamed first account must be
+		// named before we continue.
+		if len(opts.existing) == 0 && step.cfAccounts[0].cfg.Name == "" {
+			name := strings.TrimSpace(pr.ask("Name for the first account (e.g. main)", "main"))
+			if !cfNameRe.MatchString(name) || sessionNames[name] {
+				p.printf("  invalid or duplicate name %q — keeping a single account.\n", name)
+				break
+			}
+			// The env var stays CLOUDFLARE_API_TOKEN: api_token references
+			// are independent of the account label.
+			step.cfAccounts[0].cfg.Name = name
+			sessionNames[name] = true
+		}
+	}
+	step.cfEnabled = len(step.cfAccounts) > 0
+}
+
+// printCFModeHelp explains the two enforcement modes. Both are first-class:
+// lists suits many zones behind one account; rulesets suits precise per-zone
+// control (and needs no account-level list quota).
+func printCFModeHelp(p *wPrinter) {
 	p.println("")
-	p.println("  Cloudflare enforcement modes:")
+	p.println("  Cloudflare enforcement modes (both fully supported — pick per account):")
 	p.println("    • lists    — one account-scoped Custom IP List, one API token")
 	p.println("                 for the whole account, propagates to every zone")
 	p.println("                 referencing it via a WAF Custom Rule.")
-	p.println("                 Requires a one-time manual step in the CF dashboard")
-	p.println("                 (the wizard prints the exact rule to paste).")
-	p.println("                 Recommended for multi-zone / high-volume deploys.")
+	p.println("                 Good fit for multi-zone / high-volume deploys.")
 	p.println("    • rulesets — one WAF Custom Rule per zone, wired entirely via API.")
 	p.println("                 Requires listing every zone_id. ~200 IP cap per")
 	p.println("                 rule, auto-split by the enforcer.")
-	p.println("                 Recommended for single-zone setups.")
+	p.println("                 Good fit when you want per-zone control or the")
+	p.println("                 account's custom-list quota is taken.")
+}
+
+// cfNamePromptCtx carries the naming rules for one account prompt; see
+// runCloudflareSubflow for how the maps are maintained across the loop.
+type cfNamePromptCtx struct {
+	forcedName    string
+	hasForced     bool
+	required      bool
+	sessionNames  map[string]bool
+	existingNames map[string]bool
+	takenEnvVars  map[string]bool
+}
+
+// promptOneCFAccount collects, validates, and preflights a single Cloudflare
+// account. Returns (nil, false) on any failure — the caller decides whether
+// that aborts the subflow (first account) or just ends the loop.
+func promptOneCFAccount(
+	ctx context.Context,
+	p *wPrinter,
+	pr prompter,
+	deps cdnDeps,
+	nameCtx cfNamePromptCtx,
+) (*cfAccountSetup, bool) {
+	name, ok := promptCFAccountName(p, pr, nameCtx)
+	if !ok {
+		return nil, false
+	}
 
 	mode := pr.ask("Cloudflare mode (lists/rulesets)", "lists")
 	mode = strings.ToLower(strings.TrimSpace(mode))
 	if mode != "lists" && mode != "rulesets" {
-		p.printf("  invalid mode %q — expected 'lists' or 'rulesets'; skipping CF setup.\n", mode)
-		return
+		p.printf("  invalid mode %q — expected 'lists' or 'rulesets'; skipping this account.\n", mode)
+		return nil, false
 	}
-
-	// Operator label — optional for single-account (default ""). Not
-	// prompted at all in the single-account happy path to keep the flow
-	// short; the operator can add it by hand later if they add a second
-	// account.
-	name := ""
-	// For now the wizard configures a single CF account; multi-account
-	// setups can add more via a follow-up flag or a config-yaml edit.
 
 	action := pr.ask("Rule action (block/challenge/js_challenge)", "block")
 	action = strings.ToLower(strings.TrimSpace(action))
 	if action != "block" && action != "challenge" && action != "js_challenge" {
-		p.printf("  invalid action %q; skipping CF setup.\n", action)
-		return
+		p.printf("  invalid action %q; skipping this account.\n", action)
+		return nil, false
 	}
 
-	// Fixed env-var NAME (issue #13 precedent: never prompt the operator
-	// for the NAME). One CF account → CLOUDFLARE_API_TOKEN. When we add
-	// multi-account later, the wizard will pick CLOUDFLARE_API_TOKEN_<NAME>.
+	// Fixed env-var NAME derived from the account label (issue #13
+	// precedent: never prompt the operator for the NAME). Unnamed account →
+	// CLOUDFLARE_API_TOKEN; named → CLOUDFLARE_API_TOKEN_<UPPER_NAME>.
 	tokenEnvVar := cfEnvVarForName(name)
-	step.cfTokenEnvVar = tokenEnvVar
+	if nameCtx.takenEnvVars[tokenEnvVar] {
+		p.printf("  account name %q maps to env var %s, which is already used by another account; choose a different name.\n",
+			name, tokenEnvVar)
+		return nil, false
+	}
 
 	// Prompt for the token itself, masked, via the same tty path the AI
 	// step uses. Same fall-through rules on error (no tty → skip).
@@ -489,14 +629,13 @@ func runCloudflareSubflow(
 	if reader == nil {
 		reader = tokenReader
 	}
-	tok, err := reader("  Paste your Cloudflare API token (input hidden, ENTER to skip): ")
+	tok, err := reader("  Paste the Cloudflare API token for this account (input hidden, ENTER to skip): ")
 	if err != nil || tok == "" {
 		// No token means we can't even validate scope. Refuse to write
-		// half-configured CF settings — the loud-skip warning will fire.
-		p.println("  No Cloudflare token provided; skipping CF setup.")
-		return
+		// half-configured CF settings.
+		p.println("  No Cloudflare token provided; skipping this account.")
+		return nil, false
 	}
-	step.cfToken = tok
 
 	// Mode-specific fields.
 	cfg := &config.CloudflareCfg{
@@ -511,15 +650,15 @@ func runCloudflareSubflow(
 		accountID := pr.ask("Cloudflare account ID (32 hex chars)", "")
 		accountID = strings.ToLower(strings.TrimSpace(accountID))
 		if !cfHexIDRe.MatchString(accountID) {
-			p.println("  account_id must be 32 lowercase hex characters (see CF dashboard → Overview → Account ID); skipping CF setup.")
-			return
+			p.println("  account_id must be 32 lowercase hex characters (see CF dashboard → Overview → Account ID); skipping this account.")
+			return nil, false
 		}
 		cfg.AccountID = accountID
 		listName := pr.ask("Custom IP List name", "ezyshield_blocked")
 		listName = strings.TrimSpace(listName)
 		if !cfListNameRe.MatchString(listName) {
-			p.printf("  list_name must match [A-Za-z0-9_]+; got %q; skipping CF setup.\n", listName)
-			return
+			p.printf("  list_name must match [A-Za-z0-9_]+; got %q; skipping this account.\n", listName)
+			return nil, false
 		}
 		cfg.ListName = listName
 
@@ -527,13 +666,13 @@ func runCloudflareSubflow(
 		rawZones := pr.ask("Zone IDs (comma-separated, 32 hex chars each)", "")
 		zones := splitAndTrim(rawZones)
 		if len(zones) == 0 {
-			p.println("  no zone_ids given; skipping CF setup.")
-			return
+			p.println("  no zone_ids given; skipping this account.")
+			return nil, false
 		}
 		for _, z := range zones {
 			if !cfHexIDRe.MatchString(z) {
-				p.printf("  zone_id %q is not 32 hex chars; skipping CF setup.\n", z)
-				return
+				p.printf("  zone_id %q is not 32 hex chars; skipping this account.\n", z)
+				return nil, false
 			}
 		}
 		cfg.ZoneIDs = zones
@@ -543,7 +682,7 @@ func runCloudflareSubflow(
 	if err := dryValidateCFToken(ctx, deps, cfg, tok); err != nil {
 		p.printf("  Cloudflare token validation failed: %v\n", err)
 		p.println("  Refusing to write config with an unvalidated token.")
-		return
+		return nil, false
 	}
 	p.println("  Cloudflare token validated OK.")
 
@@ -552,26 +691,55 @@ func runCloudflareSubflow(
 	// still make it a guaranteed runtime failure. Prove feasibility now,
 	// while the operator is at the prompt, or refuse to write the config.
 	if !runCFCapabilityPreflight(ctx, p, deps, cfg, tok) {
-		return
+		return nil, false
 	}
 
-	// Success. Commit to the state; the writer step (in init.go) reads
-	// step.cfEnabled and emits the yaml.
-	step.cfCfg = cfg
-	step.cfEnabled = true
-
+	acct := &cfAccountSetup{cfg: *cfg, tokenEnvVar: tokenEnvVar, token: tok}
 	if mode == "lists" {
-		step.cfWAFRuleExpression = buildCFWAFRuleExpression(cfg.ListName)
-		p.println("")
-		p.println("  Lists mode requires a one-time manual step in the Cloudflare dashboard:")
-		p.println("    1. Go to Security → WAF → Custom Rules on any zone under the account.")
-		p.println("    2. Create a rule with the expression below and Action = 'Block' (or")
-		p.println("       'Managed Challenge' if you prefer challenges over hard blocks).")
-		p.println("    3. Repeat per zone you want covered by the list.")
-		p.println("")
-		p.printf("    Expression: %s\n", step.cfWAFRuleExpression)
-		p.println("")
+		acct.wafRuleExpression = buildCFWAFRuleExpression(cfg.ListName)
+		printCFListsManualStep(p, acct.wafRuleExpression)
 	}
+	return acct, true
+}
+
+// promptCFAccountName resolves the account label for the entry being
+// configured: forced (reconfigure path), required-unique (multi-account), or
+// — the single-account happy path — no prompt at all, keeping today's short
+// flow (the label is only asked once a second account enters the picture).
+func promptCFAccountName(p *wPrinter, pr prompter, nameCtx cfNamePromptCtx) (string, bool) {
+	if nameCtx.hasForced {
+		return nameCtx.forcedName, true
+	}
+	if !nameCtx.required {
+		return "", true
+	}
+	name := strings.TrimSpace(pr.ask("Account name (unique label, e.g. client_a)", "main"))
+	if !cfNameRe.MatchString(name) {
+		p.printf("  account name must match [A-Za-z0-9_-]+ (max 32 chars); got %q; skipping this account.\n", name)
+		return "", false
+	}
+	if nameCtx.sessionNames[name] {
+		p.printf("  account name %q was already used in this run; skipping this account.\n", name)
+		return "", false
+	}
+	if nameCtx.existingNames[name] {
+		p.printf("  (name %q matches an existing account — it will be replaced)\n", name)
+	}
+	return name, true
+}
+
+// printCFListsManualStep prints the one-time WAF Custom Rule instructions for
+// a lists-mode account.
+func printCFListsManualStep(p *wPrinter, expression string) {
+	p.println("")
+	p.println("  Lists mode requires a one-time manual step in the Cloudflare dashboard:")
+	p.println("    1. Go to Security → WAF → Custom Rules on any zone under the account.")
+	p.println("    2. Create a rule with the expression below and Action = 'Block' (or")
+	p.println("       'Managed Challenge' if you prefer challenges over hard blocks).")
+	p.println("    3. Repeat per zone you want covered by the list.")
+	p.println("")
+	p.printf("    Expression: %s\n", expression)
+	p.println("")
 }
 
 // runCFCapabilityPreflight proves the chosen mode can actually operate on
@@ -906,42 +1074,64 @@ func sanitizeErrorMessage(s string) string {
 
 // ── config.yaml + .env emission (called from init.go) ──────────────────────
 
-// emitCloudflareYAML appends the enforce.cloudflare section for step.cfCfg
-// to the string builder used by writeGeneratedConfig. The generated yaml is
-// still round-tripped through config.LoadConfigReader before the file
-// commits, so any mismatch between this emitter and the config schema is
-// caught before the operator can see it.
+// emitCloudflareYAML appends the enforce.cloudflare section for
+// step.cfAccounts to the string builder used by writeGeneratedConfig. The
+// generated yaml is still round-tripped through config.LoadConfigReader
+// before the file commits, so any mismatch between this emitter and the
+// config schema is caught before the operator can see it.
+//
+// A single account keeps the compact single-mapping shape (the legacy form
+// CloudflareCfgs.UnmarshalYAML accepts); multiple accounts emit a sequence,
+// one entry per account (issue #217).
 //
 // This function is deliberately in init_cdn.go rather than init.go so the
 // full CF-specific yaml emission logic lives next to the prompts it
 // backs. init.go just calls it.
 func emitCloudflareYAML(b *strings.Builder, step *cdnStep) {
-	if step == nil || step.cfCfg == nil {
+	if step == nil || len(step.cfAccounts) == 0 {
 		return
 	}
-	cfg := step.cfCfg
 	// enforce: has already been opened by init.go (nftables lives there
-	// too); we only append the cloudflare: mapping. Emit as a single-map
-	// (not a sequence) since we only support one account in this cut.
+	// too); we only append the cloudflare: section.
 	fmt.Fprintf(b, "  cloudflare:\n")
-	if cfg.Name != "" {
-		fmt.Fprintf(b, "    name: %s\n", cfg.Name)
+	if len(step.cfAccounts) == 1 {
+		emitCFAccountYAML(b, &step.cfAccounts[0].cfg, "    ", "")
+		return
 	}
-	fmt.Fprintf(b, "    api_token: %s\n", cfg.APIToken)
-	fmt.Fprintf(b, "    mode: %s\n", cfg.Mode)
+	for i := range step.cfAccounts {
+		emitCFAccountYAML(b, &step.cfAccounts[i].cfg, "      ", "    - ")
+	}
+}
+
+// emitCFAccountYAML writes one account's fields. firstPrefix, when non-empty,
+// replaces indent on the first line only (the "- " sequence-item marker).
+func emitCFAccountYAML(b *strings.Builder, cfg *config.CloudflareCfg, indent, firstPrefix string) {
+	prefix := firstPrefix
+	if prefix == "" {
+		prefix = indent
+	}
+	line := func(format string, args ...any) {
+		fmt.Fprintf(b, prefix+format, args...)
+		prefix = indent
+	}
+	if cfg.Name != "" {
+		line("name: %s\n", cfg.Name)
+	}
+	line("api_token: %s\n", cfg.APIToken)
+	line("mode: %s\n", cfg.Mode)
 	if cfg.Action != "" {
-		fmt.Fprintf(b, "    action: %s\n", cfg.Action)
+		line("action: %s\n", cfg.Action)
 	}
 	switch cfg.Mode {
 	case "lists":
-		fmt.Fprintf(b, "    account_id: %s\n", cfg.AccountID)
+		line("account_id: %s\n", cfg.AccountID)
 		if cfg.ListName != "" {
-			fmt.Fprintf(b, "    list_name: %s\n", cfg.ListName)
+			line("list_name: %s\n", cfg.ListName)
 		}
 	case "rulesets":
-		fmt.Fprintf(b, "    zone_ids:\n")
+		line("zone_ids:\n")
 		for _, z := range cfg.ZoneIDs {
-			fmt.Fprintf(b, "      - %s\n", z)
+			fmt.Fprintf(b, indent+"  - %s\n", z)
 		}
 	}
 }

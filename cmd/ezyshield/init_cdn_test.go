@@ -224,26 +224,26 @@ func TestRunCDNStep_HappyPath_Lists(t *testing.T) {
 	if !step.cfEnabled {
 		t.Fatalf("cfEnabled false; out=%q", out)
 	}
-	if step.cfCfg == nil {
+	if len(step.cfAccounts) == 0 {
 		t.Fatal("cfCfg nil despite cfEnabled")
 	}
-	if step.cfCfg.Mode != "lists" {
-		t.Errorf("mode=%q, want lists", step.cfCfg.Mode)
+	if step.cfAccounts[0].cfg.Mode != "lists" {
+		t.Errorf("mode=%q, want lists", step.cfAccounts[0].cfg.Mode)
 	}
-	if step.cfCfg.AccountID != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
-		t.Errorf("account_id=%q", step.cfCfg.AccountID)
+	if step.cfAccounts[0].cfg.AccountID != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Errorf("account_id=%q", step.cfAccounts[0].cfg.AccountID)
 	}
-	if step.cfCfg.ListName != "ezyshield_blocked" {
-		t.Errorf("list_name=%q", step.cfCfg.ListName)
+	if step.cfAccounts[0].cfg.ListName != "ezyshield_blocked" {
+		t.Errorf("list_name=%q", step.cfAccounts[0].cfg.ListName)
 	}
-	if string(step.cfCfg.APIToken) != "env:CLOUDFLARE_API_TOKEN" {
-		t.Errorf("api_token=%q, want env:CLOUDFLARE_API_TOKEN", string(step.cfCfg.APIToken))
+	if string(step.cfAccounts[0].cfg.APIToken) != "env:CLOUDFLARE_API_TOKEN" {
+		t.Errorf("api_token=%q, want env:CLOUDFLARE_API_TOKEN", string(step.cfAccounts[0].cfg.APIToken))
 	}
-	if step.cfTokenEnvVar != "CLOUDFLARE_API_TOKEN" {
-		t.Errorf("cfTokenEnvVar=%q", step.cfTokenEnvVar)
+	if step.cfAccounts[0].tokenEnvVar != "CLOUDFLARE_API_TOKEN" {
+		t.Errorf("cfTokenEnvVar=%q", step.cfAccounts[0].tokenEnvVar)
 	}
-	if step.cfWAFRuleExpression != "(ip.src in $ezyshield_blocked)" {
-		t.Errorf("waf rule = %q", step.cfWAFRuleExpression)
+	if step.cfAccounts[0].wafRuleExpression != "(ip.src in $ezyshield_blocked)" {
+		t.Errorf("waf rule = %q", step.cfAccounts[0].wafRuleExpression)
 	}
 	// The token itself must NEVER appear on stdout.
 	if strings.Contains(out, "cf-test-token") {
@@ -359,14 +359,14 @@ func TestRunCDNStep_HappyPath_Rulesets(t *testing.T) {
 	if !step.cfEnabled {
 		t.Fatalf("cfEnabled false; out=%q", out)
 	}
-	if step.cfCfg.Mode != "rulesets" {
-		t.Errorf("mode=%q, want rulesets", step.cfCfg.Mode)
+	if step.cfAccounts[0].cfg.Mode != "rulesets" {
+		t.Errorf("mode=%q, want rulesets", step.cfAccounts[0].cfg.Mode)
 	}
-	if step.cfCfg.Action != "challenge" {
-		t.Errorf("action=%q", step.cfCfg.Action)
+	if step.cfAccounts[0].cfg.Action != "challenge" {
+		t.Errorf("action=%q", step.cfAccounts[0].cfg.Action)
 	}
-	if len(step.cfCfg.ZoneIDs) != 2 {
-		t.Fatalf("zone_ids len=%d, want 2", len(step.cfCfg.ZoneIDs))
+	if len(step.cfAccounts[0].cfg.ZoneIDs) != 2 {
+		t.Fatalf("zone_ids len=%d, want 2", len(step.cfAccounts[0].cfg.ZoneIDs))
 	}
 	// Rulesets mode should NOT print WAF rule instructions.
 	if strings.Contains(out, "Custom Rules") {
@@ -443,8 +443,8 @@ func TestRunCDNStep_Rulesets_TokenRejected(t *testing.T) {
 	if step.cfEnabled {
 		t.Fatal("cfEnabled=true despite 403 on scope probe")
 	}
-	if step.cfCfg != nil {
-		t.Errorf("cfCfg was populated on failure: %+v", step.cfCfg)
+	if len(step.cfAccounts) > 0 {
+		t.Errorf("accounts were populated on failure: %+v", step.cfAccounts)
 	}
 	// No identity probe: rulesets mode has no account ID, and the user
 	// verify endpoint rejects cfat_ tokens (the very bug this guards).
@@ -527,8 +527,8 @@ func TestRunCDNStep_InvalidToken_BothVerifyFail(t *testing.T) {
 	if step.cfEnabled {
 		t.Fatal("cfEnabled=true despite invalid token")
 	}
-	if step.cfCfg != nil {
-		t.Errorf("cfCfg was populated on failure: %+v", step.cfCfg)
+	if len(step.cfAccounts) > 0 {
+		t.Errorf("accounts were populated on failure: %+v", step.cfAccounts)
 	}
 	// Both verify endpoints must have been probed, in order.
 	if len(httpc.requests) < 2 {
@@ -1042,7 +1042,7 @@ func TestEmitCloudflareYAML_LoadsBack(t *testing.T) {
 	t.Parallel()
 	step := &cdnStep{
 		cfEnabled: true,
-		cfCfg: mustCFConfig(t,
+		cfAccounts: mustCFAccounts(t,
 			"lists", "block",
 			"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "ezyshield_blocked",
 			nil),
@@ -1071,7 +1071,7 @@ func TestEmitCloudflareYAML_Rulesets(t *testing.T) {
 	t.Parallel()
 	step := &cdnStep{
 		cfEnabled: true,
-		cfCfg: mustCFConfig(t,
+		cfAccounts: mustCFAccounts(t,
 			"rulesets", "block",
 			"", "",
 			[]string{"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}),
@@ -1138,6 +1138,16 @@ func TestWriteCloudflareEnvFile_PreservesAIKey(t *testing.T) {
 
 // ── Config emitter test helpers ──────────────────────────────────────────────
 
+// mustCFAccounts wraps mustCFConfig into the one-account cfAccounts slice
+// most emission tests need.
+func mustCFAccounts(t *testing.T, mode, action, accountID, listName string, zoneIDs []string) []cfAccountSetup {
+	t.Helper()
+	return []cfAccountSetup{{ //nolint:gosec // G101: env-var NAME, not a credential value
+		cfg:         *mustCFConfig(t, mode, action, accountID, listName, zoneIDs),
+		tokenEnvVar: "CLOUDFLARE_API_TOKEN",
+	}}
+}
+
 // mustCFConfig builds a *config.CloudflareCfg for the tests. APIToken is
 // always the fixed env:CLOUDFLARE_API_TOKEN reference (matching what the
 // wizard writes in the single-account happy path).
@@ -1180,5 +1190,192 @@ func loadTestConfig(t *testing.T, body string) {
 	t.Helper()
 	if _, err := config.LoadConfigReader(strings.NewReader(body), "test"); err != nil {
 		t.Fatalf("emitted config failed re-load: %v\nbody=%s", err, body)
+	}
+}
+
+// ── Multi-account support (issue #217) ───────────────────────────────────────
+
+// multiAccountHTTPFake stubs both a lists-mode account (verify + scope +
+// preflight create-or-adopt) and a rulesets-mode account (zone rulesets).
+func multiAccountHTTPFake(accountID, zoneID string) *httpFake {
+	return &httpFake{
+		byPath: map[string]httpFakeResp{
+			"/accounts/" + accountID + "/tokens/verify": {status: 200, bodyJSON: `{"success":true}`},
+			"/accounts/" + accountID + "/rules/lists":   {status: 200, bodyJSON: `{"success":true,"result":[]}`},
+			"/zones/" + zoneID + "/rulesets":            {status: 200, bodyJSON: `{"success":true,"result":[]}`},
+		},
+	}
+}
+
+// seqTokenReader returns a TokenReader that hands out one token per call so
+// multi-account tests can prove each account keeps its own secret.
+func seqTokenReader(t *testing.T, tokens ...string) func(string) (string, error) {
+	t.Helper()
+	i := 0
+	return func(string) (string, error) {
+		if i >= len(tokens) {
+			t.Fatalf("token reader called %d times, only %d tokens scripted", i+1, len(tokens))
+		}
+		tok := tokens[i]
+		i++
+		return tok, nil
+	}
+}
+
+// TestRunCDNStep_MultiAccount drives the issue #217 happy path: a lists-mode
+// account followed by a rulesets-mode account for a second Cloudflare account
+// (e.g. another client). The first account gets named when the second is
+// added; each account keeps its own token env var.
+func TestRunCDNStep_MultiAccount(t *testing.T) {
+	t.Parallel()
+	const acctID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const zoneID = "dddddddddddddddddddddddddddddddd"
+
+	prompt := &scriptedPrompter{
+		strings: []string{
+			// account 1 (no name prompt on the first account)
+			"lists", "block", acctID, "ezyshield_blocked",
+			// "add another?" = yes → name for the first account
+			"main",
+			// account 2: name, mode, action, zone_ids
+			"client_b", "rulesets", "challenge", zoneID,
+		},
+		bools: []bool{
+			true, // Does this server sit behind a CDN?
+			true, // Add another Cloudflare account?
+			// exhausted → default false: stop after the second account
+		},
+	}
+	step := &cdnStep{}
+	out := captureStep(t, func(p *wPrinter) {
+		runCDNStep(context.Background(), p, prompt, step, cdnDeps{
+			DockerCLI:    &dockerFake{},
+			HTTPClient:   multiAccountHTTPFake(acctID, zoneID),
+			TokenReader:  seqTokenReader(t, "cf-tok-main-secret", "cf-tok-clientb-secret"),
+			CFAPIBaseURL: "http://cf.example",
+		})
+	})
+
+	if !step.cfEnabled {
+		t.Fatalf("cfEnabled false; out=%q", out)
+	}
+	if len(step.cfAccounts) != 2 {
+		t.Fatalf("accounts = %d, want 2; out=%q", len(step.cfAccounts), out)
+	}
+	first, second := step.cfAccounts[0], step.cfAccounts[1]
+	if first.cfg.Name != "main" || first.cfg.Mode != "lists" {
+		t.Errorf("first account = %+v, want name=main mode=lists", first.cfg)
+	}
+	if first.tokenEnvVar != "CLOUDFLARE_API_TOKEN" {
+		t.Errorf("first env var = %q (naming the first account later must not change its env var)", first.tokenEnvVar)
+	}
+	if second.cfg.Name != "client_b" || second.cfg.Mode != "rulesets" || second.cfg.Action != "challenge" {
+		t.Errorf("second account = %+v", second.cfg)
+	}
+	if second.tokenEnvVar != "CLOUDFLARE_API_TOKEN_CLIENT_B" {
+		t.Errorf("second env var = %q, want CLOUDFLARE_API_TOKEN_CLIENT_B", second.tokenEnvVar)
+	}
+	if string(second.cfg.APIToken) != "env:CLOUDFLARE_API_TOKEN_CLIENT_B" {
+		t.Errorf("second api_token ref = %q", string(second.cfg.APIToken))
+	}
+	if first.token != "cf-tok-main-secret" || second.token != "cf-tok-clientb-secret" {
+		t.Errorf("tokens crossed accounts: %q / %q", first.token, second.token)
+	}
+	// Secret discipline: neither token on stdout, and String() redacts both.
+	for _, tok := range []string{"cf-tok-main-secret", "cf-tok-clientb-secret"} {
+		if strings.Contains(out, tok) {
+			t.Errorf("wizard leaked token %q on stdout", tok)
+		}
+		if strings.Contains(step.String(), tok) {
+			t.Errorf("cdnStep.String() leaked token %q: %s", tok, step.String())
+		}
+	}
+	// The generated YAML must be a two-entry sequence the strict loader accepts.
+	body := renderTestConfig(t, step)
+	if !strings.Contains(body, "- name: main") || !strings.Contains(body, "- name: client_b") {
+		t.Errorf("yaml missing sequence entries:\n%s", body)
+	}
+	cfg, err := config.LoadConfigReader(strings.NewReader(body), "test")
+	if err != nil {
+		t.Fatalf("emitted config failed re-load: %v\nbody=%s", err, body)
+	}
+	if n := len(cfg.Enforce.Cloudflare); n != 2 {
+		t.Fatalf("loaded accounts = %d, want 2", n)
+	}
+}
+
+// TestRunCDNStep_MultiAccount_SecondFails: an invalid second account must not
+// take down the first — the wizard keeps what was already validated and says
+// so, and the abort banner must NOT fire (something WAS configured).
+func TestRunCDNStep_MultiAccount_SecondFails(t *testing.T) {
+	t.Parallel()
+	const acctID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	prompt := &scriptedPrompter{
+		strings: []string{
+			"lists", "block", acctID, "ezyshield_blocked",
+			"main",     // name for the first account
+			"client_b", // second account name
+			"rulesets", "block",
+			"not-a-zone-id", // invalid → second account fails
+		},
+		bools: []bool{true, true},
+	}
+	step := &cdnStep{}
+	out := captureStep(t, func(p *wPrinter) {
+		runCDNStep(context.Background(), p, prompt, step, cdnDeps{
+			DockerCLI:    &dockerFake{},
+			HTTPClient:   multiAccountHTTPFake(acctID, "unused"),
+			TokenReader:  seqTokenReader(t, "cf-tok-1", "cf-tok-2"),
+			CFAPIBaseURL: "http://cf.example",
+		})
+	})
+
+	if !step.cfEnabled {
+		t.Fatalf("cfEnabled false — first account must survive; out=%q", out)
+	}
+	if len(step.cfAccounts) != 1 {
+		t.Fatalf("accounts = %d, want 1 (second failed); out=%q", len(step.cfAccounts), out)
+	}
+	if step.cfAccounts[0].cfg.Name != "main" {
+		t.Errorf("surviving account = %+v", step.cfAccounts[0].cfg)
+	}
+	if !strings.Contains(out, "This account was NOT added") {
+		t.Errorf("missing loud partial-failure line; out=%q", out)
+	}
+	if strings.Contains(out, "Cloudflare enforcer setup did NOT complete") {
+		t.Errorf("abort banner fired although the first account succeeded: %q", out)
+	}
+}
+
+// TestRunCDNStep_MultiAccount_DuplicateNameRejected: the second account may
+// not reuse a session name.
+func TestRunCDNStep_MultiAccount_DuplicateNameRejected(t *testing.T) {
+	t.Parallel()
+	const acctID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	prompt := &scriptedPrompter{
+		strings: []string{
+			"lists", "block", acctID, "ezyshield_blocked",
+			"main", // name for the first account
+			"main", // duplicate name for the second → rejected
+		},
+		bools: []bool{true, true},
+	}
+	step := &cdnStep{}
+	out := captureStep(t, func(p *wPrinter) {
+		runCDNStep(context.Background(), p, prompt, step, cdnDeps{
+			DockerCLI:    &dockerFake{},
+			HTTPClient:   multiAccountHTTPFake(acctID, "unused"),
+			TokenReader:  seqTokenReader(t, "cf-tok-1", "cf-tok-2"),
+			CFAPIBaseURL: "http://cf.example",
+		})
+	})
+
+	if len(step.cfAccounts) != 1 {
+		t.Fatalf("accounts = %d, want 1; out=%q", len(step.cfAccounts), out)
+	}
+	if !strings.Contains(out, `already used in this run`) {
+		t.Errorf("missing duplicate-name rejection; out=%q", out)
 	}
 }

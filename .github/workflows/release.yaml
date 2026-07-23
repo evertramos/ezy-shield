@@ -1,5 +1,8 @@
 name: 🏷️ Release
 
+# Baseline for every job that does not override it (tag, publish-repos).
+# id-token: write (OIDC, used for cosign keyless signing — issue #100) is
+# granted ONLY on the release job below, never workflow-wide.
 permissions:
   contents: write
 
@@ -43,7 +46,7 @@ jobs:
           echo "::error::rc releases are cut from 'dev' (or 'main'), got '${{ github.ref_name }}'."
           exit 1
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 
@@ -111,8 +114,15 @@ jobs:
       (github.event_name == 'push' && github.actor != 'github-actions[bot]')
     needs: [tag]
     runs-on: ubuntu-latest
+    # id-token: write is the OIDC grant cosign keyless signing needs
+    # (issue #100); it is scoped to this job only. Per-job permissions
+    # replace the workflow-level block entirely, so contents: write must be
+    # restated for the release upload.
+    permissions:
+      contents: write
+      id-token: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           ref: ${{ needs.tag.outputs.new_tag || github.ref }}
@@ -138,19 +148,29 @@ jobs:
             ;;
           esac
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
 
+      # cosign (keyless signing of checksums.txt via this job's OIDC token)
+      # and syft (SPDX SBOMs) are invoked by goreleaser's signs:/sboms:
+      # sections (issue #100).
+      - name: Install cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
+
       # goreleaser (issues #97/#98) builds both binaries for amd64+arm64
       # (CGO off, -trimpath, ldflags version), publishes raw binaries under
-      # the exact names scripts/get.sh expects, tarballs, checksums.txt, and
-      # .deb/.rpm packages. rc/alpha/beta tags become prereleases and never
-      # take "latest" (release.prerelease: auto in .goreleaser.yaml).
+      # the exact names scripts/get.sh expects, tarballs, checksums.txt +
+      # cosign keyless signature (checksums.txt.sig/.pem), per-artifact SPDX
+      # SBOMs, and .deb/.rpm packages. rc/alpha/beta tags become prereleases
+      # and never take "latest" (release.prerelease: auto in .goreleaser.yaml).
       # The same snapshot build is install-verified in containers by the
       # `packages` job in ci.yaml on every PR.
       - name: Run goreleaser
-        uses: goreleaser/goreleaser-action@v7
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
         with:
           distribution: goreleaser
           version: "~> v2"
@@ -188,7 +208,8 @@ jobs:
             echo "- ezyshield-linux-arm64"
             echo "- ezyshield-enforcer-linux-amd64"
             echo "- ezyshield-enforcer-linux-arm64"
-            echo "- checksums.txt"
+            echo "- checksums.txt (+ .sig/.pem — cosign keyless signature)"
+            echo "- *.spdx.json (SBOMs, one per artifact)"
           } >> "$GITHUB_STEP_SUMMARY"
 
   # Chained explicitly because goreleaser's GITHUB_TOKEN-created release does

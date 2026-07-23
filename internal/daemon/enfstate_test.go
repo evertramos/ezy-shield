@@ -9,11 +9,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/netip"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/evertramos/ezy-shield/internal/config"
+	"github.com/evertramos/ezy-shield/internal/enforce"
 	"github.com/evertramos/ezy-shield/internal/store"
 	"github.com/evertramos/ezy-shield/pkg/sdk"
 )
@@ -179,5 +182,78 @@ func TestHandleStatus_ReportsEnforcementState(t *testing.T) {
 	}
 	if sd.EnforcementDetail == "" {
 		t.Error("DEGRADED status carries no detail for the operator")
+	}
+}
+
+// TestEnforcementState_ProbeFlipsWithoutTraffic covers the staleness gap
+// the periodic probe exists for: with no new bans and no expiries, a dying
+// enforcer must still flip ACTIVE→DEGRADED within one probe interval, and
+// a recovering one DEGRADED→ACTIVE — no traffic required.
+func TestEnforcementState_ProbeFlipsWithoutTraffic(t *testing.T) {
+	t.Parallel()
+	enf := &flakyEnforcer{}
+	db, err := store.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	d, err := New(Config{
+		Policy: &config.Policy{
+			Armed:            true,
+			BanThreshold:     config.DefaultBanThreshold,
+			ObserveThreshold: config.DefaultObserveThreshold,
+			MaxBansPerMinute: config.DefaultMaxBansPerMinute,
+			Strikes:          config.DefaultStrikes,
+		},
+		Store:        db,
+		Enforcer:     enf,
+		EnfProbeTick: 5 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go d.runEnforceProbe(ctx)
+
+	waitForState := func(want EnforcementState) {
+		t.Helper()
+		deadline := time.After(2 * time.Second)
+		for {
+			if s, _ := d.enforcementState(); s == want {
+				return
+			}
+			select {
+			case <-deadline:
+				s, detail := d.enforcementState()
+				t.Fatalf("state = %s (%s), want %s", s, detail, want)
+			case <-time.After(time.Millisecond):
+			}
+		}
+	}
+
+	// Healthy start; the enforcer dies with zero traffic → probe degrades.
+	enf.setFailing(true)
+	waitForState(EnfDegraded)
+
+	// It recovers with zero traffic → probe restores ACTIVE.
+	enf.setFailing(false)
+	waitForState(EnfActive)
+}
+
+// TestEnforcementState_GateRefusalIsNotIllHealth: the centralized allowlist
+// gate (PR #252) refusing a Ban is the safety backstop working — it must
+// not flip the enforcement state to DEGRADED or claim the enforcer failed.
+func TestEnforcementState_GateRefusalIsNotIllHealth(t *testing.T) {
+	t.Parallel()
+	d, _ := newEnfStateDaemon(t, &flakyEnforcer{}, true)
+	ctx := context.Background()
+
+	gateErr := fmt.Errorf("enforce/gate: refusing to ban 192.0.2.1 (allowlisted): %w", enforce.ErrGateRefused)
+	d.recordEnforceResult(ctx, "ban", gateErr)
+
+	if s, detail := d.enforcementState(); s != EnfActive {
+		t.Fatalf("after gate refusal: state = %s (%s), want ACTIVE (refusal is not enforcer ill-health)", s, detail)
 	}
 }

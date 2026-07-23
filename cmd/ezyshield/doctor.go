@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/evertramos/ezy-shield/internal/daemon"
 	"net"
 	"net/http"
 	"net/netip"
@@ -19,6 +18,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/evertramos/ezy-shield/internal/config"
+	"github.com/evertramos/ezy-shield/internal/daemon"
 	"github.com/evertramos/ezy-shield/internal/enforce"
 )
 

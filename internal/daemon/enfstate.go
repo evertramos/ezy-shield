@@ -12,13 +12,20 @@ package daemon
 //	ACTIVE   — armed, enforcer configured, last operation succeeded
 //
 // A failure flips the state to DEGRADED immediately; the next successful
-// Ban/Sync flips it back. Every transition is audited.
+// Ban/Sync flips it back. Every transition is audited. Because bans and
+// expiries can be arbitrarily rare (a quiet host, permanent bans), a
+// periodic probe (runEnforceProbe) reconciles the enforcer on a timer so
+// the state can never go stale in either direction.
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
+
+	"github.com/evertramos/ezy-shield/internal/enforce"
 )
 
 // EnforcementState is the coarse health of the enforcement path.
@@ -39,7 +46,6 @@ type enfHealth struct {
 	mu       sync.Mutex
 	degraded bool   // last Ban/Sync failed
 	lastErr  string // the failure detail, for status/doctor/audit
-	enforcer string // enforcer name (for messages)
 }
 
 // enforcementState derives the current state. hasEnforcer/armed are the
@@ -66,6 +72,14 @@ func (d *Daemon) recordEnforceResult(ctx context.Context, op string, err error) 
 	if d.enforcer == nil {
 		return
 	}
+	if err != nil && errors.Is(err, enforce.ErrGateRefused) {
+		// The centralized allowlist/anti-lockout gate refusing a target is
+		// the safety backstop doing its job — the enforcement path itself
+		// is healthy, and the gate already audits the refusal loudly.
+		// Counting it as ill-health would flip DEGRADED with a misleading
+		// "check the enforcer" remediation.
+		return
+	}
 	d.enfHealth.mu.Lock()
 	was := d.enfHealth.degraded
 	if err != nil {
@@ -86,11 +100,54 @@ func (d *Daemon) recordEnforceResult(ctx context.Context, op string, err error) 
 		reason := "enforcement DEGRADED — " + detail
 		slog.ErrorContext(ctx, "daemon: enforcement state → DEGRADED", "detail", detail)
 		d.auditEnfTransition(ctx, "enforce_degraded", reason)
-		d.notifyCritical(ctx, "enforcement DEGRADED: "+detail+" — bans may not be applied; check the enforcer")
+		// Notify only when armed: in dry-run nothing is enforced anyway and
+		// status reports DRY-RUN, so a "bans may not be applied" critical
+		// alert would contradict what the operator sees. The audit record
+		// and ERROR log above always happen.
+		if d.policy.IsArmed() {
+			d.notifyCritical(ctx, "enforcement DEGRADED: "+detail+" — bans may not be applied; check the enforcer")
+		}
 	} else {
 		reason := "enforcement recovered → ACTIVE (" + d.enforcer.Name() + ")"
 		slog.InfoContext(ctx, "daemon: enforcement state → ACTIVE (recovered)")
 		d.auditEnfTransition(ctx, "enforce_recovered", reason)
+	}
+}
+
+// defaultEnfProbeInterval is how often the enforcement path is reconciled
+// when nothing else exercises it. Five minutes bounds how stale the
+// reported state can get on a quiet host, at the cost of one idempotent
+// Sync per interval.
+const defaultEnfProbeInterval = 5 * time.Minute
+
+// runEnforceProbe periodically reconciles the enforcer even when no bans
+// are being written or expiring. Without it the state would only be as
+// fresh as the last ban/expiry — a dead enforcer on a quiet host would
+// report ACTIVE indefinitely, and a recovered one would stay DEGRADED
+// until new traffic arrived. syncEnforcer feeds recordEnforceResult, which
+// audits/notifies only on actual transitions, so a healthy steady state
+// costs nothing beyond the Sync itself.
+func (d *Daemon) runEnforceProbe(ctx context.Context) {
+	if d.enforcer == nil {
+		return
+	}
+	interval := d.enfProbeTick
+	if interval <= 0 {
+		interval = defaultEnfProbeInterval
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if err := d.syncEnforcer(ctx); err != nil {
+				// Already recorded in health + logged by syncEnforcer's
+				// callers elsewhere; keep the probe itself quiet.
+				slog.DebugContext(ctx, "daemon: enforcement probe reconcile failed", "err", err)
+			}
+		}
 	}
 }
 

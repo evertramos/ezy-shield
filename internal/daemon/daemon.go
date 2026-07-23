@@ -98,6 +98,9 @@ type Config struct {
 	// ArmWindowTick overrides the auto-revert poll interval (tests only;
 	// 0 = default 15s).
 	ArmWindowTick time.Duration
+	// EnfProbeTick overrides the enforcement health-probe interval (tests
+	// only; 0 = default 5m). See runEnforceProbe (issue #174).
+	EnfProbeTick time.Duration
 }
 
 // enricherFrom converts a *enrich.Enricher into the geoLookup interface, or
@@ -139,6 +142,8 @@ type Daemon struct {
 	policyPath string
 	// armWindowTick is the auto-revert poll interval (0 = default 15s).
 	armWindowTick time.Duration
+	// enfProbeTick is the enforcement health-probe interval (0 = default 5m).
+	enfProbeTick time.Duration
 	// ineffDedup deduplicates ban_ineffective notifications systemically
 	// (ADR-0009 §4, issue #146).
 	ineffDedup ineffDedup
@@ -243,6 +248,7 @@ func New(dcfg Config) (*Daemon, error) {
 		startTime:       time.Now(),
 		policyPath:      dcfg.PolicyPath,
 		armWindowTick:   dcfg.ArmWindowTick,
+		enfProbeTick:    dcfg.EnfProbeTick,
 	}
 
 	// Enforcement-anomaly delivery (ADR-0009 §4, issue #146): the engine
@@ -351,6 +357,9 @@ func (d *Daemon) Run(parentCtx context.Context) error {
 	// then keep watching it (issue #228).
 	d.checkArmWindow(ctx, time.Now())
 	go d.runArmWindow(ctx)
+
+	// Keep the enforcement state fresh on quiet hosts (issue #174).
+	go d.runEnforceProbe(ctx)
 
 	// Signal handling.
 	sigCh := make(chan os.Signal, 1)

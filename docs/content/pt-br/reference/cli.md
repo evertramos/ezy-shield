@@ -536,9 +536,10 @@ sudo ezyshield config enrich maxmind
   `config.yaml.bak`, revalidação antes de salvar e resumo das chaves alteradas.
 - diagnóstico ban_ineffective: **FAIL** quando um ban ativo é marcado ineficaz (tráfego passando apesar do ban); nomeia os IPs e aponta o remédio sistêmico (edge enforcement / real-IP parsing / saúde do enforcer)
 - **Estado do enforcement** (issue #174) — a saúde real do caminho de
-  enforcement, derivada dos resultados reais do enforcer, não só da config.
-  Mostrado em destaque na saída texto e como campo estável `enforcement_state`
-  no `--json`:
+  enforcement, derivada dos resultados reais do enforcer, não só da config, e
+  re-verificada por um probe de reconcile periódico (a cada 5 minutos) para
+  continuar honesta em hosts quietos. Mostrado em destaque na saída texto e
+  como campo estável `enforcement_state` no `--json`:
   - `ACTIVE` — armado, enforcer saudável, bans são aplicados
   - `DRY-RUN` — detecção rodando mas **nada é aplicado**
   - `DEGRADED` — armado, mas o Ban/Sync recente do enforcer **falhou**; bans podem não estar sendo aplicados (com o detalhe da falha)

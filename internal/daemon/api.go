@@ -68,6 +68,13 @@ type StatusData struct {
 	Uptime string `json:"uptime"`
 	// Armed mirrors policy.Armed: true means bans are enforced, false = dry-run.
 	Armed bool `json:"armed"`
+	// EnforcementState is the honest enforcement health (issue #174):
+	// ACTIVE / DRY-RUN / DEGRADED / DISABLED. Derived from real enforcer
+	// Ban/Sync outcomes, not config alone — status must never claim
+	// protection that is not real.
+	EnforcementState string `json:"enforcement_state"`
+	// EnforcementDetail carries the failure detail when DEGRADED.
+	EnforcementDetail string `json:"enforcement_detail,omitempty"`
 	// ActiveBans is the count of IPs currently in bans_active that are
 	// really enforced. Simulated dry-run bans are excluded — counting them
 	// as "active" would overstate protection.

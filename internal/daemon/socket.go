@@ -276,13 +276,16 @@ func (d *Daemon) handleStatus(ctx context.Context) SocketResponse {
 		}
 	}
 
+	enfState, enfDetail := d.enforcementState()
 	data := StatusData{
-		Uptime:        time.Since(d.startTime).Round(time.Second).String(),
-		Armed:         d.policy.IsArmed(),
-		ActiveBans:    active,
-		SimulatedBans: simulated,
-		ArmedUntil:    d.armedUntil(ctx),
-		Version:       d.version,
+		Uptime:            time.Since(d.startTime).Round(time.Second).String(),
+		Armed:             d.policy.IsArmed(),
+		EnforcementState:  string(enfState),
+		EnforcementDetail: enfDetail,
+		ActiveBans:        active,
+		SimulatedBans:     simulated,
+		ArmedUntil:        d.armedUntil(ctx),
+		Version:           d.version,
 	}
 	raw, _ := json.Marshal(data)
 	return SocketResponse{OK: true, Data: raw}

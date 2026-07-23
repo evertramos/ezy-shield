@@ -98,6 +98,9 @@ type Config struct {
 	// ArmWindowTick overrides the auto-revert poll interval (tests only;
 	// 0 = default 15s).
 	ArmWindowTick time.Duration
+	// EnfProbeTick overrides the enforcement health-probe interval (tests
+	// only; 0 = default 5m). See runEnforceProbe (issue #174).
+	EnfProbeTick time.Duration
 }
 
 // enricherFrom converts a *enrich.Enricher into the geoLookup interface, or
@@ -139,11 +142,16 @@ type Daemon struct {
 	policyPath string
 	// armWindowTick is the auto-revert poll interval (0 = default 15s).
 	armWindowTick time.Duration
+	// enfProbeTick is the enforcement health-probe interval (0 = default 5m).
+	enfProbeTick time.Duration
 	// ineffDedup deduplicates ban_ineffective notifications systemically
 	// (ADR-0009 §4, issue #146).
 	ineffDedup ineffDedup
-	startTime  time.Time
-	version    string
+	// enfHealth tracks enforcer Ban/Sync health for the honest
+	// enforcement-state reporting (issue #174).
+	enfHealth enfHealth
+	startTime time.Time
+	version   string
 
 	// evidenceJournalctl and evidenceDockerSocket override the journalctl
 	// binary and Docker engine socket used by on-demand evidence extraction
@@ -240,6 +248,7 @@ func New(dcfg Config) (*Daemon, error) {
 		startTime:       time.Now(),
 		policyPath:      dcfg.PolicyPath,
 		armWindowTick:   dcfg.ArmWindowTick,
+		enfProbeTick:    dcfg.EnfProbeTick,
 	}
 
 	// Enforcement-anomaly delivery (ADR-0009 §4, issue #146): the engine
@@ -348,6 +357,9 @@ func (d *Daemon) Run(parentCtx context.Context) error {
 	// then keep watching it (issue #228).
 	d.checkArmWindow(ctx, time.Now())
 	go d.runArmWindow(ctx)
+
+	// Keep the enforcement state fresh on quiet hosts (issue #174).
+	go d.runEnforceProbe(ctx)
 
 	// Signal handling.
 	sigCh := make(chan os.Signal, 1)
@@ -654,10 +666,14 @@ func (d *Daemon) dispatch(ctx context.Context, action sdk.Action) {
 
 	if action.Op == "ban" && d.enforcer != nil {
 		t := sdk.Target{IP: action.IP, TTL: action.TTL}
-		if err := d.enforcer.Ban(ctx, t); err != nil {
+		err := d.enforcer.Ban(ctx, t)
+		if err != nil {
 			slog.ErrorContext(ctx, "daemon: enforcer ban failed", "ip", action.IP, "err", err)
 			d.notifyCritical(ctx, fmt.Sprintf("enforcer ban failed for %s: %v", action.IP, err))
 		}
+		// Enforcement-state health (issue #174): a failed ban flips the
+		// daemon to DEGRADED so status/doctor stop claiming protection.
+		d.recordEnforceResult(ctx, "ban", err)
 	}
 
 	if d.notifier != nil && (action.Op == "ban" || action.Op == "dry_ban" || action.Op == "notify_only") {
@@ -739,7 +755,12 @@ func (d *Daemon) syncEnforcer(ctx context.Context) error {
 		}
 		targets = append(targets, sdk.Target{IP: b.IP, TTL: b.TTL})
 	}
-	return d.enforcer.Sync(ctx, targets)
+	err = d.enforcer.Sync(ctx, targets)
+	// Enforcement-state health (issue #174): reconcile is the periodic
+	// signal that flips DEGRADED→ACTIVE on recovery (and ACTIVE→DEGRADED if
+	// the firewall backend went away between bans).
+	d.recordEnforceResult(ctx, "sync", err)
+	return err
 }
 
 // allowlistSyncer is the optional side of sdk.Enforcer that mirrors the

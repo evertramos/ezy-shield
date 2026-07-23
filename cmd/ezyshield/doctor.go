@@ -18,6 +18,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/evertramos/ezy-shield/internal/config"
+	"github.com/evertramos/ezy-shield/internal/daemon"
 	"github.com/evertramos/ezy-shield/internal/enforce"
 )
 
@@ -44,7 +45,7 @@ type DoctorSummary struct {
 }
 
 func newDoctorCmd() *cobra.Command {
-	var configDir, dbPath string
+	var configDir, dbPath, socketPath string
 
 	cmd := &cobra.Command{
 		Use:   "doctor",
@@ -60,7 +61,7 @@ func newDoctorCmd() *cobra.Command {
 Each check prints PASS, FAIL, or N/A with a remediation hint on failure.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runDoctor(cmd, configDir, dbPath, jsonOutput)
+			return runDoctor(cmd, configDir, dbPath, socketPath, jsonOutput)
 		},
 	}
 
@@ -68,13 +69,15 @@ Each check prints PASS, FAIL, or N/A with a remediation hint on failure.`,
 		"directory containing config.yaml and policy.yaml")
 	cmd.Flags().StringVar(&dbPath, "db", "/var/lib/ezyshield/ezyshield.db",
 		"path to the SQLite database (read-only diagnostics)")
+	cmd.Flags().StringVar(&socketPath, "socket", daemon.DefaultSocketPath,
+		"daemon control socket (queried for the live enforcement state)")
 
 	return cmd
 }
 
 // runDoctor runs all health checks and writes results to cmd.
 // jsonOut controls whether output is JSON (true) or human-readable (false).
-func runDoctor(cmd *cobra.Command, configDir, dbPath string, jsonOut bool) error {
+func runDoctor(cmd *cobra.Command, configDir, dbPath, socketPath string, jsonOut bool) error {
 	checks := []CheckResult{
 		checkFileExists(filepath.Join(configDir, "config.yaml"), "config.yaml"),
 		checkFileParses(filepath.Join(configDir, "config.yaml"), "config.yaml"),
@@ -99,6 +102,8 @@ func runDoctor(cmd *cobra.Command, configDir, dbPath string, jsonOut bool) error
 	checks = append(checks, checkInstallShadowing(os.Getenv("PATH"))...)
 	// issue #146: fired ban_ineffective diagnostics (read-only DB query).
 	checks = append(checks, checkBanIneffective(dbPath))
+	// issue #174: honest enforcement state from the running daemon.
+	checks = append(checks, checkEnforcementState(socketPath))
 
 	summary := DoctorSummary{Total: len(checks)}
 	for _, c := range checks {

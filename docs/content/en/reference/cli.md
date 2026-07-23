@@ -522,6 +522,16 @@ sudo ezyshield config enrich maxmind
 - Write semantics match the other wizards: atomic write, `config.yaml.bak`,
   re-validation before saving, changed-keys summary on success.
 - ban_ineffective diagnostics: **FAIL** when an active ban is flagged ineffective (traffic flowing despite the ban); names the IPs and points at the systemic remedy (edge enforcement / real-IP parsing / enforcer health)
+- **Enforcement state** (issue #174) — the honest health of the enforcement
+  path, derived from real enforcer outcomes, not config alone, and re-verified
+  by a periodic reconcile probe (every 5 minutes) so it stays honest on quiet
+  hosts. Shown loudly in text output and as the stable `enforcement_state`
+  field in `--json`:
+  - `ACTIVE` — armed, enforcer healthy, bans are applied
+  - `DRY-RUN` — detection running but **nothing is enforced**
+  - `DEGRADED` — armed but the enforcer's recent Ban/Sync **failed**; bans may not be applied (with the failure detail)
+  - `DISABLED` — no enforcer configured; detection only
+- enforcement state (#174): **FAIL** when armed but the enforcer is DEGRADED (bans not being applied); **WARN** on DRY-RUN or DISABLED while detection runs; N/A when the daemon isn't running
 
 Available names: `maxmind`.
 

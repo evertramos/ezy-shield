@@ -40,9 +40,11 @@ func lookupDaemonGID() (int, error) {
 // the source string comes from the group database / NSS backend, so an
 // out-of-range value is rejected instead of silently wrapping into a wrong
 // ownership comparison (CodeQL go/incorrect-integer-conversion, issue #260).
-// The int64 comparison keeps the guard correct on 32-bit builds too.
+// The direct constant comparison is the guard form CodeQL recognizes as a
+// range barrier; it requires a 64-bit int, which every supported build
+// target has (goreleaser ships amd64/arm64 only).
 func gidToUint32(gid int) (uint32, bool) {
-	if gid < 0 || int64(gid) > int64(math.MaxUint32) {
+	if gid < 0 || gid > math.MaxUint32 {
 		return 0, false
 	}
 	return uint32(gid), true

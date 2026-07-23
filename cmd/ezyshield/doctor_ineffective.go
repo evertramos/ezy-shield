@@ -70,6 +70,14 @@ func checkBanIneffective(dbPath string) CheckResult {
 		return CheckResult{Name: name, Status: statusNA, Hint: err.Error()}
 	}
 
+	// The detail list above is capped at 10; the reported count must not be —
+	// "10 flagged" when 200 are would silently understate the incident.
+	var total int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM bans_active WHERE ineffective_fired = 1`).Scan(&total); err != nil {
+		total = len(hits)
+	}
+
 	var everHad int
 	if err := db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM offenders WHERE had_ineffective = 1`).Scan(&everHad); err != nil {
@@ -88,10 +96,14 @@ func checkBanIneffective(dbPath string) CheckResult {
 	for _, h := range hits {
 		parts = append(parts, fmt.Sprintf("%s (strike %d, %d post-grace events)", h.ip, h.strike, h.evts))
 	}
+	detail := strings.Join(parts, "; ")
+	if total > len(hits) {
+		detail = fmt.Sprintf("worst %d: %s", len(hits), detail)
+	}
 	return CheckResult{
 		Name:   name,
 		Status: statusFail,
 		Hint: fmt.Sprintf("%d active ban(s) flagged ineffective: %s — %s",
-			len(hits), strings.Join(parts, "; "), ineffectiveRemedy),
+			total, detail, ineffectiveRemedy),
 	}
 }

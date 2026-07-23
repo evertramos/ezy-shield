@@ -7,6 +7,7 @@ package daemon
 import (
 	"context"
 	"net/netip"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -43,7 +44,7 @@ func TestBanIneffective_NotificationDedupedSystemically(t *testing.T) {
 	// Ten distinct IPs fire within the window — the classic "broken
 	// enforcement fires for many IPs at once" scenario.
 	for i := 0; i < 10; i++ {
-		d.BanIneffective(ctx, diag("203.0.113."+itoa(i), 3))
+		d.BanIneffective(ctx, diag("203.0.113."+strconv.Itoa(i), 3))
 	}
 	if got := notif.Count(); got != 1 {
 		t.Errorf("notifications = %d, want 1 (systemic dedup — one alert, not one per IP)", got)
@@ -80,7 +81,7 @@ func TestBanIneffective_StreamEventPerFiring(t *testing.T) {
 
 	go func() {
 		for i := 0; i < 3; i++ {
-			d.BanIneffective(ctx, diag("203.0.113."+itoa(i), 3))
+			d.BanIneffective(ctx, diag("203.0.113."+strconv.Itoa(i), 3))
 		}
 	}()
 
@@ -151,20 +152,4 @@ func TestBanIneffective_NilNotifierIsSafe(t *testing.T) {
 	d.BanIneffectivePermanent(context.Background(), netip.MustParseAddr("203.0.113.1"), 5)
 }
 
-// itoa is a tiny local helper (avoids importing strconv for one use).
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var b [4]byte
-	i := len(b)
-	for n > 0 {
-		i--
-		b[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(b[i:])
-}
-
 var _ decision.Diagnostics = (*Daemon)(nil) // compile-time interface check
-var _ = sdk.Notification{}                  // keep sdk import when trimmed

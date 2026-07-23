@@ -29,9 +29,12 @@ type BanIneffectiveDiag struct {
 }
 
 // Diagnostics receives enforcement-anomaly signals from the engine.
-// Implementations must be fast and non-blocking (they run on the decision
-// hot path) and must tolerate concurrent calls. A nil Diagnostics is valid:
-// the engine then only logs, exactly the pre-#146 behavior.
+// Implementations run synchronously on the decision path and must tolerate
+// concurrent calls; they may perform I/O (the daemon sends a notification
+// inline, like the rest of dispatch), but every firing is once-per-ban and
+// notification sends are deduplicated, so the amortized cost stays
+// negligible. A nil Diagnostics is valid: the engine then only logs,
+// exactly the pre-#146 behavior.
 type Diagnostics interface {
 	// BanIneffective fires exactly once per ban (the store's
 	// compare-and-set guarantees it) when suppressed post-grace events

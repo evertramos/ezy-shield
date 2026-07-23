@@ -210,21 +210,72 @@ func TestRunUpdate_RequiresRoot(t *testing.T) {
 	}
 }
 
+// TestRunUpdate_PinnedVersion covers the --version paths: upgrades and
+// reinstalls proceed silently, downgrades warn and require an explicit yes
+// (interactive or --yes) — and silence (nil/EOF stdin) never approves one.
 func TestRunUpdate_PinnedVersion(t *testing.T) {
-	f := newFixture(t, "v0.2.0")
-	tmpDir := t.TempDir()
-	opts := f.optsFor(t, tmpDir, "v0.5.0") // current is newer than target
-	opts.pinnedVersion = "v0.2.0"          // force-downgrade
-	buf := &bytes.Buffer{}
-	opts.out = buf
-	withTestClient(t, f)
-
-	if err := runUpdate(context.Background(), opts); err != nil {
-		t.Fatalf("runUpdate: %v\nout: %s", err, buf.String())
+	const target = "v0.2.0"
+	cases := []struct {
+		name       string
+		current    string
+		stdin      string // "" means nil reader (no stdin at all)
+		assumeYes  bool
+		wantErrSub string // "" = expect success
+		wantWarn   bool
+		wantPrompt bool
+	}{
+		{name: "downgrade answered y", current: "v0.5.0", stdin: "y\n", wantWarn: true, wantPrompt: true},
+		{name: "downgrade answered YES", current: "v0.5.0", stdin: "YES\n", wantWarn: true, wantPrompt: true},
+		{name: "downgrade answered n", current: "v0.5.0", stdin: "n\n", wantErrSub: "cancelled", wantWarn: true, wantPrompt: true},
+		{name: "downgrade empty answer defaults to no", current: "v0.5.0", stdin: "\n", wantErrSub: "cancelled", wantWarn: true, wantPrompt: true},
+		{name: "downgrade nil stdin refused", current: "v0.5.0", wantErrSub: "--yes", wantWarn: true, wantPrompt: true},
+		{name: "downgrade with --yes skips prompt", current: "v0.5.0", assumeYes: true, wantWarn: true},
+		{name: "downgrade prerelease current", current: "v0.2.1-rc.1", stdin: "y\n", wantWarn: true, wantPrompt: true},
+		{name: "pinned upgrade no prompt", current: "v0.1.0"},
+		{name: "pinned reinstall no prompt", current: "v0.2.0"},
+		{name: "non-semver current no prompt", current: "dev"},
 	}
-	got, _ := os.ReadFile(opts.binaryPath)
-	if !bytes.Equal(got, f.mainBytes) {
-		t.Errorf("pinned downgrade should install target; got %q", got)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t, target)
+			opts := f.optsFor(t, t.TempDir(), tc.current)
+			opts.pinnedVersion = target
+			opts.assumeYes = tc.assumeYes
+			if tc.stdin != "" {
+				opts.in = strings.NewReader(tc.stdin)
+			}
+			buf := &bytes.Buffer{}
+			opts.out = buf
+			withTestClient(t, f)
+
+			err := runUpdate(context.Background(), opts)
+			out := buf.String()
+
+			if tc.wantErrSub == "" {
+				if err != nil {
+					t.Fatalf("runUpdate: %v\nout: %s", err, out)
+				}
+				got, _ := os.ReadFile(opts.binaryPath)
+				if !bytes.Equal(got, f.mainBytes) {
+					t.Errorf("target %s should be installed; got %q", target, got)
+				}
+			} else {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v\nout: %s", tc.wantErrSub, err, out)
+				}
+				got, _ := os.ReadFile(opts.binaryPath)
+				if string(got) != "OLD_MAIN" {
+					t.Errorf("declined downgrade must not touch binary; got %q", got)
+				}
+			}
+
+			if gotWarn := strings.Contains(out, "WARNING: this is a downgrade"); gotWarn != tc.wantWarn {
+				t.Errorf("downgrade warning present=%v, want %v\nout: %s", gotWarn, tc.wantWarn, out)
+			}
+			if gotPrompt := strings.Contains(out, "[y/N]"); gotPrompt != tc.wantPrompt {
+				t.Errorf("confirmation prompt present=%v, want %v\nout: %s", gotPrompt, tc.wantPrompt, out)
+			}
+		})
 	}
 }
 

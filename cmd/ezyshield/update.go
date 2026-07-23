@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -36,6 +37,7 @@ type updateOptions struct {
 	checkOnly      bool
 	pinnedVersion  string
 	currentVersion string
+	assumeYes      bool
 
 	apiBaseURL string // override default api.github.com
 	repo       string // override evertramos/ezy-shield
@@ -55,12 +57,16 @@ type updateOptions struct {
 	isRoot func() bool
 
 	out io.Writer
+	// in feeds the downgrade confirmation prompt. nil (or EOF, e.g. a piped
+	// stdin) counts as "no" — silence must never approve a downgrade.
+	in io.Reader
 }
 
 func newUpdateCmd() *cobra.Command {
 	var (
 		checkOnly     bool
 		pinnedVersion string
+		assumeYes     bool
 	)
 
 	cmd := &cobra.Command{
@@ -72,6 +78,10 @@ and atomically replace the on-disk binaries (ezyshield and ezyshield-enforcer).
 By default fetches from the public repo evertramos/ezy-shield. Override the
 release source with the EZYSHIELD_UPDATE_URL environment variable (e.g. a
 private mirror): point it at the GitHub API base, e.g. https://api.github.com.
+
+--version also accepts a tag older than the running version (rollback). That
+prints a warning — the database schema is never reverted — and asks for
+confirmation; pass --yes to skip the prompt in unattended rollbacks.
 
 This command does NOT restart services. After a successful update, run:
 
@@ -93,6 +103,7 @@ This command does NOT restart services. After a successful update, run:
 				checkOnly:      checkOnly,
 				pinnedVersion:  pinnedVersion,
 				currentVersion: version,
+				assumeYes:      assumeYes,
 				apiBaseURL:     apiBaseURL,
 				repo:           repo,
 				binaryPath:     selfPath,
@@ -102,6 +113,7 @@ This command does NOT restart services. After a successful update, run:
 				runVerify:      verifyBinary,
 				isRoot:         func() bool { return os.Geteuid() == 0 },
 				out:            cmd.OutOrStdout(),
+				in:             cmd.InOrStdin(),
 			}
 			return runUpdate(cmd.Context(), opts)
 		},
@@ -109,6 +121,7 @@ This command does NOT restart services. After a successful update, run:
 
 	cmd.Flags().BoolVar(&checkOnly, "check", false, "check for updates without applying")
 	cmd.Flags().StringVar(&pinnedVersion, "version", "", "install a specific release tag (e.g. v0.2.0)")
+	cmd.Flags().BoolVarP(&assumeYes, "yes", "y", false, "skip the confirmation prompt when --version is a downgrade")
 
 	return cmd
 }
@@ -188,6 +201,12 @@ func runUpdate(ctx context.Context, opts updateOptions) error {
 
 	if !opts.isRoot() {
 		return fmt.Errorf("update requires root (binaries in %s)", filepath.Dir(opts.binaryPath))
+	}
+
+	if opts.pinnedVersion != "" {
+		if err := confirmIfDowngrade(opts, out, rel.TagName); err != nil {
+			return err
+		}
 	}
 
 	suffix := "linux-" + opts.arch
@@ -304,6 +323,45 @@ func (e *errWriter) println(s string) {
 		return
 	}
 	_, e.err = fmt.Fprintln(e.w, s)
+}
+
+// confirmIfDowngrade warns and asks before installing a pinned release older
+// than the running version. Migrations are append-only, so the database schema
+// is never reverted — an older binary can meet a schema it does not know. The
+// operator must opt in explicitly (interactive y/N, or --yes for unattended
+// rollbacks). Equal/newer targets and non-semver current versions (e.g. "dev"
+// builds, which cannot be compared) pass through silently.
+func confirmIfDowngrade(opts updateOptions, out *errWriter, targetTag string) error {
+	cmp, err := update.CompareSemver(opts.currentVersion, targetTag)
+	if err != nil || cmp <= 0 {
+		return nil
+	}
+	out.printf("\nWARNING: this is a downgrade (%s → %s).\n", opts.currentVersion, targetTag)
+	out.printf("The database schema is NOT reverted — %s may not understand a database\nalready migrated by %s. Keep a backup before proceeding.\n\n",
+		targetTag, opts.currentVersion)
+	if opts.assumeYes {
+		out.printf("--yes given: proceeding with downgrade.\n")
+		return nil
+	}
+	out.printf("Proceed with downgrade? [y/N]: ")
+	if !readYes(opts.in) {
+		return fmt.Errorf("downgrade to %s cancelled (pass --yes to skip this prompt)", targetTag)
+	}
+	return nil
+}
+
+// readYes reads one line from in and reports whether the operator typed y/yes
+// (case-insensitive). A nil reader, EOF, or any other answer count as no.
+func readYes(in io.Reader) bool {
+	if in == nil {
+		return false
+	}
+	sc := bufio.NewScanner(in)
+	if !sc.Scan() {
+		return false
+	}
+	ans := strings.ToLower(strings.TrimSpace(sc.Text()))
+	return ans == "y" || ans == "yes"
 }
 
 func fetchTargetRelease(ctx context.Context, c *update.Client, pinned string) (*update.Release, error) {

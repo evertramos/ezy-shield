@@ -378,6 +378,7 @@ sudo ezyshield doctor
 | Flag | Padrão | Descrição |
 |------|--------|-----------|
 | `--config-dir` | `/etc/ezyshield` | diretório de configuração a verificar |
+| `--db` | `/var/lib/ezyshield/ezyshield.db` | banco para a checagem read-only de ban_ineffective |
 
 Verificações:
 - config.yaml / policy.yaml existem, fazem parse e têm permissões/dono seguros
@@ -533,6 +534,7 @@ sudo ezyshield config enrich maxmind
   wizard então oferece remover a seção `enrich:` existente (default não).
 - A semântica de escrita é a mesma dos outros wizards: escrita atômica,
   `config.yaml.bak`, revalidação antes de salvar e resumo das chaves alteradas.
+- diagnóstico ban_ineffective: **FAIL** quando um ban ativo é marcado ineficaz (tráfego passando apesar do ban); nomeia os IPs e aponta o remédio sistêmico (edge enforcement / real-IP parsing / saúde do enforcer)
 
 Nomes disponíveis: `maxmind`.
 

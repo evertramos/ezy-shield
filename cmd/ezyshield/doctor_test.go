@@ -165,7 +165,7 @@ func TestRunDoctor_WithTempDir(t *testing.T) {
 	dir := t.TempDir()
 
 	// Both files absent -- doctor must complete without error; file checks return FAIL/N/A.
-	if err := runDoctor(silentCmd(), dir, false); err != nil {
+	if err := runDoctor(silentCmd(), dir, "/nonexistent-doctor-test.db", false); err != nil {
 		t.Fatalf("runDoctor returned unexpected error: %v", err)
 	}
 }
@@ -182,7 +182,7 @@ func TestRunDoctor_WithValidFiles(t *testing.T) {
 		}
 	}
 
-	if err := runDoctor(silentCmd(), dir, false); err != nil {
+	if err := runDoctor(silentCmd(), dir, "/nonexistent-doctor-test.db", false); err != nil {
 		t.Fatalf("runDoctor returned unexpected error: %v", err)
 	}
 }
@@ -196,7 +196,7 @@ func TestRunDoctor_JSONOutput(t *testing.T) {
 	cmd.SetOut(buf)
 	cmd.SetErr(&bytes.Buffer{})
 
-	if err := runDoctor(cmd, dir, true); err != nil {
+	if err := runDoctor(cmd, dir, "/nonexistent-doctor-test.db", true); err != nil {
 		t.Fatalf("runDoctor JSON returned error: %v", err)
 	}
 

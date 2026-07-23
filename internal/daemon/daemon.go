@@ -139,8 +139,11 @@ type Daemon struct {
 	policyPath string
 	// armWindowTick is the auto-revert poll interval (0 = default 15s).
 	armWindowTick time.Duration
-	startTime     time.Time
-	version       string
+	// ineffDedup deduplicates ban_ineffective notifications systemically
+	// (ADR-0009 §4, issue #146).
+	ineffDedup ineffDedup
+	startTime  time.Time
+	version    string
 
 	// evidenceJournalctl and evidenceDockerSocket override the journalctl
 	// binary and Docker engine socket used by on-demand evidence extraction
@@ -238,6 +241,10 @@ func New(dcfg Config) (*Daemon, error) {
 		policyPath:      dcfg.PolicyPath,
 		armWindowTick:   dcfg.ArmWindowTick,
 	}
+
+	// Enforcement-anomaly delivery (ADR-0009 §4, issue #146): the engine
+	// detects, the daemon delivers. Injected before any goroutine starts.
+	decEng.SetDiagnostics(d)
 
 	if dcfg.Cfg != nil && dcfg.Cfg.AI != nil {
 		d.aiLo = dcfg.Cfg.AI.AmbiguousBand[0]

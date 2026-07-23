@@ -84,6 +84,10 @@ type Engine struct {
 	// anti-lockout checks — the detection path that works under systemd,
 	// where SSH_CLIENT does not exist (issue #175).
 	sshPeers sshPeerCache
+
+	// diag is the optional delivery sink for enforcement-anomaly signals
+	// (ADR-0009 §4, issue #146); nil = log-only.
+	diag Diagnostics
 }
 
 // New creates an Engine from policy and a store.
@@ -288,6 +292,9 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 		} else if hadIneff {
 			slog.WarnContext(ctx, "decision: ban_ineffective_permanent — promoting to permanent an IP that had ineffective bans",
 				"ip", ip, "strike", nextStrike)
+			if e.diag != nil {
+				e.diag.BanIneffectivePermanent(ctx, ip, nextStrike)
+			}
 		}
 	}
 
@@ -415,6 +422,21 @@ func (e *Engine) trackSuppressedEvent(ctx context.Context, ip netip.Addr, banned
 		"total_suppressed", total,
 		"grace_seconds", int(grace.Seconds()),
 	)
+	// Delivery beyond the log (ADR-0009 §4, issue #146): stream event +
+	// deduplicated notification, injected by the daemon. Same fire-once
+	// guarantee as the WARN — this branch is only reached by the caller
+	// that won the MarkBanIneffective compare-and-set.
+	if e.diag != nil {
+		e.diag.BanIneffective(ctx, BanIneffectiveDiag{
+			IP:               ip,
+			Strike:           banStrike,
+			LadderLen:        ladderLen,
+			NextRungs:        nextRungs,
+			EventsAfterGrace: afterCount,
+			TotalSuppressed:  total,
+			GraceSeconds:     int(grace.Seconds()),
+		})
+	}
 }
 
 // buildAllowlist parses policy.Allowlist, policy.AdminCIDRs, and the SSH peer

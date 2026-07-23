@@ -142,8 +142,11 @@ type Daemon struct {
 	// ineffDedup deduplicates ban_ineffective notifications systemically
 	// (ADR-0009 §4, issue #146).
 	ineffDedup ineffDedup
-	startTime  time.Time
-	version    string
+	// enfHealth tracks enforcer Ban/Sync health for the honest
+	// enforcement-state reporting (issue #174).
+	enfHealth enfHealth
+	startTime time.Time
+	version   string
 
 	// evidenceJournalctl and evidenceDockerSocket override the journalctl
 	// binary and Docker engine socket used by on-demand evidence extraction
@@ -654,10 +657,14 @@ func (d *Daemon) dispatch(ctx context.Context, action sdk.Action) {
 
 	if action.Op == "ban" && d.enforcer != nil {
 		t := sdk.Target{IP: action.IP, TTL: action.TTL}
-		if err := d.enforcer.Ban(ctx, t); err != nil {
+		err := d.enforcer.Ban(ctx, t)
+		if err != nil {
 			slog.ErrorContext(ctx, "daemon: enforcer ban failed", "ip", action.IP, "err", err)
 			d.notifyCritical(ctx, fmt.Sprintf("enforcer ban failed for %s: %v", action.IP, err))
 		}
+		// Enforcement-state health (issue #174): a failed ban flips the
+		// daemon to DEGRADED so status/doctor stop claiming protection.
+		d.recordEnforceResult(ctx, "ban", err)
 	}
 
 	if d.notifier != nil && (action.Op == "ban" || action.Op == "dry_ban" || action.Op == "notify_only") {
@@ -739,7 +746,12 @@ func (d *Daemon) syncEnforcer(ctx context.Context) error {
 		}
 		targets = append(targets, sdk.Target{IP: b.IP, TTL: b.TTL})
 	}
-	return d.enforcer.Sync(ctx, targets)
+	err = d.enforcer.Sync(ctx, targets)
+	// Enforcement-state health (issue #174): reconcile is the periodic
+	// signal that flips DEGRADED→ACTIVE on recovery (and ACTIVE→DEGRADED if
+	// the firewall backend went away between bans).
+	d.recordEnforceResult(ctx, "sync", err)
+	return err
 }
 
 // allowlistSyncer is the optional side of sdk.Enforcer that mirrors the

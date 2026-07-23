@@ -38,6 +38,9 @@ another in rulesets mode is a perfectly normal setup.
    - **Account → Account Filter Lists → Edit** (required for managing the IP list)
    - For each zone you want to auto-manage WAF rules:
      - **Zone → Firewall Services → Edit** (optional; required if using `zone_ids`)
+   - **Zone → Zone → Read** (optional; required only for the wizard's
+     "cover **all** zones" answer, which enumerates the account's zones) —
+     see the [Cloudflare permissions reference](https://developers.cloudflare.com/fundamentals/api/reference/permissions/)
 5. Set restrictions as needed (IP allowlist, TTL, etc.)
 6. Copy the token immediately — you won't see it again
 
@@ -92,9 +95,29 @@ This command will:
 - List accessible zones
 - Show the list status (created, item count, etc.)
 
+### Zone coverage in the wizard
+
+Both wizard entry points (`init` and `config enforcer cloudflare`) ask, in
+lists mode, **which zones the block rule should cover**:
+
+- **`all`** — the wizard enumerates every zone the token can read on the
+  account (paginated) and persists that snapshot into `zone_ids`; the config
+  stays explicit, and re-running the wizard picks up domains added later.
+  Needs **Zone → Zone → Read**; without it the wizard degrades gracefully to
+  the manual path and names the missing scope.
+- **Explicit zone IDs** — exactly those zones, nothing enumerated.
+- **ENTER** — manual setup (the wizard prints the rule to paste per zone).
+
+For `all`/explicit, the wizard immediately creates-or-verifies the WAF
+Custom Rule in each target zone (idempotent with the enforcer's own rule
+management — re-running never duplicates) and prints a per-zone report:
+`configured` / `already present` / `FAILED (HTTP xxx: reason)`, with manual
+instructions for any failed zone. Partial failure never aborts: the config
+is still saved and the daemon retries failed zones on every sync.
+
 ### Step 5: (Optional) Manual WAF Rule Setup
 
-**If you did NOT configure `zone_ids`** in step 3, you must create the WAF Custom Rule manually for each zone:
+**If you did NOT configure `zone_ids`** in step 3 (or answered ENTER in the wizard), you must create the WAF Custom Rule manually for each zone:
 
 1. Go to **Domain → Security → WAF → Custom rules**
 2. Click **Create Rule**

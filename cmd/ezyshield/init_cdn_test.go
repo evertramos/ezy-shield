@@ -72,6 +72,10 @@ type httpFake struct {
 	// when the same path must answer differently per verb (the issue #234
 	// preflight GETs and POSTs /rules/lists).
 	byMethodPath map[string]httpFakeResp
+	// byPathQuery routes on "/path?rawquery" and wins over everything —
+	// needed when the same path must answer differently per query (the
+	// issue #121 paginated /zones enumeration).
+	byPathQuery map[string]httpFakeResp
 	// requests captures every Do() call for assertions on URL / headers.
 	requests []*http.Request
 }
@@ -86,6 +90,15 @@ func (h *httpFake) Do(req *http.Request) (*http.Response, error) {
 	h.requests = append(h.requests, req)
 	if h.err != nil {
 		return nil, h.err
+	}
+	if h.byPathQuery != nil {
+		if r, ok := h.byPathQuery[req.URL.Path+"?"+req.URL.RawQuery]; ok {
+			return &http.Response{
+				StatusCode: r.status,
+				Body:       io.NopCloser(bytes.NewBufferString(r.bodyJSON)),
+				Header:     make(http.Header),
+			}, nil
+		}
 	}
 	if h.byMethodPath != nil {
 		if r, ok := h.byMethodPath[req.Method+" "+req.URL.Path]; ok {
@@ -1235,6 +1248,7 @@ func TestRunCDNStep_MultiAccount(t *testing.T) {
 		strings: []string{
 			// account 1 (no name prompt on the first account)
 			"lists", "block", acctID, "ezyshield_blocked",
+			"", // zone coverage: ENTER = manual setup (issue #121)
 			// "add another?" = yes → name for the first account
 			"main",
 			// account 2: name, mode, action, zone_ids
@@ -1314,6 +1328,7 @@ func TestRunCDNStep_MultiAccount_SecondFails(t *testing.T) {
 	prompt := &scriptedPrompter{
 		strings: []string{
 			"lists", "block", acctID, "ezyshield_blocked",
+			"",         // zone coverage: ENTER = manual setup
 			"main",     // name for the first account
 			"client_b", // second account name
 			"rulesets", "block",
@@ -1357,6 +1372,7 @@ func TestRunCDNStep_MultiAccount_DuplicateNameRejected(t *testing.T) {
 	prompt := &scriptedPrompter{
 		strings: []string{
 			"lists", "block", acctID, "ezyshield_blocked",
+			"",     // zone coverage: ENTER = manual setup
 			"main", // name for the first account
 			"main", // duplicate name for the second → rejected
 		},

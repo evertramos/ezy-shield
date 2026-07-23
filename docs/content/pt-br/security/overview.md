@@ -48,6 +48,13 @@ no audit log.
 
 Isso é garantido em código, não por uma rule. Nenhum threshold mal configurado consegue te trancar fora.
 
+A checagem roda duas vezes, em camadas independentes: o motor de decisão
+filtra primeiro, e um gate único na frente de todos os backends de
+enforcement re-checa cada ban e cada reconcile antes de chegar ao nftables
+ou a qualquer plataforma de edge. Mesmo um backend sem lógica própria de
+allowlist nunca recebe um endereço protegido — inclusive via um sync que o
+reintroduziria.
+
 ## Supremacia da allowlist
 
 A allowlist é checada PRIMEIRO, antes de qualquer decisão do rule engine. Um IP na allowlist não pode ser banido por nenhuma rule, decisão de IA ou tentativa de ban manual.

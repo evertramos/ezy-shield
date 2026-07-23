@@ -15,6 +15,7 @@ import (
 	"github.com/evertramos/ezy-shield/internal/collector"
 	"github.com/evertramos/ezy-shield/internal/config"
 	"github.com/evertramos/ezy-shield/internal/daemon"
+	"github.com/evertramos/ezy-shield/internal/decision"
 	"github.com/evertramos/ezy-shield/internal/enforce"
 	"github.com/evertramos/ezy-shield/internal/enrich"
 	"github.com/evertramos/ezy-shield/internal/notify"
@@ -158,6 +159,14 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 		default:
 			enf = enforce.NewMulti(all...)
 		}
+	}
+
+	if enf != nil {
+		// Authoritative allowlist/anti-lockout gate ahead of the enforcer
+		// fan-out (issue #230). Enforcer-internal checks remain belt-and-braces;
+		// this choke point is what guarantees the invariant for every enforcer,
+		// including future ones that forget their own guard.
+		enf = enforce.NewGate(enf, parseAllowlist(policy), decision.ProcSSHPeers)
 	}
 
 	var disp *notify.Dispatcher

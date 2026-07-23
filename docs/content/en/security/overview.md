@@ -47,6 +47,12 @@ ban rate limit — and refused attempts are recorded in the audit log.
 
 This is enforced in code, not a rule. No misconfigured threshold can lock you out.
 
+The check runs twice, in independent layers: the decision engine filters
+first, and a single gate ahead of all enforcement backends re-checks every
+ban and every reconcile before it can reach nftables or any edge platform.
+Even a backend with no allowlist logic of its own can never receive a
+protected address — including via a sync that would re-introduce it.
+
 ## Allowlist supremacy
 
 The allowlist is checked FIRST, before any rule engine decision. An allowlisted IP cannot be banned by any rule, AI decision, or manual ban attempt.

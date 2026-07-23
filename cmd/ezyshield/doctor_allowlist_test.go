@@ -159,7 +159,7 @@ func TestRunDoctor_AllowlistWarningSurfacesInSummary(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := runDoctor(silentCmd(), dir, false); err != nil {
+	if err := runDoctor(silentCmd(), dir, "/nonexistent-doctor-test.db", false); err != nil {
 		t.Fatalf("runDoctor returned unexpected error: %v", err)
 	}
 }

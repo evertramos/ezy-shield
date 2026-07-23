@@ -292,6 +292,7 @@ func TestRunConfigComponent_CloudflareAddSecondAccount(t *testing.T) {
 			"block",             // action
 			cfTestAccountID,     // account_id
 			"ezyshield_blocked", // list name
+			"",                  // zone coverage: ENTER = manual setup
 			"main",              // name for the pre-existing unnamed account
 		},
 		bools: []bool{

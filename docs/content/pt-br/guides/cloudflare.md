@@ -39,6 +39,9 @@ perfeitamente normal.
    - **Account → Account Filter Lists → Edit** (obrigatório para gerenciar a lista de IPs)
    - Para cada zone que quiser gerenciar regras WAF automaticamente:
      - **Zone → Firewall Services → Edit** (opcional; obrigatório ao usar `zone_ids`)
+   - **Zone → Zone → Read** (opcional; obrigatório apenas para a resposta
+     "cobrir **todas** as zones" do wizard, que enumera as zones da conta) —
+     veja a [referência de permissões da Cloudflare](https://developers.cloudflare.com/fundamentals/api/reference/permissions/)
 5. Defina restrições conforme necessário (allowlist de IP, TTL, etc.)
 6. Copie o token imediatamente — você não conseguirá vê-lo novamente
 
@@ -93,9 +96,29 @@ Este comando irá:
 - Listar zones acessíveis
 - Mostrar o status da lista (criada, quantidade de items, etc.)
 
+### Cobertura de zones no wizard
+
+Os dois entry points do wizard (`init` e `config enforcer cloudflare`)
+perguntam, no modo lists, **quais zones a regra de bloqueio deve cobrir**:
+
+- **`all`** — o wizard enumera todas as zones que o token consegue ler na
+  conta (com paginação) e persiste esse snapshot em `zone_ids`; a config
+  fica explícita, e rodar o wizard de novo captura domínios adicionados
+  depois. Precisa de **Zone → Zone → Read**; sem essa permissão o wizard
+  degrada graciosamente para o caminho manual e nomeia o escopo que falta.
+- **Zone IDs explícitos** — exatamente essas zones, nada é enumerado.
+- **ENTER** — configuração manual (o wizard imprime a regra para colar por zone).
+
+Para `all`/explícito, o wizard imediatamente cria-ou-verifica a WAF Custom
+Rule em cada zone alvo (idempotente com o gerenciamento de regras do próprio
+enforcer — rodar de novo nunca duplica) e imprime um relatório por zone:
+`configured` / `already present` / `FAILED (HTTP xxx: motivo)`, com
+instruções manuais para cada zone que falhou. Falha parcial nunca aborta: a
+config é salva mesmo assim e o daemon tenta as zones que falharam a cada sync.
+
 ### Passo 5: (Opcional) Configuração Manual da Regra WAF
 
-**Se você NÃO configurou `zone_ids`** no passo 3, você deve criar a regra WAF Custom manualmente para cada zone:
+**Se você NÃO configurou `zone_ids`** no passo 3 (ou respondeu ENTER no wizard), você deve criar a regra WAF Custom manualmente para cada zone:
 
 1. Vá em **Domain → Security → WAF → Custom rules**
 2. Clique em **Create Rule**

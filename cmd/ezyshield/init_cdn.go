@@ -644,6 +644,7 @@ func promptOneCFAccount(
 		Mode:     mode,
 		Action:   action,
 	}
+	var coverage cfZoneCoverage
 
 	switch mode {
 	case "lists":
@@ -661,6 +662,14 @@ func promptOneCFAccount(
 			return nil, false
 		}
 		cfg.ListName = listName
+		// Which zones should the WAF block rule cover (issue #121)? ENTER
+		// keeps the manual-instructions path; the rollout itself runs after
+		// the preflight below has proven the list exists.
+		var covOK bool
+		coverage, covOK = promptCFZoneCoverage(p, pr)
+		if !covOK {
+			return nil, false
+		}
 
 	case "rulesets":
 		rawZones := pr.ask("Zone IDs (comma-separated, 32 hex chars each)", "")
@@ -694,10 +703,20 @@ func promptOneCFAccount(
 		return nil, false
 	}
 
+	if mode == "lists" {
+		// Zone rollout (issue #121): resolve the coverage answer, persist
+		// zone_ids, create-or-verify the WAF rule per zone with a report.
+		cfConfigureZoneCoverage(ctx, p, deps, cfg, tok, coverage)
+	}
+
 	acct := &cfAccountSetup{cfg: *cfg, tokenEnvVar: tokenEnvVar, token: tok}
 	if mode == "lists" {
 		acct.wafRuleExpression = buildCFWAFRuleExpression(cfg.ListName)
-		printCFListsManualStep(p, acct.wafRuleExpression)
+		if len(cfg.ZoneIDs) == 0 {
+			// Manual path (no coverage chosen, or enumeration degraded):
+			// same instructions as before.
+			printCFListsManualStep(p, acct.wafRuleExpression)
+		}
 	}
 	return acct, true
 }
@@ -1127,6 +1146,14 @@ func emitCFAccountYAML(b *strings.Builder, cfg *config.CloudflareCfg, indent, fi
 		line("account_id: %s\n", cfg.AccountID)
 		if cfg.ListName != "" {
 			line("list_name: %s\n", cfg.ListName)
+		}
+		// Optional in lists mode: zones whose WAF rule the enforcer manages
+		// (collected by the coverage prompt, issue #121).
+		if len(cfg.ZoneIDs) > 0 {
+			line("zone_ids:\n")
+			for _, z := range cfg.ZoneIDs {
+				fmt.Fprintf(b, indent+"  - %s\n", z)
+			}
 		}
 	case "rulesets":
 		line("zone_ids:\n")

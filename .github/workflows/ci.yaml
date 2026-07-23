@@ -276,7 +276,11 @@ jobs:
         with:
           distribution: goreleaser
           version: "~> v2"
-          args: release --snapshot --clean
+          # Signing and SBOMs (issue #100) only run on real releases: keyless
+          # signing needs the release job's OIDC identity, and neither cosign
+          # nor syft is installed on this runner. The packaging surface this
+          # job install-verifies is unaffected by the skip.
+          args: release --snapshot --clean --skip=sign,sbom
       - name: Verify .deb on debian:12
         run: |
           docker run --rm -v "$PWD/dist:/dist:ro" debian:12 bash -ec '

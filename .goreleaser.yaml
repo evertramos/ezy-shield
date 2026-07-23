@@ -63,6 +63,40 @@ archives:
 checksum:
   name_template: checksums.txt
 
+# Supply-chain verifiability (issue #100). Signing the checksum file
+# transitively authenticates every artifact: checksums.txt carries each
+# artifact's SHA-256, so one keyless signature (GitHub OIDC, verifiable
+# against the Sigstore transparency log) covers binaries, tarballs and
+# packages without doubling the release's asset count. deb/rpm additionally
+# get repo-level GPG signing in publish-repos. Verification commands:
+# docs/content/en/security/verifying-releases.md.
+signs:
+  - id: checksums
+    cmd: cosign
+    artifacts: checksum
+    certificate: "${artifact}.pem"
+    signature: "${artifact}.sig"
+    args:
+      - sign-blob
+      - --yes
+      - --output-certificate=${certificate}
+      - --output-signature=${signature}
+      - ${artifact}
+
+# SBOMs (syft, SPDX JSON) per artifact class, attached to the release.
+# `archive` covers the tarballs, `binary` the raw ezyshield-<os>-<arch>
+# binaries get.sh installs, `package` the deb/rpm files.
+sboms:
+  - id: sbom-archives
+    artifacts: archive
+    documents: ["${artifact}.spdx.json"]
+  - id: sbom-binaries
+    artifacts: binary
+    documents: ["${artifact}.spdx.json"]
+  - id: sbom-packages
+    artifacts: package
+    documents: ["${artifact}.spdx.json"]
+
 nfpms:
   - id: packages
     package_name: ezyshield

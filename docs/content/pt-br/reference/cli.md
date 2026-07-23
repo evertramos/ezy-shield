@@ -554,6 +554,12 @@ sudo ezyshield update
 sudo ezyshield update --version v0.1.0
 ```
 
+`--version` também é o caminho oficial de rollback: quando a tag é mais antiga
+que a versão em execução, o comando avisa — o schema do banco de dados nunca é
+revertido, então mantenha um backup — e pede confirmação (`[y/N]`, padrão
+não). Use `--yes` (`-y`) para rollbacks não interativos; sem essa flag, uma
+execução sem terminal recusa o downgrade.
+
 Se você instalou via apt/dnf, prefira o gerenciador de pacotes (veja o guia de
 instalação).
 

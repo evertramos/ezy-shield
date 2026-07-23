@@ -16,11 +16,37 @@
 # EzyShield install, every binary-mode path refuses (EZYSHIELD_FORCE_SCRIPT=1
 # overrides) — installing to /usr/local/bin there would shadow the package.
 #
+# Supply-chain authentication (issue #17): on the GitHub-release paths
+# (default, EZYSHIELD_VERSION, --dev) this script verifies checksums.txt's
+# cosign keyless signature against the pinned release-workflow identity
+# before trusting it, whenever cosign is installed on the host — see
+# docs/content/en/security/verifying-releases.md. Without cosign it warns
+# (not fails) and falls back to SHA-256 over TLS. Releases that predate
+# signing have no .sig/.pem assets; that also degrades with a warning.
+#
+# Flags (after `sh -s --`):
+#   --dev        Install the newest release INCLUDING prereleases (release
+#                candidates). Same trust chain as the default path — only the
+#                version selection differs. Binary mode.
+#   --local      Required to use EZYSHIELD_BASE_URL (see below). Must be
+#                combined with EZYSHIELD_LOCAL_ACK=1.
+#   --uninstall  Remove script-install artifacts and exit.
+#
 # Environment variables:
 #   EZYSHIELD_VERSION          Install a specific release (e.g., v0.1.0-rc.21).
 #                               Must start with 'v'. Binary mode only.
-#   EZYSHIELD_BASE_URL         Install from a custom mirror. Overrides version
-#                               selection and forces binary mode (air-gapped).
+#   EZYSHIELD_DEV              Set to 1 — same as --dev.
+#   EZYSHIELD_LOCAL            Set to 1 — same as --local.
+#   EZYSHIELD_LOCAL_ACK        Must be set to 1 together with --local. The
+#                               deliberate friction exists because a custom
+#                               mirror is NOT authenticated: checksums.txt
+#                               comes from the same mirror as the binaries,
+#                               so verification only defends against transfer
+#                               corruption, not a malicious mirror.
+#   EZYSHIELD_BASE_URL         Install from a custom mirror (air-gapped
+#                               installs, the QEMU dev harness). Requires
+#                               --local AND EZYSHIELD_LOCAL_ACK=1. Overrides
+#                               version selection and forces binary mode.
 #   EZYSHIELD_API_BASE_URL     Override the GitHub API base (default
 #                               https://api.github.com) used to resolve
 #                               release metadata. For private API mirrors and
@@ -318,11 +344,17 @@ EOF
 # ── argument parsing ─────────────────────────────────────────────────────────
 
 UNINSTALL="${EZYSHIELD_UNINSTALL:-0}"
+DEV_MODE="${EZYSHIELD_DEV:-0}"
+LOCAL_MODE="${EZYSHIELD_LOCAL:-0}"
 for arg in "$@"; do
   case "$arg" in
     --uninstall) UNINSTALL=1 ;;
+    --dev) DEV_MODE=1 ;;
+    --local) LOCAL_MODE=1 ;;
     --help | -h)
       echo "Usage: curl -sfL https://get.ezyshield.com | sudo sh"
+      echo "       curl -sfL https://get.ezyshield.com | sudo sh -s -- --dev        # newest prerelease"
+      echo "       curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_LOCAL_ACK=1 EZYSHIELD_BASE_URL=<mirror> sh -s -- --local"
       echo "       curl -sfL https://get.ezyshield.com | sudo sh -s -- --uninstall"
       exit 0
       ;;
@@ -332,6 +364,52 @@ done
 if [ "$UNINSTALL" = "1" ]; then
   uninstall_script_install
   exit 0
+fi
+
+# ── --local gating (issue #17) ──────────────────────────────────────────────
+#
+# A custom mirror is the one install path with NO source authentication:
+# checksums.txt comes from the same mirror as the binaries, so the SHA-256
+# comparison only defends against transfer corruption — a malicious mirror
+# passes it trivially. Gate it behind an explicit flag + ack so the line
+# cannot be pasted into production by accident.
+if [ -n "${EZYSHIELD_BASE_URL:-}" ] && [ "$LOCAL_MODE" != "1" ]; then
+  echo "Error: EZYSHIELD_BASE_URL now requires the explicit --local flag (plus EZYSHIELD_LOCAL_ACK=1):"
+  echo ""
+  echo "  curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_LOCAL_ACK=1 EZYSHIELD_BASE_URL=${EZYSHIELD_BASE_URL} sh -s -- --local"
+  echo ""
+  echo "This install path does not authenticate the source — use it only for"
+  echo "trusted mirrors, air-gapped installs, or the QEMU dev harness."
+  exit 1
+fi
+if [ "$LOCAL_MODE" = "1" ]; then
+  if [ -z "${EZYSHIELD_BASE_URL:-}" ]; then
+    echo "Error: --local requires EZYSHIELD_BASE_URL to point at the mirror to install from."
+    exit 1
+  fi
+  if [ "${EZYSHIELD_LOCAL_ACK:-0}" != "1" ]; then
+    echo "Error: --local additionally requires EZYSHIELD_LOCAL_ACK=1 in the environment."
+    echo ""
+    echo "This acknowledges that a mirror install does NOT authenticate the source:"
+    echo "checksums.txt is fetched from the same mirror as the binaries, so the"
+    echo "verification only defends against transfer corruption — not a malicious"
+    echo "or compromised mirror. Use only trusted mirrors or the QEMU dev harness."
+    exit 1
+  fi
+  if [ "$DEV_MODE" = "1" ]; then
+    echo "Error: --dev and --local are mutually exclusive (--local installs whatever the mirror serves)."
+    exit 1
+  fi
+  echo ""
+  echo "WARNING: --local install from ${EZYSHIELD_BASE_URL}"
+  echo "         This path does not authenticate the source. Binaries and checksums"
+  echo "         come from the same mirror, so a compromised mirror passes every"
+  echo "         check. Use only for trusted mirrors or the QEMU dev harness."
+  echo ""
+fi
+if [ "$DEV_MODE" = "1" ] && [ -n "${EZYSHIELD_VERSION:-}" ]; then
+  echo "Error: --dev and EZYSHIELD_VERSION are mutually exclusive (pick one way to choose the version)."
+  exit 1
 fi
 
 # ── platform detection ───────────────────────────────────────────────────────
@@ -377,6 +455,15 @@ esac
 USE_PACKAGES=0
 if [ -n "${EZYSHIELD_BASE_URL:-}" ]; then
   : # custom mirror always wins -- air-gapped, binary mode
+elif [ "$DEV_MODE" = "1" ]; then
+  # --dev pins the newest GitHub prerelease — binary mode by design. The
+  # package-channel equivalent is the 'testing' suite, which apt/dnf hosts
+  # already get by default pre-v0.1.0.
+  if [ -n "$PKG_MGR" ]; then
+    echo "Note: --dev installs the newest prerelease binaries from GitHub Releases."
+    echo "      The package-repo equivalent is the 'testing' suite -- see the install docs."
+    echo ""
+  fi
 elif [ "$METHOD" = "binary" ]; then
   if [ -n "$PKG_MGR" ]; then
     echo "Note: native .deb/.rpm packages are available for this host (EZYSHIELD_METHOD=binary was requested) --"
@@ -437,6 +524,29 @@ if [ -n "${EZYSHIELD_BASE_URL:-}" ]; then
   VERSION="${EZYSHIELD_VERSION:-local}"
   BASE_URL="$EZYSHIELD_BASE_URL"
   echo "Installing EzyShield ${VERSION} (${SUFFIX}) from ${BASE_URL}..."
+elif [ "$DEV_MODE" = "1" ]; then
+  # --dev: newest release INCLUDING prereleases. Same trust chain as the
+  # default path (TLS + cosign verification below) — only the version
+  # selection differs.
+  echo "Fetching newest prerelease..."
+  API_BASE="${EZYSHIELD_API_BASE_URL:-https://api.github.com}"
+  VERSION=$(curl -sfL "${API_BASE}/repos/${REPO}/releases?per_page=1" 2>/dev/null | grep '"tag_name"' | head -n1 | sed 's/.*"tag_name": *"//;s/".*//')
+  # Same trust rule as the RC hint on the 404 path: the tag is API response
+  # data that ends up in URLs and output — accept only plain release tags.
+  case "$VERSION" in
+    v*) case "$VERSION" in *[!A-Za-z0-9.-]*) VERSION="" ;; esac ;;
+    *) VERSION="" ;;
+  esac
+  if [ -z "$VERSION" ]; then
+    echo "Error: could not resolve the newest prerelease from the GitHub API."
+    echo "Available releases: https://github.com/${REPO}/releases"
+    exit 1
+  fi
+  case "$VERSION" in
+    *-*) echo "Note: ${VERSION} is a prerelease (that is what --dev selects)." ;;
+  esac
+  BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
+  echo "Installing EzyShield ${VERSION} (${SUFFIX})..."
 elif [ -n "${EZYSHIELD_VERSION:-}" ]; then
   # Specific version from GitHub Releases
   VERSION="$EZYSHIELD_VERSION"
@@ -513,6 +623,49 @@ else
   BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
 fi
 
+# verify_checksums_signature authenticates checksums.txt before anything
+# trusts it (issue #17 / #100). GitHub-release paths only — --local skips it
+# (the loud warning above already states that path is unauthenticated).
+#
+# Verification proves checksums.txt was produced by THIS repository's
+# release.yaml workflow on GitHub's infrastructure (cosign keyless, Sigstore
+# transparency log). Identity is pinned to repo + workflow file; the ref
+# part accepts both release trigger paths (tag push, or workflow_dispatch
+# from main/dev). Degrades with a warning — never a failure — when cosign is
+# not installed or the release predates signing; FAILS HARD when a signature
+# exists but does not verify.
+verify_checksums_signature() {
+  if [ "$LOCAL_MODE" = "1" ]; then
+    return 0
+  fi
+  if ! command -v cosign >/dev/null 2>&1; then
+    echo "Note: cosign not found -- skipping signature verification of checksums.txt."
+    echo "      Integrity is still checked via SHA-256 over TLS to github.com. For"
+    echo "      cryptographic provenance verification, install cosign:"
+    echo "      https://docs.sigstore.dev/cosign/system_config/installation/"
+    return 0
+  fi
+  if ! curl -sfL "${BASE_URL}/checksums.txt.sig" -o "${TMP}/checksums.txt.sig" ||
+    ! curl -sfL "${BASE_URL}/checksums.txt.pem" -o "${TMP}/checksums.txt.pem"; then
+    echo "Warning: release ${VERSION} has no cosign signature assets (it predates"
+    echo "         signed releases). Integrity rests on SHA-256 over TLS to github.com."
+    return 0
+  fi
+  echo "Verifying checksums.txt signature (cosign keyless)..."
+  if ! cosign verify-blob \
+    --certificate "${TMP}/checksums.txt.pem" \
+    --signature "${TMP}/checksums.txt.sig" \
+    --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+    --certificate-identity-regexp '^https://github\.com/evertramos/ezy-shield/\.github/workflows/release\.yaml@refs/(tags/v[0-9][^ ]*|heads/(main|dev))$' \
+    "${TMP}/checksums.txt" >/dev/null 2>&1; then
+    echo "Error: cosign signature verification FAILED for checksums.txt."
+    echo "The release assets may have been tampered with. Refusing to install."
+    echo "Manual verification steps: https://github.com/${REPO} -> docs -> security/verifying-releases"
+    exit 1
+  fi
+  echo "Signature verified: checksums.txt was built by the ${REPO} release workflow."
+}
+
 # Download binaries
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
@@ -523,6 +676,8 @@ if ! curl -sfL "${BASE_URL}/checksums.txt" -o "${TMP}/checksums.txt"; then
   echo "Available releases: https://github.com/${REPO}/releases"
   exit 1
 fi
+
+verify_checksums_signature
 if ! curl -sfL "${BASE_URL}/ezyshield-${SUFFIX}" -o "${TMP}/ezyshield"; then
   echo "Error: binary not found at ${BASE_URL}/ezyshield-${SUFFIX}"
   echo "The release ${VERSION} may not have pre-built binaries yet."

@@ -73,6 +73,15 @@ curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=v0.1.0-rc.N sh
 
 The version must start with `v`. Available versions are listed at [github.com/evertramos/ezy-shield/releases](https://github.com/evertramos/ezy-shield/releases).
 
+To always track the **newest prerelease** without naming a tag, use `--dev`:
+
+```bash
+curl -sfL https://get.ezyshield.com | sudo sh -s -- --dev
+```
+
+`--dev` uses the same trust chain as the default path (TLS + cosign
+verification when available) — only the version selection differs.
+
 > **Before v0.1.0 ships:** this is the install-script method that works
 > today — every published release is a release candidate. Copy the exact
 > tag from the releases page above.
@@ -84,6 +93,12 @@ The version must start with `v`. Available versions are listed at [github.com/ev
 ```bash
 curl -sfL https://get.ezyshield.com | sudo sh
 ```
+
+When installing raw binaries from GitHub Releases, the script verifies
+`checksums.txt`'s **cosign keyless signature** against the pinned release-
+workflow identity whenever `cosign` is installed on the host (see
+[Verifying Releases](../security/verifying-releases.md)); without cosign it
+warns and falls back to SHA-256 over TLS.
 
 This one-liner is **package-first**: on a host with `apt-get` or `dnf`/`yum`
 where the package repository is reachable, it sets up the same repo shown
@@ -131,8 +146,13 @@ below.
 For air-gapped installs or CI environments, point the installer at a custom mirror with both the binaries and `checksums.txt`:
 
 ```bash
-curl -sfL https://get.ezyshield.com | EZYSHIELD_BASE_URL=https://mirror.example.com/ezyshield/v0.3.0 sudo sh
+curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_LOCAL_ACK=1 EZYSHIELD_BASE_URL=https://mirror.example.com/ezyshield/v0.3.0 sh -s -- --local
 ```
+
+Both the `--local` flag and `EZYSHIELD_LOCAL_ACK=1` are required — the
+deliberate friction acknowledges that this path cannot authenticate its
+source (see the note below). A bare `EZYSHIELD_BASE_URL` without them is
+refused with instructions.
 
 The script will:
 1. Download `checksums.txt`, `ezyshield-linux-amd64`, and `ezyshield-enforcer-linux-amd64` (or appropriate arch)
@@ -281,7 +301,10 @@ sudo rm -rf /etc/ezyshield
 |----------|---------|---------|
 | `EZYSHIELD_METHOD` | `auto` (default), `packages`, or `binary` — force the install method instead of auto-detecting | `EZYSHIELD_METHOD=binary` |
 | `EZYSHIELD_VERSION` | Install a specific release (must start with `v`). Binary mode only | `EZYSHIELD_VERSION=v0.1.0-rc.N` |
-| `EZYSHIELD_BASE_URL` | Install from a custom mirror (overrides version selection, forces binary mode) | `EZYSHIELD_BASE_URL=https://mirror.example.com/ezyshield/v0.1.0` |
+| `EZYSHIELD_BASE_URL` | Install from a custom mirror (overrides version selection, forces binary mode). Requires `--local` + `EZYSHIELD_LOCAL_ACK=1` | `EZYSHIELD_BASE_URL=https://mirror.example.com/ezyshield/v0.1.0` |
+| `EZYSHIELD_DEV` | Set to `1` — same as the `--dev` flag (newest prerelease) | `EZYSHIELD_DEV=1` |
+| `EZYSHIELD_LOCAL` | Set to `1` — same as the `--local` flag | `EZYSHIELD_LOCAL=1` |
+| `EZYSHIELD_LOCAL_ACK` | Required (`=1`) together with `--local`: acknowledges that a mirror install does not authenticate its source | `EZYSHIELD_LOCAL_ACK=1` |
 | `EZYSHIELD_API_BASE_URL` | Override the GitHub API base used to resolve release metadata (private API mirrors, testing) | `EZYSHIELD_API_BASE_URL=https://api.mirror.example.com` |
 | `EZYSHIELD_PACKAGES_BASE_URL` | Override the package repo base used for repo setup and the reachability check (private mirrors, testing) | `EZYSHIELD_PACKAGES_BASE_URL=https://packages.mirror.example.com` |
 | `EZYSHIELD_CLEANUP` | Set to `1` to non-interactively remove a shadowing script install when routing to a package install | `EZYSHIELD_CLEANUP=1` |

@@ -74,6 +74,15 @@ curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=v0.1.0-rc.N sh
 
 A versão deve começar com `v`. As versões disponíveis estão listadas em [github.com/evertramos/ezy-shield/releases](https://github.com/evertramos/ezy-shield/releases).
 
+Para sempre acompanhar o **prerelease mais novo** sem nomear um tag, use `--dev`:
+
+```bash
+curl -sfL https://get.ezyshield.com | sudo sh -s -- --dev
+```
+
+`--dev` usa a mesma cadeia de confiança do caminho padrão (TLS + verificação
+cosign quando disponível) — só a seleção de versão muda.
+
 > **Antes do v0.1.0 ser lançado:** este é o método via install-script que
 > funciona hoje — toda release publicada é um release candidate. Copie o
 > tag exato da página de releases acima.
@@ -85,6 +94,12 @@ A versão deve começar com `v`. As versões disponíveis estão listadas em [gi
 ```bash
 curl -sfL https://get.ezyshield.com | sudo sh
 ```
+
+Ao instalar binários crus do GitHub Releases, o script verifica a
+**assinatura cosign keyless** do `checksums.txt` contra a identidade fixa do
+workflow de release sempre que o `cosign` estiver instalado no host (veja
+[Verificando Releases](../security/verifying-releases.md)); sem cosign ele
+avisa e recai no SHA-256 sobre TLS.
 
 Esse one-liner é **package-first**: em um host com `apt-get` ou `dnf`/`yum`
 onde o repositório de pacotes está acessível, ele configura o mesmo
@@ -134,8 +149,12 @@ abaixo.
 Para instalações em ambientes isolados ou CI, aponte o instalador para um espelho customizado com ambos os binários e `checksums.txt`:
 
 ```bash
-curl -sfL https://get.ezyshield.com | EZYSHIELD_BASE_URL=https://mirror.exemplo.com/ezyshield/v0.3.0 sudo sh
+curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_LOCAL_ACK=1 EZYSHIELD_BASE_URL=https://mirror.exemplo.com/ezyshield/v0.3.0 sh -s -- --local
 ```
+
+Tanto a flag `--local` quanto `EZYSHIELD_LOCAL_ACK=1` são obrigatórias — a
+fricção deliberada reconhece que esse caminho não autentica a origem (veja a
+nota abaixo). Um `EZYSHIELD_BASE_URL` sem elas é recusado com instruções.
 
 O script irá:
 1. Fazer download de `checksums.txt`, `ezyshield-linux-amd64` e `ezyshield-enforcer-linux-amd64` (ou arquitetura apropriada)
@@ -287,7 +306,10 @@ sudo rm -rf /etc/ezyshield
 |----------|-----------|---------|
 | `EZYSHIELD_METHOD` | `auto` (padrão), `packages`, ou `binary` — força o método de instalação em vez de auto-detectar | `EZYSHIELD_METHOD=binary` |
 | `EZYSHIELD_VERSION` | Instalar uma versão específica (deve começar com `v`). Só no modo binário | `EZYSHIELD_VERSION=v0.1.0-rc.N` |
-| `EZYSHIELD_BASE_URL` | Instalar a partir de um espelho customizado (sobrescreve seleção de versão, força modo binário) | `EZYSHIELD_BASE_URL=https://mirror.exemplo.com/ezyshield/v0.1.0` |
+| `EZYSHIELD_BASE_URL` | Instalar a partir de um espelho customizado (sobrescreve seleção de versão, força modo binário). Exige `--local` + `EZYSHIELD_LOCAL_ACK=1` | `EZYSHIELD_BASE_URL=https://mirror.exemplo.com/ezyshield/v0.1.0` |
+| `EZYSHIELD_DEV` | Defina como `1` — igual à flag `--dev` (prerelease mais novo) | `EZYSHIELD_DEV=1` |
+| `EZYSHIELD_LOCAL` | Defina como `1` — igual à flag `--local` | `EZYSHIELD_LOCAL=1` |
+| `EZYSHIELD_LOCAL_ACK` | Obrigatório (`=1`) junto com `--local`: reconhece que uma instalação via espelho não autentica a origem | `EZYSHIELD_LOCAL_ACK=1` |
 | `EZYSHIELD_API_BASE_URL` | Sobrescreve a base da API do GitHub usada para resolver metadados de release (espelhos privados de API, testes) | `EZYSHIELD_API_BASE_URL=https://api.mirror.exemplo.com` |
 | `EZYSHIELD_PACKAGES_BASE_URL` | Sobrescreve a base do repositório de pacotes usada na configuração do repo e na checagem de acessibilidade (espelhos privados, testes) | `EZYSHIELD_PACKAGES_BASE_URL=https://packages.mirror.exemplo.com` |
 | `EZYSHIELD_CLEANUP` | Defina como `1` para remover uma instalação via script que esteja escondendo o pacote, sem interação, ao rotear para uma instalação via pacote | `EZYSHIELD_CLEANUP=1` |

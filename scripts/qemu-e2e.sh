@@ -87,8 +87,11 @@ stop_http() {
 }
 
 provision() {
-  info "Installing via the REAL installer: curl … | sudo sh  (EZYSHIELD_BASE_URL=$GW:$HTTP_PORT)"
-  gssh "curl -sfL http://$GW:$HTTP_PORT/get.sh | sudo EZYSHIELD_BASE_URL=http://$GW:$HTTP_PORT sh"
+  info "Installing via the REAL installer: curl … | sudo sh -s -- --local  (EZYSHIELD_BASE_URL=$GW:$HTTP_PORT)"
+  # --local + EZYSHIELD_LOCAL_ACK=1 (issue #17): custom-mirror installs are
+  # explicitly acknowledged as unauthenticated — exactly what this dev
+  # harness is: the host serves binaries it just built.
+  gssh "curl -sfL http://$GW:$HTTP_PORT/get.sh | sudo EZYSHIELD_LOCAL_ACK=1 EZYSHIELD_BASE_URL=http://$GW:$HTTP_PORT sh -s -- --local"
   info "Running 'ezyshield init --yes' in the guest"
   gssh "sudo ezyshield init --yes"
   info "Copying + running the verifier (e2e-install-test.sh --verify)"

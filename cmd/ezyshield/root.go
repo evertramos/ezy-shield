@@ -24,7 +24,7 @@ func newRootCmd() *cobra.Command {
 It detects malicious IPs from logs, escalates bans by strike count,
 and enforces blocks locally (nftables) and at the edge (Cloudflare/Bunny/AWS).
 
-Commands read as:  ` + progName + ` <verb>   (equivalent to: ezy shield <verb>)`,
+Commands read as:  ` + progName + ` VERB   (equivalent to: ezy shield VERB)`,
 		// Wires up `ezyshield --version` (used by the self-update verifier
 		// to confirm a freshly downloaded binary actually runs).
 		Version:       version,
@@ -44,6 +44,7 @@ Commands read as:  ` + progName + ` <verb>   (equivalent to: ezy shield <verb>)`
 		newConfigCmd(),
 		newValidateCmd(),
 		newCompletionCmd(root),
+		newGenDocsCmd(root),
 		newTestCmd(),
 		// Pre-taxonomy verbs kept as hidden deprecated aliases until 1.0.
 		newDeprecatedTestAliasCmd("test-notify", "notifier", runTestNotify),

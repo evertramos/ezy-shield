@@ -62,6 +62,51 @@ iniciam serviço algum — rode `sudo ezyshield init` depois de instalar.
 
 ---
 
+## Completions de shell e páginas de manual
+
+Completions (bash/zsh/fish) e páginas de manual são geradas diretamente da
+árvore de comandos do `ezyshield` no momento do build, então elas sempre
+batem exatamente com a superfície de CLI da versão instalada — sem
+divergência em relação ao `--help`.
+
+**Instalado via apt / dnf:** as duas coisas são instaladas automaticamente
+pelo pacote, nada para configurar. As páginas de manual funcionam
+imediatamente:
+
+```bash
+man ezyshield
+man ezyshield-ban   # cada subcomando tem sua própria página, ex.: ezyshield-ban(1)
+```
+
+As completions de bash e zsh ficam ativas na próxima vez que você abrir um
+shell (ou rodar `exec $SHELL`) — elas ficam nos diretórios padrão de
+completion da distro (`/usr/share/bash-completion/completions/`,
+`/usr/share/zsh/vendor-completions/`). O fish detecta
+`/usr/share/fish/vendor_completions.d/ezyshield.fish` da mesma forma, sem
+precisar de reload além de abrir um shell novo.
+
+**Instalado via script ou binário/tarball bruto:** gere o script de
+completion com o comando `completion` embutido e coloque-o onde seu shell
+carrega completions:
+
+```bash
+# Bash (para todo o sistema)
+ezyshield completion bash | sudo tee /etc/bash_completion.d/ezyshield > /dev/null
+
+# Zsh (por usuário — garanta que o diretório de destino está no seu $fpath)
+ezyshield completion zsh > "${fpath[1]}/_ezyshield"
+
+# Fish
+ezyshield completion fish > ~/.config/fish/completions/ezyshield.fish
+```
+
+Depois, recarregue seu shell (`exec $SHELL`). O tarball de release também
+traz os mesmos arquivos pré-gerados em `completions/` e `man/`, caso você
+prefira copiá-los diretamente em vez de rodar `ezyshield completion` você
+mesmo.
+
+---
+
 ## Instalando uma versão específica ou candidata a lançamento
 
 Se você quer uma versão específica (incluindo candidatos a lançamento como

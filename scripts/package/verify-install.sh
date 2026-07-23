@@ -106,13 +106,20 @@ DISTRO="$( . /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-unknown}" )"
 info "verify-install: $DISTRO / $FAMILY / suite=$SUITE${EXPECT:+ / expect=$EXPECT}"
 
 # --- Prerequisites (environment setup, not part of the documented flow) ---
+# man-db is installed here, BEFORE the package, on purpose: it proves `man
+# ezyshield` works the way a real user's box works (man-db already present,
+# package installed after) rather than relying on install-order luck. Both
+# apt's and dnf's `man` do a live filesystem lookup for a name match, so no
+# `mandb`/`makewhatis` rebuild is required after the package lands its
+# pages — confirmed empirically on debian:12 and rockylinux:9 (issue #225).
 if [ "$FAMILY" = apt ]; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get -qq update >/dev/null
-  apt-get -qq install -y curl ca-certificates gnupg >/dev/null
+  apt-get -qq install -y curl ca-certificates gnupg man-db >/dev/null
 else
   command -v curl >/dev/null 2>&1 || dnf -q -y install curl >/dev/null
   command -v gpg  >/dev/null 2>&1 || dnf -q -y install gnupg2 >/dev/null
+  command -v man  >/dev/null 2>&1 || dnf -q -y install man-db >/dev/null
 fi
 
 # --- Suite published? ---
@@ -278,6 +285,17 @@ if find /etc/systemd/system -name 'ezyshield*' 2>/dev/null | grep -q .; then
   bad "package enabled a systemd unit — install.md promises it never does"
 else
   ok "no unit enabled or started (as documented)"
+fi
+
+# --- Shell completions and man pages (issue #225) ---
+check "bash completion shipped" test -s /usr/share/bash-completion/completions/ezyshield
+check "zsh completion shipped" test -s /usr/share/zsh/vendor-completions/_ezyshield
+check "fish completion shipped" test -s /usr/share/fish/vendor_completions.d/ezyshield.fish
+check "man page ezyshield.1.gz shipped" test -s /usr/share/man/man1/ezyshield.1.gz
+if man ezyshield 2>/dev/null | grep -q 'EzyShield is a CLI-first Linux security tool'; then
+  ok "man ezyshield renders the real command tree"
+else
+  bad "man ezyshield did not render the expected content"
 fi
 
 # --- Summary ---

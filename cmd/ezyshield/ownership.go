@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"os/user"
 	"strconv"
@@ -32,6 +33,19 @@ func lookupDaemonGID() (int, error) {
 		return 0, fmt.Errorf("invalid gid %q for group %s: %w", g.Gid, ownership.Group, err)
 	}
 	return gid, nil
+}
+
+// gidToUint32 narrows a GID from os/user (an int, via strconv.Atoi) to the
+// uint32 the kernel's Stat_t uses. POSIX guarantees GIDs fit in uint32, but
+// the source string comes from the group database / NSS backend, so an
+// out-of-range value is rejected instead of silently wrapping into a wrong
+// ownership comparison (CodeQL go/incorrect-integer-conversion, issue #260).
+// The int64 comparison keeps the guard correct on 32-bit builds too.
+func gidToUint32(gid int) (uint32, bool) {
+	if gid < 0 || int64(gid) > int64(math.MaxUint32) {
+		return 0, false
+	}
+	return uint32(gid), true
 }
 
 // applyDaemonOwnership chmods path to mode and chowns it to root:ezyshield.

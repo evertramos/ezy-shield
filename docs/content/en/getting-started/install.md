@@ -61,6 +61,49 @@ service — run `sudo ezyshield init` after installing.
 
 ---
 
+## Shell completions and man pages
+
+Completions (bash/zsh/fish) and man pages are generated straight from the
+`ezyshield` command tree at build time, so they always match the exact CLI
+surface of the version you have installed — no drift from `--help`.
+
+**Installed via apt / dnf:** both are installed automatically by the
+package, nothing to configure. Man pages work immediately:
+
+```bash
+man ezyshield
+man ezyshield-ban   # every subcommand has its own page, e.g. ezyshield-ban(1)
+```
+
+Bash and zsh completions activate the next time you open a shell (or run
+`exec $SHELL`) — they land in the distro's standard completion directories
+(`/usr/share/bash-completion/completions/`,
+`/usr/share/zsh/vendor-completions/`). Fish picks up
+`/usr/share/fish/vendor_completions.d/ezyshield.fish` the same way, no
+reload needed beyond opening a new shell.
+
+**Installed via the install script or a raw binary/tarball:** generate the
+completion script with the built-in `completion` command and drop it
+wherever your shell loads completions from:
+
+```bash
+# Bash (system-wide)
+ezyshield completion bash | sudo tee /etc/bash_completion.d/ezyshield > /dev/null
+
+# Zsh (user-local — make sure the target directory is on your $fpath)
+ezyshield completion zsh > "${fpath[1]}/_ezyshield"
+
+# Fish
+ezyshield completion fish > ~/.config/fish/completions/ezyshield.fish
+```
+
+Reload your shell (`exec $SHELL`) afterwards. The release tarball also
+ships the same pre-generated files under `completions/` and `man/` if you'd
+rather copy those directly instead of running `ezyshield completion`
+yourself.
+
+---
+
 ## Installing a specific version or release candidate
 
 If you want a specific version (including release candidates like

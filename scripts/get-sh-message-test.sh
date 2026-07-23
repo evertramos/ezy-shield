@@ -642,5 +642,121 @@ fi
 rm -rf "$FAKEBIN" "$SANDBOX"
 
 echo
+echo "▸ Scenario: bare EZYSHIELD_BASE_URL without --local — refused with migration guidance (issue #17)"
+SANDBOX="$(mktemp -d)"
+EXTRA_ENV=(EZYSHIELD_BASE_URL="http://127.0.0.1:1" EZYSHIELD_ROOT="$SANDBOX")
+run_get_sh_only
+if [ "$RC" -eq 1 ]; then ok "exits 1 (refused before any network call)"; else bad "exit code = $RC, want 1; output:
+$OUT"; fi
+case "$OUT" in
+  *"requires the explicit --local flag"*) ok "names the --local flag" ;;
+  *) bad "missing the --local migration message; output:
+$OUT" ;;
+esac
+case "$OUT" in
+  *"EZYSHIELD_LOCAL_ACK=1"*) ok "names EZYSHIELD_LOCAL_ACK=1" ;;
+  *) bad "missing the EZYSHIELD_LOCAL_ACK=1 requirement" ;;
+esac
+case "$OUT" in
+  *"Installing EzyShield"* | *"Fetching"*) bad "proceeded past the gate" ;;
+  *) ok "no install/download was attempted" ;;
+esac
+rm -rf "$SANDBOX"
+
+echo
+echo "▸ Scenario: --local without EZYSHIELD_LOCAL_ACK=1 — refused, ack requirement explained"
+SANDBOX="$(mktemp -d)"
+EXTRA_ENV=(EZYSHIELD_BASE_URL="http://127.0.0.1:1" EZYSHIELD_ROOT="$SANDBOX")
+run_get_sh_only --local
+if [ "$RC" -eq 1 ]; then ok "exits 1"; else bad "exit code = $RC, want 1; output:
+$OUT"; fi
+case "$OUT" in
+  *"additionally requires EZYSHIELD_LOCAL_ACK=1"*) ok "demands the ack" ;;
+  *) bad "missing the ack demand; output:
+$OUT" ;;
+esac
+case "$OUT" in
+  *"does NOT authenticate the source"*) ok "explains WHY the ack exists" ;;
+  *) bad "missing the unauthenticated-source explanation" ;;
+esac
+rm -rf "$SANDBOX"
+
+echo
+echo "▸ Scenario: --local + ack + mirror — loud warning, proceeds to the (blocked) download"
+SANDBOX="$(mktemp -d)"
+EXTRA_ENV=(
+  EZYSHIELD_BASE_URL="http://127.0.0.1:1"
+  EZYSHIELD_LOCAL_ACK=1
+  EZYSHIELD_ROOT="$SANDBOX"
+)
+run_get_sh_only --local
+if [ "$RC" -eq 1 ]; then ok "exits 1 (mirror is a dead port — nothing installed)"; else bad "exit code = $RC, want 1; output:
+$OUT"; fi
+case "$OUT" in
+  *"WARNING: --local install from"*) ok "prints the loud unauthenticated-path warning" ;;
+  *) bad "missing the --local warning; output:
+$OUT" ;;
+esac
+case "$OUT" in
+  *"checksums.txt not found"*) ok "reached the download step (gate passed with flag+ack)" ;;
+  *) bad "never reached the download step; output:
+$OUT" ;;
+esac
+rm -rf "$SANDBOX"
+
+echo
+echo "▸ Scenario: --dev resolves the newest prerelease (download blocked by dead proxy)"
+SANDBOX="$(mktemp -d)"
+start_mock 404
+EXTRA_ENV=(
+  EZYSHIELD_METHOD=binary
+  EZYSHIELD_API_BASE_URL="http://127.0.0.1:${MOCK_PORT}"
+  EZYSHIELD_ROOT="$SANDBOX"
+)
+run_get_sh_only --dev
+stop_mock
+case "$OUT" in
+  *"Installing EzyShield v0.1.0-rc.999 "*) ok "resolved the newest prerelease tag" ;;
+  *) bad "did not resolve the prerelease; output:
+$OUT" ;;
+esac
+case "$OUT" in
+  *"is a prerelease"*) ok "labels the pick as a prerelease" ;;
+  *) bad "missing the prerelease note" ;;
+esac
+if [ "$RC" -ne 0 ]; then ok "exit != 0 (asset download blocked — nothing installed)"; else bad "exit code = 0 — must never complete a real install"; fi
+case "$OUT" in
+  *"checksums.txt not found"*) ok "failed at the download step, not before" ;;
+  *) bad "expected the checksums-download failure; output:
+$OUT" ;;
+esac
+rm -rf "$SANDBOX"
+
+echo
+echo "▸ Scenario: --dev with a hostile tag_name — rejected before any URL or output use"
+SANDBOX="$(mktemp -d)"
+start_mock evil-tag
+EXTRA_ENV=(
+  EZYSHIELD_METHOD=binary
+  EZYSHIELD_API_BASE_URL="http://127.0.0.1:${MOCK_PORT}"
+  EZYSHIELD_ROOT="$SANDBOX"
+)
+run_get_sh_only --dev
+stop_mock
+if [ "$RC" -eq 1 ]; then ok "exits 1"; else bad "exit code = $RC, want 1; output:
+$OUT"; fi
+# shellcheck disable=SC2016  # matching a literal $( in the output — must not expand
+case "$OUT" in
+  *'$(touch'*) bad "hostile tag reached the output/URL" ;;
+  *) ok "hostile tag was rejected" ;;
+esac
+case "$OUT" in
+  *"could not resolve the newest prerelease"*) ok "degrades to the resolution error" ;;
+  *) bad "missing the resolution-error message; output:
+$OUT" ;;
+esac
+rm -rf "$SANDBOX"
+
+echo
 echo "Result: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

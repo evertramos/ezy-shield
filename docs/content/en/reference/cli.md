@@ -216,7 +216,12 @@ ezyshield list --by-asn
 # Allowlist entries
 ezyshield list --allow
 
-# JSON output
+# Historical action log (bans, expiries, unbans, allows) — newest first
+ezyshield list --audit
+ezyshield list --audit --ip 203.0.113.42
+ezyshield list --audit --limit 50
+
+# JSON output (works with --audit too)
 ezyshield list --json
 ```
 
@@ -225,12 +230,19 @@ ezyshield list --json
 | `--allow` | list allowlist entries instead of bans |
 | `--by-country` | aggregate bans by country (requires GeoIP enrichment) |
 | `--by-asn` | aggregate bans by ASN (requires GeoIP enrichment) |
+| `--audit` | show the historical action log instead of active bans |
+| `--ip` | with `--audit`: filter the history to one IP address |
+| `--limit` | with `--audit`: maximum rows to return (default 100) |
 | `--socket` | control socket path override |
 
 Ban columns: `IP / STRIKE / TTL / COUNTRY / ASN / REASON`.
 Allowlist columns: `IP/CIDR / EXPIRES / REASON`.
+Audit columns: `TIME / IP / ACTION / STRIKE / TTL / REASON` (newest first;
+`TTL` is `perm` for a permanent ban, `-` for actions that carry none).
 
-For per-IP history with evidence, use `ezyshield report`.
+`list --audit` shows only the audit trail (timestamps, actions, strikes,
+reasons). For a single offender's full history with detection verdicts and
+evidence, use `ezyshield report`.
 
 ## ezyshield report
 

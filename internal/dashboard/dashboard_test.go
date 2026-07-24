@@ -151,11 +151,12 @@ func TestNew_RefusesNonLoopback(t *testing.T) {
 	}
 }
 
-func TestRun_RefusesNonLoopback(t *testing.T) {
+// TestRun_BoundAddrFrozen proves that Run binds to the address frozen on
+// boundAddr at construction time, not to cfg.Addr — so an errant future
+// write to cfg.Addr (there is none in this package today) cannot change
+// where the dashboard listens.
+func TestRun_BoundAddrFrozen(t *testing.T) {
 	dir := t.TempDir()
-	// Bypass New's guard by constructing the Server through the normal path,
-	// then mutating cfg.Addr. This proves Run has its own defence-in-depth
-	// loopback check.
 	srv, err := New(Config{
 		Addr:       "127.0.0.1:0",
 		AuthDBPath: filepath.Join(dir, "dashboard.db"),
@@ -168,13 +169,39 @@ func TestRun_RefusesNonLoopback(t *testing.T) {
 			t.Logf("close: %v", err)
 		}
 	}()
-	srv.cfg.Addr = "0.0.0.0:9090"
-	err = srv.Run(context.Background())
-	if err == nil {
-		t.Fatal("expected Run to refuse 0.0.0.0, got nil error")
+
+	want := srv.boundAddr
+	if want == "" {
+		t.Fatal("boundAddr was not populated by New")
 	}
-	if !strings.Contains(err.Error(), "loopback") {
-		t.Errorf("error message should mention loopback, got: %v", err)
+
+	// Simulate an errant future write to cfg.Addr after construction.
+	srv.cfg.Addr = "0.0.0.0:9090"
+
+	if srv.boundAddr != want {
+		t.Fatalf("boundAddr changed from %q to %q after mutating cfg.Addr", want, srv.boundAddr)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runErrCh := make(chan error, 1)
+	go func() { runErrCh <- srv.Run(ctx) }()
+
+	// Give Run a moment to either bind successfully or fail; a non-loopback
+	// bind (from the mutated cfg.Addr) would fail fast with a loopback
+	// error, so a short wait is enough to distinguish the two outcomes.
+	select {
+	case err := <-runErrCh:
+		t.Fatalf("Run returned early (should have bound to frozen boundAddr %q and kept serving): %v", want, err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	cancel()
+	if err := <-runErrCh; err != nil {
+		t.Fatalf("Run: unexpected error after cancel: %v", err)
+	}
+
+	if srv.boundAddr != want {
+		t.Fatalf("boundAddr changed from %q to %q over the lifetime of Run", want, srv.boundAddr)
 	}
 }
 

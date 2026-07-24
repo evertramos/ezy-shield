@@ -32,15 +32,19 @@ logs (SSH, Nginx)
 
 O EzyShield tem uma regra dura: **sua sessão SSH ativa e os CIDRs de admin nunca podem ser banidos**, mesmo que casem com um padrão de ataque.
 
-Antes de qualquer ban ser gravado no firewall:
+Antes de qualquer ban ser gravado no firewall, duas checagens independentes rodam em sequência:
 
-1. Detecta os peers SSH ativos — pela tabela de conexões do kernel
-   (`/proc/net/tcp` e `/proc/net/tcp6`, pontas remotas de conexões
-   estabelecidas na(s) porta(s) do sshd — funciona sob systemd, sem depender
-   de ambiente; portas lidas do `sshd_config`, fallback 22) e, em contextos
-   interativos, pela variável de ambiente `SSH_CLIENT`
-2. Checa os CIDRs de admin do policy.yaml
-3. Se qualquer um deles casar com o IP alvo, o ban é rejeitado
+1. **Checagem de allowlist**: o IP alvo é comparado com a allowlist estática —
+   sua `allowlist` configurada, os `admin_cidrs` do policy.yaml e o peer SSH
+   capturado quando o daemon iniciou.
+2. **Re-checagem de SSH ao vivo**: o IP alvo é comparado com os peers SSH
+   ativos agora — pela tabela de conexões do kernel (`/proc/net/tcp` e
+   `/proc/net/tcp6`, pontas remotas de conexões estabelecidas na(s) porta(s)
+   do sshd — funciona sob systemd, sem depender de ambiente; portas lidas do
+   `sshd_config`, fallback 22) e, em contextos interativos, pela variável de
+   ambiente `SSH_CLIENT` atual.
+
+Se qualquer uma das checagens casar, o ban é rejeitado.
 
 Bans manuais (`ezyshield ban`) passam exatamente pelos mesmos guards —
 incluindo o rate limit de bans — e tentativas recusadas ficam registradas
@@ -69,7 +73,7 @@ admin_cidrs:
 
 ## Limite de taxa
 
-Uma rule quebrada ou um feed envenenado não consegue banir a internet inteira. A trava `max_bans_per_minute` (default 30) rejeita bans excedentes com um erro explícito — nunca em silêncio, nunca descartando o limite.
+Uma rule quebrada ou um feed envenenado não consegue banir a internet inteira. A trava `max_bans_per_minute` (default 30) rejeita bans excedentes com um erro explícito — nunca em silêncio, nunca descartando o limite. Bans de escalação que re-bloqueiam um IP cujo ban anterior terminou dentro da `escalation_exempt_window` (default 24h) ficam isentos dessa trava, para que um reincidente que já foi banido não volte a entrar enquanto o rate limit está saturado; bans de primeira ofensa sempre contam para a trava.
 
 ## Tratamento de segredos
 
@@ -100,7 +104,7 @@ O enforcer não é uma biblioteca. É um processo separado. O daemon principal n
 
 ## Sem listeners de rede
 
-O EzyShield não abre nenhum listener de rede para controle (o dashboard opcional faz bind apenas em 127.0.0.1 e recusa qualquer outra coisa). O controle é via:
+O EzyShield não abre nenhum listener de rede para controle (o dashboard opcional faz bind apenas em um endereço loopback — `127.0.0.1` ou `::1` — e recusa qualquer outra coisa). O controle é via:
 - CLI: `ezyshield ban`, `ezyshield list`, etc. (somente local)
 - Unix socket: `/run/ezyshield/ezyshield.sock` (permissões de filesystem)
 
@@ -119,7 +123,6 @@ Toda ação é registrada em SQLite:
 - Quando: timestamp
 - O quê: IP, rule, score, decisão (ban/allow/defer)
 - Por quê: nome da rule, resposta da IA (se a IA foi consultada)
-- Como: qual backend aplicou (nftables, Cloudflare, manual)
 
 Exportação para compliance:
 
@@ -175,7 +178,7 @@ O EzyShield mantém:
 - Allowlist para tráfego liberado
 - Modo dry-run para testar antes do enforcement
 
-Adequado a requisitos de SOC 2, ISO 27001 e GDPR onde o registro de requisições é necessário.
+Os dados desse audit trail podem sustentar requisitos de registro de requisições de SOC 2, ISO 27001 e GDPR — a compliance em si depende dos controles organizacionais que você constrói ao redor dele, não do EzyShield sozinho.
 
 ## Reportando problemas de segurança
 

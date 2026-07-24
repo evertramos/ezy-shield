@@ -23,17 +23,14 @@ o `ezyshield status` os reporta separados dos bans ativos.
 sudo ezyshield run
 ```
 
-Você verá uma saída como esta:
+O daemon registra linhas JSON estruturadas no stderr. Uma decisão em dry-run
+se parece com isto:
 
-```
-2026-07-08T10:15:23Z INFO starting pipeline
-2026-07-08T10:15:24Z INFO collector[journald]: started
-2026-07-08T10:15:24Z INFO collector[file]: tailing /var/log/nginx/access.log
-2026-07-08T10:15:30Z WARN decision: ssh brute-force attempt from 203.0.113.42 (strike 1, score 95)
-  verdict: dry_ban (would ban for 5 minutes)
+```json
+{"time":"2026-07-08T10:15:30Z","level":"INFO","msg":"decision: dry_ban (armed=false)","ip":"203.0.113.42","would_strike":1,"would_ttl":300000000000}
 ```
 
-Repare no veredito `dry_ban` — aquele IP teria sido bloqueado, mas em dry-run apenas fica registrado no log.
+Repare no veredito `dry_ban` — aquele IP teria sido bloqueado, mas em dry-run apenas fica registrado no log. `would_ttl` está em nanossegundos (codificação padrão de duração do slog); `300000000000` equivale a 5 minutos.
 
 ## Passo 2: Leia a saída do dry-run
 
@@ -57,8 +54,14 @@ Veja o que teria sido bloqueado:
 ezyshield report | head -30
 ```
 
-`report` mostra o histórico de decisões por IP (strikes, scores, evidências) sem
-que nada seja de fato bloqueado.
+Sem um argumento de IP, `report` lista todos os ofensores registrados em uma
+tabela resumo (`IP`, `FIRST SEEN`, `LAST SEEN`, `STRIKES`, `BANNED`,
+`COUNTRY`, `ASN`) — nada é de fato bloqueado. Para o histórico completo de
+decisões por IP (strikes, scores, evidências), passe um IP:
+
+```bash
+ezyshield report 203.0.113.42
+```
 
 ## Passo 4: Arme
 
@@ -144,9 +147,10 @@ tail -f /var/log/nginx/access.log  # Para Nginx
 R:
 
 ```bash
-sudo ezyshield ban 203.0.113.42         # Banir permanentemente
-sudo ezyshield unban 203.0.113.42       # Desbanir
-sudo ezyshield allow 198.51.100.0/24    # Adicionar um CIDR à allowlist
+sudo ezyshield ban 203.0.113.42          # Banir permanentemente
+sudo ezyshield ban 203.0.113.42 --ttl 0  # Também permanente (explícito)
+sudo ezyshield unban 203.0.113.42        # Desbanir
+sudo ezyshield allow 198.51.100.0/24     # Adicionar um CIDR à allowlist
 ```
 
 ## Próximos passos

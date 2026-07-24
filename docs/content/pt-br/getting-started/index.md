@@ -27,8 +27,10 @@ Coloque o EzyShield rodando no seu servidor em menos de 5 minutos.
 curl -sfL https://get.ezyshield.com | sudo sh
 ```
 
-Isso baixa os binários assinados mais recentes (`ezyshield` e `ezyshield-enforcer`),
-verifica checksums e instala em `/usr/local/bin/`.
+Isso baixa os binários mais recentes `ezyshield` e `ezyshield-enforcer`,
+verifica a assinatura cosign do checksum quando o `cosign` está instalado
+(caindo para uma verificação de checksum SHA-256 simples caso contrário),
+e os instala.
 
 Para instalar uma versão específica:
 
@@ -38,7 +40,7 @@ curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=v0.1.0 sh
 
 ### Build from source
 
-Requer **Go 1.24+**.
+Requer **Go 1.26+**.
 
 ```bash
 git clone https://github.com/evertramos/ezy-shield.git
@@ -106,11 +108,13 @@ sudo ezyshield doctor
 Saída esperada:
 
 ```
-✓ config.yaml válido
-✓ policy.yaml válido
-✓ rules.yaml válido
-✓ nftables acessível
-✓ diretório de dados gravável
+[PASS] config.yaml: exists
+[PASS] config.yaml: parses
+[PASS] policy.yaml: exists
+[PASS] policy.yaml: parses
+[PASS] nft: binary present
+[PASS] journald: readable
+[PASS] enforcer: socket connectivity
 ```
 
 ---
@@ -144,9 +148,12 @@ enforce:
 ```
 
 O helper privilegiado (`ezyshield-enforcer`) lida com todas as escritas no
-firewall via unix socket. Se o socket não estiver disponível no startup, os
-bans ficam na fila no SQLite e são aplicados automaticamente quando o helper
-subir.
+firewall via unix socket. O daemon re-sincroniza o conjunto completo de bans
+para o enforcer sempre que o **daemon** reinicia, então os bans sobrevivem a
+reinícios do daemon. Reiniciar apenas o helper `ezyshield-enforcer` não
+dispara essa re-sincronização por si só — o conjunto de bans se atualiza no
+próximo ciclo periódico de expiração de bans, ou no próximo reinício do
+daemon.
 
 ### AI (opcional)
 

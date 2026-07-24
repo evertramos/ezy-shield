@@ -23,17 +23,14 @@ Nothing is ever enforced: simulated bans never reach the firewall, and
 sudo ezyshield run
 ```
 
-You'll see output like:
+The daemon logs structured JSON lines to stderr. A dry-run decision looks
+like:
 
-```
-2026-07-08T10:15:23Z INFO starting pipeline
-2026-07-08T10:15:24Z INFO collector[journald]: started
-2026-07-08T10:15:24Z INFO collector[file]: tailing /var/log/nginx/access.log
-2026-07-08T10:15:30Z WARN decision: ssh brute-force attempt from 203.0.113.42 (strike 1, score 95)
-  verdict: dry_ban (would ban for 5 minutes)
+```json
+{"time":"2026-07-08T10:15:30Z","level":"INFO","msg":"decision: dry_ban (armed=false)","ip":"203.0.113.42","would_strike":1,"would_ttl":300000000000}
 ```
 
-Notice the `dry_ban` verdict — it would have blocked that IP, but in dry-run mode it only logs.
+Notice the `dry_ban` verdict — it would have blocked that IP, but in dry-run mode it only logs. `would_ttl` is in nanoseconds (slog's default duration encoding); `300000000000` is 5 minutes.
 
 ## Step 2: Read the dry-run output
 
@@ -57,8 +54,14 @@ See what would have been blocked:
 ezyshield report | head -30
 ```
 
-`report` shows per-IP decision history (strikes, scores, evidence) without
-anything actually being blocked.
+Without an IP argument, `report` lists every recorded offender in a summary
+table (`IP`, `FIRST SEEN`, `LAST SEEN`, `STRIKES`, `BANNED`, `COUNTRY`, `ASN`)
+— nothing is actually blocked. For the full per-IP decision history (strikes,
+scores, evidence), pass an IP:
+
+```bash
+ezyshield report 203.0.113.42
+```
 
 ## Step 4: Arm it
 
@@ -142,9 +145,10 @@ tail -f /var/log/nginx/access.log  # For Nginx
 A:
 
 ```bash
-sudo ezyshield ban 203.0.113.42         # Ban permanently
-sudo ezyshield unban 203.0.113.42       # Unban
-sudo ezyshield allow 198.51.100.0/24    # Allowlist a CIDR
+sudo ezyshield ban 203.0.113.42          # Ban permanently
+sudo ezyshield ban 203.0.113.42 --ttl 0  # Also permanent (explicit)
+sudo ezyshield unban 203.0.113.42        # Unban
+sudo ezyshield allow 198.51.100.0/24     # Allowlist a CIDR
 ```
 
 ## Next steps

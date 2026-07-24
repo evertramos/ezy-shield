@@ -145,7 +145,8 @@ tail -f /var/log/nginx/access.log  # For Nginx
 A:
 
 ```bash
-sudo ezyshield ban 203.0.113.42 --ttl 0  # ttl=0 = permanent (no expiry)
+sudo ezyshield ban 203.0.113.42          # Ban permanently
+sudo ezyshield ban 203.0.113.42 --ttl 0  # Also permanent (explicit)
 sudo ezyshield unban 203.0.113.42        # Unban
 sudo ezyshield allow 198.51.100.0/24     # Allowlist a CIDR
 ```

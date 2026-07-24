@@ -147,7 +147,8 @@ tail -f /var/log/nginx/access.log  # Para Nginx
 R:
 
 ```bash
-sudo ezyshield ban 203.0.113.42 --ttl 0  # ttl=0 = permanente (sem expiração)
+sudo ezyshield ban 203.0.113.42          # Banir permanentemente
+sudo ezyshield ban 203.0.113.42 --ttl 0  # Também permanente (explícito)
 sudo ezyshield unban 203.0.113.42        # Desbanir
 sudo ezyshield allow 198.51.100.0/24     # Adicionar um CIDR à allowlist
 ```

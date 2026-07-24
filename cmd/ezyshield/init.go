@@ -789,10 +789,12 @@ func writeGeneratedConfig(path string, state *wizardState) error {
 	if state.nftPath != "" || hasCF {
 		b.WriteString("enforce:\n")
 		if state.nftPath != "" {
-			b.WriteString("  nftables:\n")
-			fmt.Fprintf(&b, "    socket: %s\n", enforcerSockPath)
-			b.WriteString("    table: inet ezyshield\n")
-			b.WriteString("    set: blocked\n")
+			// The empty mapping is the whole configuration (issue #268): its
+			// presence switches local enforcement on, and table/set/socket
+			// all have real, honored defaults. Emitting any of them here
+			// would just pin today's defaults into every generated config —
+			// reference/config.md documents how to customize when needed.
+			b.WriteString("  nftables: {}\n")
 		}
 		if hasCF {
 			emitCloudflareYAML(&b, state.cdn)

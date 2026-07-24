@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/evertramos/ezy-shield/internal/nftnames"
 )
 
 // errElementAbsent is a stable, typed sentinel that nftDel and nftDelAllow
@@ -52,13 +54,11 @@ func isNftAbsentErr(msg string) bool {
 	return false
 }
 
-const (
-	nftTable     = "inet ezyshield"
-	nftSet4      = "blocked"
-	nftSet6      = "blocked6"
-	nftSetAllow4 = "allowed"
-	nftSetAllow6 = "allowed6"
-)
+// Table and set names are no longer compile-time constants (issue #268):
+// every function below receives an nftnames.Names that was resolved and
+// validated IN THIS PROCESS via nftnames.Resolve — the conservative
+// identifier charset there is what makes interpolating the names into nft
+// scripts safe. Nothing else may reach script generation.
 
 // nftRunner abstracts nft execution so tests can inject a mock.
 type nftRunner func(ctx context.Context, script []byte) error
@@ -111,37 +111,39 @@ func realNftRunner(ctx context.Context, script []byte) error {
 // The allowed sets do not use `timeout` — allowlist TTLs are enforced by the
 // daemon which syncs the set on entry expiration. Blocked sets do use nft's
 // native `timeout` for ban expiry.
-func initTable(ctx context.Context, run nftRunner) error {
-	script := `add table inet ezyshield
-add set inet ezyshield blocked { type ipv4_addr ; flags interval,timeout ; auto-merge ; }
-add set inet ezyshield blocked6 { type ipv6_addr ; flags interval,timeout ; auto-merge ; }
-add set inet ezyshield allowed { type ipv4_addr ; flags interval ; auto-merge ; }
-add set inet ezyshield allowed6 { type ipv6_addr ; flags interval ; auto-merge ; }
-add chain inet ezyshield prerouting { type filter hook prerouting priority raw ; policy accept ; }
-flush chain inet ezyshield prerouting
-add rule inet ezyshield prerouting ip saddr @allowed accept
-add rule inet ezyshield prerouting ip6 saddr @allowed6 accept
-add rule inet ezyshield prerouting ip saddr @blocked notrack
-add rule inet ezyshield prerouting ip6 saddr @blocked6 notrack
-add rule inet ezyshield prerouting ip saddr @blocked drop
-add rule inet ezyshield prerouting ip6 saddr @blocked6 drop
-add chain inet ezyshield input { type filter hook input priority filter ; policy accept ; }
-flush chain inet ezyshield input
-add rule inet ezyshield input ip saddr @blocked drop
-add rule inet ezyshield input ip6 saddr @blocked6 drop
-add chain inet ezyshield forward { type filter hook forward priority filter ; policy accept ; }
-flush chain inet ezyshield forward
-add rule inet ezyshield forward ip saddr @blocked drop
-add rule inet ezyshield forward ip6 saddr @blocked6 drop
-`
+func initTable(ctx context.Context, run nftRunner, n nftnames.Names) error {
+	// The %[1]s..%[5]s values come exclusively from nftnames.Resolve — the
+	// strict identifier charset there is the injection barrier.
+	script := fmt.Sprintf(`add table %[1]s
+add set %[1]s %[2]s { type ipv4_addr ; flags interval,timeout ; auto-merge ; }
+add set %[1]s %[3]s { type ipv6_addr ; flags interval,timeout ; auto-merge ; }
+add set %[1]s %[4]s { type ipv4_addr ; flags interval ; auto-merge ; }
+add set %[1]s %[5]s { type ipv6_addr ; flags interval ; auto-merge ; }
+add chain %[1]s prerouting { type filter hook prerouting priority raw ; policy accept ; }
+flush chain %[1]s prerouting
+add rule %[1]s prerouting ip saddr @%[4]s accept
+add rule %[1]s prerouting ip6 saddr @%[5]s accept
+add rule %[1]s prerouting ip saddr @%[2]s notrack
+add rule %[1]s prerouting ip6 saddr @%[3]s notrack
+add rule %[1]s prerouting ip saddr @%[2]s drop
+add rule %[1]s prerouting ip6 saddr @%[3]s drop
+add chain %[1]s input { type filter hook input priority filter ; policy accept ; }
+flush chain %[1]s input
+add rule %[1]s input ip saddr @%[2]s drop
+add rule %[1]s input ip6 saddr @%[3]s drop
+add chain %[1]s forward { type filter hook forward priority filter ; policy accept ; }
+flush chain %[1]s forward
+add rule %[1]s forward ip saddr @%[2]s drop
+add rule %[1]s forward ip6 saddr @%[3]s drop
+`, n.Table, n.Set4, n.Set6, n.Allow4, n.Allow6)
 	return run(ctx, []byte(script))
 }
 
 // nftAdd adds ip to the appropriate set with an optional timeout.
 // ip must be a pre-validated netip.Addr or netip.Prefix string.
 // ttlSec == 0 → permanent (no timeout directive).
-func nftAdd(ctx context.Context, run nftRunner, ip string, ttlSec int64) error {
-	set, err := setForIP(ip)
+func nftAdd(ctx context.Context, run nftRunner, n nftnames.Names, ip string, ttlSec int64) error {
+	set, err := setForIP(n, ip)
 	if err != nil {
 		return err
 	}
@@ -151,7 +153,7 @@ func nftAdd(ctx context.Context, run nftRunner, ip string, ttlSec int64) error {
 	} else {
 		entry = ip
 	}
-	script := fmt.Sprintf("add element %s %s { %s }\n", nftTable, set, entry)
+	script := fmt.Sprintf("add element %s %s { %s }\n", n.Table, set, entry)
 	return run(ctx, []byte(script))
 }
 
@@ -159,12 +161,12 @@ func nftAdd(ctx context.Context, run nftRunner, ip string, ttlSec int64) error {
 // is already gone (see nftAbsentSignals), it returns errElementAbsent so the
 // dispatch layer can translate that into a typed enforce.CodeAlreadyAbsent
 // response — never propagating raw nft stderr to the client (issue #39).
-func nftDel(ctx context.Context, run nftRunner, ip string) error {
-	set, err := setForIP(ip)
+func nftDel(ctx context.Context, run nftRunner, n nftnames.Names, ip string) error {
+	set, err := setForIP(n, ip)
 	if err != nil {
 		return err
 	}
-	script := fmt.Sprintf("delete element %s %s { %s }\n", nftTable, set, ip)
+	script := fmt.Sprintf("delete element %s %s { %s }\n", n.Table, set, ip)
 	if err := run(ctx, []byte(script)); err != nil {
 		if isNftAbsentErr(err.Error()) {
 			slog.Debug("nftDel: element already absent", "ip", ip)
@@ -176,9 +178,9 @@ func nftDel(ctx context.Context, run nftRunner, ip string) error {
 }
 
 // nftFlush clears both blocked sets.
-func nftFlush(ctx context.Context, run nftRunner) error {
+func nftFlush(ctx context.Context, run nftRunner, n nftnames.Names) error {
 	script := fmt.Sprintf("flush set %s %s\nflush set %s %s\n",
-		nftTable, nftSet4, nftTable, nftSet6)
+		n.Table, n.Set4, n.Table, n.Set6)
 	return run(ctx, []byte(script))
 }
 
@@ -186,12 +188,12 @@ func nftFlush(ctx context.Context, run nftRunner) error {
 // allowlist entries have no nft-native timeout — the daemon owns TTL and
 // syncs the set on expiry. Idempotent: adding an already-present element
 // succeeds (nft add is a no-op on duplicates for interval sets).
-func nftAddAllow(ctx context.Context, run nftRunner, ip string) error {
-	set, err := allowSetForIP(ip)
+func nftAddAllow(ctx context.Context, run nftRunner, n nftnames.Names, ip string) error {
+	set, err := allowSetForIP(n, ip)
 	if err != nil {
 		return err
 	}
-	script := fmt.Sprintf("add element %s %s { %s }\n", nftTable, set, ip)
+	script := fmt.Sprintf("add element %s %s { %s }\n", n.Table, set, ip)
 	return run(ctx, []byte(script))
 }
 
@@ -199,12 +201,12 @@ func nftAddAllow(ctx context.Context, run nftRunner, ip string) error {
 // is signalled via errElementAbsent — same handling as nftDel; the allow set
 // has no nft-native timeout today but the code paths stay symmetric so a
 // future refactor cannot accidentally split their behaviour (issue #39, §5).
-func nftDelAllow(ctx context.Context, run nftRunner, ip string) error {
-	set, err := allowSetForIP(ip)
+func nftDelAllow(ctx context.Context, run nftRunner, n nftnames.Names, ip string) error {
+	set, err := allowSetForIP(n, ip)
 	if err != nil {
 		return err
 	}
-	script := fmt.Sprintf("delete element %s %s { %s }\n", nftTable, set, ip)
+	script := fmt.Sprintf("delete element %s %s { %s }\n", n.Table, set, ip)
 	if err := run(ctx, []byte(script)); err != nil {
 		if isNftAbsentErr(err.Error()) {
 			slog.Debug("nftDelAllow: element already absent", "ip", ip)
@@ -216,12 +218,12 @@ func nftDelAllow(ctx context.Context, run nftRunner, ip string) error {
 }
 
 // nftListAllow returns the current elements of both allowed sets.
-func nftListAllow(ctx context.Context) ([]string, error) {
-	ips4, err := listSet(ctx, nftSetAllow4)
+func nftListAllow(ctx context.Context, n nftnames.Names) ([]string, error) {
+	ips4, err := listSet(ctx, n, n.Allow4)
 	if err != nil {
 		return nil, err
 	}
-	ips6, err := listSet(ctx, nftSetAllow6)
+	ips6, err := listSet(ctx, n, n.Allow6)
 	if err != nil {
 		return nil, err
 	}
@@ -230,29 +232,31 @@ func nftListAllow(ctx context.Context) ([]string, error) {
 
 // nftFlushAllow clears both allowed sets. Used by the daemon at startup
 // before re-adding the full allowlist (idempotent sync).
-func nftFlushAllow(ctx context.Context, run nftRunner) error {
+func nftFlushAllow(ctx context.Context, run nftRunner, n nftnames.Names) error {
 	script := fmt.Sprintf("flush set %s %s\nflush set %s %s\n",
-		nftTable, nftSetAllow4, nftTable, nftSetAllow6)
+		n.Table, n.Allow4, n.Table, n.Allow6)
 	return run(ctx, []byte(script))
 }
 
 // nftList returns the current elements of both blocked sets by running
 // `nft list set` and parsing the output.
 // Falls back to empty slice (not an error) when the set is empty.
-func nftList(ctx context.Context) ([]string, error) {
-	ips4, err := listSet(ctx, nftSet4)
+func nftList(ctx context.Context, n nftnames.Names) ([]string, error) {
+	ips4, err := listSet(ctx, n, n.Set4)
 	if err != nil {
 		return nil, err
 	}
-	ips6, err := listSet(ctx, nftSet6)
+	ips6, err := listSet(ctx, n, n.Set6)
 	if err != nil {
 		return nil, err
 	}
 	return append(ips4, ips6...), nil
 }
 
-func listSet(ctx context.Context, set string) ([]string, error) {
-	cmd := exec.CommandContext(ctx, "nft", "list", "set", nftTable, set) //nolint:gosec // table/set names are constants
+func listSet(ctx context.Context, n nftnames.Names, set string) ([]string, error) {
+	// n.Table is "family name"; nft's CLI wants them as separate argv words.
+	family, tbl, _ := strings.Cut(n.Table, " ")
+	cmd := exec.CommandContext(ctx, "nft", "list", "set", family, tbl, set) //nolint:gosec // names validated by nftnames.Resolve in this process
 	out, err := cmd.Output()
 	if err != nil {
 		// "No such file or directory" means the set doesn't exist yet; treat as empty.
@@ -299,15 +303,15 @@ func parseSetElements(out []byte) []string {
 	return ips
 }
 
-// setForIP returns "blocked" for IPv4 addresses/prefixes, "blocked6" for IPv6.
+// setForIP returns the v4 or v6 blocked set for ip.
 // Validates that ip is a well-formed address or prefix — no raw nft syntax.
-func setForIP(ip string) (string, error) {
-	return setForIPIn(ip, nftSet4, nftSet6)
+func setForIP(n nftnames.Names, ip string) (string, error) {
+	return setForIPIn(ip, n.Set4, n.Set6)
 }
 
 // allowSetForIP is the @allowed counterpart of setForIP.
-func allowSetForIP(ip string) (string, error) {
-	return setForIPIn(ip, nftSetAllow4, nftSetAllow6)
+func allowSetForIP(n nftnames.Names, ip string) (string, error) {
+	return setForIPIn(ip, n.Allow4, n.Allow6)
 }
 
 // setForIPIn picks the v4 or v6 set name for ip. Shared by setForIP and

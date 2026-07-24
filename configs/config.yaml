@@ -21,11 +21,15 @@ log:
 # Log collectors — add sources after running 'ezyshield init && ezyshield scan'
 collectors: []
 
-# Example (uncomment after nftables enforcer is set up — issue #9):
+# Example (uncomment after the nftables enforcer is set up):
 # enforce:
-#   nftables:
-#     table: inet ezyshield
-#     set:   blocked
+#   nftables: {}
+#   # table and set are optional; defaults are "inet ezyshield" / "blocked"
+#   # (IPv6 twin derives as "<set>6"). Custom names require an
+#   # ezyshield-enforcer of the same version.
+#   # nftables:
+#   #   table: inet mytable
+#   #   set:   myblocked
 #
 #   # Cloudflare edge enforcer — blocks IPs at the CF edge (issue #45, #88).
 #   # Two modes are supported; pick one.

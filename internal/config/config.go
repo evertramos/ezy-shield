@@ -9,6 +9,8 @@ import (
 	"os"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/evertramos/ezy-shield/internal/nftnames"
 )
 
 // DefaultRulesDir is the drop-in overlay directory scanned for rule
@@ -543,12 +545,13 @@ func validateCFListName(name string) error {
 	return nil
 }
 
+// validateNFTables format-checks the optional table/set names (issue #268).
+// Empty values are valid — the enforcer defaults to "inet ezyshield" /
+// "blocked". Non-empty values must pass the strict identifier rules in
+// internal/nftnames; the privileged helper re-validates independently.
 func validateNFTables(n NFTablesCfg) error {
-	if n.Table == "" {
-		return fmt.Errorf("'table' is required")
-	}
-	if n.Set == "" {
-		return fmt.Errorf("'set' is required")
+	if _, err := nftnames.Resolve(n.Table, n.Set); err != nil {
+		return err
 	}
 	return nil
 }

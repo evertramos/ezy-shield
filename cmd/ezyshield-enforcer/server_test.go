@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/evertramos/ezy-shield/internal/enforce"
+	"github.com/evertramos/ezy-shield/internal/nftnames"
 )
 
 // mockNftCalls records the nft scripts that would be executed.
@@ -317,7 +318,7 @@ func TestInitTable_BothChainsPresent(t *testing.T) {
 		captured = script
 		return nil
 	}
-	if err := initTable(context.Background(), run); err != nil {
+	if err := initTable(context.Background(), run, defaultNames()); err != nil {
 		t.Fatalf("initTable: %v", err)
 	}
 	s := string(captured)
@@ -349,7 +350,7 @@ func TestInitTable_PreroutingSinkhole(t *testing.T) {
 		captured = script
 		return nil
 	}
-	if err := initTable(context.Background(), run); err != nil {
+	if err := initTable(context.Background(), run, defaultNames()); err != nil {
 		t.Fatalf("initTable: %v", err)
 	}
 	s := string(captured)
@@ -409,13 +410,13 @@ func TestDispatch_AllowDel(t *testing.T) {
 
 // TestAllowSetForIP: v4 vs v6 routing.
 func TestAllowSetForIP(t *testing.T) {
-	if s, err := allowSetForIP("1.2.3.4"); err != nil || s != nftSetAllow4 {
+	if s, err := allowSetForIP(defaultNames(), "203.0.113.4"); err != nil || s != "allowed" {
 		t.Errorf("v4: got %s err=%v", s, err)
 	}
-	if s, err := allowSetForIP("::1"); err != nil || s != nftSetAllow6 {
+	if s, err := allowSetForIP(defaultNames(), "::1"); err != nil || s != "allowed6" {
 		t.Errorf("v6: got %s err=%v", s, err)
 	}
-	if _, err := allowSetForIP("not-an-ip"); err == nil {
+	if _, err := allowSetForIP(defaultNames(), "not-an-ip"); err == nil {
 		t.Error("expected error for invalid IP")
 	}
 }
@@ -423,21 +424,21 @@ func TestAllowSetForIP(t *testing.T) {
 // ── nft helpers ───────────────────────────────────────────────────────────────
 
 func TestSetForIP_IPv4(t *testing.T) {
-	set, err := setForIP("1.2.3.4")
-	if err != nil || set != nftSet4 {
-		t.Errorf("expected %s, got %s (err=%v)", nftSet4, set, err)
+	set, err := setForIP(defaultNames(), "203.0.113.4")
+	if err != nil || set != "blocked" {
+		t.Errorf("expected %s, got %s (err=%v)", "blocked", set, err)
 	}
 }
 
 func TestSetForIP_IPv6(t *testing.T) {
-	set, err := setForIP("::1")
-	if err != nil || set != nftSet6 {
-		t.Errorf("expected %s, got %s (err=%v)", nftSet6, set, err)
+	set, err := setForIP(defaultNames(), "::1")
+	if err != nil || set != "blocked6" {
+		t.Errorf("expected %s, got %s (err=%v)", "blocked6", set, err)
 	}
 }
 
 func TestSetForIP_InvalidRejected(t *testing.T) {
-	_, err := setForIP("not-an-ip")
+	_, err := setForIP(defaultNames(), "not-an-ip")
 	if err == nil {
 		t.Error("expected error for invalid IP")
 	}
@@ -515,7 +516,7 @@ func TestNftDel_ElementAbsent_ReturnsSentinel(t *testing.T) {
 			run := func(_ context.Context, _ []byte) error {
 				return fmt.Errorf("%s", captured)
 			}
-			err := nftDel(context.Background(), run, "1.2.3.4")
+			err := nftDel(context.Background(), run, defaultNames(), "203.0.113.4")
 			if !errors.Is(err, errElementAbsent) {
 				t.Errorf("expected errElementAbsent, got: %v", err)
 			}
@@ -527,7 +528,7 @@ func TestNftDel_OtherError_Propagated(t *testing.T) {
 	run := func(_ context.Context, _ []byte) error {
 		return fmt.Errorf("nft -f: exit status 1\npermission denied")
 	}
-	err := nftDel(context.Background(), run, "1.2.3.4")
+	err := nftDel(context.Background(), run, defaultNames(), "203.0.113.4")
 	if err == nil {
 		t.Fatal("expected error to propagate, got nil")
 	}
@@ -543,7 +544,7 @@ func TestNftDelAllow_ElementAbsent_ReturnsSentinel(t *testing.T) {
 	run := func(_ context.Context, _ []byte) error {
 		return fmt.Errorf("nft -f: exit status 1\nError: element does not exist")
 	}
-	err := nftDelAllow(context.Background(), run, "10.0.0.0/8")
+	err := nftDelAllow(context.Background(), run, defaultNames(), "10.0.0.0/8")
 	if !errors.Is(err, errElementAbsent) {
 		t.Errorf("expected errElementAbsent from nftDelAllow, got: %v", err)
 	}
@@ -842,5 +843,133 @@ func TestDispatch_AddNftFailure_SkipsKill(t *testing.T) {
 	}
 	if len(ssMock.calls) != 0 {
 		t.Errorf("ss -K must not be invoked when nftAdd fails, got calls: %v", ssMock.calls)
+	}
+}
+
+// defaultNames returns the default nftables names for tests.
+func defaultNames() nftnames.Names {
+	n, _ := nftnames.Resolve("", "")
+	return n
+}
+
+// ── Custom table/set names: switch, pin, reject (issue #268) ─────────────────
+
+// TestDispatch_CustomNames_SwitchAndPin drives the full name lifecycle: the
+// first request carrying custom names switches the enforcer off the boot
+// defaults (init script for the new table, cache reload, default table
+// removed), and every later request naming anything else is rejected with an
+// actionable error.
+func TestDispatch_CustomNames_SwitchAndPin(t *testing.T) {
+	mock := &mockNftCalls{}
+	srv := startTestServer(t, mock)
+	srv.listFn = func(_ context.Context, _ nftnames.Names) ([]string, error) {
+		return []string{"198.51.100.7"}, nil // pre-existing entry in the custom table
+	}
+
+	resp := doRPC(t, srv.sockPath(), enforce.Request{
+		Verb: "add", IP: "203.0.113.9", Table: "inet mytable", Set: "myblocked",
+	})
+	if !resp.OK {
+		t.Fatalf("custom-name add failed: %s", resp.Error)
+	}
+
+	joined := strings.Join(mock.scripts, "\n---\n")
+	for _, want := range []string{
+		"add table inet mytable",
+		"add set inet mytable myblocked {",
+		"add set inet mytable myblocked6 {",
+		"add rule inet mytable prerouting ip saddr @allowed accept",
+		"delete table inet ezyshield",
+		"add element inet mytable myblocked { 203.0.113.9 }",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("switch scripts missing %q\nscripts:\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "add element inet ezyshield") {
+		t.Errorf("element written to the DEFAULT table after switch:\n%s", joined)
+	}
+
+	// Cache was reloaded from the custom table and includes the new element.
+	list := doRPC(t, srv.sockPath(), enforce.Request{Verb: "list", Table: "inet mytable", Set: "myblocked"})
+	if !list.OK {
+		t.Fatalf("list failed: %s", list.Error)
+	}
+	got := append([]string{}, list.IPs...)
+	sort.Strings(got)
+	if want := []string{"198.51.100.7", "203.0.113.9"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("cache after switch = %v, want %v", got, want)
+	}
+
+	// Pinned: a request for the defaults (e.g. an operator reverting config
+	// without restarting the helper) is rejected, never silently applied.
+	def := doRPC(t, srv.sockPath(), enforce.Request{Verb: "add", IP: "203.0.113.10"})
+	if def.OK {
+		t.Fatal("default-named request accepted after pinning custom names")
+	}
+	if !strings.Contains(def.Error, "restart ezyshield-enforcer") {
+		t.Errorf("pin-conflict error not actionable: %s", def.Error)
+	}
+}
+
+// TestDispatch_DefaultPinRejectsCustom covers the reverse order: an old-style
+// request (no name fields) pins the defaults, after which custom names are
+// rejected until the helper restarts.
+func TestDispatch_DefaultPinRejectsCustom(t *testing.T) {
+	mock := &mockNftCalls{}
+	srv := startTestServer(t, mock)
+
+	if resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "add", IP: "203.0.113.1"}); !resp.OK {
+		t.Fatalf("default add failed: %s", resp.Error)
+	}
+	resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "add", IP: "203.0.113.2", Table: "inet other"})
+	if resp.OK {
+		t.Fatal("custom-name request accepted after defaults were pinned")
+	}
+	if !strings.Contains(resp.Error, "restart ezyshield-enforcer") {
+		t.Errorf("pin-conflict error not actionable: %s", resp.Error)
+	}
+}
+
+// TestDispatch_InvalidNamesRejected: hostile name strings never reach script
+// generation — rejected at the trust boundary with no nft call.
+func TestDispatch_InvalidNamesRejected(t *testing.T) {
+	mock := &mockNftCalls{}
+	srv := startTestServer(t, mock)
+
+	for _, req := range []enforce.Request{
+		{Verb: "add", IP: "203.0.113.1", Table: "inet x; flush ruleset"},
+		{Verb: "add", IP: "203.0.113.1", Table: "ip mytable"},
+		{Verb: "add", IP: "203.0.113.1", Set: "allowed"},
+		{Verb: "list", Set: "bad{name"},
+	} {
+		resp := doRPC(t, srv.sockPath(), req)
+		if resp.OK {
+			t.Errorf("hostile names accepted: %+v", req)
+		}
+	}
+	if len(mock.scripts) != 0 {
+		t.Errorf("nft was invoked despite invalid names:\n%s", strings.Join(mock.scripts, "\n"))
+	}
+}
+
+// TestDispatch_Caps: the capability probe advertises custom-name support and
+// works regardless of pin state (it must remain usable for version probing).
+func TestDispatch_Caps(t *testing.T) {
+	mock := &mockNftCalls{}
+	srv := startTestServer(t, mock)
+
+	resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "caps"})
+	if !resp.OK {
+		t.Fatalf("caps failed: %s", resp.Error)
+	}
+	found := false
+	for _, f := range resp.Features {
+		if f == enforce.FeatureCustomNames {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("caps features = %v, want %q present", resp.Features, enforce.FeatureCustomNames)
 	}
 }

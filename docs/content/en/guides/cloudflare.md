@@ -60,7 +60,7 @@ another in rulesets mode is a perfectly normal setup.
 Save the API token as an environment variable:
 
 ```bash
-export EZYSHIELD_CF_TOKEN="your_api_token_here"
+export CLOUDFLARE_API_TOKEN="your_api_token_here"
 ```
 
 Add to `config.yaml`:
@@ -68,7 +68,7 @@ Add to `config.yaml`:
 ```yaml
 enforce:
   cloudflare:
-    api_token: env:EZYSHIELD_CF_TOKEN
+    api_token: env:CLOUDFLARE_API_TOKEN
     mode: lists
     account_id: your_account_id_32_hex_chars
     # Optional: auto-manage WAF rules per zone
@@ -140,14 +140,14 @@ For deployments that want per-zone control or cannot use account-level tokens:
 1. Go to **Zone → API Tokens** (in the zone dashboard)
 2. Create a token with:
    - **Zone → Firewall → Edit** on each zone
-3. Save the token as `EZYSHIELD_CF_TOKEN`
+3. Save the token as `CLOUDFLARE_API_TOKEN`
 
 ### Step 2: Configure EzyShield
 
 ```yaml
 enforce:
   cloudflare:
-    api_token: env:EZYSHIELD_CF_TOKEN
+    api_token: env:CLOUDFLARE_API_TOKEN
     mode: rulesets
     zone_ids:
       - zone_1
@@ -257,7 +257,7 @@ With more than one account, every entry needs a unique `name` (the wizard
 enforces this, and offers to name a pre-existing unnamed entry). Each account
 gets independent list/rule management and per-account status in
 `test enforcer cloudflare` and `doctor`. Logs show
-`enforce/cloudflare[client_a]` and `enforce/cloudflare[client_b]` for clarity.
+`cloudflare[client_a]` and `cloudflare[client_b]` as the enforcer name for clarity.
 
 ## Rate Limiting
 
@@ -295,9 +295,9 @@ Cloudflare enforcer (mode: lists): pass
 ────────────────────────────────────
 ✓ Token validity: Token ID: abc...def, status: active
 ✓ Account access: Account ID: 0123456789abcdef
-✓ List access (read): List "ezyshield_blocked" found (147 items, ID: lstxxxxx)
-✓ Zone WAF access: Zone example.com (zone_id: aaa111) — WAF rule access OK
-✗ Zone WAF access: Zone shop.example.org (zone_id: ccc333) — 403 Forbidden
+✓ List access (read): List "ezyshield_blocked" found (ID: lstxxxxx, 147 items)
+✓ Zone WAF access: Zone aaa111 — WAF rule access OK (2 custom rule(s) in use)
+✗ Zone WAF access: Zone ccc333 — 403 Forbidden
   └─ Ensure token has Zone:Firewall Services:Edit on this zone
 
 Result: 4/5 checks passed, 1 failed
@@ -309,6 +309,6 @@ Result: 4/5 checks passed, 1 failed
 
 ## See Also
 
-- ADR-0002: Cloudflare Enforcement Strategy (see ezy-shield repo `docs/internal/adr/`)
+- ADR-0002: Cloudflare edge enforcement — IP Access Rules → Rulesets → Lists (see ezy-shield repo `docs/internal/adr/`)
 - [Cloudflare API Docs: Custom IP Lists](https://developers.cloudflare.com/api/operations/lists-list-lists)
 - [Cloudflare Dashboard](https://dash.cloudflare.com)

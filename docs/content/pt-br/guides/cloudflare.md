@@ -61,7 +61,7 @@ perfeitamente normal.
 Salve o token de API como variável de ambiente:
 
 ```bash
-export EZYSHIELD_CF_TOKEN="seu_token_api_aqui"
+export CLOUDFLARE_API_TOKEN="seu_token_api_aqui"
 ```
 
 Adicione ao `config.yaml`:
@@ -69,7 +69,7 @@ Adicione ao `config.yaml`:
 ```yaml
 enforce:
   cloudflare:
-    api_token: env:EZYSHIELD_CF_TOKEN
+    api_token: env:CLOUDFLARE_API_TOKEN
     mode: lists
     account_id: seu_account_id_32_caracteres_hex
     # Opcional: gerenciar regras WAF automaticamente por zone
@@ -87,7 +87,7 @@ enforce:
 Execute o comando de diagnóstico:
 
 ```bash
-ezyshield doctor cloudflare
+ezyshield test enforcer cloudflare
 ```
 
 Este comando irá:
@@ -141,14 +141,14 @@ Para implantações que querem controle por zone ou não podem usar tokens accou
 1. Vá em **Zone → API Tokens** (no painel da zone)
 2. Crie um token com:
    - **Zone → Firewall → Edit** em cada zone
-3. Salve o token como `EZYSHIELD_CF_TOKEN`
+3. Salve o token como `CLOUDFLARE_API_TOKEN`
 
 ### Passo 2: Configurar EzyShield
 
 ```yaml
 enforce:
   cloudflare:
-    api_token: env:EZYSHIELD_CF_TOKEN
+    api_token: env:CLOUDFLARE_API_TOKEN
     mode: rulesets
     zone_ids:
       - zone_1
@@ -211,7 +211,7 @@ Isso é esperado se seu token de API tiver apenas Account Filter Lists:Edit (nã
 Verifique:
 1. `zone_ids` está configurado em `config.yaml`
 2. Seu token tem permissão `Zone → Firewall Services → Edit`
-3. Execute `ezyshield doctor cloudflare` para verificar erros de permissão
+3. Execute `ezyshield test enforcer cloudflare` para verificar erros de permissão
 4. Verifique os logs: `ezyshield status` → procure por entradas da Cloudflare
 
 ### "List at capacity" (10k items)
@@ -258,7 +258,7 @@ Com mais de uma conta, cada entrada precisa de um `name` único (o wizard
 garante isso, e se oferece para nomear uma entrada pré-existente sem nome).
 Cada conta recebe gerenciamento independente de listas/regras e status
 por conta em `test enforcer cloudflare` e `doctor`. Os logs mostram
-`enforce/cloudflare[cliente_a]` e `enforce/cloudflare[cliente_b]` para clareza.
+`cloudflare[cliente_a]` e `cloudflare[cliente_b]` como o nome do enforcer para clareza.
 
 ## Limitação de Taxa
 
@@ -296,9 +296,9 @@ Cloudflare enforcer (mode: lists): pass
 ────────────────────────────────────
 ✓ Token validity: Token ID: abc...def, status: active
 ✓ Account access: Account ID: 0123456789abcdef
-✓ List access (read): List "ezyshield_blocked" found (147 items, ID: lstxxxxx)
-✓ Zone WAF access: Zone example.com (zone_id: aaa111) — WAF rule access OK
-✗ Zone WAF access: Zone shop.example.org (zone_id: ccc333) — 403 Forbidden
+✓ List access (read): List "ezyshield_blocked" found (ID: lstxxxxx, 147 items)
+✓ Zone WAF access: Zone aaa111 — WAF rule access OK (2 custom rule(s) in use)
+✗ Zone WAF access: Zone ccc333 — 403 Forbidden
   └─ Ensure token has Zone:Firewall Services:Edit on this zone
 
 Result: 4/5 checks passed, 1 failed
@@ -310,6 +310,6 @@ Result: 4/5 checks passed, 1 failed
 
 ## Veja Também
 
-- ADR-0002: Estratégia de Bloqueio na Cloudflare (ver repositório ezy-shield `docs/internal/adr/`)
+- ADR-0002: Cloudflare edge enforcement — IP Access Rules → Rulesets → Lists (ver repositório ezy-shield `docs/internal/adr/`)
 - [Documentação da API Cloudflare: Custom IP Lists](https://developers.cloudflare.com/api/operations/lists-list-lists)
 - [Painel da Cloudflare](https://dash.cloudflare.com)

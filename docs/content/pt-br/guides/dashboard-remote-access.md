@@ -50,7 +50,7 @@ palavra só:
 
 ```
 Host ezyshield-dashboard
-    HostName seu-servidor.com
+    HostName servidor.exemplo.com
     User operador
     LocalForward 9090 127.0.0.1:9090
     # Opcional: manter conexão viva por NATs.

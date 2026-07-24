@@ -50,10 +50,13 @@ sudo dnf install ezyshield
 > ponta. Assinatura por pacote rpm chega com o futuro trabalho de assinatura
 > de artefatos, quando `gpgcheck=1` vira o padrão documentado.
 
-Fingerprint da chave de assinatura (confira após importar com `gpg --show-keys`):
+Depois de importar a chave, confira o fingerprint você mesmo em vez de
+confiar em um valor colado num documento (chaves podem rotacionar) —
+inspecione a chave importada e compare o fingerprint com o valor obtido por
+um canal confiável antes de confiar no repositório:
 
-```
-810E EEB0 1802 38F7 E800  4A9E E1AD 3D15 A121 3612
+```bash
+gpg --show-keys /usr/share/keyrings/ezyshield.gpg
 ```
 
 Para trocar para o canal estável quando o v0.1.0 sair, troque `testing`

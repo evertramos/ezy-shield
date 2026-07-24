@@ -27,8 +27,9 @@ Get EzyShield running on your server in under 5 minutes.
 curl -sfL https://get.ezyshield.com | sudo sh
 ```
 
-This downloads the latest signed binaries (`ezyshield` and `ezyshield-enforcer`),
-verifies checksums, and installs them to `/usr/local/bin/`.
+This downloads the latest checksum-verified binaries (`ezyshield` and
+`ezyshield-enforcer`), verifies checksums, and installs them to
+`/usr/local/bin/`.
 
 To install a specific version:
 
@@ -109,9 +110,9 @@ Expected output:
 [PASS] config.yaml: parses
 [PASS] policy.yaml: exists
 [PASS] policy.yaml: parses
-[PASS] nft binary: present
+[PASS] nft: binary present
 [PASS] journald: readable
-[PASS] enforcer socket: reachable
+[PASS] enforcer: socket connectivity
 ```
 
 ---
@@ -145,8 +146,11 @@ enforce:
 ```
 
 The privileged helper (`ezyshield-enforcer`) handles all firewall writes via a
-unix socket. The daemon re-syncs the full ban set to the enforcer at startup,
-so blocks survive restarts of either process.
+unix socket. The daemon re-syncs the full ban set to the enforcer whenever the
+**daemon** restarts, so blocks survive daemon restarts. Restarting only the
+`ezyshield-enforcer` helper does not trigger that re-sync on its own — the ban
+set catches up on the next periodic ban-expiry tick, or the next daemon
+restart.
 
 ### AI (optional)
 

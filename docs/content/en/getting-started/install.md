@@ -49,10 +49,13 @@ sudo dnf install ezyshield
 > Per-package rpm signatures arrive with the upcoming artifact-signing work,
 > at which point `gpgcheck=1` becomes the documented default.
 
-Signing key fingerprint (verify after import with `gpg --show-keys`):
+After importing the key, verify its fingerprint yourself rather than trusting
+a value pasted into a doc (keys can rotate) — inspect the imported key and
+compare the fingerprint against the value you obtained through a trusted
+channel before relying on the repository:
 
-```
-810E EEB0 1802 38F7 E800  4A9E E1AD 3D15 A121 3612
+```bash
+gpg --show-keys /usr/share/keyrings/ezyshield.gpg
 ```
 
 To switch to the stable channel once v0.1.0 ships, replace `testing` with

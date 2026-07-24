@@ -11,11 +11,10 @@ daemon. It gives operators a browser view of daemon state, active
 bans, allowlist entries, the recent audit trail and the strike
 timeline, plus in-page controls for manual ban / unban / allow.
 
-**Status: Phase 4 (final).** Authentication, live views, event log,
-strike timeline, WebSocket live updates, CSRF-protected write forms,
-per-account login throttle and a per-user session cap. Server-side
-redaction and multi-user RBAC are explicitly out of scope for this
-release.
+It provides authentication, live views, an event log, the strike
+timeline, WebSocket live updates, CSRF-protected write forms, a
+per-account login throttle, and a per-user session cap. Server-side
+redaction and multi-user RBAC are out of scope for this release.
 
 ---
 
@@ -24,8 +23,8 @@ release.
 The dashboard binds **exclusively to a loopback address** — `127.0.0.1`,
 `::1` or the literal `localhost`. Any other bind (`0.0.0.0`, a public
 interface, etc.) is refused at startup, both in
-`internal/dashboard.New()` and again in `Server.Run()`. This is a hard
-rule from `AGENTS.md §2` and `docs/internal/SECURITY-REVIEW.md §6`. The
+`internal/dashboard.New()` and again in `Server.Run()` — a hard
+invariant, checked twice so a config mistake can't expose it. The
 dashboard is therefore reachable only from the same host, and remote
 access is by design an *operator concern* handled outside the daemon.
 
@@ -299,8 +298,7 @@ Read-only — no forms.
 - Ban / unban / allow POST handlers parse the `ip` field with
   `netip.ParsePrefix` (falling back to `netip.ParseAddr` → /32 or
   /128) *before* any daemon RPC — hostnames, oversized strings and
-  garbage characters are rejected at the dashboard edge
-  (`SECURITY-REVIEW.md §1`).
+  garbage characters are rejected at the dashboard edge.
 - Operator-supplied reasons are prefixed with `dashboard:admin` so
   the daemon's `audit_log` distinguishes dashboard writes from CLI
   verbs. Empty reason produces the bare tag; filled reason produces

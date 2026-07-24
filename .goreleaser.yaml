@@ -95,19 +95,20 @@ signs:
       - --output-signature=${signature}
       - ${artifact}
 
-# SBOMs (syft, SPDX JSON) per artifact class, attached to the release.
-# `archive` covers the tarballs, `binary` the raw ezyshield-<os>-<arch>
-# binaries get.sh installs, `package` the deb/rpm files.
-sboms:
-  - id: sbom-archives
-    artifacts: archive
-    documents: ["${artifact}.spdx.json"]
-  - id: sbom-binaries
-    artifacts: binary
-    documents: ["${artifact}.spdx.json"]
-  - id: sbom-packages
-    artifacts: package
-    documents: ["${artifact}.spdx.json"]
+# SBOMs (syft, SPDX JSON) per artifact class — disabled due to goreleaser v2
+# upload conflicts (422 already_exists + 404 on retry). Can re-enable once
+# goreleaser fixes the issue or we switch to a different SBOM strategy.
+# Disabled 2026-07-24 after multiple failed releases.
+# sboms:
+#   - id: sbom-archives
+#     artifacts: archive
+#     documents: ["${artifact}.spdx.json"]
+#   - id: sbom-binaries
+#     artifacts: binary
+#     documents: ["${artifact}.spdx.json"]
+#   - id: sbom-packages
+#     artifacts: package
+#     documents: ["${artifact}.spdx.json"]
 
 nfpms:
   - id: packages
@@ -162,6 +163,9 @@ nfpms:
 
 changelog:
   use: github-native
+
+sbom:
+  - artifacts: none
 
 release:
   # rc/alpha/beta tags become prereleases and never take the "latest" mark —

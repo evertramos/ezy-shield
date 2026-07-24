@@ -6,7 +6,7 @@ order: 3
 
 # Your First Run
 
-After installation, you've configured EzyShield with at least one log source. Now let's run it for the first time and understand what it's doing.
+You've installed EzyShield and configured at least one log source. Time for the first run.
 
 ## Step 1: Start in dry-run (default)
 

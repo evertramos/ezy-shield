@@ -6,7 +6,7 @@ order: 3
 
 # Sua Primeira Execução
 
-Após a instalação, você configurou o EzyShield com pelo menos uma fonte de log. Agora vamos executá-lo pela primeira vez e entender o que ele está fazendo.
+Você instalou o EzyShield e configurou pelo menos uma fonte de log. Hora da primeira execução.
 
 ## Passo 1: Comece em dry-run (padrão)
 

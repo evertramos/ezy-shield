@@ -27,7 +27,8 @@ A única coisa que você precisa acertar: **o IP real do visitante tem que chega
 aos logs.** Atrás do Docker, seu proxy nginx enxerga o IP da bridge do Docker, a
 menos que esteja configurado para registrar o `X-Forwarded-For`. A seção 3 cuida
 disso — se você pular essa parte, o EzyShield vai tentar banir a rede interna do
-Docker. (O anti-lockout evita o pior, mas corrija direito.)
+Docker. (O anti-lockout só protege seu peer SSH atual e os `admin_cidrs`
+configurados — isso não vai evitar esse caso. Corrija a fonte do log direito.)
 
 ---
 
@@ -48,13 +49,6 @@ ezyshield version
 ```
 
 Ou instale o `.deb`/`.rpm` assinado — veja o [guia de instalação](../getting-started/install.md).
-
-Enquanto o instalador não existe, compile a partir do código-fonte:
-
-```bash
-git clone https://github.com/youruser/yourrepo.git && cd yourrepo
-make build && sudo install -m0755 ./bin/ezyshield /usr/local/bin/ezyshield
-```
 
 ---
 
@@ -272,7 +266,7 @@ atacantes antes mesmo de chegarem ao seu host:
 enforce:
   nftables: {}
   cloudflare:
-    api_token: env:CF_API_TOKEN     # restrinja o escopo a "Account Filter Lists: Edit"
+    api_token: env:CLOUDFLARE_API_TOKEN     # restrinja o escopo a "Account Filter Lists: Edit"
     account_id: "your-account-id"   # obrigatório no modo padrão "lists"
 ```
 
@@ -290,7 +284,7 @@ O rule engine funciona sem IA nenhuma. Para deixar a IA julgar os casos ambíguo
 ```yaml
 ai:
   provider: anthropic            # anthropic | openai | ollama
-  model: claude-3-5-haiku-latest
+  model: claude-haiku-4-5-20251001
   api_key: env:ANTHROPIC_API_KEY
   token_budget_daily: 50000      # teto diário rígido; o rule engine assume se for excedido
 ```
@@ -339,12 +333,10 @@ opcionalmente — os dados).
 | Sintoma | Causa provável | Correção |
 |---|---|---|
 | Está banindo `172.x.x.x` / IPs do Docker | o proxy loga o IP do container, não do cliente | configure o `real_ip` do nginx (§3b) |
-| Nada é detectado | caminho ou formato de log errado | `ezyshield doctor`; confira `format: json` vs `combined` |
+| Nada é detectado | caminho de log errado ou o parser não reconhece o formato | `ezyshield doctor`; confira `path`/`parser` do collector em `config.yaml` |
 | Fiquei brevemente trancado para fora | allowlist sem o seu IP | o anti-lockout deveria impedir; adicione seu IP à `allowlist` |
-| Telegram em silêncio | token/chat_id ou env não carregado | `ezyshield test notifier telegram`; confira as permissões do `ezyshield.env` |
+| Telegram em silêncio | token/chat_id ou env não carregado | `ezyshield test notifier telegram`; confira as permissões do `.env` |
 | Visitantes reais bloqueados | o proxy confia no XFF de fonte não confiável | restrinja `set_real_ip_from` a upstreams que você controla |
-| Aviso "this might be a Cloudflare IP" | os logs mostram a edge do CDN, não o visitante | corrija o `real_ip` do nginx (§3b); nunca aplique ban duro numa faixa de CDN |
-| Aviso "source is internal/private" | ataque de dentro da LAN | possibilidade real (insider/host comprometido) — investigue a máquina, não apenas bana |
 
 ---
 
@@ -353,6 +345,6 @@ opcionalmente — os dados).
 1. Instale o binário **no host** (não num container).
 2. Faça bind-mount do access log do seu proxy para o host; garanta que ele loga o IP **real** do cliente.
 3. `ezyshield init`, coloque seu IP na allowlist, mantenha `armed: false`.
-4. `ezyshield dry-run` por um dia, confirme que está fazendo sentido.
+4. `sudo ezyshield run` por um dia (modo dry-run; `armed: false`), confirme que está fazendo sentido.
 5. Mude para `armed: true`, `systemctl enable --now ezyshield`.
 6. (Opcional) adicione bloqueio na edge da Cloudflare e/ou análise por IA.

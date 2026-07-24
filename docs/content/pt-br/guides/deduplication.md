@@ -84,7 +84,7 @@ O EzyShield usa um modelo de detecção em duas camadas para capturar tanto atac
 
 ### Ajustando Limiares
 
-Para customizar os limiares, aponte `rules_path` no config.yaml para o seu próprio arquivo de regras (comece a partir do `/etc/ezyshield/rules.yaml.example` distribuído) e ajuste os campos `window` e `threshold` — as regras embutidas fazem parte do binário, então editar arquivos do repositório não tem efeito em um daemon instalado:
+Para customizar os limiares, sobrescreva a regra embutida com um drop-in em `/etc/ezyshield/rules.d/` (mesmo `name` da regra, para que ela substitua o padrão distribuído) e ajuste os campos `window` e `threshold` — as regras embutidas fazem parte do binário, então editar arquivos do repositório não tem efeito em um daemon instalado. Veja [Customizando Regras de Detecção](rules-customization.md) para o mecanismo completo:
 
 ```yaml
 - name: http_wp_probe_sustained

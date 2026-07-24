@@ -53,7 +53,7 @@ with a single word:
 
 ```
 Host ezyshield-dashboard
-    HostName your-server.com
+    HostName server.example.com
     User operator
     LocalForward 9090 127.0.0.1:9090
     # Optional: keep the connection alive through NATs.

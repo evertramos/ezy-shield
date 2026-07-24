@@ -83,7 +83,7 @@ EzyShield uses a two-tier detection model to catch both rapid attackers and "low
 
 ### Adjusting Thresholds
 
-To customize thresholds, point `rules_path` in config.yaml at your own rules file (start from the shipped `/etc/ezyshield/rules.yaml.example`) and adjust the `window` and `threshold` fields — the built-in rules are embedded in the binary, so editing repo files has no effect on an installed daemon:
+To customize thresholds, override the built-in rule with a drop-in in `/etc/ezyshield/rules.d/` (same rule `name`, so it replaces the shipped default) and adjust the `window` and `threshold` fields — the built-in rules are embedded in the binary, so editing repo files has no effect on an installed daemon. See [Customizing Detection Rules](rules-customization.md) for the full mechanism:
 
 ```yaml
 - name: http_wp_probe_sustained

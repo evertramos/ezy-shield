@@ -296,7 +296,7 @@ override — allowlist and anti-lockout are hard rules, and the rate-limit
 knob is the policy's `max_bans_per_minute`.
 
 ```bash
-# Ban using the policy strike table (strike #1 TTL)
+# Ban permanently
 sudo ezyshield ban 203.0.113.42
 
 # Explicit duration
@@ -308,7 +308,7 @@ sudo ezyshield ban 203.0.113.0/24
 
 | Flag | Description |
 |------|-------------|
-| `--ttl` | ban duration (`5m`, `24h`, `7d`); empty = policy strike table |
+| `--ttl` | ban duration (`5m`, `24h`, `7d`); empty = permanent |
 | `--reason` | free-text reason stored in the audit log |
 | `--socket` | control socket path override |
 

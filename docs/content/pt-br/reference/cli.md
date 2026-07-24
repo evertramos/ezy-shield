@@ -307,7 +307,7 @@ log como `ban_refused`. Não há override — allowlist e anti-lockout são
 hard rules, e o botão do rate limit é o `max_bans_per_minute` da policy.
 
 ```bash
-# Banir usando a tabela de strikes da policy (TTL do strike 1)
+# Banir permanentemente
 sudo ezyshield ban 203.0.113.42
 
 # Duração explícita
@@ -319,7 +319,7 @@ sudo ezyshield ban 203.0.113.0/24
 
 | Flag | Descrição |
 |------|-----------|
-| `--ttl` | duração do banimento (`5m`, `24h`, `7d`); vazio = tabela de strikes da policy |
+| `--ttl` | duração do banimento (`5m`, `24h`, `7d`); vazio = permanente |
 | `--reason` | motivo em texto livre armazenado no log de auditoria |
 | `--socket` | override do caminho do socket de controle |
 

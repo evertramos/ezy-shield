@@ -17,7 +17,9 @@ type SocketRequest struct {
 	// IP is the target for ban/unban/allow/report. ban/unban/allow accept
 	// either a bare address ("1.2.3.4") or a CIDR ("203.0.113.0/24"); a bare
 	// address is treated as a host prefix (/32 or /128). report accepts only
-	// a bare address; an empty IP selects the offender-listing mode.
+	// a bare address; an empty IP selects the offender-listing mode. events
+	// accepts an optional bare address that filters the audit history to that
+	// one IP (exact match); an empty IP returns all recent actions.
 	IP string `json:"ip,omitempty"`
 	// TTL is a Go duration string (e.g. "5m", "24h") for the ban verb.
 	// Zero or absent means the policy strike table decides.

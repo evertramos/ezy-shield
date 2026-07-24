@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/evertramos/ezy-shield/internal/ownership"
+	"github.com/evertramos/ezy-shield/internal/store"
 	"github.com/evertramos/ezy-shield/pkg/sdk"
 )
 
@@ -590,7 +591,22 @@ func (d *Daemon) handleEvents(ctx context.Context, req SocketRequest) SocketResp
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := d.store.ListAuditLog(ctx, limit)
+	var (
+		rows []store.AuditEntry
+		err  error
+	)
+	if req.IP != "" {
+		// --ip filter: exact-match a single address. AuditLogForIP matches the
+		// ip column literally, so only a bare address is meaningful here — rows
+		// recorded against a CIDR prefix target a range, not one host.
+		addr, perr := netip.ParseAddr(req.IP)
+		if perr != nil {
+			return SocketResponse{Error: fmt.Sprintf("events: invalid ip %q: expected a bare address", req.IP)}
+		}
+		rows, err = d.store.AuditLogForIP(ctx, addr, limit)
+	} else {
+		rows, err = d.store.ListAuditLog(ctx, limit)
+	}
 	if err != nil {
 		return SocketResponse{Error: fmt.Sprintf("list audit_log: %v", err)}
 	}

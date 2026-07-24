@@ -12,11 +12,11 @@ daemon, dos banimentos ativos, entradas da allowlist, do audit trail
 recente e do timeline de strikes, mais controles em página para
 ban / unban / allow manuais.
 
-**Status: Fase 4 (final).** Autenticação, visões ao vivo, event log,
-timeline de strikes, updates ao vivo via WebSocket, forms de escrita
-protegidos por CSRF, throttle de login por conta e limite de sessões
-por usuário. Redação server-side e RBAC multi-usuário estão fora do
-escopo deste release.
+Ele oferece autenticação, visões ao vivo, event log, timeline de
+strikes, updates ao vivo via WebSocket, forms de escrita protegidos
+por CSRF, throttle de login por conta e limite de sessões por usuário.
+Redação server-side e RBAC multi-usuário estão fora do escopo deste
+release.
 
 ---
 
@@ -25,10 +25,10 @@ escopo deste release.
 O dashboard escuta **exclusivamente em endereços de loopback** —
 `127.0.0.1`, `::1` ou o literal `localhost`. Qualquer outro bind
 (`0.0.0.0`, interface pública, etc.) é recusado na inicialização,
-tanto em `internal/dashboard.New()` quanto em `Server.Run()`. Essa é
-uma regra dura do `AGENTS.md §2` e do
-`docs/internal/SECURITY-REVIEW.md §6`. O dashboard só é alcançável
-a partir do próprio host, e acesso remoto é, por design, uma
+tanto em `internal/dashboard.New()` quanto em `Server.Run()` — um
+invariante rígido, checado duas vezes para que um erro de config não
+consiga expô-lo. O dashboard só é alcançável a partir do próprio
+host, e acesso remoto é, por design, uma
 *preocupação do operador* — resolvida fora do daemon.
 
 Para acesso remoto, veja o guia dedicado:
@@ -300,8 +300,7 @@ Read-only — não tem forms.
 - Os handlers POST de ban / unban / allow parseiam o campo `ip` com
   `netip.ParsePrefix` (com fallback para `netip.ParseAddr` → /32 ou
   /128) *antes* de qualquer RPC — hostnames, strings gigantes e
-  caracteres inválidos são recusados na borda do dashboard
-  (`SECURITY-REVIEW.md §1`).
+  caracteres inválidos são recusados na borda do dashboard.
 - Reasons vindos do operador são prefixados com `dashboard:admin`
   para que o `audit_log` distinga escritas do dashboard dos verbos
   da CLI. Reason vazio produz o tag puro; reason preenchido produz

@@ -1324,3 +1324,50 @@ func TestAuditSystem_AppendsRow(t *testing.T) {
 		t.Errorf("entries = %+v, want one op=arm ip=system row", entries)
 	}
 }
+
+// TestActiveBans_ExpiredNeverPermanent (issue #279): the three expiry states
+// must stay distinguishable — a ban whose remaining time reached zero is NOT
+// active (skipped; the expiry tick owns deletion) and must never come back
+// disguised as permanent, which both rendered "permanent" in list and
+// re-synced into nftables with no timeout.
+func TestActiveBans_ExpiredNeverPermanent(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestDB(t)
+
+	expired := netip.MustParseAddr("203.0.113.1")
+	perm := netip.MustParseAddr("203.0.113.2")
+	future := netip.MustParseAddr("203.0.113.3")
+
+	// 1ns TTL: expires_at lands in the past by the time we query.
+	if err := s.RecordManualBan(ctx, expired, time.Nanosecond, "expired row"); err != nil {
+		t.Fatalf("seed expired: %v", err)
+	}
+	if err := s.RecordManualBan(ctx, perm, 0, "permanent row"); err != nil {
+		t.Fatalf("seed permanent: %v", err)
+	}
+	if err := s.RecordManualBan(ctx, future, time.Hour, "future row"); err != nil {
+		t.Fatalf("seed future: %v", err)
+	}
+
+	bans, err := s.ActiveBans(ctx)
+	if err != nil {
+		t.Fatalf("ActiveBans: %v", err)
+	}
+	got := make(map[netip.Addr]sdk.Action, len(bans))
+	for _, b := range bans {
+		got[b.IP] = b
+	}
+
+	if _, ok := got[expired]; ok {
+		t.Errorf("expired ban returned as active: %+v", got[expired])
+	}
+	p, ok := got[perm]
+	if !ok || !p.Permanent || p.TTL != 0 {
+		t.Errorf("permanent ban = %+v (ok=%v), want Permanent=true TTL=0", p, ok)
+	}
+	f, ok := got[future]
+	if !ok || f.Permanent || f.TTL <= 0 || f.TTL > time.Hour {
+		t.Errorf("future ban = %+v (ok=%v), want Permanent=false 0<TTL<=1h", f, ok)
+	}
+}

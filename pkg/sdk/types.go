@@ -58,12 +58,18 @@ type Verdict struct {
 
 // Action is what the decision engine decides to do about an IP.
 type Action struct {
-	IP       netip.Addr
-	Op       string // "ban", "unban", "ratelimit", "notify_only"
-	TTL      time.Duration
-	Strike   int // 1..5
-	Reason   string
-	Verdicts []Verdict
+	IP  netip.Addr
+	Op  string // "ban", "unban", "ratelimit", "notify_only"
+	TTL time.Duration
+	// Permanent marks a ban with no expiry (expires_at NULL in the store).
+	// It exists because TTL alone is lossy: a remaining-time that reached
+	// zero and "no expiry at all" must never be conflated (issue #279 — an
+	// expired ban rendered and re-synced as permanent). Additive field on
+	// the §3 contract; TTL is 0 whenever Permanent is true.
+	Permanent bool
+	Strike    int // 1..5
+	Reason    string
+	Verdicts  []Verdict
 }
 
 // Target is the subject of a ban/unban operation.

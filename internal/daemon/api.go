@@ -97,7 +97,9 @@ type StatusData struct {
 // BanEntry is one element in the array returned by the "list" verb.
 type BanEntry struct {
 	IP string `json:"ip"`
-	// TTL is "permanent" or a Go duration string for the remaining time.
+	// TTL is "permanent" (no expiry), a Go duration string for the
+	// remaining time, or — defensively — "expired" (issue #279; the store
+	// normally excludes expired rows before they reach this layer).
 	TTL    string `json:"ttl"`
 	Strike int    `json:"strike"`
 	Reason string `json:"reason"`

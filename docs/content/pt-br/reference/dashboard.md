@@ -67,8 +67,27 @@ primeira execução acontece no primeiríssimo `ezyshield dashboard`:
    ======================================================================
    ```
 
-A senha em claro nunca toca o disco. Se você perder a mensagem,
-apague o `dashboard.db` e reinicie — uma conta nova será gerada.
+Em um terminal interativo, a senha em claro nunca toca o disco. Se
+você perder a mensagem, apague o `dashboard.db` e reinicie — uma
+conta nova será gerada.
+
+**stderr não-interativo (systemd, Docker, cron).** Quando o stderr não
+é um terminal — o caso comum no caminho de instalação documentado — o
+banner acima não é impresso, porque seria capturado literalmente pelo
+journald ou pelo `docker logs`. Em vez disso, a senha em claro é
+gravada uma vez em `<data_dir>/dashboard.first-run-password` (modo
+`0600`), e apenas o caminho do arquivo é impresso no stderr:
+
+```
+EzyShield dashboard: admin account created (username: admin).
+stderr is not a terminal — the initial password was written to:
+  /var/lib/ezyshield/dashboard.first-run-password (mode 0600)
+Read it once and remove it:
+  sudo cat /var/lib/ezyshield/dashboard.first-run-password && sudo rm /var/lib/ezyshield/dashboard.first-run-password
+```
+
+Leia o arquivo uma vez e apague-o — ele não é removido
+automaticamente.
 
 ---
 
@@ -186,8 +205,8 @@ Envelope na rede (JSON, sempre frames de texto UTF-8):
 
 Quando um ciclo de poll traz mais de 10 eventos, o bus colapsa a
 rajada em um único `refresh` e o navegador recarrega a página. Esse
-limite mais a cadência de 3 s deixam a taxa por cliente bem abaixo do
-orçamento de 10 mensagens/segundo definido em `AGENTS.md §2`.
+limite mais a cadência de 3 s mantêm a taxa de mensagens por cliente
+baixa, sem uma rajada ilimitada de frames `audit` individuais.
 
 A reconexão fica com o helper `EzyLive` embutido no layout: back-off
 exponencial começando em 1 s e limitado a 30 s, com um "live dot"

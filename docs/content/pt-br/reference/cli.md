@@ -651,12 +651,22 @@ Os verbos pré-1.0 `test-enforce <name>` e `test-notify <name>` continuam funcio
 |------|-----------|
 | `--json` | Saída em JSON (veja as [convenções globais](#convenções-globais) para os formatos) |
 | `--no-color` | Desabilita a saída colorida (a variável de ambiente `NO_COLOR` também é respeitada) |
-| `--version` | Imprime a versão e sai |
 | `-h, --help` | Mostra o texto de ajuda |
 
 `--config` / `--policy` **não** são globais — existem nos comandos que leem
 esses arquivos (`run`, `config show`, `validate`, `dashboard`), com defaults
 em `/etc/ezyshield`.
+
+### Flags exclusivas do comando raiz
+
+| Flag | Descrição |
+|------|-----------|
+| `-v, --version` | Imprime a versão e sai |
+
+Diferente de `--json`/`--no-color`, `-v`/`--version` só é registrada no
+comando raiz `ezyshield` e **não** é herdada pelos subcomandos — `ezyshield
+ban --version` falha com `unknown flag: --version`. Use `ezyshield version`
+(ou `ezyshield --version`) para checar a versão.
 
 ## Exemplos
 

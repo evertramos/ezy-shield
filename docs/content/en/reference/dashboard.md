@@ -66,8 +66,26 @@ bootstrap happens on the very first `ezyshield dashboard` startup:
    ======================================================================
    ```
 
-The plaintext password never touches disk. If you miss the banner,
-delete `dashboard.db` and restart — a fresh account will be generated.
+On an interactive terminal the plaintext password never touches disk.
+If you miss the banner, delete `dashboard.db` and restart — a fresh
+account will be generated.
+
+**Non-interactive stderr (systemd, Docker, cron).** When stderr is not
+a terminal — the common case for the documented install path — the
+banner above isn't printed, because it would otherwise be captured
+verbatim by journald or `docker logs`. Instead, the plaintext password
+is written once to `<data_dir>/dashboard.first-run-password` (mode
+`0600`), and only that file path is printed to stderr:
+
+```
+EzyShield dashboard: admin account created (username: admin).
+stderr is not a terminal — the initial password was written to:
+  /var/lib/ezyshield/dashboard.first-run-password (mode 0600)
+Read it once and remove it:
+  sudo cat /var/lib/ezyshield/dashboard.first-run-password && sudo rm /var/lib/ezyshield/dashboard.first-run-password
+```
+
+Read the file once and delete it — it is not removed automatically.
 
 ---
 
@@ -186,9 +204,8 @@ Wire envelope (JSON, always UTF-8 text frames):
 
 When a poll cycle finds more than 10 new events the bus coalesces the
 burst into one `refresh` message and the browser reloads the current
-page. That cap plus the 3 s cadence keeps the per-client wire rate
-well under the 10 messages/second dashboard budget from
-`AGENTS.md §2`.
+page. That cap plus the 3 s poll cadence keeps the per-client message
+rate low without an unbounded burst of individual `audit` frames.
 
 Reconnection is handled by the small `EzyLive` helper baked into the
 layout: exponential back-off starting at 1 s and capped at 30 s, with

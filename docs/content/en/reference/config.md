@@ -51,13 +51,39 @@ collectors:
 | `container` | for `docker` | container name, short ID, or full ID |
 | `parser` | no | force a parser: `nginx` \| `ssh` \| `apache` \| `apache-error` \| `traefik` \| `caddy` (default: routed automatically from the source) |
 
+### SSH collector (unit name varies by distro)
+
+The SSH systemd unit name **depends on the distro**: it's `ssh` on
+Debian/Ubuntu and `sshd` on RHEL/CentOS/Fedora/Rocky/Alma, Arch, and
+SUSE. Use whatever name `systemctl status <unit>` resolves on your
+host — an alias that `journalctl -u` doesn't recognize collects zero
+events.
+
+```yaml
+collectors:
+  - kind: journald
+    unit: ssh    # Debian/Ubuntu; use "sshd" on RHEL/CentOS/Arch/SUSE
+```
+
+To read SSH from a file instead of journald, point at your distro's
+auth log — `/var/log/auth.log` (Debian/Ubuntu) or `/var/log/secure`
+(RHEL family). Both timestamp formats are accepted: the legacy syslog
+format (`Jan  1 12:00:00`) and modern ISO-8601
+(`2026-07-13T22:57:35+00:00`).
+
+> **Configure only one SSH collector per host** — journald **or** the
+> file it feeds, never both. Reading both ingests every event twice,
+> which double-counts toward detection thresholds. (An already-banned
+> IP is never banned again, so this never causes duplicate bans, only
+> earlier detection.)
+
 ## enforce
 
 ```yaml
 enforce:
   nftables:
-    table: ezyshield             # default
-    set: banned                  # default
+    table: inet ezyshield        # required
+    set: blocked                 # required
 
   cloudflare:
     api_token: env:CF_API_TOKEN  # secrets are env: references, never inline
@@ -70,11 +96,11 @@ enforce:
 
 ### nftables
 
-| Field | Default | Description |
-|-------|---------|-------------|
-| `table` | `ezyshield` | nftables table (all EzyShield rules live inside it) |
-| `set` | `banned` | set holding banned addresses |
-| `socket` | `/run/ezyshield-enforcer/enforcer.sock` | privileged enforcer helper socket |
+| Field | Required | Description |
+|-------|----------|-------------|
+| `table` | yes — no default | nftables table name. Must currently be set to `inet ezyshield`: the privileged enforcer hardcodes that table and does not read this value |
+| `set` | yes — no default | set holding banned addresses. Must currently be set to `blocked`: the enforcer hardcodes `blocked` (IPv4) / `blocked6` (IPv6) and does not read this value |
+| `socket` | no (default `/run/ezyshield-enforcer/enforcer.sock`) | privileged enforcer helper socket |
 
 ### cloudflare
 
@@ -136,7 +162,7 @@ Optional — with no `ai` block, the deterministic rule engine handles everythin
 # Single provider
 ai:
   provider: anthropic            # anthropic | openai | ollama
-  model: claude-3-5-haiku-latest
+  model: claude-haiku-4-5-20251001
   api_key: env:ANTHROPIC_API_KEY
   ambiguous_band: [30, 75]       # scores in this band consult the AI
   token_budget_daily: 50000      # hard daily cap; rule engine takes over beyond it
@@ -149,7 +175,7 @@ ai:
   providers:
     - name: anthropic
       priority: 1
-      model: claude-3-5-haiku-latest
+      model: claude-haiku-4-5-20251001
       api_key: env:ANTHROPIC_API_KEY
     - name: ollama
       priority: 2
@@ -219,7 +245,9 @@ collectors:
     unit: ssh
 
 enforce:
-  nftables: {}
+  nftables:
+    table: inet ezyshield
+    set: blocked
 ```
 
 ## Secrets

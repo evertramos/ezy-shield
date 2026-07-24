@@ -439,14 +439,21 @@ func (s *DB) ActiveBans(ctx context.Context) ([]sdk.Action, error) {
 		}
 
 		var ttl time.Duration
+		permanent := !expiresAt.Valid // expires_at NULL = no expiry
 		if expiresAt.Valid {
 			et, err := time.Parse(time.RFC3339Nano, expiresAt.String)
 			if err != nil {
 				return nil, fmt.Errorf("store: parse expires_at: %w", err)
 			}
 			remaining := time.Until(et)
-			if remaining < 0 {
-				remaining = 0
+			if remaining <= 0 {
+				// Expired but not yet removed by the ban-expiry tick: not an
+				// active ban — skip it. Clamping to 0 here (the old
+				// behaviour) made it indistinguishable from a permanent ban,
+				// so it rendered as "permanent" in list and was re-synced
+				// into nftables with no timeout (issue #279). Deleting the
+				// row stays the reaper's job.
+				continue
 			}
 			ttl = remaining
 		}
@@ -456,11 +463,12 @@ func (s *DB) ActiveBans(ctx context.Context) ([]sdk.Action, error) {
 			op = "dry_ban"
 		}
 		out = append(out, sdk.Action{
-			IP:     ip,
-			Op:     op,
-			TTL:    ttl,
-			Strike: strikeNum,
-			Reason: reason,
+			IP:        ip,
+			Op:        op,
+			TTL:       ttl,
+			Permanent: permanent,
+			Strike:    strikeNum,
+			Reason:    reason,
 		})
 	}
 	return out, rows.Err()

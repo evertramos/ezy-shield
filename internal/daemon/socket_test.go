@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net"
+	"net/netip"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/evertramos/ezy-shield/internal/config"
 	"github.com/evertramos/ezy-shield/internal/store"
@@ -309,5 +311,47 @@ func TestHandleEvents_RoundTrip(t *testing.T) {
 	}
 	if len(one) != 1 {
 		t.Errorf("limit=1 returned %d rows, want 1", len(one))
+	}
+}
+
+// TestHandleList_ExpiredNeverRendersPermanent (issue #279): `ezyshield list`
+// must say "permanent" only for a genuine no-expiry ban. The expired-but-
+// unreaped row is excluded by the store; the timed ban shows its remaining
+// duration, never the permanent label.
+func TestHandleList_ExpiredNeverRendersPermanent(t *testing.T) {
+	d := newTestDaemonForSocket(t, true)
+	ctx := context.Background()
+
+	if err := d.store.RecordManualBan(ctx, netip.MustParseAddr("203.0.113.1"), time.Nanosecond, "expired"); err != nil {
+		t.Fatalf("seed expired: %v", err)
+	}
+	if err := d.store.RecordManualBan(ctx, netip.MustParseAddr("203.0.113.2"), 0, "really permanent"); err != nil {
+		t.Fatalf("seed permanent: %v", err)
+	}
+	if err := d.store.RecordManualBan(ctx, netip.MustParseAddr("203.0.113.3"), 5*time.Minute, "strike-1 style"); err != nil {
+		t.Fatalf("seed timed: %v", err)
+	}
+
+	resp := callSocket(t, d, SocketRequest{Verb: "list"})
+	if resp.Error != "" {
+		t.Fatalf("list: %s", resp.Error)
+	}
+	var entries []BanEntry
+	if err := json.Unmarshal(resp.Data, &entries); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	ttls := make(map[string]string, len(entries))
+	for _, e := range entries {
+		ttls[e.IP] = e.TTL
+	}
+	if _, ok := ttls["203.0.113.1"]; ok {
+		t.Errorf("expired ban present in list output: ttl=%q", ttls["203.0.113.1"])
+	}
+	if ttls["203.0.113.2"] != "permanent" {
+		t.Errorf("permanent ban ttl = %q, want \"permanent\"", ttls["203.0.113.2"])
+	}
+	if got := ttls["203.0.113.3"]; got == "permanent" || got == "expired" || got == "" {
+		t.Errorf("timed ban ttl = %q, want a remaining duration", got)
 	}
 }

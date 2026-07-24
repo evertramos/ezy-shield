@@ -301,9 +301,18 @@ func (d *Daemon) handleList(ctx context.Context) SocketResponse {
 
 	entries := make([]BanEntry, 0, len(bans))
 	for _, b := range bans {
-		ttl := "permanent"
-		if b.TTL > 0 {
+		// "permanent" only for a genuine no-expiry ban. A remaining TTL of
+		// zero means expired — the store skips those, but render honestly if
+		// one ever slips through; never dress an expired ban as permanent
+		// (issue #279).
+		var ttl string
+		switch {
+		case b.Permanent:
+			ttl = "permanent"
+		case b.TTL > 0:
 			ttl = b.TTL.Round(time.Second).String()
+		default:
+			ttl = "expired"
 		}
 		e := BanEntry{
 			IP:        b.IP.String(),

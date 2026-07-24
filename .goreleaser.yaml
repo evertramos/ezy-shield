@@ -96,15 +96,17 @@ signs:
       - ${artifact}
 
 # SBOMs (syft, SPDX JSON) per artifact class, attached to the release.
-# `archive` covers the tarballs, `binary` the raw ezyshield-<os>-<arch>
-# binaries get.sh installs, `package` the deb/rpm files.
+# `archive` covers the tarballs, `binary` the raw build binaries, `package`
+# the deb/rpm files. Binary artifacts are named just `ezyshield` /
+# `ezyshield-enforcer` on every arch, so their SBOM names must include
+# os/arch or the release upload collides (422 already_exists).
 sboms:
   - id: sbom-archives
     artifacts: archive
     documents: ["${artifact}.spdx.json"]
   - id: sbom-binaries
     artifacts: binary
-    documents: ["${artifact}.spdx.json"]
+    documents: ["{{ .Binary }}-{{ .Os }}-{{ .Arch }}.spdx.json"]
   - id: sbom-packages
     artifacts: package
     documents: ["${artifact}.spdx.json"]

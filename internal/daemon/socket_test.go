@@ -311,3 +311,48 @@ func TestHandleEvents_RoundTrip(t *testing.T) {
 		t.Errorf("limit=1 returned %d rows, want 1", len(one))
 	}
 }
+
+// TestHandleEvents_FilterByIP covers the `list --audit --ip <addr>` path:
+// the events verb with a bare IP must return only that address's audit rows,
+// and reject a non-address filter with a clear error (issue #83).
+func TestHandleEvents_FilterByIP(t *testing.T) {
+	_ = captureSlog(t)
+	d := newTestDaemonForSocket(t, true /* armed */)
+
+	for _, req := range []SocketRequest{
+		{Verb: "ban", IP: "203.0.113.1", TTL: "5m", Reason: "sshd"},
+		{Verb: "ban", IP: "203.0.113.2", TTL: "5m", Reason: "sshd"},
+		{Verb: "unban", IP: "203.0.113.1"},
+	} {
+		if resp := callSocket(t, d, req); !resp.OK {
+			t.Fatalf("seed %q failed: %s", req.Verb, resp.Error)
+		}
+	}
+
+	// Filter to .1 → both the ban and the unban for that host, nothing for .2.
+	resp := callSocket(t, d, SocketRequest{Verb: "events", IP: "203.0.113.1"})
+	if !resp.OK {
+		t.Fatalf("events --ip failed: %s", resp.Error)
+	}
+	var entries []EventEntry
+	if err := json.Unmarshal(resp.Data, &entries); err != nil {
+		t.Fatalf("decode events: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("expected rows for 203.0.113.1, got 0")
+	}
+	for _, e := range entries {
+		if e.IP != "203.0.113.1" {
+			t.Errorf("filter leaked a row for %s, want only 203.0.113.1", e.IP)
+		}
+	}
+
+	// A non-address filter is rejected, not silently treated as "all".
+	bad := callSocket(t, d, SocketRequest{Verb: "events", IP: "not-an-ip"})
+	if bad.OK {
+		t.Error("events with a bogus --ip should fail, but succeeded")
+	}
+	if !strings.Contains(bad.Error, "invalid ip") {
+		t.Errorf("error %q should mention invalid ip", bad.Error)
+	}
+}

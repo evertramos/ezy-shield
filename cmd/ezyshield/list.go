@@ -5,12 +5,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/evertramos/ezy-shield/internal/daemon"
 )
+
+// auditReasonMax caps the untrusted, log-derived reason column in the
+// --audit table so a crafted reason cannot flood the terminal.
+const auditReasonMax = 200
 
 func newListCmd() *cobra.Command {
 	var (
@@ -18,6 +24,9 @@ func newListCmd() *cobra.Command {
 		byCountry  bool
 		byASN      bool
 		allow      bool
+		audit      bool
+		auditIP    string
+		auditLimit int
 	)
 
 	cmd := &cobra.Command{
@@ -28,9 +37,22 @@ func newListCmd() *cobra.Command {
 This is a point-in-time snapshot — to follow events live as they happen
 (detections, strikes, bans) use the 'watch' command instead.
 
-Use --allow to list the persisted allowlist instead, including expiry info.`,
+Use --allow to list the persisted allowlist instead, including expiry info.
+
+Use --audit to print the historical action log (bans, expiries, unbans,
+allows) newest-first, instead of the active-ban snapshot. --ip filters the
+history to one address and --limit caps the number of rows (default 100).`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if audit {
+				if allow || byCountry || byASN {
+					return fmt.Errorf("--audit cannot be combined with --allow/--by-country/--by-asn")
+				}
+				return runListAudit(cmd, socketPath, auditIP, auditLimit)
+			}
+			if auditIP != "" || cmd.Flags().Changed("limit") {
+				return fmt.Errorf("--ip and --limit only apply with --audit")
+			}
 			if allow {
 				return runListAllow(cmd, socketPath)
 			}
@@ -46,8 +68,87 @@ Use --allow to list the persisted allowlist instead, including expiry info.`,
 		"group bans by ASN (requires GeoIP enrichment)")
 	cmd.Flags().BoolVar(&allow, "allow", false,
 		"list allowlist entries instead of bans")
+	cmd.Flags().BoolVar(&audit, "audit", false,
+		"show the historical action log instead of active bans")
+	cmd.Flags().StringVar(&auditIP, "ip", "",
+		"with --audit: filter the history to a single IP address")
+	cmd.Flags().IntVar(&auditLimit, "limit", 100,
+		"with --audit: maximum number of rows to return")
 
 	return cmd
+}
+
+// runListAudit queries the daemon's audit history via the "events" verb and
+// prints it newest-first. --ip narrows to one exact address; --limit caps rows.
+func runListAudit(cmd *cobra.Command, socketPath, ip string, limit int) error {
+	resp, err := daemonRPC(context.Background(), socketPath,
+		daemon.SocketRequest{Verb: "events", IP: ip, Limit: limit})
+	if err != nil {
+		return err
+	}
+
+	var entries []daemon.EventEntry
+	if err := json.Unmarshal(resp.Data, &entries); err != nil {
+		return fmt.Errorf("parse events response: %w", err)
+	}
+
+	if jsonOutput {
+		return writeJSON(cmd.OutOrStdout(), entries)
+	}
+
+	if len(entries) == 0 {
+		msg := "no recorded actions"
+		if ip != "" {
+			msg = "no recorded actions for " + ip
+		}
+		_, err := fmt.Fprintln(cmd.OutOrStdout(), msg)
+		return err
+	}
+
+	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "TIME\tIP\tACTION\tSTRIKE\tTTL\tREASON") //nolint:errcheck
+	for _, e := range entries {
+		// IP and Op are daemon-written (an address/CIDR and a fixed op set);
+		// Reason is the only untrusted, log-derived field, so sanitize it.
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", //nolint:errcheck
+			formatAuditTime(e.RecordedAt), e.IP, e.Op,
+			auditStrike(e.Strike), auditTTL(e.Op, e.TTLSeconds),
+			sanitizeField(e.Reason, auditReasonMax))
+	}
+	return w.Flush()
+}
+
+// formatAuditTime renders a stored RFC 3339 timestamp as "YYYY-MM-DD HH:MM:SS"
+// in UTC. The value is daemon-written and always valid; on the off chance it
+// isn't parseable it is sanitized and returned as-is rather than dropped.
+func formatAuditTime(recordedAt string) string {
+	t, err := time.Parse(time.RFC3339, recordedAt)
+	if err != nil {
+		return sanitizeField(recordedAt, 40)
+	}
+	return t.UTC().Format("2006-01-02 15:04:05")
+}
+
+// auditStrike renders the STRIKE column: the strike number, or "-" for actions
+// that carry none (expiries, unbans, manual permanent bans).
+func auditStrike(n int) string {
+	if n <= 0 {
+		return "-"
+	}
+	return strconv.Itoa(n)
+}
+
+// auditTTL renders the TTL column: a duration for timed bans, "perm" for a ban
+// with TTL 0 (permanent), and "-" for actions that carry no TTL (expiry, unban,
+// allow).
+func auditTTL(op string, ttlSeconds int64) string {
+	if ttlSeconds > 0 {
+		return (time.Duration(ttlSeconds) * time.Second).String()
+	}
+	if op == "ban" {
+		return "perm"
+	}
+	return "-"
 }
 
 func runList(cmd *cobra.Command, socketPath string, byCountry, byASN bool) error {

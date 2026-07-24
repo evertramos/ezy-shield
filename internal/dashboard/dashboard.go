@@ -53,14 +53,20 @@ type Config struct {
 
 // Server is a localhost-only HTTP server for the EzyShield dashboard.
 type Server struct {
-	cfg      Config
-	logger   *slog.Logger
-	store    *authStore
-	sessions *sessionStore
-	throttle *loginThrottle
-	mux      *http.ServeMux
-	srv      *http.Server
-	bus      *eventBus
+	cfg Config
+	// boundAddr is the loopback-verified bind address, copied out of cfg.Addr
+	// once checkLoopback passes in New. Run and Serve consult this field, not
+	// cfg.Addr — nothing in this package writes to it after New returns, so
+	// the loopback-only guarantee survives even if a future refactor adds a
+	// write path to cfg.Addr (see TestRun_BoundAddrFrozen).
+	boundAddr string
+	logger    *slog.Logger
+	store     *authStore
+	sessions  *sessionStore
+	throttle  *loginThrottle
+	mux       *http.ServeMux
+	srv       *http.Server
+	bus       *eventBus
 	// decoyHash is a valid PBKDF2 hash of a random string, computed once at
 	// server construction. When a login POST references an unknown user,
 	// the handler runs verifyPassword against this decoy so both paths pay
@@ -104,6 +110,7 @@ func New(cfg Config) (*Server, error) {
 	}
 	s := &Server{
 		cfg:       cfg,
+		boundAddr: cfg.Addr,
 		logger:    cfg.Logger,
 		store:     store,
 		sessions:  newSessionStore(cfg.SessionTimeout),
@@ -142,16 +149,15 @@ func (s *Server) EnsureAdmin(ctx context.Context) (password string, created bool
 }
 
 // Run binds the listener and serves HTTP until ctx is cancelled.
-// The loopback check is re-run here as defence in depth against callers that
-// mutated cfg.Addr between New and Run.
+// It binds to s.boundAddr, the loopback-verified address frozen at
+// construction time in New — not s.cfg.Addr — so a re-check here is
+// unnecessary: nothing in this package writes to boundAddr after New
+// returns.
 func (s *Server) Run(ctx context.Context) error {
-	if err := checkLoopback(s.cfg.Addr); err != nil {
-		return fmt.Errorf("dashboard: %w", err)
-	}
 	lc := &net.ListenConfig{}
-	ln, err := lc.Listen(ctx, "tcp", s.cfg.Addr)
+	ln, err := lc.Listen(ctx, "tcp", s.boundAddr)
 	if err != nil {
-		return fmt.Errorf("dashboard: listen %s: %w", s.cfg.Addr, err)
+		return fmt.Errorf("dashboard: listen %s: %w", s.boundAddr, err)
 	}
 	return s.serve(ctx, ln)
 }

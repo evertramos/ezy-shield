@@ -410,7 +410,7 @@ func TestDispatch_AllowDel(t *testing.T) {
 
 // TestAllowSetForIP: v4 vs v6 routing.
 func TestAllowSetForIP(t *testing.T) {
-	if s, err := allowSetForIP(defaultNames(), "1.2.3.4"); err != nil || s != "allowed" {
+	if s, err := allowSetForIP(defaultNames(), "203.0.113.4"); err != nil || s != "allowed" {
 		t.Errorf("v4: got %s err=%v", s, err)
 	}
 	if s, err := allowSetForIP(defaultNames(), "::1"); err != nil || s != "allowed6" {
@@ -424,7 +424,7 @@ func TestAllowSetForIP(t *testing.T) {
 // ── nft helpers ───────────────────────────────────────────────────────────────
 
 func TestSetForIP_IPv4(t *testing.T) {
-	set, err := setForIP(defaultNames(), "1.2.3.4")
+	set, err := setForIP(defaultNames(), "203.0.113.4")
 	if err != nil || set != "blocked" {
 		t.Errorf("expected %s, got %s (err=%v)", "blocked", set, err)
 	}
@@ -516,7 +516,7 @@ func TestNftDel_ElementAbsent_ReturnsSentinel(t *testing.T) {
 			run := func(_ context.Context, _ []byte) error {
 				return fmt.Errorf("%s", captured)
 			}
-			err := nftDel(context.Background(), run, defaultNames(), "1.2.3.4")
+			err := nftDel(context.Background(), run, defaultNames(), "203.0.113.4")
 			if !errors.Is(err, errElementAbsent) {
 				t.Errorf("expected errElementAbsent, got: %v", err)
 			}
@@ -528,7 +528,7 @@ func TestNftDel_OtherError_Propagated(t *testing.T) {
 	run := func(_ context.Context, _ []byte) error {
 		return fmt.Errorf("nft -f: exit status 1\npermission denied")
 	}
-	err := nftDel(context.Background(), run, defaultNames(), "1.2.3.4")
+	err := nftDel(context.Background(), run, defaultNames(), "203.0.113.4")
 	if err == nil {
 		t.Fatal("expected error to propagate, got nil")
 	}

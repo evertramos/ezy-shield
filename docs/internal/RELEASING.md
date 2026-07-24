@@ -41,6 +41,7 @@ mark (`release.prerelease: auto`).
 | `ezyshield_<ver>_linux_{amd64,arm64}.tar.gz` | Both binaries + LICENSE/README for manual installs |
 | `ezyshield_<ver>_linux_{amd64,arm64}.{deb,rpm}` | Distro packages (nfpm): binaries in `/usr/bin`, units in `/usr/lib/systemd/system`, config **examples** in `/etc/ezyshield/*.example` (noreplace), postinstall creates the `ezyshield` user/group and 0750 dirs, **never enables/starts units** |
 | `checksums.txt` | SHA-256 for everything above |
+| `ghcr.io/evertramos/ezyshield:<ver>` (+ `:latest` on stable) | Multi-arch container image (amd64+arm64) carrying **both** binaries on a `scratch` base, non-root by default. Pushed to **GHCR** — not attached as a GitHub release asset. See [Container image](#container-image-ghcr). |
 
 ## Package/system layout notes
 
@@ -66,6 +67,49 @@ docker run --rm -v "$PWD/dist:/dist:ro" debian:12 bash -ec \
 The `packages` job in `ci.yaml` runs the same snapshot + container
 install-verify (debian:12 for .deb, rockylinux:9 for .rpm) on every PR, so a
 broken package config fails before a tag ever exists.
+
+## Container image (GHCR)
+
+The official image (issue #101) is built by goreleaser's `dockers_v2:` block
+from `./Dockerfile` and pushed to `ghcr.io/evertramos/ezyshield` on tag push.
+
+- **One image, both binaries, `scratch` base.** The final stage is
+  `FROM scratch` + a CA bundle + zoneinfo + a single non-root account; it
+  carries `ezyshield` and `ezyshield-enforcer` and nothing else (no shell, no
+  libc). `ENTRYPOINT` is the main CLI; run the enforcer with
+  `--entrypoint /usr/local/bin/ezyshield-enforcer` and a runtime
+  `--cap-add NET_ADMIN` (a compose example + user guide are the follow-up).
+- **Non-root by default** (uid/gid `65532`) — the main daemon needs no
+  privileges; the image never bakes in a privileged default.
+- **Multi-arch** `linux/amd64` + `linux/arm64`, stitched into one manifest.
+  The cross-build needs **no QEMU**: the Dockerfile's data stage is pinned to
+  `--platform=$BUILDPLATFORM` (runs natively) and the `scratch` stage only
+  `COPY`s the prebuilt binaries, so nothing executes under the target arch.
+- **Tags**: `:<version>` for every release (rc included); `:latest` only moves
+  on a stable release (empty-template trick mirrors `release.prerelease:auto`).
+- **OCI labels**: static `title`/`description`/`source`/`url`/`licenses`/
+  `vendor` in the Dockerfile; dynamic `version`/`revision`/`created` injected
+  by goreleaser at release time.
+- **No secrets in the image** — config is provided at runtime via mounted
+  files/env. GHCR auth in `release.yaml` uses the job's `GITHUB_TOKEN`
+  (`packages: write`), never a baked credential.
+
+`release.yaml` sets up buildx, logs in to GHCR, then runs goreleaser. The CI
+`packages` job builds the same images from the snapshot (no push) and
+**smoke-tests** the amd64 one: `version`, `doctor` (must run gracefully and
+never panic even with no config/nft/journald), the enforcer binary, and the
+non-root default — so an image regression fails on the PR, before any tag.
+
+Build and smoke-test locally exactly like CI (needs a buildx builder —
+`docker buildx create --use` once):
+
+```bash
+goreleaser release --snapshot --clean --skip=sign,sbom
+IMG=$(jq -r '.[]|select(.type=="Docker Image" and (.name|endswith("-amd64"))).name' dist/artifacts.json | head -1)
+docker run --rm "$IMG" version
+docker run --rm "$IMG" doctor            # FAIL/N/A checks, exits 0, no panic
+docker run --rm --entrypoint /usr/local/bin/ezyshield-enforcer "$IMG" --version
+```
 
 ## Package repositories (packages.ezyshield.com)
 
@@ -116,4 +160,3 @@ docker run --rm -v "$PWD:/src:ro" rockylinux:9 \
 
 - #100 cosign keyless signing + SBOM (adds per-package rpm signatures →
   flip docs to `gpgcheck=1`)
-- #101 GHCR container image

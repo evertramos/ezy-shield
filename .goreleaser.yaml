@@ -1,8 +1,10 @@
-# goreleaser config (issues #97, #98).
+# goreleaser config (issues #97, #98, #100, #101).
 #
 # Local testing (never publishes):
 #   goreleaser check
 #   goreleaser release --snapshot --clean
+# The snapshot also builds the container images (issue #101) locally; nothing
+# is pushed until a real tag runs release.yaml (which logs in to GHCR first).
 #
 # Artifact naming is a compatibility contract: scripts/get.sh downloads the
 # raw binaries by the exact names ezyshield-<os>-<arch> and
@@ -159,6 +161,42 @@ nfpms:
         dependencies: [adduser]
       rpm:
         dependencies: [shadow-utils]
+
+# Official container image (issue #101). One image carries BOTH binaries on a
+# FROM-scratch base (see ./Dockerfile): non-root by default, ENTRYPOINT is the
+# main CLI. dockers_v2 builds every platform and stitches the multi-arch
+# manifest in one step, reusing the binaries goreleaser already built — so the
+# container `version` is byte-identical to the release binaries. Images are
+# only pushed on a real release (release.yaml logs in to GHCR first); the CI
+# `packages` snapshot builds per-arch images locally to smoke-test and pushes
+# nothing.
+dockers_v2:
+  - id: image
+    ids: [ezyshield, ezyshield-enforcer]
+    dockerfile: Dockerfile
+    images:
+      - ghcr.io/evertramos/ezyshield
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    tags:
+      # Always tag the version (rc/alpha/beta included). Only stable releases
+      # move `latest` — an empty template result is dropped, so prereleases and
+      # snapshots never take it. Mirrors release.prerelease: auto for the GitHub
+      # release and package suites.
+      - "{{ .Version }}"
+      - "{{ if not .Prerelease }}latest{{ end }}"
+    # Dynamic OCI labels (release-time values). The static ones
+    # (title/source/licenses/…) are baked into the Dockerfile so a plain build
+    # is labelled too; these complete the org.opencontainers.image.* set.
+    labels:
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.created: "{{ .Date }}"
+    # Image-level SBOM/attestation is a separate supply-chain follow-up; the
+    # release already ships per-artifact SPDX SBOMs (issue #100). Off here so
+    # the CI snapshot's local image build needs no syft.
+    sbom: false
 
 changelog:
   use: github-native

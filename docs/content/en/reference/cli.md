@@ -637,12 +637,22 @@ The pre-1.0 verbs `test-enforce <name>` and `test-notify <name>` keep working as
 |------|-------------|
 | `--json` | Output as JSON (see [Global conventions](#global-conventions) for shapes) |
 | `--no-color` | Disable colored output (the `NO_COLOR` env var is also honored) |
-| `--version` | Print version and exit |
 | `-h, --help` | Show help text |
 
 `--config` / `--policy` are **not** global — they exist on the commands that
 read those files (`run`, `config show`, `validate`, `dashboard`), with
 defaults under `/etc/ezyshield`.
+
+### Root-command-only flags
+
+| Flag | Description |
+|------|-------------|
+| `-v, --version` | Print version and exit |
+
+Unlike `--json`/`--no-color`, `-v`/`--version` is wired only on the root
+`ezyshield` command and is **not** inherited by subcommands — `ezyshield ban
+--version` fails with `unknown flag: --version`. Use `ezyshield version` (or
+`ezyshield --version`) to check the version.
 
 ## Examples
 

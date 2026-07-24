@@ -79,8 +79,8 @@ o ISO-8601 moderno (`2026-07-13T22:57:35+00:00`).
 ```yaml
 enforce:
   nftables:
-    table: ezyshield             # padrão
-    set: banned                  # padrão
+    table: inet ezyshield        # obrigatório
+    set: blocked                 # obrigatório
 
   cloudflare:
     api_token: env:CF_API_TOKEN  # segredos são referências env:, nunca inline
@@ -93,11 +93,11 @@ enforce:
 
 ### nftables
 
-| Campo | Padrão | Descrição |
-|-------|--------|-----------|
-| `table` | `ezyshield` | tabela nftables (todas as regras do EzyShield vivem dentro dela) |
-| `set` | `banned` | set que guarda os endereços banidos |
-| `socket` | `/run/ezyshield-enforcer/enforcer.sock` | socket do helper privilegiado do enforcer |
+| Campo | Obrigatório | Descrição |
+|-------|-------------|-----------|
+| `table` | sim — sem padrão | nome da tabela nftables. Precisa estar definido como `inet ezyshield`: o enforcer privilegiado usa essa tabela fixa e não lê este valor |
+| `set` | sim — sem padrão | set que guarda os endereços banidos. Precisa estar definido como `blocked`: o enforcer usa fixo `blocked` (IPv4) / `blocked6` (IPv6) e não lê este valor |
+| `socket` | não (padrão `/run/ezyshield-enforcer/enforcer.sock`) | socket do helper privilegiado do enforcer |
 
 ### cloudflare
 
@@ -159,7 +159,7 @@ Opcional — sem o bloco `ai`, o rule engine determinístico cuida de tudo.
 # Provedor único
 ai:
   provider: anthropic            # anthropic | openai | ollama
-  model: claude-3-5-haiku-latest
+  model: claude-haiku-4-5-20251001
   api_key: env:ANTHROPIC_API_KEY
   ambiguous_band: [30, 75]       # scores nesta faixa consultam a IA
   token_budget_daily: 50000      # teto diário rígido; além dele o rule engine assume
@@ -172,7 +172,7 @@ ai:
   providers:
     - name: anthropic
       priority: 1
-      model: claude-3-5-haiku-latest
+      model: claude-haiku-4-5-20251001
       api_key: env:ANTHROPIC_API_KEY
     - name: ollama
       priority: 2
@@ -242,7 +242,9 @@ collectors:
     unit: ssh
 
 enforce:
-  nftables: {}
+  nftables:
+    table: inet ezyshield
+    set: blocked
 ```
 
 ## Segredos

@@ -27,9 +27,10 @@ Get EzyShield running on your server in under 5 minutes.
 curl -sfL https://get.ezyshield.com | sudo sh
 ```
 
-This downloads the latest checksum-verified binaries (`ezyshield` and
-`ezyshield-enforcer`), verifies checksums, and installs them to
-`/usr/local/bin/`.
+This downloads the latest `ezyshield` and `ezyshield-enforcer` binaries,
+verifies their checksum's cosign signature when `cosign` is installed
+(falling back to a plain SHA-256 checksum check otherwise), and installs
+them.
 
 To install a specific version:
 

@@ -6,7 +6,7 @@ order: 1
 
 # Cloudflare Edge Enforcement
 
-This guide walks you through setting up EzyShield to block malicious IPs at the Cloudflare edge using the **Lists mode** (recommended for most deployments).
+Block malicious IPs at the Cloudflare edge. This guide uses **Lists mode**, recommended for most deployments.
 
 ## Modes Overview
 
@@ -89,11 +89,7 @@ Run the diagnostic command:
 ezyshield test enforcer cloudflare
 ```
 
-This command will:
-- Verify the API token has correct permissions
-- Test connectivity to Cloudflare
-- List accessible zones
-- Show the list status (created, item count, etc.)
+It verifies the token's permissions, tests connectivity to Cloudflare, lists the zones you can reach, and shows the list status (existence, item count).
 
 ### Zone coverage in the wizard
 
@@ -281,12 +277,7 @@ After configuration, validate your setup with:
 ezyshield test enforcer cloudflare --config-dir /etc/ezyshield/
 ```
 
-This command will:
-- Verify the API token is valid and active
-- Check account and zone access
-- Validate Cloudflare permissions for your token
-- Report what works and what's missing
-- Provide clear fix suggestions
+It confirms the token is valid and active, checks account and zone access, validates the token's Cloudflare permissions, and reports what works, what's missing, and how to fix each gap.
 
 **Example output (lists mode with zone_ids):**
 

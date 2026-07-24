@@ -39,7 +39,7 @@ recorded in the audit log but no firewall rule is written.`,
 	cmd.Flags().StringVar(&socketPath, "socket", daemon.DefaultSocketPath,
 		"path to daemon control socket")
 	cmd.Flags().StringVar(&ttl, "ttl", "",
-		"ban duration, e.g. \"5m\", \"24h\", \"7d\" (empty = policy strike table)")
+		"ban duration, e.g. \"5m\", \"24h\", \"7d\" (empty = permanent)")
 	cmd.Flags().StringVar(&reason, "reason", "",
 		"free-text note, shown in audit log")
 

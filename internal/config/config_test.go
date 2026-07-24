@@ -198,24 +198,36 @@ enforce:
 
 func TestLoadConfig_NFTablesMissingTable(t *testing.T) {
 	t.Parallel()
-	yaml := `
-enforce:
-  nftables:
-    set: blocked
-`
-	_, err := LoadConfigReader(strings.NewReader(yaml), "test")
-	wantErr(t, err, "'table' is required")
+	// table/set are optional since issue #268 — the enforcer defaults apply.
+	// Partial and empty forms must all load, including the documented
+	// minimal `nftables: {}`.
+	for _, yaml := range []string{
+		"enforce:\n  nftables:\n    set: blocked\n",
+		"enforce:\n  nftables:\n    table: inet ezyshield\n",
+		"enforce:\n  nftables: {}\n",
+	} {
+		if _, err := LoadConfigReader(strings.NewReader(yaml), "test"); err != nil {
+			t.Errorf("optional table/set must load, got error for %q: %v", yaml, err)
+		}
+	}
 }
 
-func TestLoadConfig_NFTablesMissingSet(t *testing.T) {
+func TestLoadConfig_NFTablesInvalidNames(t *testing.T) {
 	t.Parallel()
-	yaml := `
-enforce:
-  nftables:
-    table: inet ezyshield
-`
-	_, err := LoadConfigReader(strings.NewReader(yaml), "test")
-	wantErr(t, err, "'set' is required")
+	cases := []struct {
+		name, yaml, wantErr string
+	}{
+		{"non-inet family", "enforce:\n  nftables:\n    table: ip mytable\n", "family must be 'inet'"},
+		{"nft syntax in table", "enforce:\n  nftables:\n    table: \"x; flush ruleset\"\n", "must be '<name>' or 'inet <name>'"},
+		{"bad chars in set", "enforce:\n  nftables:\n    set: \"bad-name!\"\n", "letters, digits and underscore"},
+		{"reserved allow set", "enforce:\n  nftables:\n    set: allowed\n", "reserved allowlist sets"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := LoadConfigReader(strings.NewReader(tc.yaml), "test")
+			wantErr(t, err, tc.wantErr)
+		})
+	}
 }
 
 // ---- Cloudflare enforcer config --------------------------------------------

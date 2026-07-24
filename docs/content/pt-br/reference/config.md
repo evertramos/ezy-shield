@@ -78,9 +78,7 @@ o ISO-8601 moderno (`2026-07-13T22:57:35+00:00`).
 
 ```yaml
 enforce:
-  nftables:
-    table: inet ezyshield        # obrigatório
-    set: blocked                 # obrigatório
+  nftables: {}                   # enforcement local ligado; os padrões bastam
 
   cloudflare:
     api_token: env:CF_API_TOKEN  # segredos são referências env:, nunca inline
@@ -93,11 +91,23 @@ enforce:
 
 ### nftables
 
-| Campo | Obrigatório | Descrição |
-|-------|-------------|-----------|
-| `table` | sim — sem padrão | nome da tabela nftables. Precisa estar definido como `inet ezyshield`: o enforcer privilegiado usa essa tabela fixa e não lê este valor |
-| `set` | sim — sem padrão | set que guarda os endereços banidos. Precisa estar definido como `blocked`: o enforcer usa fixo `blocked` (IPv4) / `blocked6` (IPv6) e não lê este valor |
-| `socket` | não (padrão `/run/ezyshield-enforcer/enforcer.sock`) | socket do helper privilegiado do enforcer |
+| Campo | Padrão | Descrição |
+|-------|--------|-----------|
+| `table` | `inet ezyshield` | tabela nftables (todas as regras do EzyShield vivem dentro dela). `<nome>` ou `inet <nome>`; a família `inet` é a única suportada (layout dual-stack v4+v6). Nomes: letras, dígitos, underscore |
+| `set` | `blocked` | set que guarda os endereços IPv4 banidos; o gêmeo IPv6 é derivado automaticamente como `<set>6` (padrão `blocked6`). `allowed`/`allowed6` são reservados para os sets de allowlist |
+| `socket` | `/run/ezyshield-enforcer/enforcer.sock` | socket do helper privilegiado do enforcer |
+
+Os dois são opcionais e genuinamente respeitados: o daemon os repassa ao
+enforcer privilegiado, que os revalida de forma independente antes de
+escrever qualquer regra. Duas notas operacionais para nomes customizados:
+
+- O enforcer precisa suportá-los (mesma versão do daemon). Contra um
+  `ezyshield-enforcer` mais antigo, o daemon se recusa a aplicar com um erro
+  claro em vez de usar os padrões silenciosamente.
+- O enforcer aplica um conjunto de nomes por execução. Depois de mudar
+  `table`/`set`, reinicie os dois serviços (`sudo systemctl restart
+  ezyshield-enforcer ezyshield`); uma tabela antiga deixada por uma renomeação
+  pode ser removida com `nft delete table inet <nome-antigo>`.
 
 ### cloudflare
 
@@ -242,9 +252,7 @@ collectors:
     unit: ssh
 
 enforce:
-  nftables:
-    table: inet ezyshield
-    set: blocked
+  nftables: {}
 ```
 
 ## Segredos

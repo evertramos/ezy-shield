@@ -81,9 +81,7 @@ format (`Jan  1 12:00:00`) and modern ISO-8601
 
 ```yaml
 enforce:
-  nftables:
-    table: inet ezyshield        # required
-    set: blocked                 # required
+  nftables: {}                   # local enforcement on; defaults are fine
 
   cloudflare:
     api_token: env:CF_API_TOKEN  # secrets are env: references, never inline
@@ -96,11 +94,23 @@ enforce:
 
 ### nftables
 
-| Field | Required | Description |
-|-------|----------|-------------|
-| `table` | yes — no default | nftables table name. Must currently be set to `inet ezyshield`: the privileged enforcer hardcodes that table and does not read this value |
-| `set` | yes — no default | set holding banned addresses. Must currently be set to `blocked`: the enforcer hardcodes `blocked` (IPv4) / `blocked6` (IPv6) and does not read this value |
-| `socket` | no (default `/run/ezyshield-enforcer/enforcer.sock`) | privileged enforcer helper socket |
+| Field | Default | Description |
+|-------|---------|-------------|
+| `table` | `inet ezyshield` | nftables table (all EzyShield rules live inside it). `<name>` or `inet <name>`; the `inet` family is the only one supported (dual-stack v4+v6 layout). Names: letters, digits, underscore |
+| `set` | `blocked` | set holding banned IPv4 addresses; the IPv6 twin is derived automatically as `<set>6` (default `blocked6`). `allowed`/`allowed6` are reserved for the allowlist sets |
+| `socket` | `/run/ezyshield-enforcer/enforcer.sock` | privileged enforcer helper socket |
+
+Both are optional and genuinely honored: the daemon passes them to the
+privileged enforcer, which re-validates them independently before any rule
+is written. Two operational notes for custom names:
+
+- The enforcer must support them (same version as the daemon). Against an
+  older `ezyshield-enforcer`, the daemon refuses to enforce with a clear
+  error instead of silently using the defaults.
+- The enforcer applies one name set per run. After changing `table`/`set`,
+  restart both services (`sudo systemctl restart ezyshield-enforcer
+  ezyshield`); a previous table left behind by a rename can be removed with
+  `nft delete table inet <old-name>`.
 
 ### cloudflare
 
@@ -245,9 +255,7 @@ collectors:
     unit: ssh
 
 enforce:
-  nftables:
-    table: inet ezyshield
-    set: blocked
+  nftables: {}
 ```
 
 ## Secrets

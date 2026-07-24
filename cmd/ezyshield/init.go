@@ -789,10 +789,11 @@ func writeGeneratedConfig(path string, state *wizardState) error {
 	if state.nftPath != "" || hasCF {
 		b.WriteString("enforce:\n")
 		if state.nftPath != "" {
+			// table/set are omitted on purpose (issue #268): the defaults
+			// ("inet ezyshield" / "blocked") are real, honored defaults now,
+			// and a leaner generated config leaves fewer knobs to drift.
 			b.WriteString("  nftables:\n")
 			fmt.Fprintf(&b, "    socket: %s\n", enforcerSockPath)
-			b.WriteString("    table: inet ezyshield\n")
-			b.WriteString("    set: blocked\n")
 		}
 		if hasCF {
 			emitCloudflareYAML(&b, state.cdn)

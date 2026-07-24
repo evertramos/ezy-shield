@@ -129,7 +129,11 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 				"socket", sockPath, "err", err)
 		}
 		allowlist := parseAllowlist(policy)
-		enf = enforce.New(sockPath, allowlist)
+		// Table/set come from config (issue #268): empty means the enforcer
+		// defaults; non-default names are validated at config load and the
+		// helper is capability-probed before first use.
+		enf = enforce.New(sockPath, allowlist,
+			enforce.WithNames(cfg.Enforce.NFTables.Table, cfg.Enforce.NFTables.Set))
 	}
 
 	if cfg.Enforce != nil && len(cfg.Enforce.Cloudflare) > 0 {

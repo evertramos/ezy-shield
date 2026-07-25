@@ -94,6 +94,21 @@ Flags:
 - `--yes` — non-interactive: accept every default, skip CDN detection.
 - `--config-dir <dir>` — write files to a different directory; skips systemd
   unit installation and service start (next steps then use foreground `run`).
+- `--non-interactive`, `-n` — scripted setup (no TTY), driven by `--answers`
+  and/or the override flags below. Produces the same validated config the
+  wizard produces (always `armed: false`). See the
+  [unattended install guide](../guides/automation.md) for the answers-file
+  schema and Ansible/cloud-init examples.
+- `--answers <path>` — YAML answers file (implies `--non-interactive`; flags
+  override file values). Unknown keys are rejected.
+- `--force` — overwrite an existing `config.yaml`/`policy.yaml` (non-interactive
+  only; without it a re-run refuses, same as the wizard).
+- `--admin-ips`, `--monitor-ssh`, `--enable-ai`, `--ai-provider`, `--ai-model`,
+  `--ai-key-env` — per-answer overrides for the non-interactive path.
+  `--ai-key-env` takes an env var **NAME**, never the key itself; a literal
+  secret in any flag or answers-file value is rejected.
+- `--json` — with `--non-interactive`, emit the summary as JSON on stdout
+  (progress goes to stderr).
 
 ## ezyshield run
 

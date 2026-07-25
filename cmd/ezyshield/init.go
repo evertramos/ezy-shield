@@ -53,19 +53,32 @@ const (
 
 func newInitCmd() *cobra.Command {
 	var (
-		configDir  string
-		yes        bool
-		skipSystem bool
+		configDir      string
+		yes            bool
+		skipSystem     bool
+		nonInteractive bool
+		answersPath    string
+		force          bool
 	)
 
 	cmd := &cobra.Command{
 		Use:   "init",
-		Short: "Interactive setup wizard",
+		Short: "Interactive setup wizard (or scripted with --non-interactive)",
 		Long: `Detect the environment, ask a few questions, write config files,
 install systemd units, and start EzyShield in dry-run mode.
 
 Pass --yes to accept all smart defaults without prompting.
-Pass --config-dir to write files elsewhere (skips systemd/service steps — useful for testing).`,
+Pass --config-dir to write files elsewhere (skips systemd/service steps — useful for testing).
+
+Non-interactive (for Ansible / cloud-init / Terraform / golden images):
+
+  --non-interactive (-n) runs without a TTY, driven by --answers and/or the
+  override flags, producing the same validated config the wizard produces.
+  Detection still runs; answers pin or override the result. Secrets are NEVER
+  passed as flags or answers-file values — reference an env var NAME and put
+  the value in the .env file. The config is always generated with armed: false.
+  Re-running against an existing config refuses without --force. With --json
+  the summary is emitted as JSON on stdout (progress goes to stderr).`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := requireRootForWrites(cmd, configDir); err != nil {
@@ -73,6 +86,14 @@ Pass --config-dir to write files elsewhere (skips systemd/service steps — usef
 			}
 			if configDir != defaultConfigDir {
 				skipSystem = true
+			}
+			// --answers implies --non-interactive (a file cannot be answered
+			// interactively).
+			if nonInteractive || answersPath != "" {
+				if yes {
+					return fmt.Errorf("--yes and --non-interactive are mutually exclusive; --non-interactive already runs without prompts")
+				}
+				return runNonInteractiveInit(cmd, configDir, skipSystem, force, answersPath)
 			}
 			return runInitWizard(cmd, configDir, yes, skipSystem)
 		},
@@ -82,6 +103,27 @@ Pass --config-dir to write files elsewhere (skips systemd/service steps — usef
 		"directory to write configuration files")
 	cmd.Flags().BoolVar(&yes, "yes", false,
 		"accept all defaults without interactive prompts")
+
+	// Non-interactive (scripted) flags.
+	cmd.Flags().BoolVarP(&nonInteractive, "non-interactive", "n", false,
+		"scripted setup: no prompts, driven by --answers and flags")
+	cmd.Flags().StringVar(&answersPath, "answers", "",
+		"path to a YAML answers file (implies --non-interactive; flags override file values)")
+	cmd.Flags().BoolVar(&force, "force", false,
+		"overwrite an existing config.yaml/policy.yaml (non-interactive only)")
+	// Per-answer overrides. --ai-key-env carries an env var NAME, never a key.
+	cmd.Flags().String("admin-ips", "",
+		"admin IPs/CIDRs for the allowlist, comma/space separated (overrides answers)")
+	cmd.Flags().Bool("monitor-ssh", true,
+		"monitor SSH via journald (overrides answers)")
+	cmd.Flags().Bool("enable-ai", false,
+		"enable AI analysis (overrides answers)")
+	cmd.Flags().String("ai-provider", "",
+		"AI provider: anthropic|openai|ollama (overrides answers)")
+	cmd.Flags().String("ai-model", "",
+		"AI model (overrides answers)")
+	cmd.Flags().String("ai-key-env", "",
+		"env var NAME holding the AI API key — never the key itself (overrides answers)")
 
 	return cmd
 }
@@ -200,87 +242,11 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 		sc = bufio.NewScanner(os.Stdin)
 	}
 
-	// ── Environment detection ─────────────────────────────────────────────
-	p.println("")
-	p.println(st.header("Environment"))
-
 	state := &wizardState{}
 	sum := &initSummary{}
 
-	state.osArch = runtime.GOOS + "/" + runtime.GOARCH
-	p.printf("  OS/arch: %s\n", state.osArch)
-
-	state.nftPath = detectNFT()
-	if state.nftPath != "" {
-		p.println(st.ok("nftables: " + state.nftPath))
-	} else {
-		p.println(st.fail("nftables: not found"))
-		if !skipSystem {
-			if p.err != nil {
-				return fmt.Errorf("writing output: %w", p.err)
-			}
-			state.nftPath = offerInstallNFT(sc, yes, p.w)
-			if state.nftPath != "" {
-				p.println(st.ok("nftables: " + state.nftPath + " (installed)"))
-			} else {
-				p.println(st.warn("nftables: skipped — only dry-run and edge enforcement will work"))
-			}
-		}
-	}
-
-	state.allContainers = detectDockerContainers()
-	state.hasDocker = len(state.allContainers) > 0
-	if state.hasDocker {
-		p.println(st.ok(fmt.Sprintf("docker: %d container(s) running", len(state.allContainers))))
-
-		// Allowlist only the docker bridge subnets that actually exist on
-		// this host (issue #210) — never the whole 172.16.0.0/12 supernet,
-		// which would exempt >1M RFC1918 addresses from enforcement forever
-		// (allowlist always wins).
-		subnets, usedFallback := detectDockerBridgeSubnets()
-		state.dockerAllowlist = subnets
-		switch {
-		case usedFallback:
-			p.println(st.warn(fmt.Sprintf(
-				"docker networks: could not enumerate — allowlisting the default bridge subnet only (%s)",
-				defaultDockerBridgeSubnet)))
-		case len(subnets) == 0:
-			p.println(st.ok("docker networks: no bridge subnets found — no docker allowlist entry added"))
-		default:
-			p.println(st.ok(fmt.Sprintf("docker networks: allowlisting %d bridge subnet(s): %s",
-				len(subnets), strings.Join(subnets, ", "))))
-		}
-	} else {
-		p.println(st.fail("docker: not running / no containers"))
-	}
-
-	state.hasWordPress = hasWordPressContainers(state.allContainers)
-	if state.hasWordPress {
-		state.wpRulesPath = filepath.Join(configDir, "rules.d", "10-wordpress.yaml")
-		p.println(st.ok("WordPress detected — rules are built in; tuning drop-in: " + state.wpRulesPath))
-	}
-
-	p.println("\n  Detecting web servers...")
-	state.webServers = detectWebServers(state.allContainers)
-	renderWebServerSummary(p, state.webServers)
-
-	state.sshUnit = detectSSHUnit()
-	p.println(st.ok("SSH unit: " + state.sshUnit))
-
-	state.publicIP = fetchPublicIP()
-	if state.publicIP != "" {
-		p.println(st.ok("public IP: " + state.publicIP))
-	} else {
-		p.println(st.warn("public IP: unknown (ifconfig.me unreachable)"))
-	}
-
-	state.sshSourceIP = sshSourceIP()
-	if state.sshSourceIP != "" {
-		p.println(st.ok("SSH source: " + state.sshSourceIP))
-	}
-
-	if p.err != nil {
-		return fmt.Errorf("writing output: %w", p.err)
+	if err := detectEnvironment(p, st, state, configDir, sc, yes, skipSystem); err != nil {
+		return err
 	}
 
 	// ── Questions (sectioned sub-flows) ───────────────────────────────────
@@ -462,6 +428,97 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 	renderInitSummary(p, st, state, sum, checkRecentDetections(), configDir)
 
 	return p.err
+}
+
+// detectEnvironment runs the wizard's environment-detection pass, filling
+// state and printing the "Environment" section. Shared verbatim by the
+// interactive wizard (runInitWizard) and the non-interactive driver
+// (runNonInteractiveInit) so both see identical detection — issue #231's
+// requirement that detection still runs in scripted mode, with answers
+// pinning/overriding the result. sc is consulted ONLY for the nftables
+// install offer and may be nil in --yes / non-interactive mode (offerInstallNFT
+// auto-accepts when yes is true and never touches sc).
+func detectEnvironment(p *wPrinter, st styler, state *wizardState, configDir string,
+	sc *bufio.Scanner, yes, skipSystem bool) error {
+	p.println("")
+	p.println(st.header("Environment"))
+
+	state.osArch = runtime.GOOS + "/" + runtime.GOARCH
+	p.printf("  OS/arch: %s\n", state.osArch)
+
+	state.nftPath = detectNFT()
+	if state.nftPath != "" {
+		p.println(st.ok("nftables: " + state.nftPath))
+	} else {
+		p.println(st.fail("nftables: not found"))
+		if !skipSystem {
+			if p.err != nil {
+				return fmt.Errorf("writing output: %w", p.err)
+			}
+			state.nftPath = offerInstallNFT(sc, yes, p.w)
+			if state.nftPath != "" {
+				p.println(st.ok("nftables: " + state.nftPath + " (installed)"))
+			} else {
+				p.println(st.warn("nftables: skipped — only dry-run and edge enforcement will work"))
+			}
+		}
+	}
+
+	state.allContainers = detectDockerContainers()
+	state.hasDocker = len(state.allContainers) > 0
+	if state.hasDocker {
+		p.println(st.ok(fmt.Sprintf("docker: %d container(s) running", len(state.allContainers))))
+
+		// Allowlist only the docker bridge subnets that actually exist on
+		// this host (issue #210) — never the whole 172.16.0.0/12 supernet,
+		// which would exempt >1M RFC1918 addresses from enforcement forever
+		// (allowlist always wins).
+		subnets, usedFallback := detectDockerBridgeSubnets()
+		state.dockerAllowlist = subnets
+		switch {
+		case usedFallback:
+			p.println(st.warn(fmt.Sprintf(
+				"docker networks: could not enumerate — allowlisting the default bridge subnet only (%s)",
+				defaultDockerBridgeSubnet)))
+		case len(subnets) == 0:
+			p.println(st.ok("docker networks: no bridge subnets found — no docker allowlist entry added"))
+		default:
+			p.println(st.ok(fmt.Sprintf("docker networks: allowlisting %d bridge subnet(s): %s",
+				len(subnets), strings.Join(subnets, ", "))))
+		}
+	} else {
+		p.println(st.fail("docker: not running / no containers"))
+	}
+
+	state.hasWordPress = hasWordPressContainers(state.allContainers)
+	if state.hasWordPress {
+		state.wpRulesPath = filepath.Join(configDir, "rules.d", "10-wordpress.yaml")
+		p.println(st.ok("WordPress detected — rules are built in; tuning drop-in: " + state.wpRulesPath))
+	}
+
+	p.println("\n  Detecting web servers...")
+	state.webServers = detectWebServers(state.allContainers)
+	renderWebServerSummary(p, state.webServers)
+
+	state.sshUnit = detectSSHUnit()
+	p.println(st.ok("SSH unit: " + state.sshUnit))
+
+	state.publicIP = detectPublicIP()
+	if state.publicIP != "" {
+		p.println(st.ok("public IP: " + state.publicIP))
+	} else {
+		p.println(st.warn("public IP: unknown (ifconfig.me unreachable)"))
+	}
+
+	state.sshSourceIP = sshSourceIP()
+	if state.sshSourceIP != "" {
+		p.println(st.ok("SSH source: " + state.sshSourceIP))
+	}
+
+	if p.err != nil {
+		return fmt.Errorf("writing output: %w", p.err)
+	}
+	return nil
 }
 
 // initSummary accumulates what the wizard configured, skipped, and wrote,
@@ -759,7 +816,27 @@ func writeGeneratedConfig(path string, state *wizardState) error {
 	if _, err := os.Stat(path); err == nil {
 		return fmt.Errorf("%s already exists — delete it to regenerate", path)
 	}
+	data, err := renderGeneratedConfig(state)
+	if err != nil {
+		return err
+	}
+	//nolint:gosec // 0640: group-readable; no secrets here (SecretRef env: references only)
+	if err := os.WriteFile(path, data, 0o640); err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	if err := applyDaemonOwnership(path, 0o640); err != nil {
+		return fmt.Errorf("set ownership on %s: %w", path, err)
+	}
+	return nil
+}
 
+// renderGeneratedConfig builds the config.yaml body from state and validates
+// it through the strict loader before returning the bytes. Extracted from
+// writeGeneratedConfig so the non-interactive driver (issue #231) renders and
+// validates the exact same YAML the wizard writes, without duplicating the
+// generation logic. No file I/O; credential fields are emitted only as
+// `env:VARNAME` references, never inline secrets.
+func renderGeneratedConfig(state *wizardState) ([]byte, error) {
 	var b strings.Builder
 	b.WriteString("# EzyShield config — generated by 'ezyshield init'\n")
 	b.WriteString("# Secrets must use 'env:VARNAME' references, never inline values.\n\n")
@@ -818,10 +895,22 @@ func writeGeneratedConfig(path string, state *wizardState) error {
 
 	// validate before writing — catches any field mismatch immediately
 	if _, err := config.LoadConfigReader(bytes.NewReader(data), "generated config"); err != nil {
-		return fmt.Errorf("generated config.yaml failed validation: %w", err)
+		return nil, fmt.Errorf("generated config.yaml failed validation: %w", err)
 	}
+	return data, nil
+}
 
-	//nolint:gosec // 0640: group-readable; no secrets here (SecretRef env: references only)
+// writeGeneratedPolicy writes policy.yaml using only valid Policy fields.
+// Validates via LoadPolicyReader before writing to disk.
+func writeGeneratedPolicy(path string, state *wizardState) error {
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("%s already exists — delete it to regenerate", path)
+	}
+	data, err := renderGeneratedPolicy(state)
+	if err != nil {
+		return err
+	}
+	//nolint:gosec // 0640: group-readable; no secrets in policy
 	if err := os.WriteFile(path, data, 0o640); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
@@ -831,13 +920,13 @@ func writeGeneratedConfig(path string, state *wizardState) error {
 	return nil
 }
 
-// writeGeneratedPolicy writes policy.yaml using only valid Policy fields.
-// Validates via LoadPolicyReader before writing to disk.
-func writeGeneratedPolicy(path string, state *wizardState) error {
-	if _, err := os.Stat(path); err == nil {
-		return fmt.Errorf("%s already exists — delete it to regenerate", path)
-	}
-
+// renderGeneratedPolicy builds the policy.yaml body from state and validates
+// it through the strict loader before returning the bytes. Extracted from
+// writeGeneratedPolicy so the non-interactive driver (issue #231) renders and
+// validates the exact same YAML the wizard writes. armed is taken from
+// state.armed, which the non-interactive driver forces to false (Hard Rule 1,
+// dry-run default). No file I/O and no secrets.
+func renderGeneratedPolicy(state *wizardState) ([]byte, error) {
 	var b strings.Builder
 	b.WriteString("# EzyShield policy — generated by 'ezyshield init'\n\n")
 	fmt.Fprintf(&b, "armed: %v\n", state.armed)
@@ -881,17 +970,9 @@ func writeGeneratedPolicy(path string, state *wizardState) error {
 
 	// validate before writing
 	if _, err := config.LoadPolicyReader(bytes.NewReader(data), "generated policy"); err != nil {
-		return fmt.Errorf("generated policy.yaml failed validation: %w", err)
+		return nil, fmt.Errorf("generated policy.yaml failed validation: %w", err)
 	}
-
-	//nolint:gosec // 0640: group-readable; no secrets in policy
-	if err := os.WriteFile(path, data, 0o640); err != nil {
-		return fmt.Errorf("writing %s: %w", path, err)
-	}
-	if err := applyDaemonOwnership(path, 0o640); err != nil {
-		return fmt.Errorf("set ownership on %s: %w", path, err)
-	}
-	return nil
+	return data, nil
 }
 
 // writeOrKeepEnvFile writes /etc/ezyshield/.env with the operator-supplied
@@ -1387,6 +1468,12 @@ func detectSSHUnit() string {
 	}
 	return "ssh" // Debian/Ubuntu default
 }
+
+// detectPublicIP is the seam through which detectEnvironment fetches the
+// server's public IP. It defaults to fetchPublicIP (a real network call) and
+// is a package var so tests drive detection hermetically, without hitting the
+// network — the same pattern used for dockerNetworkLister and tokenReader.
+var detectPublicIP = fetchPublicIP
 
 func fetchPublicIP() string {
 	client := &http.Client{Timeout: 5 * time.Second}

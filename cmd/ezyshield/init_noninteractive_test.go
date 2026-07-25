@@ -136,7 +136,7 @@ enforce:
 	if info.Mode().Perm() != 0o600 {
 		t.Errorf(".env perms = %04o, want 0600", info.Mode().Perm())
 	}
-	env, _ := os.ReadFile(envPath) //nolint:errcheck // test path
+	env, _ := os.ReadFile(envPath) //nolint:gosec // test path under t.TempDir
 	for _, name := range []string{"ANTHROPIC_API_KEY", "CLOUDFLARE_API_TOKEN"} {
 		if !strings.Contains(string(env), name+"="+config.PlaceholderAPIKey) {
 			t.Errorf(".env missing placeholder for %s; body=%q", name, string(env))
@@ -286,17 +286,17 @@ func TestNonInteractive_ForcePreservesRealSecret(t *testing.T) {
 	}
 	const realKey = "sk-ant-REAL-operator-key-000" //nolint:gosec // G101: intentional fake
 	envPath := filepath.Join(etc, ".env")
-	body, _ := os.ReadFile(envPath) //nolint:errcheck // test path
+	body, _ := os.ReadFile(envPath) //nolint:gosec // test path under t.TempDir
 	updated := strings.Replace(string(body), "ANTHROPIC_API_KEY="+config.PlaceholderAPIKey,
 		"ANTHROPIC_API_KEY="+realKey, 1)
-	if err := os.WriteFile(envPath, []byte(updated), 0o600); err != nil {
+	if err := os.WriteFile(envPath, []byte(updated), 0o600); err != nil { //nolint:gosec // test path under t.TempDir
 		t.Fatalf("seeding real key: %v", err)
 	}
 
 	if _, _, err := runInit(t, "--answers", answers, "--config-dir", etc, "--force"); err != nil {
 		t.Fatalf("force re-run failed: %v", err)
 	}
-	got, _ := os.ReadFile(envPath) //nolint:errcheck // test path
+	got, _ := os.ReadFile(envPath) //nolint:gosec // test path under t.TempDir
 	if !strings.Contains(string(got), "ANTHROPIC_API_KEY="+realKey) {
 		t.Errorf("real key was clobbered on --force re-run; body=%q", string(got))
 	}
@@ -384,17 +384,17 @@ func TestEnsureEnvPlaceholders_Idempotent(t *testing.T) {
 	}
 	// A real value must survive.
 	envPath := filepath.Join(dir, envFileName)
-	body, _ := os.ReadFile(envPath) //nolint:errcheck // test path
+	body, _ := os.ReadFile(envPath)      //nolint:gosec // test path under t.TempDir
 	const real = "sk-ant-real-value-123" //nolint:gosec // G101: intentional fake
 	seeded := strings.Replace(string(body), "ANTHROPIC_API_KEY="+config.PlaceholderAPIKey,
 		"ANTHROPIC_API_KEY="+real, 1)
-	if err := os.WriteFile(envPath, []byte(seeded), 0o600); err != nil {
+	if err := os.WriteFile(envPath, []byte(seeded), 0o600); err != nil { //nolint:gosec // test path under t.TempDir
 		t.Fatal(err)
 	}
 	if _, err := ensureEnvPlaceholders(dir, names); err != nil {
 		t.Fatalf("third call: %v", err)
 	}
-	got, _ := os.ReadFile(envPath) //nolint:errcheck // test path
+	got, _ := os.ReadFile(envPath) //nolint:gosec // test path under t.TempDir
 	if !strings.Contains(string(got), "ANTHROPIC_API_KEY="+real) {
 		t.Errorf("real value clobbered; body=%q", string(got))
 	}

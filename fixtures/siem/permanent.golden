@@ -1,0 +1,6 @@
+--- json ---
+{"schema_version":1,"timestamp":"2025-01-15T10:00:01Z","vendor":"ezy","product":"EzyShield","version":"1.4.2","action":"ban","ip":"198.51.100.23","rule":"5th strike: permanent ban","score":90,"strike":5,"ttl_seconds":0,"actor":"rules","node":"edge-01"}
+--- cef ---
+CEF:0|ezy|EzyShield|1.4.2|ban|IP banned|10|src=198.51.100.23 act=ban rt=1736935201000 cs1Label=rule cs1=5th strike: permanent ban cs2Label=actor cs2=rules cn1Label=score cn1=90 cn2Label=strike cn2=5 cn3Label=ttlSeconds cn3=0 dvchost=edge-01
+--- rfc5424 ---
+<130>1 2025-01-15T10:00:01Z edge-01 EzyShield - ban [ezyShield@32473 action="ban" ip="198.51.100.23" rule="5th strike: permanent ban" actor="rules" score="90" strike="5" ttlSeconds="0" node="edge-01"] ban 198.51.100.23 rule=5th strike: permanent ban

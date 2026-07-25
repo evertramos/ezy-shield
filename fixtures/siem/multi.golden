@@ -1,0 +1,6 @@
+--- json ---
+{"schema_version":1,"timestamp":"2025-01-15T10:00:01Z","vendor":"ezy","product":"EzyShield","version":"1.4.2","action":"ban","ip":"198.51.100.23","rule":"a|b=c]d\"e\\f\ng\u001b[31mh","score":90,"strike":3,"ttl_seconds":86400,"actor":"a|b=c]d\"e\\f\ng\u001b[31mh","node":"a|b=c]d\"e\\f\ng\u001b[31mh"}
+--- cef ---
+CEF:0|ezy|EzyShield|1.4.2|ban|IP banned|8|src=198.51.100.23 act=ban rt=1736935201000 cs1Label=rule cs1=a|b\=c]d"e\\f\ng [31mh cs2Label=actor cs2=a|b\=c]d"e\\f\ng [31mh cn1Label=score cn1=90 cn2Label=strike cn2=3 cn3Label=ttlSeconds cn3=86400 dvchost=a|b\=c]d"e\\f\ng [31mh
+--- rfc5424 ---
+<131>1 2025-01-15T10:00:01Z a|b=c]d"e\fg[31mh EzyShield - ban [ezyShield@32473 action="ban" ip="198.51.100.23" rule="a|b=c\]d\"e\\f g [31mh" actor="a|b=c\]d\"e\\f g [31mh" score="90" strike="3" ttlSeconds="86400" node="a|b=c\]d\"e\\f g [31mh"] ban 198.51.100.23 rule=a|b=c]d"e\f g [31mh

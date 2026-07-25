@@ -88,7 +88,11 @@ enforce:
 ```
 
 `nftables` local enforcement is enabled automatically when `nft` is detected on
-the host; there is no answer for it (matching the wizard).
+the host; there is no answer for it. Unlike the interactive wizard, which
+offers to install a missing `nftables`, non-interactive init **never runs a
+package manager** — it writes config only. On a host without `nft` it reports
+the miss and continues (dry-run and edge enforcement still work); install
+`nftables` beforehand, as the Ansible play below does.
 
 ## Override flags
 
@@ -139,6 +143,11 @@ only stubs what is missing.
   hosts: webservers
   become: true
   tasks:
+    - name: Ensure nftables is installed (init never installs packages)
+      ansible.builtin.package:
+        name: nftables
+        state: present
+
     - name: Write the answers file
       ansible.builtin.copy:
         dest: /etc/ezyshield/init.yaml

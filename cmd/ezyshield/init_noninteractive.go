@@ -139,10 +139,16 @@ func runNonInteractiveInit(cmd *cobra.Command, configDir string, skipSystem, for
 		return fmt.Errorf("init requires root — re-run with sudo or as root")
 	}
 
-	// 6. Detection still runs; answers pin/override the result.
+	// 6. Detection still runs; answers pin/override the result. The final
+	//    `true` suppresses the wizard's nftables install offer: scripted
+	//    mode's contract is "writes config only" (the summary says so), so
+	//    it must never run a package manager. A missing nft is reported,
+	//    the config still validates, and local enforcement stays off until
+	//    the operator installs nftables — the automation guide's Ansible
+	//    snippet does it as a prior task.
 	state := &wizardState{}
 	sum := &initSummary{}
-	if err := detectEnvironment(p, st, state, configDir, nil, true, skipSystem); err != nil {
+	if err := detectEnvironment(p, st, state, configDir, nil, true, true); err != nil {
 		return err
 	}
 

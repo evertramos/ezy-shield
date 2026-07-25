@@ -91,7 +91,11 @@ enforce:
 ```
 
 O enforcement local via `nftables` é habilitado automaticamente quando o `nft` é
-detectado no host; não há resposta para ele (igual ao assistente).
+detectado no host; não há resposta para ele. Ao contrário do assistente
+interativo, que oferece instalar um `nftables` ausente, o init não-interativo
+**nunca executa um gerenciador de pacotes** — ele só escreve configuração. Num
+host sem `nft` ele reporta a ausência e continua (dry-run e enforcement de borda
+seguem funcionando); instale o `nftables` antes, como o play Ansible abaixo faz.
 
 ## Flags de sobrescrita
 
@@ -142,6 +146,11 @@ preenche o que estiver faltando.
   hosts: webservers
   become: true
   tasks:
+    - name: Garantir que o nftables está instalado (o init nunca instala pacotes)
+      ansible.builtin.package:
+        name: nftables
+        state: present
+
     - name: Escrever o arquivo de respostas
       ansible.builtin.copy:
         dest: /etc/ezyshield/init.yaml

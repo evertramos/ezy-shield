@@ -287,9 +287,12 @@ Read-only — não tem forms.
 ### Gestão de sessão
 
 - O store limita a **3 sessões ativas por conta**. O quarto login
-  evita silenciosamente o slot mais antigo, então um cookie roubado
-  tem vida útil limitada e uma máquina compartilhada não acumula
-  sessões abandonadas.
+  remove o slot mais antigo, então um cookie roubado tem vida útil
+  limitada e uma máquina compartilhada não acumula sessões
+  abandonadas. A remoção é registrada em INFO com
+  `reason=cap_exceeded` para que um operador perceba atividade
+  inesperada; logout explícito e expiração por ociosidade não geram
+  log.
 - O limite é por usuário: a sessão da `alice` não é afetada quando
   o `bob` estoura o limite dele.
 - Qualquer request autenticado desliza a expiração para 30 minutos

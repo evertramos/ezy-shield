@@ -1,12 +1,14 @@
 package dashboard
 
 import (
+	"bytes"
+	"log/slog"
 	"testing"
 	"time"
 )
 
 func TestSessionStore_CreateGet(t *testing.T) {
-	s := newSessionStore(time.Hour)
+	s := newSessionStore(time.Hour, nil)
 	tok, _, err := s.Create("admin")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -27,8 +29,10 @@ func TestSessionStore_CreateGet(t *testing.T) {
 }
 
 func TestSessionStore_Expiry(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
 	now := time.Unix(1_000_000, 0)
-	s := newSessionStore(30 * time.Minute)
+	s := newSessionStore(30*time.Minute, logger)
 	s.now = func() time.Time { return now }
 
 	tok, _, err := s.Create("admin")
@@ -43,11 +47,17 @@ func TestSessionStore_Expiry(t *testing.T) {
 	if s.Len() != 0 {
 		t.Errorf("expired session should be evicted; Len=%d", s.Len())
 	}
+	// Idle-timeout eviction is a different code path from the cap-exceeded
+	// eviction and must stay silent — logging it would spam the log on
+	// every normal idle-out.
+	if buf.Len() != 0 {
+		t.Errorf("expiry cleanup must not emit an eviction log, got: %q", buf.String())
+	}
 }
 
 func TestSessionStore_SlidingRenewal(t *testing.T) {
 	now := time.Unix(2_000_000, 0)
-	s := newSessionStore(30 * time.Minute)
+	s := newSessionStore(30*time.Minute, nil)
 	s.now = func() time.Time { return now }
 
 	tok, _, err := s.Create("admin")
@@ -68,7 +78,7 @@ func TestSessionStore_SlidingRenewal(t *testing.T) {
 }
 
 func TestSessionStore_Delete(t *testing.T) {
-	s := newSessionStore(time.Hour)
+	s := newSessionStore(time.Hour, nil)
 	tok, _, err := s.Create("admin")
 	if err != nil {
 		t.Fatalf("Create: %v", err)

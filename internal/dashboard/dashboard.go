@@ -113,7 +113,7 @@ func New(cfg Config) (*Server, error) {
 		boundAddr: cfg.Addr,
 		logger:    cfg.Logger,
 		store:     store,
-		sessions:  newSessionStore(cfg.SessionTimeout),
+		sessions:  newSessionStore(cfg.SessionTimeout, cfg.Logger),
 		throttle:  newLoginThrottle(),
 		decoyHash: decoyHash,
 	}

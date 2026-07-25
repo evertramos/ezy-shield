@@ -285,9 +285,11 @@ Read-only — no forms.
 ### Session management
 
 - The store caps live sessions at **3 per account**. A fourth login
-  evicts the oldest slot silently, so a stolen cookie has a bounded
-  useful life and a shared machine can't accumulate abandoned
-  sessions.
+  evicts the oldest slot, so a stolen cookie has a bounded useful
+  life and a shared machine can't accumulate abandoned sessions.
+  The eviction is logged at INFO with `reason=cap_exceeded` so an
+  operator can spot unexpected activity; explicit logout and
+  idle-timeout expiry are not logged.
 - The cap is per-username: `alice`'s session is unaffected by
   `bob` hitting his cap.
 - Any authenticated request slides the expiry forward by the

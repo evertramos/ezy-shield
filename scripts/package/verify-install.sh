@@ -89,8 +89,11 @@ fi
 
 # The docs are the contract: the fingerprint asserted below is the one a
 # user is told to verify, grep-extracted so doc drift fails this gate.
+# `|| true` so a docless fingerprint reaches the die() below with its
+# message instead of killing the script silently via set -e + pipefail
+# (grep exits 1 on no match).
 DOC_FPR="$(grep -Eo '([0-9A-F]{4}[[:space:]]+){9}[0-9A-F]{4}' "$INSTALL_DOC" \
-  | head -n1 | tr -d '[:space:]')"
+  | head -n1 | tr -d '[:space:]' || true)"
 [ "${#DOC_FPR}" -eq 40 ] || die "could not extract the signing-key fingerprint from $INSTALL_DOC"
 
 if command -v apt-get >/dev/null 2>&1; then

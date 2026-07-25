@@ -53,19 +53,32 @@ const (
 
 func newInitCmd() *cobra.Command {
 	var (
-		configDir  string
-		yes        bool
-		skipSystem bool
+		configDir      string
+		yes            bool
+		skipSystem     bool
+		nonInteractive bool
+		answersPath    string
+		force          bool
 	)
 
 	cmd := &cobra.Command{
 		Use:   "init",
-		Short: "Interactive setup wizard",
+		Short: "Interactive setup wizard (or scripted with --non-interactive)",
 		Long: `Detect the environment, ask a few questions, write config files,
 install systemd units, and start EzyShield in dry-run mode.
 
 Pass --yes to accept all smart defaults without prompting.
-Pass --config-dir to write files elsewhere (skips systemd/service steps — useful for testing).`,
+Pass --config-dir to write files elsewhere (skips systemd/service steps — useful for testing).
+
+Non-interactive (for Ansible / cloud-init / Terraform / golden images):
+
+  --non-interactive (-n) runs without a TTY, driven by --answers and/or the
+  override flags, producing the same validated config the wizard produces.
+  Detection still runs; answers pin or override the result. Secrets are NEVER
+  passed as flags or answers-file values — reference an env var NAME and put
+  the value in the .env file. The config is always generated with armed: false.
+  Re-running against an existing config refuses without --force. With --json
+  the summary is emitted as JSON on stdout (progress goes to stderr).`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := requireRootForWrites(cmd, configDir); err != nil {
@@ -73,6 +86,14 @@ Pass --config-dir to write files elsewhere (skips systemd/service steps — usef
 			}
 			if configDir != defaultConfigDir {
 				skipSystem = true
+			}
+			// --answers implies --non-interactive (a file cannot be answered
+			// interactively).
+			if nonInteractive || answersPath != "" {
+				if yes {
+					return fmt.Errorf("--yes and --non-interactive are mutually exclusive; --non-interactive already runs without prompts")
+				}
+				return runNonInteractiveInit(cmd, configDir, skipSystem, force, answersPath)
 			}
 			return runInitWizard(cmd, configDir, yes, skipSystem)
 		},
@@ -82,6 +103,27 @@ Pass --config-dir to write files elsewhere (skips systemd/service steps — usef
 		"directory to write configuration files")
 	cmd.Flags().BoolVar(&yes, "yes", false,
 		"accept all defaults without interactive prompts")
+
+	// Non-interactive (scripted) flags.
+	cmd.Flags().BoolVarP(&nonInteractive, "non-interactive", "n", false,
+		"scripted setup: no prompts, driven by --answers and flags")
+	cmd.Flags().StringVar(&answersPath, "answers", "",
+		"path to a YAML answers file (implies --non-interactive; flags override file values)")
+	cmd.Flags().BoolVar(&force, "force", false,
+		"overwrite an existing config.yaml/policy.yaml (non-interactive only)")
+	// Per-answer overrides. --ai-key-env carries an env var NAME, never a key.
+	cmd.Flags().String("admin-ips", "",
+		"admin IPs/CIDRs for the allowlist, comma/space separated (overrides answers)")
+	cmd.Flags().Bool("monitor-ssh", true,
+		"monitor SSH via journald (overrides answers)")
+	cmd.Flags().Bool("enable-ai", false,
+		"enable AI analysis (overrides answers)")
+	cmd.Flags().String("ai-provider", "",
+		"AI provider: anthropic|openai|ollama (overrides answers)")
+	cmd.Flags().String("ai-model", "",
+		"AI model (overrides answers)")
+	cmd.Flags().String("ai-key-env", "",
+		"env var NAME holding the AI API key — never the key itself (overrides answers)")
 
 	return cmd
 }

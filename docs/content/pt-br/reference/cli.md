@@ -100,6 +100,22 @@ Flags:
 - `--config-dir <dir>` — escreve os arquivos em outro diretório; pula a
   instalação das units do systemd e o start dos serviços (os próximos passos
   passam a usar o `run` em primeiro plano).
+- `--non-interactive`, `-n` — configuração automatizada (sem TTY), guiada por
+  `--answers` e/ou pelas flags de sobrescrita abaixo. Produz a mesma
+  configuração validada que o assistente gera (sempre `armed: false`). Veja o
+  [guia de instalação não-interativa](../guides/automation.md) para o esquema do
+  arquivo de respostas e exemplos de Ansible/cloud-init.
+- `--answers <caminho>` — arquivo de respostas YAML (implica
+  `--non-interactive`; as flags sobrescrevem os valores do arquivo). Chaves
+  desconhecidas são rejeitadas.
+- `--force` — sobrescreve um `config.yaml`/`policy.yaml` existente (só no modo
+  não-interativo; sem ela, uma reexecução recusa, igual ao assistente).
+- `--admin-ips`, `--monitor-ssh`, `--enable-ai`, `--ai-provider`, `--ai-model`,
+  `--ai-key-env` — sobrescritas por resposta para o caminho não-interativo. O
+  `--ai-key-env` recebe um **NOME** de variável de ambiente, nunca a chave em
+  si; um segredo literal em qualquer flag ou valor do arquivo é rejeitado.
+- `--json` — com `--non-interactive`, emite o resumo como JSON no stdout (o
+  progresso vai para o stderr).
 
 ## ezyshield run
 

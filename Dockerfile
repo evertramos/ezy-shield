@@ -31,7 +31,7 @@
 # $BUILDPLATFORM means this stage always runs natively: cross-building the
 # arm64 image on an amd64 runner needs no QEMU emulation, because the only
 # arch-specific payload (the Go binaries) is prebuilt and merely COPYed.
-FROM --platform=$BUILDPLATFORM alpine:3.21 AS base
+FROM --platform=$BUILDPLATFORM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d AS base
 RUN apk add --no-cache ca-certificates tzdata \
  && printf 'nonroot:x:65532:65532:nonroot:/nonexistent:/sbin/nologin\n' > /etc/passwd.nonroot \
  && printf 'nonroot:x:65532:\n' > /etc/group.nonroot

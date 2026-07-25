@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/evertramos/ezy-shield/docs/schemas/siem/event.schema.json",
+  "title": "EzyShield SIEM audit event",
+  "description": "Stable v1 JSON wire schema produced by internal/siem.FormatJSON. See README.md in this directory for the CEF and RFC 5424 renderings of the same event.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "timestamp",
+    "vendor",
+    "product",
+    "version",
+    "action",
+    "rule",
+    "score",
+    "strike",
+    "ttl_seconds",
+    "actor",
+    "node"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Wire-schema version. Bumped on any field addition, removal, rename, or meaning change."
+    },
+    "timestamp": {
+      "type": "string",
+      "description": "Event time, RFC 3339 in UTC. Empty string when the event time is zero.",
+      "examples": ["2025-01-15T10:00:01Z", ""]
+    },
+    "vendor": {
+      "type": "string",
+      "maxLength": 512,
+      "description": "Emitting vendor. Defaults to \"ezy\" when unset by the caller."
+    },
+    "product": {
+      "type": "string",
+      "maxLength": 512,
+      "description": "Emitting product. Defaults to \"EzyShield\" when unset."
+    },
+    "version": {
+      "type": "string",
+      "maxLength": 512,
+      "description": "Emitting product version (build info). Defaults to \"unknown\" when unset."
+    },
+    "action": {
+      "type": "string",
+      "maxLength": 512,
+      "description": "Audit operation: ban, dry_ban, unban, expire, allow, arm, disarm, ...",
+      "examples": ["ban", "unban", "arm"]
+    },
+    "ip": {
+      "type": "string",
+      "description": "Target IP address. OMITTED entirely for system-level events with no target.",
+      "examples": ["198.51.100.23", "2001:db8::1"]
+    },
+    "rule": {
+      "type": "string",
+      "maxLength": 512,
+      "description": "Matched rule / reason text. Untrusted: may derive from hostile log content."
+    },
+    "score": {
+      "type": "integer",
+      "description": "Threat score 0-100; 0 when unknown."
+    },
+    "strike": {
+      "type": "integer",
+      "description": "Escalation level 0-5 (0 when not a strike event)."
+    },
+    "ttl_seconds": {
+      "type": "integer",
+      "description": "Ban duration in seconds; 0 means permanent or not applicable."
+    },
+    "actor": {
+      "type": "string",
+      "maxLength": 512,
+      "description": "What produced the verdict: rules, ai:anthropic, manual, ... Untrusted."
+    },
+    "node": {
+      "type": "string",
+      "maxLength": 512,
+      "description": "Reporting host name. Untrusted."
+    }
+  }
+}

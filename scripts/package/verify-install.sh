@@ -115,14 +115,31 @@ info "verify-install: $DISTRO / $FAMILY / suite=$SUITE${EXPECT:+ / expect=$EXPEC
 # apt's and dnf's `man` do a live filesystem lookup for a name match, so no
 # `mandb`/`makewhatis` rebuild is required after the package lands its
 # pages — confirmed empirically on debian:12 and rockylinux:9 (issue #225).
+#
+# Container images minimize docs in ways real servers don't; undo that
+# FIRST so the gate asserts real-box behaviour, not Docker's:
+#   - ubuntu:* ships /etc/dpkg/dpkg.cfg.d/excludes with
+#     path-exclude=/usr/share/man/* — dpkg would drop our man pages —
+#     and dpkg-diverts /usr/bin/man to a stub that prints a "system has
+#     been minimized" notice (exit 0) instead of the page, even with
+#     man-db installed.
+#   - fedora:* sets tsflags=nodocs in dnf.conf, and lacks `col`
+#     (util-linux), which man-db's output pipeline needs to render.
 if [ "$FAMILY" = apt ]; then
   export DEBIAN_FRONTEND=noninteractive
+  rm -f /etc/dpkg/dpkg.cfg.d/excludes
+  if dpkg-divert --list /usr/bin/man 2>/dev/null | grep -q .; then
+    rm -f /usr/bin/man
+    dpkg-divert --quiet --remove --rename /usr/bin/man
+  fi
   apt-get -qq update >/dev/null
   apt-get -qq install -y curl ca-certificates gnupg man-db >/dev/null
 else
+  sed -i '/^tsflags=nodocs$/d' /etc/dnf/dnf.conf 2>/dev/null || true
   command -v curl >/dev/null 2>&1 || dnf -q -y install curl >/dev/null
   command -v gpg  >/dev/null 2>&1 || dnf -q -y install gnupg2 >/dev/null
   command -v man  >/dev/null 2>&1 || dnf -q -y install man-db >/dev/null
+  command -v col  >/dev/null 2>&1 || dnf -q -y install util-linux >/dev/null
 fi
 
 # --- Suite published? ---

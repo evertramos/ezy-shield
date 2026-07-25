@@ -503,7 +503,7 @@ func detectEnvironment(p *wPrinter, st styler, state *wizardState, configDir str
 	state.sshUnit = detectSSHUnit()
 	p.println(st.ok("SSH unit: " + state.sshUnit))
 
-	state.publicIP = fetchPublicIP()
+	state.publicIP = detectPublicIP()
 	if state.publicIP != "" {
 		p.println(st.ok("public IP: " + state.publicIP))
 	} else {
@@ -1468,6 +1468,12 @@ func detectSSHUnit() string {
 	}
 	return "ssh" // Debian/Ubuntu default
 }
+
+// detectPublicIP is the seam through which detectEnvironment fetches the
+// server's public IP. It defaults to fetchPublicIP (a real network call) and
+// is a package var so tests drive detection hermetically, without hitting the
+// network — the same pattern used for dockerNetworkLister and tokenReader.
+var detectPublicIP = fetchPublicIP
 
 func fetchPublicIP() string {
 	client := &http.Client{Timeout: 5 * time.Second}

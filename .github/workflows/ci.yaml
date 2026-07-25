@@ -197,6 +197,11 @@ jobs:
         run: |
           set -o pipefail
           go test -fuzz=FuzzProcTCPPeers -fuzztime=10s ./internal/decision/ | tee fuzz-proc.txt
+      - name: Fuzz SIEM formatters (10s)
+        id: fsiem
+        run: |
+          set -o pipefail
+          go test -fuzz=FuzzSIEMFormatters -fuzztime=10s ./internal/siem/ | tee fuzz-siem.txt
       - name: Job summary
         if: always()
         run: |
@@ -210,6 +215,7 @@ jobs:
             echo "| FuzzSSHParser | $(execs fuzz-ssh.txt) | ${{ steps.fssh.outcome }} |"
             echo "| FuzzNginxParser | $(execs fuzz-nginx.txt) | ${{ steps.fnginx.outcome }} |"
             echo "| FuzzProcTCPPeers | $(execs fuzz-proc.txt) | ${{ steps.fproc.outcome }} |"
+            echo "| FuzzSIEMFormatters | $(execs fuzz-siem.txt) | ${{ steps.fsiem.outcome }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   govulncheck:

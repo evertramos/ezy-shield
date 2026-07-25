@@ -1,0 +1,6 @@
+--- json ---
+{"schema_version":1,"timestamp":"","vendor":"ezy","product":"EzyShield","version":"unknown","action":"","rule":"","score":0,"strike":0,"ttl_seconds":0,"actor":"","node":""}
+--- cef ---
+CEF:0|ezy|EzyShield|unknown|unknown|EzyShield event|4|act= cn1Label=score cn1=0 cn2Label=strike cn2=0 cn3Label=ttlSeconds cn3=0
+--- rfc5424 ---
+<133>1 - - EzyShield - - [ezyShield@32473 action="" score="0" strike="0" ttlSeconds="0"] event

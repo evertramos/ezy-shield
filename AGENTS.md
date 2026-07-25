@@ -68,6 +68,7 @@ addressed. "Looks fine" is not a review — cite file:line, why, and the fix.
 | Gate | What it guards |
 |------|---------------|
 | `FuzzSSHParser` / `FuzzNginxParser` | Parser panic-safety on hostile bytes; run with `-fuzztime=10s` in CI, longer locally |
+| `FuzzSIEMFormatters` | SIEM formatter output can never carry a raw newline or unescaped delimiter, however hostile the event fields (§1 SECURITY-REVIEW) |
 | `govulncheck ./...` | Known CVEs in module graph |
 | `gosec` (via golangci-lint) | Static security linting |
 | `internal/decision/antilockout_test.go` | SSH peer / allowlist / CDN range can never be banned (§2 SECURITY-REVIEW) |

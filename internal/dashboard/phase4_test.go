@@ -1,8 +1,10 @@
 package dashboard
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -159,7 +161,9 @@ func TestLoginRateLimit_EndToEnd(t *testing.T) {
 }
 
 func TestSessionCap_EvictsOldest(t *testing.T) {
-	s := newSessionStore(time.Hour)
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	s := newSessionStore(time.Hour, logger)
 	first, _, err := s.Create("admin")
 	if err != nil {
 		t.Fatalf("Create 1: %v", err)
@@ -181,6 +185,9 @@ func TestSessionCap_EvictsOldest(t *testing.T) {
 	if got := s.userLen("admin"); got != 3 {
 		t.Fatalf("userLen = %d, want 3", got)
 	}
+	if buf.Len() != 0 {
+		t.Fatalf("no eviction log expected before the cap is exceeded, got: %q", buf.String())
+	}
 
 	fourth, _, err := s.Create("admin")
 	if err != nil {
@@ -197,10 +204,33 @@ func TestSessionCap_EvictsOldest(t *testing.T) {
 	if got := s.userLen("admin"); got != 3 {
 		t.Fatalf("userLen after cap = %d, want 3", got)
 	}
+
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("want exactly one eviction log line, got %d: %q", len(lines), buf.String())
+	}
+	line := lines[0]
+	if !strings.Contains(line, `msg="dashboard session evicted"`) {
+		t.Errorf("eviction log missing expected msg: %q", line)
+	}
+	if !strings.Contains(line, "user=admin") {
+		t.Errorf("eviction log missing user=admin: %q", line)
+	}
+	if !strings.Contains(line, "reason=cap_exceeded") {
+		t.Errorf("eviction log missing reason=cap_exceeded: %q", line)
+	}
+
+	// Explicit logout is user-initiated and expected — must not emit the
+	// cap-eviction line.
+	buf.Reset()
+	s.Delete(fourth)
+	if buf.Len() != 0 {
+		t.Errorf("explicit Delete must not emit an eviction log, got: %q", buf.String())
+	}
 }
 
 func TestSessionCap_ScopedPerUser(t *testing.T) {
-	s := newSessionStore(time.Hour)
+	s := newSessionStore(time.Hour, nil)
 	aliceTok, _, err := s.Create("alice")
 	if err != nil {
 		t.Fatalf("alice create: %v", err)

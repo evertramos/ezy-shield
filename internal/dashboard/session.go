@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -30,6 +31,7 @@ const maxSessionsPerUser = 3
 type sessionStore struct {
 	timeout time.Duration
 	now     func() time.Time
+	logger  *slog.Logger
 
 	mu      sync.Mutex
 	entries map[string]*sessionEntry
@@ -53,10 +55,14 @@ type sessionInfo struct {
 	CSRF     string
 }
 
-func newSessionStore(timeout time.Duration) *sessionStore {
+func newSessionStore(timeout time.Duration, logger *slog.Logger) *sessionStore {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &sessionStore{
 		timeout: timeout,
 		now:     time.Now,
+		logger:  logger,
 		entries: make(map[string]*sessionEntry),
 		perUser: make(map[string][]string),
 	}
@@ -101,6 +107,11 @@ func (s *sessionStore) enforceCapLocked(username string) {
 		oldest := list[0]
 		list = list[1:]
 		delete(s.entries, oldest)
+		s.logger.Info("dashboard session evicted",
+			"user", username,
+			"reason", "cap_exceeded",
+			"cap", maxSessionsPerUser,
+		)
 	}
 	if len(list) == 0 {
 		delete(s.perUser, username)

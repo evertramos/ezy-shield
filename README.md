@@ -182,7 +182,7 @@ echo "deb [signed-by=/usr/share/keyrings/ezyshield.gpg] https://packages.ezyshie
 sudo apt update && sudo apt install ezyshield
 ```
 
-GPG-signed repositories with `.deb` and `.rpm` for amd64/arm64 — dnf setup and details in the [install guide](docs/content/en/getting-started/install.md). Every release today is a release candidate, so this uses the `testing` suite; switch to `stable` once v0.1.0 ships.
+GPG-signed repositories with `.deb` and `.rpm` for amd64/arm64 — dnf setup and details in the [install guide](docs/content/en/getting-started/install.md). Every release today is a release candidate, so this uses the `testing` suite; switch to `stable` once v0.1.0 ships. See the [supported platforms matrix](docs/content/en/reference/supported-platforms.md) for the distros and architectures exercised by the end-to-end install test.
 
 ### Specific version (including release candidates)
 

@@ -5,8 +5,10 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // sessionTokenBytes is the length of the raw random token before hex encoding.
@@ -108,7 +110,7 @@ func (s *sessionStore) enforceCapLocked(username string) {
 		list = list[1:]
 		delete(s.entries, oldest)
 		s.logger.Info("dashboard session evicted",
-			"user", username,
+			"user", logSafeUser(username),
 			"reason", "cap_exceeded",
 			"cap", maxSessionsPerUser,
 		)
@@ -189,4 +191,34 @@ func (s *sessionStore) userLen(username string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.perUser[username])
+}
+
+// maxLogUserLen caps how much of a username is echoed into a log line; a
+// login form can submit kilobytes, and unbounded attacker-sized fields in
+// logs are themselves an attack (§1 SECURITY-REVIEW).
+const maxLogUserLen = 64
+
+// logSafeUser sanitizes a form-provided username for use as a log attribute:
+// CR/LF and all other control characters are stripped and the length is
+// capped. The JSON slog handler already escapes these, but the sanitizer
+// keeps log lines unforgeable under any handler and satisfies CodeQL
+// go/log-injection. Log-sink use only — never feed the result back into
+// auth or session bookkeeping.
+func logSafeUser(username string) string {
+	username = strings.ReplaceAll(username, "\n", "")
+	username = strings.ReplaceAll(username, "\r", "")
+	username = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, username)
+	if len(username) > maxLogUserLen {
+		cut := maxLogUserLen
+		for cut > 0 && !utf8.RuneStart(username[cut]) {
+			cut--
+		}
+		username = username[:cut]
+	}
+	return username
 }

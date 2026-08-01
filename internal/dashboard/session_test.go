@@ -3,8 +3,10 @@ package dashboard
 import (
 	"bytes"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestSessionStore_CreateGet(t *testing.T) {
@@ -89,4 +91,58 @@ func TestSessionStore_Delete(t *testing.T) {
 	}
 	// Deleting an unknown token must not panic.
 	s.Delete("nonexistent")
+}
+
+func TestLogSafeUser(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain", "admin", "admin"},
+		{"crlf injection", "admin\r\nFAKE ban 203.0.113.7", "adminFAKE ban 203.0.113.7"},
+		{"ansi escape", "adm\x1b[31min\x1b[0m", "adm[31min[0m"},
+		{"control chars and del", "a\x00b\x07c\x7fd", "abcd"},
+		{"unicode kept", "usuário", "usuário"},
+		{"empty", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := logSafeUser(tt.in); got != tt.want {
+				t.Errorf("logSafeUser(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+
+	t.Run("length cap rune-safe", func(t *testing.T) {
+		long := strings.Repeat("é", 100) // 2 bytes per rune
+		got := logSafeUser(long)
+		if len(got) > maxLogUserLen {
+			t.Errorf("len = %d, want <= %d", len(got), maxLogUserLen)
+		}
+		if !utf8.ValidString(got) {
+			t.Errorf("truncation produced invalid UTF-8: %q", got)
+		}
+	})
+}
+
+func TestSessionStore_EvictionLogSanitized(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	s := newSessionStore(time.Hour, logger)
+	hostile := "admin\r\nFORGED line"
+	for range maxSessionsPerUser + 1 {
+		if _, _, err := s.Create(hostile); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+	}
+	out := buf.String()
+	if out == "" {
+		t.Fatalf("expected an eviction log line")
+	}
+	// The sanitizer removes CR/LF entirely, so neither a raw CR nor the
+	// handler-escaped `\r` form may appear in the eviction line.
+	if strings.Contains(out, "\r") || strings.Contains(out, `\r`) {
+		t.Errorf("eviction log contains CR (raw or escaped): %q", out)
+	}
 }

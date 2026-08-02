@@ -119,3 +119,53 @@ func TestAuthorizeManualBan_ValidBanPasses(t *testing.T) {
 		t.Errorf("legitimate CIDR manual ban refused: %v", err)
 	}
 }
+
+// ── IPv4-mapped IPv6 forms (issue #314) ─────────────────────────────────────
+// Operators on dual-stack hosts copy "::ffff:a.b.c.d" spellings straight from
+// logs into `ezyshield ban`, and the CLI's forwarded peer comes from an
+// SSH_CLIENT that sshd reports in mapped form. netip treats mapped and plain
+// as distinct, so every guard must normalize both sides.
+func TestAuthorizeManualBan_MappedForms(t *testing.T) {
+	pol := armedPolicy()
+	pol.Allowlist = []string{"203.0.113.10"}
+	eng := mustEngine(t, pol, newMock(nil))
+	eng.SetSSHPeerProbe(func() []netip.Addr { return nil })
+
+	cases := []struct {
+		name    string
+		target  netip.Prefix
+		peers   []netip.Addr
+		wantErr error
+	}{
+		{
+			"mapped host prefix of allowlisted IP",
+			hostPrefix("::ffff:203.0.113.10"), nil,
+			decision.ErrManualBanAllowlisted,
+		},
+		{
+			"mapped CIDR overlapping allowlisted IP",
+			netip.MustParsePrefix("::ffff:203.0.113.0/120"), nil,
+			decision.ErrManualBanAllowlisted,
+		},
+		{
+			"mapped forwarded peer inside plain target",
+			netip.MustParsePrefix("198.51.100.0/24"),
+			[]netip.Addr{netip.MustParseAddr("::ffff:198.51.100.9")},
+			decision.ErrManualBanSSHPeer,
+		},
+		{
+			"plain forwarded peer inside mapped target",
+			hostPrefix("::ffff:198.51.100.9"),
+			[]netip.Addr{netip.MustParseAddr("198.51.100.9")},
+			decision.ErrManualBanSSHPeer,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := eng.AuthorizeManualBan(context.Background(), tc.target, tc.peers...)
+			if !errors.Is(err, tc.wantErr) {
+				t.Errorf("err = %v, want %v (mapped form bypassed the guard — issue #314)", err, tc.wantErr)
+			}
+		})
+	}
+}

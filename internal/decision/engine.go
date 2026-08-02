@@ -129,7 +129,13 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 			best = v
 		}
 	}
-	ip := best.IP
+	// Normalize the IPv4-mapped IPv6 form ("::ffff:a.b.c.d") that dual-stack
+	// listeners log for IPv4 clients and parsers deliver verbatim: netip
+	// treats it as distinct from the plain form, so without Unmap a mapped
+	// verdict bypasses the allowlist/SSH-peer checks below, splits store rows
+	// across two spellings of the same offender, and hands the enforcer a v6
+	// literal its IPv4 set can never match on the wire (issue #314).
+	ip := best.IP.Unmap()
 
 	// ── Safety invariant §1: allowlist checked FIRST, always wins ─────────────
 	if e.isAllowlisted(ip) {
@@ -457,7 +463,7 @@ func buildAllowlist(policy *config.Policy) ([]netip.Prefix, error) {
 		if err != nil {
 			return nil, fmt.Errorf("decision: admin_cidrs entry %q: %w", s, err)
 		}
-		prefixes = append(prefixes, p)
+		prefixes = append(prefixes, normalizePrefix(p))
 	}
 
 	// Anti-lockout: add the SSH peer present at daemon startup.
@@ -469,20 +475,40 @@ func buildAllowlist(policy *config.Policy) ([]netip.Prefix, error) {
 }
 
 // parsePrefixOrAddr accepts a bare IP ("1.2.3.4") or a CIDR ("10.0.0.0/8")
-// and returns the equivalent netip.Prefix.
+// and returns the equivalent netip.Prefix. IPv4-mapped IPv6 forms are
+// normalized to IPv4 so they match the unmapped verdict IPs the engine
+// compares against (issue #314).
 func parsePrefixOrAddr(s string) (netip.Prefix, error) {
 	if p, err := netip.ParsePrefix(s); err == nil {
-		return p, nil
+		return normalizePrefix(p), nil
 	}
 	a, err := netip.ParseAddr(s)
 	if err != nil {
 		return netip.Prefix{}, fmt.Errorf("invalid IP address or CIDR %q", s)
 	}
+	a = a.Unmap()
 	return netip.PrefixFrom(a, a.BitLen()), nil
 }
 
+// normalizePrefix converts an IPv4-mapped IPv6 prefix ("::ffff:a.b.c.d/n",
+// n ≥ 96) to its IPv4 equivalent — operators on dual-stack hosts copy the
+// mapped spelling straight from logs into allowlist/admin_cidrs entries, and
+// the engine compares against unmapped addresses (issue #314). A mapped
+// prefix shorter than /96 has no IPv4 equivalent and passes through
+// unchanged. Never narrows protection: the unmapped verdict IPs the mapped
+// original would have matched no longer occur post-Unmap in Decide.
+func normalizePrefix(p netip.Prefix) netip.Prefix {
+	if p.Addr().Is4In6() && p.Bits() >= 96 {
+		return netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96)
+	}
+	return p
+}
+
 // sshClientIP returns the client IP from the SSH_CLIENT environment variable.
-// OpenSSH sets SSH_CLIENT to "IP srcport dstport" for each session.
+// OpenSSH sets SSH_CLIENT to "IP srcport dstport" for each session; a
+// dual-stack sshd reports IPv4 clients in the mapped form, so the result is
+// unmapped to compare equal to the engine's normalized verdict IPs and the
+// kernel-derived peers (issue #314; sshpeers.go already unmaps its side).
 // Returns the zero Addr if SSH_CLIENT is unset or cannot be parsed.
 func sshClientIP() netip.Addr {
 	v := os.Getenv("SSH_CLIENT")
@@ -497,5 +523,5 @@ func sshClientIP() netip.Addr {
 	if err != nil {
 		return netip.Addr{}
 	}
-	return ip
+	return ip.Unmap()
 }

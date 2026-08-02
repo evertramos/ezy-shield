@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"slices"
 	"testing"
 	"time"
 
@@ -98,7 +99,7 @@ func TestGateForwardsAllowlistSyncer(t *testing.T) {
 	if len(local.unallows) != 1 || local.unallows[0] != pfx {
 		t.Errorf("inner Unallow calls = %v, want [%v]", local.unallows, pfx)
 	}
-	if len(local.syncAllows) != 1 || len(local.syncAllows[0]) != len(want) {
+	if len(local.syncAllows) != 1 || !slices.Equal(local.syncAllows[0], want) {
 		t.Errorf("inner SyncAllowlist calls = %v, want one call with %v", local.syncAllows, want)
 	}
 }

@@ -56,6 +56,12 @@ Rules; this is the verification side.)
 
 - [ ] Allowlist is checked **first** and is **unbypassable** — no code path bans
       an allowlisted IP/CIDR. Test asserts it.
+- [ ] IPv4-mapped IPv6 spellings (`::ffff:a.b.c.d`) are normalized (`Unmap`)
+      before every allowlist / SSH-peer / suppression comparison and before
+      store or enforcer writes — dual-stack listeners log IPv4 clients in the
+      mapped form and `netip` treats the two spellings as distinct addresses
+      (issue #314). Any new comparison or key on a `netip.Addr`/`Prefix` must
+      state which side guarantees canonical form.
 - [ ] Anti-lockout re-derives the active SSH peer + admin CIDRs **before every
       ban write**, not just at startup.
 - [ ] CDN/edge ranges and RFC1918/loopback get the documented guardrail (warn +

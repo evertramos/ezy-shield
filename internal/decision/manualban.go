@@ -48,6 +48,18 @@ var ErrManualBanSSHPeer = errors.New("target covers an active SSH session")
 // ErrRateLimited) and carry the specific entry that fired, so refusals can be
 // audited and reported to the operator by name.
 func (e *Engine) AuthorizeManualBan(_ context.Context, target netip.Prefix, peers ...netip.Addr) error {
+	// Normalize the IPv4-mapped IPv6 spelling operators copy from dual-stack
+	// logs ("ezyshield ban ::ffff:a.b.c.d") — netip treats it as distinct
+	// from the plain form, which would bypass every Overlaps/Contains guard
+	// below (issue #314). A mapped super-prefix broader than /96 has no IPv4
+	// equivalent, so no guard below could refuse it — reject it outright
+	// rather than authorize a target the allowlist can't see (PR #364
+	// review). The refusal is audited like any other via the socket handler.
+	var err error
+	if target, err = NormalizePrefix(target); err != nil {
+		return fmt.Errorf("refusing manual ban: %w", err)
+	}
+
 	// ── Safety invariant §1: allowlist checked FIRST, always wins ─────────
 	// Overlap in either direction refuses: banning a prefix that contains an
 	// allowlisted range would lock the allowlisted hosts out just as surely
@@ -68,6 +80,9 @@ func (e *Engine) AuthorizeManualBan(_ context.Context, target netip.Prefix, peer
 		}
 	}
 	for _, peer := range peers {
+		// CLI-forwarded peers come from the client's SSH_CLIENT, which a
+		// dual-stack sshd reports in mapped form (issue #314).
+		peer = peer.Unmap()
 		if peer.IsValid() && target.Contains(peer) {
 			return fmt.Errorf("%w: %s contains your session's IP %s", ErrManualBanSSHPeer, target, peer)
 		}

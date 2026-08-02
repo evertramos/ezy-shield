@@ -463,7 +463,7 @@ func buildAllowlist(policy *config.Policy) ([]netip.Prefix, error) {
 		if err != nil {
 			return nil, fmt.Errorf("decision: admin_cidrs entry %q: %w", s, err)
 		}
-		p, err = normalizePrefix(p)
+		p, err = NormalizePrefix(p)
 		if err != nil {
 			return nil, fmt.Errorf("decision: admin_cidrs entry %q: %w", s, err)
 		}
@@ -484,7 +484,7 @@ func buildAllowlist(policy *config.Policy) ([]netip.Prefix, error) {
 // compares against; unmappable mapped prefixes are rejected (issue #314).
 func parsePrefixOrAddr(s string) (netip.Prefix, error) {
 	if p, err := netip.ParsePrefix(s); err == nil {
-		return normalizePrefix(p)
+		return NormalizePrefix(p)
 	}
 	a, err := netip.ParseAddr(s)
 	if err != nil {
@@ -494,7 +494,7 @@ func parsePrefixOrAddr(s string) (netip.Prefix, error) {
 	return netip.PrefixFrom(a, a.BitLen()), nil
 }
 
-// normalizePrefix converts an IPv4-mapped IPv6 prefix ("::ffff:a.b.c.d/n",
+// NormalizePrefix converts an IPv4-mapped IPv6 prefix ("::ffff:a.b.c.d/n",
 // n ≥ 96) to its IPv4 equivalent — operators on dual-stack hosts copy the
 // mapped spelling straight from logs into allowlist/admin_cidrs entries, and
 // the engine compares against unmapped addresses (issue #314). Non-mapped
@@ -505,7 +505,12 @@ func parsePrefixOrAddr(s string) (netip.Prefix, error) {
 // an allowlist entry that protects nothing, or a manual-ban target no guard
 // can refuse (PR #364 review findings). Fail loud instead of leaving a
 // silent hole: reject it and tell the operator to spell the range plainly.
-func normalizePrefix(p netip.Prefix) (netip.Prefix, error) {
+//
+// Exported because the daemon's socket input boundary (parseSocketTarget)
+// canonicalizes operator-typed ban/unban/allow targets through the same
+// rules, so store keys, runtime-allowlist overlap checks, and enforcer
+// targets all carry one identity per address.
+func NormalizePrefix(p netip.Prefix) (netip.Prefix, error) {
 	if !p.Addr().Is4In6() {
 		return p, nil
 	}

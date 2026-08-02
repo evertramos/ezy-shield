@@ -56,7 +56,7 @@ func (e *Engine) AuthorizeManualBan(_ context.Context, target netip.Prefix, peer
 	// rather than authorize a target the allowlist can't see (PR #364
 	// review). The refusal is audited like any other via the socket handler.
 	var err error
-	if target, err = normalizePrefix(target); err != nil {
+	if target, err = NormalizePrefix(target); err != nil {
 		return fmt.Errorf("refusing manual ban: %w", err)
 	}
 

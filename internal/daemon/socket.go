@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/evertramos/ezy-shield/internal/decision"
 	"github.com/evertramos/ezy-shield/internal/ownership"
 	"github.com/evertramos/ezy-shield/internal/store"
 	"github.com/evertramos/ezy-shield/pkg/sdk"
@@ -666,17 +667,27 @@ func formatExpires(t time.Time, now time.Time) string {
 
 // parseSocketTarget accepts a bare IP ("1.2.3.4") or a CIDR ("10.0.0.0/8")
 // and returns the equivalent netip.Prefix (single hosts become /32 or /128).
+//
+// IPv4-mapped IPv6 spellings ("::ffff:a.b.c.d") that operators copy from
+// dual-stack logs are canonicalized to plain IPv4 here, at the input
+// boundary, so every downstream consumer sees one identity per address:
+// the runtime-allowlist overlap check in handleBan (which runs before the
+// engine's guards and would otherwise miss the mapped spelling of a
+// protected IP), store keys, enforcer targets, and the matching
+// unban/allow spellings (issue #314, PR #364 review). Mapped super-prefixes
+// broader than /96 have no IPv4 equivalent and are rejected.
 func parseSocketTarget(s string) (netip.Prefix, error) {
 	if s == "" {
 		return netip.Prefix{}, fmt.Errorf("ip or cidr is required")
 	}
 	if p, err := netip.ParsePrefix(s); err == nil {
-		return p, nil
+		return decision.NormalizePrefix(p)
 	}
 	a, err := netip.ParseAddr(s)
 	if err != nil {
 		return netip.Prefix{}, fmt.Errorf("invalid ip or cidr %q", s)
 	}
+	a = a.Unmap()
 	return netip.PrefixFrom(a, a.BitLen()), nil
 }
 

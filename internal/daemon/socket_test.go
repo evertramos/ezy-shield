@@ -400,3 +400,79 @@ func TestHandleList_ExpiredNeverRendersPermanent(t *testing.T) {
 		t.Errorf("timed ban ttl = %q, want a remaining duration", got)
 	}
 }
+
+// ── IPv4-mapped IPv6 canonicalization at the socket boundary (issue #314) ───
+
+// TestParseSocketTarget_MappedForms: operator-typed mapped spellings
+// ("::ffff:a.b.c.d", copied from dual-stack logs) must canonicalize to plain
+// IPv4 at the input boundary; unmappable mapped super-prefixes are rejected
+// (PR #364 review — Strix CWE-284 finding).
+func TestParseSocketTarget_MappedForms(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{in: "::ffff:198.51.100.7", want: "198.51.100.7/32"},
+		{in: "::ffff:198.51.100.0/120", want: "198.51.100.0/24"},
+		{in: "::ffff:0.0.0.0/95", wantErr: true},
+		{in: "198.51.100.7", want: "198.51.100.7/32"}, // plain forms untouched
+		{in: "2001:db8::1", want: "2001:db8::1/128"},  // real IPv6 untouched
+	}
+	for _, tc := range cases {
+		p, err := parseSocketTarget(tc.in)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("parseSocketTarget(%q) = %v, want error (no IPv4 equivalent)", tc.in, p)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("parseSocketTarget(%q): %v", tc.in, err)
+			continue
+		}
+		if p.String() != tc.want {
+			t.Errorf("parseSocketTarget(%q) = %v, want %s", tc.in, p, tc.want)
+		}
+	}
+}
+
+// TestHandleBan_MappedSpellingOfRuntimeAllowlistedIP — Strix on PR #364: the
+// runtime-allowlist refusal in handleBan runs before the engine guards, and
+// runtime entries live only in the daemon (not in the engine's static set).
+// Without canonicalization at the input boundary, `ezyshield ban ::ffff:x`
+// of a runtime-allowlisted x sails past both checks.
+func TestHandleBan_MappedSpellingOfRuntimeAllowlistedIP(t *testing.T) {
+	captureSlog(t)
+	d := newTestDaemonForSocket(t, true /* armed */)
+
+	if resp := callSocket(t, d, SocketRequest{Verb: "allow", IP: "192.0.2.10", Reason: "operator"}); !resp.OK {
+		t.Fatalf("allow: %s", resp.Error)
+	}
+	resp := callSocket(t, d, SocketRequest{Verb: "ban", IP: "::ffff:192.0.2.10"})
+	if resp.OK {
+		t.Fatal("mapped spelling of a runtime-allowlisted IP was banned — runtime allowlist bypassed (PR #364 review)")
+	}
+}
+
+// TestHandleBan_MappedSpellingStoresCanonicalRow: a mapped ban of an
+// unprotected IP must still be authorized AND keyed by the canonical IPv4 in
+// bans_active — otherwise the ban lives under a split identity the pipeline
+// (normalized since #314) never matches, and the enforcer receives a v6
+// literal its IPv4 set can't match on the wire.
+func TestHandleBan_MappedSpellingStoresCanonicalRow(t *testing.T) {
+	captureSlog(t)
+	d := newTestDaemonForSocket(t, true /* armed */)
+
+	resp := callSocket(t, d, SocketRequest{Verb: "ban", IP: "::ffff:198.51.100.9"})
+	if !resp.OK {
+		t.Fatalf("ban: %s", resp.Error)
+	}
+	_, _, _, found, err := d.store.GetBanInfo(context.Background(), netip.MustParseAddr("198.51.100.9"))
+	if err != nil {
+		t.Fatalf("GetBanInfo: %v", err)
+	}
+	if !found {
+		t.Error("bans_active row not keyed by canonical 198.51.100.9 — mapped spelling created a split identity")
+	}
+}

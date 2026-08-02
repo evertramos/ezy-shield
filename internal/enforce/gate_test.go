@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"slices"
 	"testing"
 	"time"
 
@@ -33,6 +34,32 @@ func (f *unguardedEnforcer) Sync(_ context.Context, want []sdk.Target) error {
 	return nil
 }
 
+// allowSyncEnforcer is an unguardedEnforcer that additionally mirrors the
+// allowlist (AllowlistSyncer), like the nftables enforcer does. It records
+// every call so tests can assert forwarding through Gate/MultiEnforcer.
+type allowSyncEnforcer struct {
+	unguardedEnforcer
+	allows     []netip.Prefix
+	unallows   []netip.Prefix
+	syncAllows [][]netip.Prefix
+	err        error // if set, every allowlist method returns it
+}
+
+func (f *allowSyncEnforcer) Allow(_ context.Context, p netip.Prefix) error {
+	f.allows = append(f.allows, p)
+	return f.err
+}
+func (f *allowSyncEnforcer) Unallow(_ context.Context, p netip.Prefix) error {
+	f.unallows = append(f.unallows, p)
+	return f.err
+}
+func (f *allowSyncEnforcer) SyncAllowlist(_ context.Context, want []netip.Prefix) error {
+	c := make([]netip.Prefix, len(want))
+	copy(c, want)
+	f.syncAllows = append(f.syncAllows, c)
+	return f.err
+}
+
 func mustPrefix(t *testing.T, s string) netip.Prefix {
 	t.Helper()
 	p, err := netip.ParsePrefix(s)
@@ -40,6 +67,85 @@ func mustPrefix(t *testing.T, s string) netip.Prefix {
 		t.Fatalf("ParsePrefix(%q): %v", s, err)
 	}
 	return p
+}
+
+// TestGateForwardsAllowlistSyncer covers issue #317: the Gate must keep the
+// inner enforcer's allowlist mirror reachable — hiding it leaves the kernel
+// @allowed sets empty and kills the ADR-0007 anti-lockout backstop. The
+// production shape Gate(Multi(nftables-like, edge-like)) is exercised so the
+// full wrapper chain forwards, and the edge enforcer (no AllowlistSyncer)
+// is skipped without error.
+func TestGateForwardsAllowlistSyncer(t *testing.T) {
+	local := &allowSyncEnforcer{}
+	edge := &unguardedEnforcer{} // no allowlist mirror, like Cloudflare
+	g := NewGate(NewMulti(local, edge), []netip.Prefix{mustPrefix(t, "192.0.2.0/24")}, nil)
+
+	pfx := mustPrefix(t, "203.0.113.7/32")
+	want := []netip.Prefix{pfx, mustPrefix(t, "10.0.0.0/8")}
+
+	if err := g.Allow(context.Background(), pfx); err != nil {
+		t.Fatalf("Allow: %v", err)
+	}
+	if err := g.Unallow(context.Background(), pfx); err != nil {
+		t.Fatalf("Unallow: %v", err)
+	}
+	if err := g.SyncAllowlist(context.Background(), want); err != nil {
+		t.Fatalf("SyncAllowlist: %v", err)
+	}
+
+	if len(local.allows) != 1 || local.allows[0] != pfx {
+		t.Errorf("inner Allow calls = %v, want [%v]", local.allows, pfx)
+	}
+	if len(local.unallows) != 1 || local.unallows[0] != pfx {
+		t.Errorf("inner Unallow calls = %v, want [%v]", local.unallows, pfx)
+	}
+	if len(local.syncAllows) != 1 || !slices.Equal(local.syncAllows[0], want) {
+		t.Errorf("inner SyncAllowlist calls = %v, want one call with %v", local.syncAllows, want)
+	}
+}
+
+// TestGateAllowlistNoOpWithoutInnerSyncer: an edge-only chain (no local
+// firewall) has nothing to mirror into; the forwarded methods must be silent
+// no-ops, preserving pre-#230 behaviour where the daemon's type assertion
+// simply failed and skipped the sync.
+func TestGateAllowlistNoOpWithoutInnerSyncer(t *testing.T) {
+	g := NewGate(&unguardedEnforcer{}, nil, nil)
+	pfx := mustPrefix(t, "203.0.113.7/32")
+	if err := g.Allow(context.Background(), pfx); err != nil {
+		t.Fatalf("Allow on edge-only inner: %v", err)
+	}
+	if err := g.Unallow(context.Background(), pfx); err != nil {
+		t.Fatalf("Unallow on edge-only inner: %v", err)
+	}
+	if err := g.SyncAllowlist(context.Background(), []netip.Prefix{pfx}); err != nil {
+		t.Fatalf("SyncAllowlist on edge-only inner: %v", err)
+	}
+}
+
+// TestMultiAllowlistFanOutJoinsErrors: a failing local mirror must surface in
+// the joined error (so the daemon logs it) while the healthy one still gets
+// the call — matching Ban/Unban/Sync fan-out semantics.
+func TestMultiAllowlistFanOutJoinsErrors(t *testing.T) {
+	bad := &allowSyncEnforcer{err: errors.New("nft exploded")}
+	good := &allowSyncEnforcer{}
+	m := NewMulti(bad, good, &unguardedEnforcer{})
+
+	pfx := mustPrefix(t, "203.0.113.7/32")
+	if err := m.Allow(context.Background(), pfx); err == nil {
+		t.Fatal("Allow: want joined error from failing enforcer, got nil")
+	}
+	if err := m.Unallow(context.Background(), pfx); err == nil {
+		t.Fatal("Unallow: want joined error from failing enforcer, got nil")
+	}
+	if err := m.SyncAllowlist(context.Background(), []netip.Prefix{pfx}); err == nil {
+		t.Fatal("SyncAllowlist: want joined error from failing enforcer, got nil")
+	}
+	for name, f := range map[string]*allowSyncEnforcer{"bad": bad, "good": good} {
+		if len(f.allows) != 1 || len(f.unallows) != 1 || len(f.syncAllows) != 1 {
+			t.Errorf("enforcer %s calls = allow:%d unallow:%d sync:%d, want 1/1/1 (fan-out must reach every syncer)",
+				name, len(f.allows), len(f.unallows), len(f.syncAllows))
+		}
+	}
 }
 
 func TestGateBan(t *testing.T) {

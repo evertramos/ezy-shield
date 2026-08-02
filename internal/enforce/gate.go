@@ -80,6 +80,36 @@ func (g *Gate) Sync(ctx context.Context, want []sdk.Target) error {
 	return g.inner.Sync(ctx, filtered)
 }
 
+// Allow forwards the allowlist addition to the inner enforcer's @allowed
+// mirror. Allowlist mutations are never gated: widening the allowlist can
+// only restore access, never lock anyone out, and this path is itself the
+// anti-lockout backstop the gate exists to protect (issue #317). Inners
+// without a local allowlist mirror (edge-only setups) make this a no-op.
+func (g *Gate) Allow(ctx context.Context, prefix netip.Prefix) error {
+	if s, ok := g.inner.(AllowlistSyncer); ok {
+		return s.Allow(ctx, prefix)
+	}
+	return nil
+}
+
+// Unallow forwards the allowlist removal to the inner enforcer's @allowed
+// mirror; no-op when the inner has none.
+func (g *Gate) Unallow(ctx context.Context, prefix netip.Prefix) error {
+	if s, ok := g.inner.(AllowlistSyncer); ok {
+		return s.Unallow(ctx, prefix)
+	}
+	return nil
+}
+
+// SyncAllowlist forwards the desired allowlist state to the inner enforcer's
+// @allowed mirror; no-op when the inner has none.
+func (g *Gate) SyncAllowlist(ctx context.Context, want []netip.Prefix) error {
+	if s, ok := g.inner.(AllowlistSyncer); ok {
+		return s.SyncAllowlist(ctx, want)
+	}
+	return nil
+}
+
 // refuse reports whether the target must be blocked from enforcement and why.
 //
 // The prefix comparison uses Overlaps, not Contains: banning 192.0.2.0/24

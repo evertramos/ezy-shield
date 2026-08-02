@@ -117,3 +117,20 @@ Sync is a mechanical problem, not an architectural one, and is already implement
 - Counter for "kernel-level accept saved us": every time the `@allowed accept` rule at prerouting fires with the same IP that was written to `@blocked` in the last few minutes, we know the upper layers had a bug and layer 4 caught it. Exporting that counter (log or metrics) turns "defense in depth" from an untestable claim into an observable one — a sustained rise means there's a real bug in the daemon-side check to hunt.
 - QEMU e2e harness gaining a Docker-container-target test that would have caught this from the start.
 - Possible future move to XDP/eBPF for the busiest scanner hosts, once justified by measured overhead.
+
+## Amendment — 2026-08-01 (issue #317)
+
+The "Sync is a mechanical problem … already implemented" claim above was
+regressed by the centralized enforcement gate (issue #230, `enforce.Gate`):
+the daemon discovers the allowlist mirror via a type assertion on its
+enforcer, and the Gate/MultiEnforcer wrappers did not forward
+`Allow`/`Unallow`/`SyncAllowlist` — so from #230 until #317 the assertion
+always failed and the kernel `@allowed` / `@allowed6` sets stayed empty in
+production, disabling this ADR's layer-4 backstop.
+
+Fixed by making both wrappers forward the interface
+(`enforce.AllowlistSyncer`), with compile-time guards in
+`internal/enforce/allowlist.go` and a daemon-level regression test that wires
+the enforcer exactly as `run.go` does. Rule for future wrappers: any type
+that wraps an `sdk.Enforcer` must forward `AllowlistSyncer` (add it to the
+compile-time guard list), or the anti-lockout backstop dies silently again.

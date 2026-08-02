@@ -764,9 +764,12 @@ func (d *Daemon) syncEnforcer(ctx context.Context) error {
 }
 
 // allowlistSyncer is the optional side of sdk.Enforcer that mirrors the
-// daemon's allowlist to a local firewall — currently only satisfied by the
-// nftables enforcer. Kept out of sdk.Enforcer proper because edge enforcers
-// (Cloudflare) don't have a matching concept.
+// daemon's allowlist to a local firewall — implemented by the nftables
+// enforcer and forwarded through the enforce.Gate / enforce.MultiEnforcer
+// wrappers run.go always applies (enforce.AllowlistSyncer is the exported
+// mirror of this interface; compile-time guards in internal/enforce keep the
+// wrappers forwarding — issue #317). Kept out of sdk.Enforcer proper because
+// edge enforcers (Cloudflare) don't have a matching concept.
 type allowlistSyncer interface {
 	Allow(ctx context.Context, prefix netip.Prefix) error
 	Unallow(ctx context.Context, prefix netip.Prefix) error

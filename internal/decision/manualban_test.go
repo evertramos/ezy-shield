@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"testing"
 
+	"github.com/evertramos/ezy-shield/internal/config"
 	"github.com/evertramos/ezy-shield/internal/decision"
 )
 
@@ -165,6 +166,49 @@ func TestAuthorizeManualBan_MappedForms(t *testing.T) {
 			err := eng.AuthorizeManualBan(context.Background(), tc.target, tc.peers...)
 			if !errors.Is(err, tc.wantErr) {
 				t.Errorf("err = %v, want %v (mapped form bypassed the guard — issue #314)", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestAuthorizeManualBan_MappedSuperPrefixRefused — Strix finding on PR #364:
+// a mapped super-prefix like ::ffff:0.0.0.0/95 has no IPv4 equivalent, stays
+// in the IPv6 family, and netip's Overlaps/Contains can never match it
+// against the normalized IPv4 allowlist and peers — so every guard would
+// silently pass. The engine must refuse the target outright.
+func TestAuthorizeManualBan_MappedSuperPrefixRefused(t *testing.T) {
+	pol := armedPolicy()
+	pol.Allowlist = []string{"203.0.113.10"}
+	eng := mustEngine(t, pol, newMock(nil))
+	eng.SetSSHPeerProbe(func() []netip.Addr { return nil })
+
+	err := eng.AuthorizeManualBan(context.Background(),
+		netip.MustParsePrefix("::ffff:0.0.0.0/95"),
+		netip.MustParseAddr("198.51.100.9"))
+	if err == nil {
+		t.Fatal("mapped super-prefix was authorized — the allowlist/SSH-peer guards cannot see it (PR #364 review)")
+	}
+}
+
+// TestNew_RejectsUnmappableMappedConfigEntries — Copilot finding on PR #364:
+// post-#314 the engine compares unmapped addresses, so a mapped config entry
+// broader than /96 would silently protect nothing. Engine construction must
+// fail loud so the operator fixes the spelling instead of trusting a dead
+// allowlist entry.
+func TestNew_RejectsUnmappableMappedConfigEntries(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(p *config.Policy)
+	}{
+		{"allowlist entry", func(p *config.Policy) { p.Allowlist = []string{"::ffff:0.0.0.0/95"} }},
+		{"admin_cidrs entry", func(p *config.Policy) { p.AdminCIDRs = []string{"::ffff:0.0.0.0/95"} }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pol := armedPolicy()
+			tc.mutate(pol)
+			if _, err := decision.New(pol, newMock(nil)); err == nil {
+				t.Error("New accepted an unmappable IPv4-mapped config entry — it would protect nothing (PR #364 review)")
 			}
 		})
 	}

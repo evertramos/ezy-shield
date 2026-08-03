@@ -215,7 +215,7 @@ The script will:
 When using `EZYSHIELD_BASE_URL`, you can also set `EZYSHIELD_VERSION` for your own versioning:
 
 ```bash
-curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=internal-rc1 EZYSHIELD_BASE_URL=https://mirror.example.com/ezyshield/v0.3.0 sh
+curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_LOCAL_ACK=1 EZYSHIELD_VERSION=internal-rc1 EZYSHIELD_BASE_URL=https://mirror.example.com/ezyshield/v0.3.0 sh -s -- --local
 ```
 
 ---

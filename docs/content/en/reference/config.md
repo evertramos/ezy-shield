@@ -198,7 +198,7 @@ ai:
 | `provider` | `anthropic` \| `openai` \| `ollama` (single-provider form) |
 | `model` | model name |
 | `api_key` | `env:VARNAME` reference (never inline) |
-| `endpoint` | base URL — used by ollama (default `http://localhost:11434`) and OpenAI-compatible endpoints |
+| `endpoint` | base URL for the **`ollama`** provider only (default `http://localhost:11434`). The `anthropic` and `openai` providers ignore it and always call their official APIs (`https://api.anthropic.com`, `https://api.openai.com`) — there is no OpenAI-compatible-endpoint override. Same in the single-provider and `providers` failover forms. |
 | `ambiguous_band` | `[low, high]` — only scores inside the band consult the AI |
 | `token_budget_daily` | daily token cap; when exhausted, decisions fall back to rules |
 | `cache_ttl` | verdict cache duration |

@@ -405,7 +405,7 @@ Checks:
   a private (RFC1918/ULA) range at `/16` or broader — such a range can never be
   banned, so it silently exempts a large chunk of address space from
   enforcement forever. See the allowlist section in [Policy Reference](policy.md).
-- ban_ineffective diagnostics: **FAIL** when an active ban is flagged ineffective (traffic flowing despite the ban); names the IPs and points at the systemic remedy (edge enforcement / real-IP parsing / enforcer health). Read-only query against the database at `--db`.
+- ban_ineffective diagnostics: **FAIL** when an active ban is flagged ineffective (traffic flowing despite the ban) — names the IPs and points at the systemic remedy (edge enforcement / real-IP parsing / enforcer health); **WARN** when no ban is currently ineffective but some offender was flagged historically; **PASS** otherwise. Read-only query against the database at `--db`.
 - **Enforcement state** (issue #174) — the honest health of the enforcement
   path, derived from real enforcer outcomes, not config alone, and re-verified
   by a periodic reconcile probe (every 5 minutes) so it stays honest on quiet
@@ -416,7 +416,7 @@ Checks:
   - `DEGRADED` — armed but the enforcer's recent Ban/Sync **failed**; bans may not be applied (with the failure detail)
   - `DISABLED` — no enforcer configured; detection only
 
-  As a check it is **FAIL** when armed but the enforcer is DEGRADED (bans not being applied); **WARN** on DRY-RUN or DISABLED while detection runs; N/A when the daemon isn't running.
+  As a check it is **FAIL** when armed but the enforcer is DEGRADED (bans not being applied); **WARN** on DRY-RUN or DISABLED; N/A when the daemon isn't running.
 
 To exercise enforcers and notification channels for real, use
 `ezyshield test enforcer` and `ezyshield test notifier`.

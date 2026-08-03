@@ -420,7 +420,7 @@ Verificações:
   essa faixa nunca pode ser banida, então ela isenta silenciosamente um
   pedaço grande do espaço de endereços do enforcement para sempre. Veja a
   seção de allowlist na [Referência de Policy](policy.md).
-- diagnóstico ban_ineffective: **FAIL** quando um ban ativo é marcado ineficaz (tráfego passando apesar do ban); nomeia os IPs e aponta o remédio sistêmico (edge enforcement / real-IP parsing / saúde do enforcer). Consulta read-only ao banco em `--db`.
+- diagnóstico ban_ineffective: **FAIL** quando um ban ativo é marcado ineficaz (tráfego passando apesar do ban) — nomeia os IPs e aponta o remédio sistêmico (edge enforcement / real-IP parsing / saúde do enforcer); **WARN** quando nenhum ban está ineficaz no momento, mas algum offender foi marcado historicamente; **PASS** caso contrário. Consulta read-only ao banco em `--db`.
 - **Estado do enforcement** (issue #174) — a saúde real do caminho de
   enforcement, derivada dos resultados reais do enforcer, não só da config, e
   re-verificada por um probe de reconcile periódico (a cada 5 minutos) para
@@ -431,7 +431,7 @@ Verificações:
   - `DEGRADED` — armado, mas o Ban/Sync recente do enforcer **falhou**; bans podem não estar sendo aplicados (com o detalhe da falha)
   - `DISABLED` — nenhum enforcer configurado; só detecção
 
-  Como checagem é **FAIL** quando armado mas o enforcer está DEGRADED (bans não aplicados); **WARN** em DRY-RUN ou DISABLED enquanto a detecção roda; N/A quando o daemon não está rodando.
+  Como checagem é **FAIL** quando armado mas o enforcer está DEGRADED (bans não aplicados); **WARN** em DRY-RUN ou DISABLED; N/A quando o daemon não está rodando.
 
 Para exercitar de verdade os enforcers e os canais de notificação, use
 `ezyshield test enforcer` e `ezyshield test notifier`.

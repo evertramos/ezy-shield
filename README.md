@@ -258,7 +258,7 @@ sudo ezyshield test notifier telegram
 |------|---------|
 | `/etc/ezyshield/config.yaml` | Log sources, enforcement backends, AI providers, notifications |
 | `/etc/ezyshield/policy.yaml` | Score thresholds, strike table, allowlists, rate limits |
-| `/etc/ezyshield/rules.yaml` | Detection rules |
+| `/etc/ezyshield/rules.d/*.yaml` | Optional drop-in rule customizations — the built-in detection rules ship embedded in the binary and update with it; files here merge over them by `name`. (`rules_path`, whole-file replacement, is deprecated.) |
 
 Secrets (API tokens, SMTP passwords) are **never** stored in YAML — reference
 them as `env:VARNAME` or via systemd `LoadCredential=`. Inline secret values are

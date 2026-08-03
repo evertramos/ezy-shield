@@ -19,7 +19,7 @@ Complete reference for `/etc/ezyshield/config.yaml` — log sources, enforcement
 | `rules_dir` | string | `/etc/ezyshield/rules.d` | Drop-in rule customizations: every `*.yaml` here merges over the built-in rules by `name` and survives updates (see the [rules guide](../guides/rules-customization.md)) |
 | `rules_path` | string | — | **Deprecated.** Replaces the built-in rules entirely (no merge; `rules.d` ignored) — freezes the install out of upstream rule tuning |
 | `log.level` | string | `info` | `debug` \| `info` \| `warn` \| `error` |
-| `collectors` | list | `[]` | Log sources to tail (see below) |
+| `collectors` | list | `[]` | Log sources to tail (see below). An empty list is valid — `config validate` warns and the daemon simply tails nothing. |
 | `enforce` | object | — | Enforcement backends (optional — without it, decisions are log-only) |
 | `notify` | object | — | Notification channels (optional) |
 | `ai` | object | — | AI provider for ambiguous traffic (optional) |

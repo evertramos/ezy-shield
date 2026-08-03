@@ -135,22 +135,23 @@ func checkConfigFile(w io.Writer, path string, errs, warns *int) (*config.Config
 	passLine(w, "YAML syntax")
 
 	// Required fields not enforced by the loader.
-	requiredOK := true
 	if strings.TrimSpace(cfg.DataDir) == "" {
 		failLine(w, "data_dir is required")
 		*errs++
-		requiredOK = false
-	}
-	if len(cfg.Collectors) == 0 {
-		failLine(w, "at least one collector is required")
-		*errs++
-		requiredOK = false
-	}
-	if requiredOK {
+	} else {
 		passLine(w, "Required fields")
 	}
 
-	writef(w, "%s Collectors (%d configured)\n", markPass, len(cfg.Collectors))
+	// An empty collectors list is valid: the strict loader (config.LoadConfig)
+	// accepts it and the daemon runs (tailing nothing), so `config validate`
+	// warns rather than errors. Otherwise the shipped configs/config.yaml
+	// (collectors: []) would fail the project's own validate command (#339).
+	if len(cfg.Collectors) == 0 {
+		warnLine(w, "no collectors configured — the daemon will not tail any log sources")
+		*warns++
+	} else {
+		writef(w, "%s Collectors (%d configured)\n", markPass, len(cfg.Collectors))
+	}
 
 	// File-path warnings for file-kind collectors.
 	for i, c := range cfg.Collectors {

@@ -125,21 +125,48 @@ o `cloudflared` fala com ele, e só o Cloudflare fala com o
 ## Opção 3: Tailscale (mesh privada, config zero)
 
 Boa quando você já tem uma mesh Tailscale ligando time e máquinas.
-Instale Tailscale no servidor e no laptop, logue na mesma tailnet,
-depois abra `http://<nome-tailnet-do-servidor>:9090` pelo laptop.
+Instale Tailscale no servidor e no laptop e logue na mesma tailnet. O
+tráfego é peer-to-peer via mesh, cifrado com WireGuard — sem IP
+público nem DNS — e você pode restringir o acesso com ACLs no painel
+do Tailscale.
 
-Como o Tailscale não precisa de IP público nem DNS público — o
-tráfego é peer-to-peer via mesh, cifrado com WireGuard — o dashboard
-continua tão privado quanto era. Você pode restringir mais o acesso
-com ACLs no painel do Tailscale.
+**Importante:** o dashboard escuta só em `127.0.0.1:9090`, e sua
+guarda de loopback rejeita qualquer bind não-loopback, então você
+**não** pode simplesmente abrir o endereço tailnet do servidor na
+porta 9090. Uma instalação Tailscale padrão (modo kernel) não
+encaminha o tráfego destinado à tailnet para um listener só de
+loopback — uma requisição a `http://<nome-tailnet-do-servidor>:9090`
+chega em `100.x.y.z:9090`, não encontra listener e é recusada. (Falha
+fechando — sem brecha de segurança — mas não funciona como URL
+direta.) Ligue a tailnet ao dashboard de loopback de uma destas duas
+formas:
 
-Referência: <https://tailscale.com/kb/1017/install/>
+- **`tailscale serve`** — o proxy reverso embutido do Tailscale. No
+  servidor:
 
-Repare que a guarda de loopback do próprio dashboard **não** aceita
-a interface do tailnet. Você continua chegando no daemon pela
-interface do tailscale do lado do cliente, o que o Tailscale faz de
-forma transparente — você digita `http://my-server:9090` e o
-Tailscale roteia para o loopback do host destino.
+  ```bash
+  # Encaminha o endereço tailnet do node (HTTPS) para o dashboard local em :9090.
+  sudo tailscale serve --bg 9090
+  tailscale serve status   # verifica; rode `tailscale serve --help` para desfazer
+  ```
+
+  Depois abra `https://<servidor>.<tailnet>.ts.net/` de qualquer
+  dispositivo na tailnet. O Tailscale termina a conexão e a encaminha
+  para `127.0.0.1:9090`, então o dashboard ainda vê um cliente de
+  loopback e sua guarda de bind é satisfeita. (O serve HTTPS exige
+  certificados HTTPS habilitados na sua tailnet; as flags exatas variam
+  conforme a versão do Tailscale.)
+
+- **Túnel SSH sobre Tailscale** — idêntico à Opção 1, mas apontando o
+  SSH para o nome tailnet, de modo que nenhuma porta fica exposta:
+
+  ```bash
+  ssh -L 9090:127.0.0.1:9090 <usuário>@<nome-tailnet-do-servidor>
+  # depois abra http://localhost:9090
+  ```
+
+Referência: <https://tailscale.com/kb/1017/install/> ·
+<https://tailscale.com/docs/features/tailscale-serve>
 
 ## Nunca exponha 0.0.0.0
 

@@ -368,6 +368,7 @@ func TestResultsHaveFailure(t *testing.T) {
 // must produce a non-zero exit in both text and --json output modes.
 func TestRunTestEnforce_UnresolvableToken(t *testing.T) {
 	dir := t.TempDir()
+	t.Setenv("EZYSHIELD_TEST_TOKEN_PLACEHOLDER", config.PlaceholderAPIKey)
 	cfgPath := dir + "/config.yaml"
 	cfgYAML := `
 enforce:
@@ -375,7 +376,7 @@ enforce:
     - name: default
       mode: lists
       account_id: acc-123
-      api_token: "env:EZYSHIELD_TEST_TOKEN_DOES_NOT_EXIST"
+      api_token: "env:EZYSHIELD_TEST_TOKEN_PLACEHOLDER"
 `
 	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o600); err != nil {
 		t.Fatalf("writing config: %v", err)

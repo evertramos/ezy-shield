@@ -64,6 +64,11 @@ Acontecem interativamente, nunca a partir do daemon:
 - **`ezyshield config enforcer cloudflare` / `ezyshield test enforce
   cloudflare`** — verificação de token e checagens de conectividade contra
   `api.cloudflare.com`.
+- **`ezyshield doctor`** — quando um enforcer Cloudflare está configurado, roda
+  checagens de capacidade somente-leitura contra `api.cloudflare.com` (o token
+  resolve e é válido, a lista alvo existe, cota de WAF/rate-limit) com timeout de
+  8 segundos. Sem um enforcer Cloudflare configurado, não faz nenhuma chamada de
+  saída.
 
 ## O que nunca sai da máquina
 
@@ -146,6 +151,7 @@ Cada conexão acima mapeia para um arquivo de implementação:
 | `ezyshield update` | `internal/update/client.go`, `cmd/ezyshield/update.go` |
 | Consulta de IP público do `init` | `cmd/ezyshield/init.go` |
 | Chamadas Cloudflare do wizard/test | `cmd/ezyshield/init_cdn.go`, `cmd/ezyshield/testenforce.go` |
+| Checagens Cloudflare do `ezyshield doctor` | `cmd/ezyshield/doctor.go` (`checkCloudflareEnforcers`) |
 | Extração local de evidências | `internal/daemon/evidence_ondemand.go` |
 
 Uma auditoria rápida de que a lista está completa:

@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 
 	"github.com/evertramos/ezy-shield/internal/config"
 )
@@ -293,6 +296,107 @@ func TestTestCloudflareBackend_ListsMode(t *testing.T) {
 	if result.Failed > 0 && result.Message == "" {
 		// If there were failures, there should be a message
 		t.Error("Failed checks should have a message")
+	}
+}
+
+func TestResultsHaveFailure(t *testing.T) {
+	tests := []struct {
+		name    string
+		results *testEnforceResults
+		want    bool
+	}{
+		{
+			name: "all pass",
+			results: &testEnforceResults{
+				Backends: map[string]*backendResult{
+					"default": {Status: "pass"},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "skipped only",
+			results: &testEnforceResults{
+				Backends: map[string]*backendResult{
+					"nftables": {Status: "skipped"},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "one check failed",
+			results: &testEnforceResults{
+				Backends: map[string]*backendResult{
+					"default": {Status: "fail"},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "token resolution/verification error",
+			results: &testEnforceResults{
+				Backends: map[string]*backendResult{
+					"default": {Status: "error", Message: "Failed to resolve API token: env var not set"},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "one backend passes, another errors",
+			results: &testEnforceResults{
+				Backends: map[string]*backendResult{
+					"default":  {Status: "pass"},
+					"secondCF": {Status: "error"},
+				},
+			},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resultsHaveFailure(tt.results); got != tt.want {
+				t.Errorf("resultsHaveFailure() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestRunTestEnforce_UnresolvableToken reproduces the issue #298 report:
+// an unresolvable api_token drives testCloudflareBackend to Status "error"
+// (no network call needed — config.SecretRef.Resolve fails first), and that
+// must produce a non-zero exit in both text and --json output modes.
+func TestRunTestEnforce_UnresolvableToken(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("EZYSHIELD_TEST_TOKEN_PLACEHOLDER", config.PlaceholderAPIKey)
+	cfgPath := dir + "/config.yaml"
+	cfgYAML := `
+enforce:
+  cloudflare:
+    - name: default
+      mode: lists
+      account_id: acc-123
+      api_token: "env:EZYSHIELD_TEST_TOKEN_PLACEHOLDER"
+`
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+
+	for _, jsonMode := range []bool{false, true} {
+		t.Run(map[bool]string{false: "text", true: "json"}[jsonMode], func(t *testing.T) {
+			origJSON := jsonOutput
+			jsonOutput = jsonMode
+			defer func() { jsonOutput = origJSON }()
+
+			cmd := &cobra.Command{}
+			var out strings.Builder
+			cmd.SetOut(&out)
+
+			err := runTestEnforce(cmd, dir, "cloudflare")
+			if err == nil {
+				t.Fatalf("expected non-zero-exit error for unresolvable token, got nil (output: %s)", out.String())
+			}
+		})
 	}
 }
 

@@ -26,7 +26,8 @@ Referência completa de `/etc/ezyshield/config.yaml` — fontes de log, backends
 | `enrich` | objeto | — | Enriquecimento GeoIP/ASN (opcional) |
 | `dashboard` | objeto | — | Endereço de bind e banco de auth do dashboard (opcional) |
 
-> **`data_dir` e `socket_path` são consumidos apenas pelo comando `dashboard`.**
+> **O daemon ignora `data_dir` e `socket_path`; o comando `dashboard` os
+> consome** (e `data_dir` é adicionalmente exigido por `config validate`).
 > O daemon (`ezyshield run`) obtém o caminho do banco e o socket de controle das
 > suas próprias flags `--db` e `--socket` (defaults `/var/lib/ezyshield/ezyshield.db`
 > e `/run/ezyshield/ezyshield.sock`) e não lê essas duas chaves. Defini-las no

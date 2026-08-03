@@ -137,7 +137,7 @@ banner "Daemon offline" no lugar dos dados ao vivo.
 |--------|--------------------------|-------------|----------------------------------------------------------------|
 | GET    | `/login`                 | dispensada  | Formulário de login                                            |
 | POST   | `/login`                 | dispensada  | Submit do form; grava cookie de sessão no sucesso              |
-| POST   | `/logout`                | dispensada  | Limpa o cookie de sessão                                       |
+| POST   | `/logout`                | obrigatória | Protegido por CSRF como toda mutação; limpa o cookie de sessão |
 | GET    | `/`                      | obrigatória | Redireciona sessões autenticadas para `/dashboard`             |
 | GET    | `/dashboard`             | obrigatória | Overview: estado do daemon, modo, uptime, versão, contagem de bans ativos, distribuição por strike |
 | GET    | `/dashboard/bans`        | obrigatória | Tabela de bans ativos com botão de unban por linha + form de ban manual |

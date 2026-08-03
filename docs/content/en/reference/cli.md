@@ -37,6 +37,7 @@ against:
 | `report <ip>` | Object: versioned abuse report (`schema_version`, `ip`, `country`, `asn`, `current_ban`, `strikes`, `actions`, plus `evidence` with `--evidence`) |
 | `report` | Array of offender summaries (`ip`, `first_seen`, `last_seen`, `total_strikes`, `banned`, `permanent`, `country`, `asn`) |
 | `watch` | NDJSON: one event object per line |
+| `scan` | Object: `listeners`, `new_listeners` (each a socket: `Addr`, `Protocol`, `PID`, `ExePath`, `UserName`, `IsPublic`, `OwnerType`, `UnitName`/`ContainerName`, `LogSource`) |
 | `doctor` | Object: `checks` (`name`, `status`, `hint`) and `summary` (`total`, `pass`, `fail`, `warn`) |
 | `config show` | Object: `config`, `policy` (effective values, secrets redacted) |
 | `version` | Object: `version`, `commit`, `build_date` |
@@ -380,6 +381,43 @@ sudo ezyshield allow --until 2026-08-01T00:00:00Z 198.51.100.8
 | `--socket` | control socket path override |
 
 Allowlist is checked first. No rule can ban an allowlisted IP.
+
+## ezyshield scan
+
+Discover every listening TCP socket on the host and detect drift against the
+previous baseline. This is a read-only reconnaissance command — it answers
+"what is exposed, which process owns it, and where are its logs?" and never
+bans.
+
+```bash
+# Scan and print the listener table
+sudo ezyshield scan
+
+# Machine-readable output
+sudo ezyshield scan --json
+```
+
+For every socket in the `LISTEN` state (parsed from `/proc/net/tcp` and
+`/proc/net/tcp6`) it resolves the owning PID and binary, the user, the owner
+(systemd unit or Docker/Podman container), and a log source. Results are stored
+as a baseline in the SQLite database; on later runs, listeners that were not in
+the previous baseline are flagged `[NEW]`. A **public** listener with no
+resolvable log source is reported as `⚠ no logs`, so an internet-facing service
+that EzyShield cannot watch stands out.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--db` | `/var/lib/ezyshield/ezyshield.db` | path to the SQLite database that holds the baseline |
+
+Table columns: `PROTO / ADDR:PORT / PID / BINARY / USER / OWNER /
+UNIT/CONTAINER / LOG SOURCE`.
+
+Run as root: resolving the binary, owner, and log source of processes you do
+not own — and creating or reading the database under `/var/lib/ezyshield` —
+needs privileges. Without them those fields degrade gracefully (e.g. `PID` `0`,
+empty binary) rather than failing the scan. The command follows the
+[global exit-code contract](#exit-codes); with `--json` it prints only JSON on
+stdout, with the newly detected sockets also collected under `new_listeners`.
 
 ## ezyshield doctor
 

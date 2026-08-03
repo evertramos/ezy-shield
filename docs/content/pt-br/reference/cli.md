@@ -37,6 +37,7 @@ seguros para scripts:
 | `report <ip>` | Objeto: relatório de abuso versionado (`schema_version`, `ip`, `country`, `asn`, `current_ban`, `strikes`, `actions`, mais `evidence` com `--evidence`) |
 | `report` | Array de resumos de ofensores (`ip`, `first_seen`, `last_seen`, `total_strikes`, `banned`, `permanent`, `country`, `asn`) |
 | `watch` | NDJSON: um objeto de evento por linha |
+| `scan` | Objeto: `listeners`, `new_listeners` (cada socket: `Addr`, `Protocol`, `PID`, `ExePath`, `UserName`, `IsPublic`, `OwnerType`, `UnitName`/`ContainerName`, `LogSource`) |
 | `doctor` | Objeto: `checks` (`name`, `status`, `hint`) e `summary` (`total`, `pass`, `fail`, `warn`) |
 | `config show` | Objeto: `config`, `policy` (valores efetivos, segredos redigidos) |
 | `version` | Objeto: `version`, `commit`, `build_date` |
@@ -394,6 +395,46 @@ sudo ezyshield allow --until 2026-08-01T00:00:00Z 198.51.100.8
 
 A allowlist é verificada primeiro. Nenhuma regra pode banir um IP que está na
 allowlist.
+
+## ezyshield scan
+
+Descobre todos os sockets TCP em escuta no host e detecta desvios (drift) em
+relação à baseline anterior. É um comando de reconhecimento somente-leitura —
+responde "o que está exposto, qual processo é o dono e onde estão os logs?" e
+nunca bane.
+
+```bash
+# Escaneia e imprime a tabela de listeners
+sudo ezyshield scan
+
+# Saída legível por máquina
+sudo ezyshield scan --json
+```
+
+Para cada socket no estado `LISTEN` (lido de `/proc/net/tcp` e
+`/proc/net/tcp6`) ele resolve o PID e o binário donos, o usuário, o dono
+(unidade systemd ou container Docker/Podman) e uma fonte de log. Os resultados
+são armazenados como baseline no banco SQLite; em execuções seguintes, os
+listeners que não estavam na baseline anterior são marcados com `[NEW]`. Um
+listener **público** sem fonte de log resolvível é reportado como `⚠ no logs`,
+para que um serviço exposto à internet que o EzyShield não consegue observar se
+destaque.
+
+| Flag | Padrão | Descrição |
+|------|--------|-----------|
+| `--db` | `/var/lib/ezyshield/ezyshield.db` | caminho do banco SQLite que guarda a baseline |
+
+Colunas da tabela: `PROTO / ADDR:PORT / PID / BINARY / USER / OWNER /
+UNIT/CONTAINER / LOG SOURCE`.
+
+Execute como root: resolver o binário, o dono e a fonte de log de processos que
+não são seus — e criar ou ler o banco em `/var/lib/ezyshield` — exige
+privilégios. Sem eles, esses campos degradam graciosamente (por exemplo, `PID`
+`0`, binário vazio) em vez de falhar o scan. O comando segue o
+[contrato global de códigos de saída](#códigos-de-saída); com `--json` imprime
+apenas
+JSON no stdout, com os sockets recém-detectados também reunidos em
+`new_listeners`.
 
 ## ezyshield doctor
 

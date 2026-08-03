@@ -52,6 +52,12 @@ block_countries: []   # ISO 3166-1 alpha-2, e.g. [CN, RU]
 block_asns: []        # e.g. [AS16276, AS14061]
 ```
 
+Every value above is the loader default, with one exception: `observe_threshold`
+has **no** default — `applyDefaults` leaves it untouched, so omitting it yields
+`0` (notify on any score below `ban_threshold`). The `40` shown here mirrors the
+shipped `configs/policy.yaml` as a sensible starting point; see the
+[Thresholds](#thresholds) table below.
+
 ## armed
 
 | Field | Type | Default | Description |
@@ -169,7 +175,15 @@ sudo ezyshield config validate   # strict schema + constraint check
 sudo ezyshield doctor            # full environment check
 ```
 
-Unknown keys fail validation; out-of-range values (e.g. `ban_threshold: 0`, `max_bans_per_minute: 0`) are rejected with the exact reason.
+Unknown keys fail validation, and genuinely out-of-range values are rejected
+with the exact reason — e.g. `ban_threshold: 150` (must be in `[1, 100]`),
+`observe_threshold` ≥ `ban_threshold`, or a negative `max_bans_per_minute`.
+
+One subtlety: an **explicit `0`** for `ban_threshold` or `max_bans_per_minute`
+is **not** rejected. Defaults are applied *before* the range check, so a `0`
+(indistinguishable from an omitted field) is replaced by the default — `70` and
+`30` respectively — and then passes. `observe_threshold` is the exception: it
+has no default, so `0` stays `0`.
 
 ## SSH probe / aggressive tier
 

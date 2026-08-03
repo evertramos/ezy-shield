@@ -53,6 +53,12 @@ block_countries: []   # ISO 3166-1 alpha-2, ex.: [CN, RU]
 block_asns: []        # ex.: [AS16276, AS14061]
 ```
 
+Todos os valores acima são o default do loader, com uma exceção:
+`observe_threshold` **não** tem default — `applyDefaults` o deixa intocado,
+então omiti-lo resulta em `0` (notifica qualquer score abaixo de
+`ban_threshold`). O `40` mostrado aqui espelha o `configs/policy.yaml` como um
+ponto de partida sensato; veja a tabela de [Thresholds](#thresholds) abaixo.
+
 ## armed
 
 | Campo | Tipo | Default | Descrição |
@@ -173,7 +179,16 @@ sudo ezyshield config validate   # checagem estrita de schema + restrições
 sudo ezyshield doctor            # checagem completa do ambiente
 ```
 
-Chaves desconhecidas falham a validação; valores fora de faixa (ex.: `ban_threshold: 0`, `max_bans_per_minute: 0`) são rejeitados com o motivo exato.
+Chaves desconhecidas falham a validação, e valores genuinamente fora de faixa
+são rejeitados com o motivo exato — ex.: `ban_threshold: 150` (deve estar em
+`[1, 100]`), `observe_threshold` ≥ `ban_threshold`, ou um `max_bans_per_minute`
+negativo.
+
+Uma sutileza: um **`0` explícito** para `ban_threshold` ou `max_bans_per_minute`
+**não** é rejeitado. Os defaults são aplicados *antes* da checagem de faixa,
+então um `0` (indistinguível de um campo omitido) é substituído pelo default —
+`70` e `30` respectivamente — e então passa. `observe_threshold` é a exceção:
+como não tem default, `0` permanece `0`.
 
 ## Tier SSH probe / agressivo
 

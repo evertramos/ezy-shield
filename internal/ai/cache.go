@@ -15,7 +15,9 @@ import (
 // The key is a hash of the aggregate's event kind counts and window duration —
 // not the IP address — so identical traffic patterns from different IPs share
 // cached verdicts. This avoids redundant API calls while keeping AI cost
-// proportional to the diversity of attack patterns.
+// proportional to the diversity of attack patterns. Verdicts returned by Get
+// are always re-targeted to the requesting aggregate's IP; the stored IP is
+// never replayed (issue #311).
 //
 // It is safe for concurrent use.
 type Cache struct {
@@ -40,6 +42,12 @@ func NewCache(ttl time.Duration) *Cache {
 
 // Get returns cached verdicts for agg's behavior signature, or nil on miss or expiry.
 // Expired entries are deleted on access.
+//
+// Because entries are shared across IPs, every returned verdict is re-targeted
+// to agg.IP: a hit for IP B on an entry cached from IP A's traffic must never
+// replay A's address, or the decision engine would act on the wrong IP and the
+// audit log would misattribute B's activity (issue #311). The returned slice is
+// an independent copy; callers may mutate it freely.
 func (c *Cache) Get(agg sdk.Aggregate) []sdk.Verdict {
 	if c.ttl == 0 {
 		return nil
@@ -57,21 +65,29 @@ func (c *Cache) Get(agg sdk.Aggregate) []sdk.Verdict {
 		delete(c.entries, key)
 		return nil
 	}
-	return e.verdicts
+	out := make([]sdk.Verdict, len(e.verdicts))
+	copy(out, e.verdicts)
+	for i := range out {
+		out[i].IP = agg.IP
+	}
+	return out
 }
 
 // Set stores verdicts for agg's behavior signature with the configured TTL.
+// The slice is copied, so the entry is immune to later caller mutations.
 func (c *Cache) Set(agg sdk.Aggregate, verdicts []sdk.Verdict) {
 	if c.ttl == 0 {
 		return
 	}
 	key := behaviorKey(agg)
+	stored := make([]sdk.Verdict, len(verdicts))
+	copy(stored, verdicts)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	c.entries[key] = cacheEntry{
-		verdicts:  verdicts,
+		verdicts:  stored,
 		expiresAt: time.Now().Add(c.ttl),
 	}
 }

@@ -366,7 +366,7 @@ func verifyChecksumsSig(ctx context.Context, opts updateOptions, out *errWriter,
 		return nil
 	case errors.Is(err, update.ErrCosignNotFound):
 		out.printf("WARNING: cosign is not installed — skipping signature verification of %s.\n", checksumsFilename)
-		out.printf("         Install cosign to verify releases: https://docs.sigstore.dev/cosign/system_config/installation/\n")
+		out.printf("         Install cosign and re-run to verify releases (see the project's 'Verifying releases' docs).\n")
 		return nil
 	default:
 		return fmt.Errorf("signature verification of %s FAILED — refusing to update: %w", checksumsFilename, err)

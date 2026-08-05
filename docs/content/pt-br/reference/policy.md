@@ -57,9 +57,17 @@ block_asns: []        # ex.: [AS16276, AS14061]
 
 | Campo | Tipo | Default | Descrição |
 |-------|------|---------|-----------|
-| `armed` | bool | `false` | `true` = aplica bans; `false` = dry-run: o pipeline inteiro roda e registra decisões `dry_ban`, mas nada é bloqueado e nada é gravado no store de bans |
+| `armed` | bool | `false` | `true` = aplica bans; `false` = dry-run: o pipeline inteiro roda e registra decisões `dry_ban`, mas nenhum enforcer é chamado, então nada é de fato bloqueado |
 
 Dry-run é o padrão de propósito — rode assim até o `ezyshield doctor` estar limpo e as decisões no log fazerem sentido.
+
+O dry-run ainda **grava** (ADR-0009 §5): cada `dry_ban` escreve o strike, uma
+linha de ban simulada (`dry_run=1`) em `bans_active` e uma entrada de auditoria
+pelo mesmo caminho `RecordStrike` de um ban real, e suprime eventos seguintes
+daquele IP como um ban real. Só a chamada ao enforcer é pulada. Como os strikes
+são cumulativos e persistem, um IP que reincide depois de você definir
+`armed: true` pode começar mais alto na escada do que um ofensor novo — o
+histórico de dry-run conta.
 
 ## Thresholds
 

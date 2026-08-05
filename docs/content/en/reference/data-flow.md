@@ -62,6 +62,10 @@ These happen interactively, never from the daemon:
 - **`ezyshield config enforcer cloudflare` / `ezyshield test enforce
   cloudflare`** — token verification and connectivity checks against
   `api.cloudflare.com`.
+- **`ezyshield doctor`** — when a Cloudflare enforcer is configured, runs
+  read-only capability checks against `api.cloudflare.com` (token resolves and
+  is valid, the target list exists, WAF/rate-limit quota) with an 8-second
+  timeout. With no Cloudflare enforcer configured it makes no outbound call.
 
 ## What never leaves the machine
 
@@ -141,6 +145,7 @@ Every connection above maps to one implementation file:
 | `ezyshield update` | `internal/update/client.go`, `cmd/ezyshield/update.go` |
 | `init` public-IP lookup | `cmd/ezyshield/init.go` |
 | Cloudflare wizard/test calls | `cmd/ezyshield/init_cdn.go`, `cmd/ezyshield/testenforce.go` |
+| `ezyshield doctor` Cloudflare checks | `cmd/ezyshield/doctor.go` (`checkCloudflareEnforcers`) |
 | Local evidence extraction | `internal/daemon/evidence_ondemand.go` |
 
 A quick audit that the list is complete:

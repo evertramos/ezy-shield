@@ -282,3 +282,92 @@ func TestGateShieldsMultiEnforcer(t *testing.T) {
 		}
 	}
 }
+
+// ── issue #365: IPv4-mapped canonicalization at the enforce layer ────────────
+
+// TestGateMappedPrefixTargets reproduces issue #365 (residue of #314/#364):
+// Prefix-shaped targets in the IPv4-mapped IPv6 spelling did not Overlap
+// plain-v4 allowlist entries, so the Gate's belt-and-braces refusal missed
+// them. The Gate's job is to hold even when the layers above are bugged, so
+// it must canonicalize both target shapes, not just bare IPs.
+func TestGateMappedPrefixTargets(t *testing.T) {
+	allowlist := []netip.Prefix{
+		mustPrefix(t, "192.0.2.0/24"),
+		mustPrefix(t, "198.51.100.7/32"),
+	}
+	peers := func() []netip.Addr { return []netip.Addr{netip.MustParseAddr("203.0.113.9")} }
+
+	tests := []struct {
+		name    string
+		target  sdk.Target
+		refused bool
+	}{
+		{"mapped prefix inside plain allowlist entry", sdk.Target{Prefix: mustPrefix(t, "::ffff:192.0.2.0/120")}, true},
+		{"mapped host-prefix of allowlisted host", sdk.Target{Prefix: mustPrefix(t, "::ffff:198.51.100.7/128")}, true},
+		{"mapped prefix covering ssh peer", sdk.Target{Prefix: mustPrefix(t, "::ffff:203.0.113.0/120")}, true},
+		{"clean mapped prefix", sdk.Target{Prefix: mustPrefix(t, "::ffff:233.252.0.0/120")}, false},
+		{"broad mapped prefix (<96, no v4 equivalent) stays v6", sdk.Target{Prefix: mustPrefix(t, "::ffff:0:0/95")}, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			inner := &unguardedEnforcer{}
+			g := NewGate(inner, allowlist, peers)
+			err := g.Ban(context.Background(), tc.target)
+			if tc.refused {
+				if !errors.Is(err, ErrGateRefused) {
+					t.Fatalf("Ban = %v, want ErrGateRefused", err)
+				}
+				if len(inner.bans) != 0 {
+					t.Fatalf("inner enforcer received refused target: %+v", inner.bans)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Ban = %v, want nil", err)
+			}
+		})
+	}
+}
+
+// TestGateMappedAllowlistEntries: a policy allowlist entry written in the
+// mapped spelling must still protect the plain-v4 target (issue #365: the
+// slice handed to NewGate is canonicalized on construction).
+func TestGateMappedAllowlistEntries(t *testing.T) {
+	allowlist := []netip.Prefix{mustPrefix(t, "::ffff:192.0.2.0/120")}
+	inner := &unguardedEnforcer{}
+	g := NewGate(inner, allowlist, nil)
+
+	for _, target := range []sdk.Target{
+		{IP: netip.MustParseAddr("192.0.2.10")},
+		{Prefix: mustPrefix(t, "192.0.2.128/25")},
+	} {
+		if err := g.Ban(context.Background(), target); !errors.Is(err, ErrGateRefused) {
+			t.Errorf("Ban(%+v) = %v, want ErrGateRefused (mapped allowlist entry must protect plain target)", target, err)
+		}
+	}
+	if len(inner.bans) != 0 {
+		t.Fatalf("inner enforcer received refused targets: %+v", inner.bans)
+	}
+}
+
+// TestGateSyncFiltersMappedPrefix: the Sync filter path uses the same
+// canonicalization as Ban.
+func TestGateSyncFiltersMappedPrefix(t *testing.T) {
+	allowlist := []netip.Prefix{mustPrefix(t, "192.0.2.0/24")}
+	inner := &unguardedEnforcer{}
+	g := NewGate(inner, allowlist, nil)
+
+	clean := sdk.Target{IP: netip.MustParseAddr("233.252.0.77")}
+	want := []sdk.Target{
+		{Prefix: mustPrefix(t, "::ffff:192.0.2.0/121")}, // mapped, inside allowlist
+		clean,
+	}
+	if err := g.Sync(context.Background(), want); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	got := inner.syncs[0]
+	if len(got) != 1 || got[0] != clean {
+		t.Fatalf("inner Sync received %+v, want only %+v", got, clean)
+	}
+}

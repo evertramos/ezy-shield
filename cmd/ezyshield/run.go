@@ -485,18 +485,32 @@ func mergeProviderCfg(base *config.AICfg, p config.ProviderCfg) *config.AICfg {
 }
 
 // parseAllowlist builds a []netip.Prefix from policy allowlist + admin_cidrs.
+// Entries are canonicalized (issue #365): bare IPs are unmapped and mapped
+// CIDRs become their plain-IPv4 form via decision.NormalizePrefix — the same
+// rules the decision layer applies to its own copy since #314/#364 — so a
+// mapped-form policy entry protects its range at the enforce layer too. An
+// entry NormalizePrefix rejects (mapped broader than /96) is kept as parsed:
+// dropping it would remove protection, and the decision layer already fails
+// loud on those.
 func parseAllowlist(policy *config.Policy) []netip.Prefix {
 	var prefixes []netip.Prefix
+	appendPrefix := func(p netip.Prefix) {
+		if norm, err := decision.NormalizePrefix(p); err == nil {
+			p = norm
+		}
+		prefixes = append(prefixes, p)
+	}
 	for _, s := range policy.Allowlist {
 		if p, err := netip.ParsePrefix(s); err == nil {
-			prefixes = append(prefixes, p)
+			appendPrefix(p)
 		} else if a, err := netip.ParseAddr(s); err == nil {
+			a = a.Unmap()
 			prefixes = append(prefixes, netip.PrefixFrom(a, a.BitLen()))
 		}
 	}
 	for _, s := range policy.AdminCIDRs {
 		if p, err := netip.ParsePrefix(s); err == nil {
-			prefixes = append(prefixes, p)
+			appendPrefix(p)
 		}
 	}
 	return prefixes

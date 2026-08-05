@@ -264,3 +264,46 @@ func TestEmail_UnreachableHostReturnsError(t *testing.T) {
 		t.Fatal("expected error connecting to unreachable host, got nil")
 	}
 }
+
+// TestEmail_SubjectHeaderInjectionBlocked reproduces issue #320 (CWE-93):
+// Notification.Title carries wrapped error text (daemon.notifyCritical), so a
+// CR/LF inside it would terminate the Subject header and inject arbitrary
+// headers (e.g. Bcc) into the RFC 5322 message. The header section (everything
+// before the first blank line) must contain no injected header; occurrences in
+// the body are inert display text and are allowed.
+func TestEmail_SubjectHeaderInjectionBlocked(t *testing.T) {
+	srv, addr := newFakeSMTP(t)
+	n := newTestEmail(t, addr)
+
+	msg := sdk.Notification{
+		Severity: "critical",
+		Title:    "enforcer ban failed\r\nBcc: attacker@example.com\r\nX-Injected: 1",
+	}
+	if err := n.Send(context.Background(), msg); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	// The fake server records DATA with line endings normalized to "\n".
+	body := strings.ReplaceAll(srv.recorded()[0].Body, "\r\n", "\n")
+	headerSection, _, found := strings.Cut(body, "\n\n")
+	if !found {
+		t.Fatalf("message has no header/body separator:\n%s", body)
+	}
+	headerLines := strings.Split(headerSection, "\n")
+	for _, line := range headerLines {
+		for _, hdr := range []string{"Bcc:", "X-Injected:"} {
+			if strings.HasPrefix(line, hdr) {
+				t.Errorf("injected header %q made it into the header section:\n%s", line, headerSection)
+			}
+		}
+	}
+	if !strings.Contains(headerSection, "Subject: [EzyShield] CRITICAL:") {
+		t.Errorf("Subject header missing or malformed:\n%s", headerSection)
+	}
+	// The header section is a fixed set of lines (From/To/Subject/
+	// MIME-Version/Content-Type): the sanitized title must stay on the single
+	// Subject line and add no headers.
+	if got := len(headerLines); got != 5 {
+		t.Errorf("header section has %d lines, want 5:\n%s", got, headerSection)
+	}
+}

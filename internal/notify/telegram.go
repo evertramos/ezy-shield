@@ -90,7 +90,7 @@ func (t *TelegramNotifier) post(ctx context.Context, chatID, text string) error 
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := t.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("http: %w", err)
+		return fmt.Errorf("http: %w", redactTransportErr(err))
 	}
 	defer resp.Body.Close() //nolint:errcheck
 	if resp.StatusCode != http.StatusOK {

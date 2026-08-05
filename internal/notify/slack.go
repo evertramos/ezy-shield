@@ -54,7 +54,7 @@ func (s *SlackNotifier) Send(ctx context.Context, msg sdk.Notification) error {
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("slack: http: %w", err)
+		return fmt.Errorf("slack: http: %w", redactTransportErr(err))
 	}
 	defer resp.Body.Close() //nolint:errcheck
 	if resp.StatusCode != http.StatusOK {

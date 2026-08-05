@@ -79,7 +79,7 @@ func (w *WebhookNotifier) Send(ctx context.Context, msg sdk.Notification) error 
 	}
 	resp, err := w.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("webhook: http: %w", err)
+		return fmt.Errorf("webhook: http: %w", redactTransportErr(err))
 	}
 	defer resp.Body.Close() //nolint:errcheck
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {

@@ -27,7 +27,8 @@ const (
 // (connection refused) without any network I/O leaving the host.
 func closedPortURL(t *testing.T, path string) string {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	var lc net.ListenConfig
+	l, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("reserving closed port: %v", err)
 	}

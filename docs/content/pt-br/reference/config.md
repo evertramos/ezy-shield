@@ -58,7 +58,7 @@ collectors:
 | `path` | para `file` | arquivo a acompanhar |
 | `unit` | para `journald` | unit systemd a acompanhar |
 | `container` | para `docker` | nome do container, ID curto ou ID completo |
-| `parser` | não | força um parser: `nginx` \| `ssh` \| `apache` \| `apache-error` \| `traefik` \| `caddy` (padrão: roteado automaticamente a partir da fonte) |
+| `parser` | não | força um parser: `nginx` \| `ssh` \| `apache` \| `apache-error` \| `traefik` \| `caddy` (padrão: roteado automaticamente a partir da fonte). **Honrado apenas para coletores `file` e `docker`** — o `journald` o ignora e sempre roteia o parser a partir da unidade. |
 
 ### Coletor SSH (nome do unit varia por distro)
 

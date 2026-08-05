@@ -58,7 +58,7 @@ collectors:
 | `path` | for `file` | file to tail |
 | `unit` | for `journald` | systemd unit to follow |
 | `container` | for `docker` | container name, short ID, or full ID |
-| `parser` | no | force a parser: `nginx` \| `ssh` \| `apache` \| `apache-error` \| `traefik` \| `caddy` (default: routed automatically from the source) |
+| `parser` | no | force a parser: `nginx` \| `ssh` \| `apache` \| `apache-error` \| `traefik` \| `caddy` (default: routed automatically from the source). **Honored only for `file` and `docker` collectors** — `journald` ignores it and always routes its parser from the unit. |
 
 ### SSH collector (unit name varies by distro)
 

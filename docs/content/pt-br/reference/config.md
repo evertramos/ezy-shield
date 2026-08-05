@@ -170,6 +170,8 @@ Campos compartilhados: `rate_limit_per_minute` (padrão 5) e `dedup_window_sec` 
 
 > Campos do tipo segredo (`bot_token`, `password`, `webhook_url`, o `url` do webhook) só aceitam referências `env:VARNAME` — valores inline são rejeitados no carregamento. Os **valores** dos headers do webhook são enviados literalmente, a menos que o valor inteiro seja uma referência `env:`, que é resolvida.
 
+> O `tls: starttls` do email **falha fechado**: se o servidor SMTP não anunciar STARTTLS (ou um proxy que remove capacidades o esconder), o envio dá erro em vez de silenciosamente cair para texto puro. Defina `tls: none` explicitamente se realmente pretende enviar sem criptografia.
+
 ## ai
 
 Opcional — sem o bloco `ai`, o rule engine determinístico cuida de tudo.

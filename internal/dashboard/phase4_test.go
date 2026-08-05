@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -373,3 +374,57 @@ type statusRecorder struct {
 func (r *statusRecorder) Header() http.Header         { return r.header }
 func (r *statusRecorder) Write(b []byte) (int, error) { return len(b), nil }
 func (r *statusRecorder) WriteHeader(status int)      { r.status = status }
+
+// TestLoginThrottle_GlobalBudgetCapsUsernameCycling reproduces issue #360:
+// an attacker sending a fresh username each request never trips the
+// per-username throttle, so without a global ceiling the failures map grows
+// unbounded and each request burns a decoy PBKDF2. Once the global budget is
+// exhausted, Allow must reject every login until the window drains.
+func TestLoginThrottle_GlobalBudgetCapsUsernameCycling(t *testing.T) {
+	th := newLoginThrottle()
+	fakeNow := time.Unix(3_000_000, 0)
+	th.nowClock = func() time.Time { return fakeNow }
+
+	for i := 0; i < th.globalMax; i++ {
+		u := "attacker-" + strconv.Itoa(i)
+		if !th.Allow(u) {
+			t.Fatalf("distinct username %q should be allowed before the global budget is spent", u)
+		}
+		th.RecordFailure(u)
+	}
+
+	// Global budget spent: a brand-new username is now rejected too.
+	if th.Allow("fresh-victim") {
+		t.Fatal("global budget exhausted — a new username must be rejected before PBKDF2")
+	}
+
+	// Draining the window restores service.
+	fakeNow = fakeNow.Add(2 * time.Minute)
+	if !th.Allow("fresh-victim") {
+		t.Fatal("global lockout must clear once the window drains")
+	}
+}
+
+// TestLoginThrottle_MapPrunesExpiredEntries: the failures map must not grow
+// without bound — expired single-failure entries are pruned once the map
+// exceeds the global budget (issue #360).
+func TestLoginThrottle_MapPrunesExpiredEntries(t *testing.T) {
+	th := newLoginThrottle()
+	fakeNow := time.Unix(4_000_000, 0)
+	th.nowClock = func() time.Time { return fakeNow }
+
+	for i := 0; i < th.globalMax+5; i++ {
+		th.RecordFailure("u-" + strconv.Itoa(i))
+	}
+	// Advance past the window so every recorded stamp is stale, then record
+	// one more failure to trigger the opportunistic prune.
+	fakeNow = fakeNow.Add(2 * time.Minute)
+	th.RecordFailure("trigger")
+
+	th.mu.Lock()
+	n := len(th.failures)
+	th.mu.Unlock()
+	if n > th.globalMax {
+		t.Errorf("failures map has %d entries after prune, want <= %d", n, th.globalMax)
+	}
+}

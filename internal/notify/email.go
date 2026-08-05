@@ -89,11 +89,19 @@ func (e *EmailNotifier) sendSTARTTLS(ctx context.Context, addr, from string, to 
 		return fmt.Errorf("smtp client: %w", err)
 	}
 	defer c.Close() //nolint:errcheck
-	if ok, _ := c.Extension("STARTTLS"); ok {
-		tlsCfg := &tls.Config{ServerName: e.host, MinVersion: tls.VersionTLS12} //nolint:gosec
-		if err := c.StartTLS(tlsCfg); err != nil {
-			return fmt.Errorf("starttls: %w", err)
-		}
+	// Fail closed when STARTTLS is unavailable (issue #360): the operator
+	// chose tls: "starttls", so silently delivering in plaintext — whether
+	// the server never offered it or a MITM stripped the capability — would
+	// downgrade the configured security mode and leak credentials on the
+	// wire without any signal. An operator who genuinely wants plaintext can
+	// set tls: "none" explicitly.
+	ok, _ := c.Extension("STARTTLS")
+	if !ok {
+		return fmt.Errorf("starttls: server did not advertise STARTTLS; refusing to send in plaintext (set tls: \"none\" to allow, or fix the server)")
+	}
+	tlsCfg := &tls.Config{ServerName: e.host, MinVersion: tls.VersionTLS12} //nolint:gosec
+	if err := c.StartTLS(tlsCfg); err != nil {
+		return fmt.Errorf("starttls: %w", err)
 	}
 	return e.authAndDeliver(c, from, to, body)
 }

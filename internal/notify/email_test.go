@@ -264,3 +264,30 @@ func TestEmail_UnreachableHostReturnsError(t *testing.T) {
 		t.Fatal("expected error connecting to unreachable host, got nil")
 	}
 }
+
+// TestEmail_StartTLSFailsClosedWithoutAdvertise reproduces issue #360: with
+// tls: "starttls", if the server never advertises STARTTLS (fakeSMTP doesn't,
+// mimicking a capability-stripping MITM), delivery must error instead of
+// silently falling back to plaintext and leaking the message/credentials.
+func TestEmail_StartTLSFailsClosedWithoutAdvertise(t *testing.T) {
+	srv, addr := newFakeSMTP(t)
+	_ = srv
+	host, portStr, _ := net.SplitHostPort(addr)
+	var port int
+	if _, err := fmt.Sscan(portStr, &port); err != nil {
+		t.Fatalf("bad addr %q: %v", addr, err)
+	}
+	n := notify.NewEmail("shield@example.com", []string{"admin@example.com"},
+		host, port, "", "", "starttls")
+
+	err := n.Send(context.Background(), sdk.Notification{Severity: "warn", Title: "t"})
+	if err == nil {
+		t.Fatal("starttls mode must fail closed when the server does not advertise STARTTLS")
+	}
+	if !strings.Contains(err.Error(), "starttls") {
+		t.Errorf("error should name the starttls failure, got: %v", err)
+	}
+	if len(srv.recorded()) != 0 {
+		t.Error("no message may be delivered when STARTTLS is unavailable in starttls mode")
+	}
+}

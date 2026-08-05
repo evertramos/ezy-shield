@@ -173,6 +173,8 @@ Shared fields: `rate_limit_per_minute` (default 5) and `dedup_window_sec` (defau
 
 > Secret-typed fields (`bot_token`, `password`, `webhook_url`, webhook `url`) only accept `env:VARNAME` references — inline values are rejected at load time. Webhook header **values** are sent verbatim unless the entire value is an `env:` reference, which is resolved.
 
+> Email `tls: starttls` **fails closed**: if the SMTP server does not advertise STARTTLS (or a capability-stripping proxy hides it), the send errors instead of silently downgrading to plaintext. Set `tls: none` explicitly if you really intend to send unencrypted.
+
 ## ai
 
 Optional — with no `ai` block, the deterministic rule engine handles everything.

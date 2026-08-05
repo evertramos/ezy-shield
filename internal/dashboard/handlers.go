@@ -8,6 +8,11 @@ import (
 
 const sessionCookieName = "ezyshield_dashboard"
 
+// maxLoginUsernameLen bounds the username accepted at /login before any store
+// lookup or PBKDF2 work. Admin usernames are short; anything longer is a
+// brute-force probe (issue #360).
+const maxLoginUsernameLen = 64
+
 func (s *Server) routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /login", s.handleLoginGet)
@@ -69,6 +74,18 @@ func (s *Server) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 	}
 	username := strings.TrimSpace(r.FormValue("username"))
 	password := r.FormValue("password")
+
+	// Reject implausibly long usernames before any store lookup or PBKDF2:
+	// admin usernames are short, and an unbounded attacker-supplied key would
+	// otherwise be stored in the throttle map and burn a decoy hash (issue
+	// #360). A generic 401 keeps existing/unknown usernames indistinguishable.
+	if len(username) > maxLoginUsernameLen {
+		w.WriteHeader(http.StatusUnauthorized)
+		if err := renderLogin(w, "Invalid credentials."); err != nil {
+			s.logger.Error("render login", "err", err)
+		}
+		return
+	}
 
 	// Check the throttle before doing any store work. A locked-out
 	// account cannot burn PBKDF2 CPU on brute-force attempts, and the

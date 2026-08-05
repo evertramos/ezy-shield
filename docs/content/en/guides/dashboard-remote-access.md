@@ -128,22 +128,46 @@ The dashboard on the server still binds only to `127.0.0.1` — only
 ## Option 3: Tailscale (private mesh, zero config)
 
 Good when you already have a Tailscale mesh across your team and
-machines. Install Tailscale on the server and on your laptop, log in
-to the same tailnet, then open `http://<server-tailnet-name>:9090`
-from the laptop.
+machines. Install Tailscale on the server and on your laptop and log
+in to the same tailnet. Traffic goes peer-to-peer through the mesh,
+encrypted with WireGuard — no public IP or DNS entry needed — and you
+can restrict access with ACLs in the Tailscale admin panel.
 
-Since Tailscale doesn't need a public IP or DNS entry — traffic goes
-peer-to-peer through the mesh, encrypted with WireGuard — the
-dashboard remains as private as it was. You can restrict access
-further with ACLs in the Tailscale admin panel.
+**Important:** the dashboard binds `127.0.0.1:9090` only, and its
+loopback check rejects any non-loopback bind, so you **cannot** just
+browse the server's tailnet address on port 9090. A default
+(kernel-mode) Tailscale install does not forward tailnet-destined
+traffic to a loopback-only listener — a request to
+`http://<server-tailnet-name>:9090` reaches `100.x.y.z:9090`, finds no
+listener, and is refused. (It fails closed — no security hole — but it
+does not work as a bare URL.) Bridge the tailnet to the loopback
+dashboard one of two ways:
 
-Reference: <https://tailscale.com/kb/1017/install/>
+- **`tailscale serve`** — Tailscale's built-in reverse proxy. On the
+  server:
 
-Note that the dashboard's own loopback bind check does **not**
-accept the tailnet interface. You still need to reach the daemon
-through the tailscale interface on the client side, which is what
-Tailscale does transparently — you type `http://my-server:9090` and
-Tailscale routes it to the loopback on that host.
+  ```bash
+  # Proxy the node's tailnet address (HTTPS) to the local dashboard on :9090.
+  sudo tailscale serve --bg 9090
+  tailscale serve status   # verify; run `tailscale serve --help` to undo
+  ```
+
+  Then open `https://<server>.<tailnet>.ts.net/` from any device on the
+  tailnet. Tailscale terminates the connection and forwards it to
+  `127.0.0.1:9090`, so the dashboard still sees a loopback client and its
+  bind check is satisfied. (HTTPS serve requires HTTPS certificates enabled
+  for your tailnet; exact flags vary by Tailscale version.)
+
+- **SSH tunnel over Tailscale** — identical to Option 1, but point SSH at
+  the tailnet name so no port is ever exposed:
+
+  ```bash
+  ssh -L 9090:127.0.0.1:9090 <user>@<server-tailnet-name>
+  # then open http://localhost:9090
+  ```
+
+Reference: <https://tailscale.com/kb/1017/install/> ·
+<https://tailscale.com/docs/features/tailscale-serve>
 
 ## Never expose 0.0.0.0
 

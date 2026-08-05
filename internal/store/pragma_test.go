@@ -20,7 +20,7 @@ func TestOpen_AppliesPragmas(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	var journalMode string
 	if err := s.db.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&journalMode); err != nil {

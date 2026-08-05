@@ -6,12 +6,14 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"net/netip"
 	"strings"
 	"testing"
 
 	"github.com/evertramos/ezy-shield/internal/config"
 	"github.com/evertramos/ezy-shield/internal/store"
+	"github.com/evertramos/ezy-shield/pkg/sdk"
 )
 
 // newManualBanDaemon builds an armed daemon over a real in-memory store and
@@ -176,4 +178,104 @@ func TestHandleBan_LegitimateBanStillWorks(t *testing.T) {
 	if got := banRefusedReasons(t, db); len(got) != 0 {
 		t.Errorf("unexpected ban_refused audit rows: %v", got)
 	}
+}
+
+// ── issue #326: enforcer-boundary gating ─────────────────────────────────────
+
+// failingEnforcer counts Ban attempts and always fails them.
+type failingEnforcer struct {
+	fakeEnforcer
+}
+
+func (f *failingEnforcer) Ban(ctx context.Context, t sdk.Target) error {
+	_ = f.fakeEnforcer.Ban(ctx, t) // record the attempt
+	return fmt.Errorf("nft exec: operation not permitted")
+}
+
+// newManualBanDaemonWith builds a manual-ban daemon with explicit armed state
+// and enforcer, for boundary tests that need combinations newManualBanDaemon
+// doesn't cover (it is always armed=true + fakeEnforcer).
+func newManualBanDaemonWith(t *testing.T, armed bool, enf sdk.Enforcer) (*Daemon, *store.DB) {
+	t.Helper()
+	ctx := context.Background()
+	db, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	d, err := New(Config{
+		Policy: &config.Policy{
+			Armed:            armed,
+			BanThreshold:     config.DefaultBanThreshold,
+			ObserveThreshold: config.DefaultObserveThreshold,
+			MaxBansPerMinute: config.DefaultMaxBansPerMinute,
+			Strikes:          config.DefaultStrikes,
+		},
+		Store:      db,
+		Enforcer:   enf,
+		SocketPath: "",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return d, db
+}
+
+// TestHandleBan_DryRun_NeverReachesEnforcer covers the missing half of the
+// socket.go gate (issue #326): a daemon WITH an enforcer but armed=false. A
+// regression dropping the IsArmed() condition — a dry-run manual ban reaching
+// the firewall, violating Hard Rule 1 (dry-run is the default mode) — passed
+// the entire suite before this test: every manual-ban test was armed=true and
+// the only dry-run test had no enforcer at all.
+func TestHandleBan_DryRun_NeverReachesEnforcer(t *testing.T) {
+	enf := &fakeEnforcer{}
+	d, _ := newManualBanDaemonWith(t, false /* armed */, enf)
+
+	resp := callSocket(t, d, SocketRequest{Verb: "ban", IP: "203.0.113.9", Reason: "test"})
+	if !resp.OK {
+		t.Fatalf("dry-run manual ban should succeed as dry_ban: %s", resp.Error)
+	}
+	if got := enf.BanCount(); got != 0 {
+		t.Fatalf("enforcer received %d Ban call(s) while disarmed — dry-run must never touch the firewall", got)
+	}
+}
+
+// TestHandleBan_EnforcerFailure_ErrorsAndNoStoreRow covers the enforcer-fails
+// branch: the operator gets the error and no bans_active row is written (list
+// must not claim a ban the firewall refused).
+func TestHandleBan_EnforcerFailure_ErrorsAndNoStoreRow(t *testing.T) {
+	enf := &failingEnforcer{}
+	d, db := newManualBanDaemonWith(t, true /* armed */, enf)
+	ctx := context.Background()
+
+	resp := callSocket(t, d, SocketRequest{Verb: "ban", IP: "203.0.113.9", Reason: "test"})
+	if resp.OK {
+		t.Fatal("manual ban must fail when the enforcer fails")
+	}
+	if !strings.Contains(resp.Error, "enforcer ban:") {
+		t.Errorf("error should carry the enforcer failure, got: %s", resp.Error)
+	}
+	if got := enf.BanCount(); got != 1 {
+		t.Errorf("expected exactly 1 Ban attempt, got %d", got)
+	}
+
+	ip := netip.MustParseAddr("203.0.113.9")
+	if _, _, _, active, err := db.GetBanInfo(ctx, ip); err == nil && active {
+		t.Error("bans_active must not contain an IP the enforcer refused to ban")
+	}
+	for _, e := range mustAudit(t, db) {
+		if e.Op == "ban" {
+			t.Errorf("audit_log must not record op=ban for a failed enforcer ban, got %+v", e)
+		}
+	}
+}
+
+func mustAudit(t *testing.T, db *store.DB) []store.AuditEntry {
+	t.Helper()
+	entries, err := db.ListAuditLog(context.Background(), 100)
+	if err != nil {
+		t.Fatalf("ListAuditLog: %v", err)
+	}
+	return entries
 }

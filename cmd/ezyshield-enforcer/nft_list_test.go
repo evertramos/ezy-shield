@@ -15,7 +15,7 @@ import (
 // live *os.ProcessState), so we run a tiny failing shell command.
 func fakeNftError(t *testing.T, msg string) error {
 	t.Helper()
-	cmd := exec.Command("sh", "-c", `printf '%s\n' "$NFT_TEST_MSG" >&2; exit 1`)
+	cmd := exec.CommandContext(context.Background(), "sh", "-c", `printf '%s\n' "$NFT_TEST_MSG" >&2; exit 1`)
 	cmd.Env = append(os.Environ(), "NFT_TEST_MSG="+msg)
 	_, err := cmd.Output()
 	if err == nil {

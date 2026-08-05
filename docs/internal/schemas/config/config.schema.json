@@ -8,11 +8,11 @@
   "properties": {
     "data_dir": {
       "type": "string",
-      "description": "Directory for runtime state (SQLite database, unix socket)."
+      "description": "State directory used by the dashboard command (auth DB at <data_dir>/dashboard.db); required by 'config validate'. Does not set the daemon's database path, which comes from the 'run --db' flag."
     },
     "socket_path": {
       "type": "string",
-      "description": "Control unix socket path; CLI commands connect here."
+      "description": "Control unix socket path the dashboard connects to. The daemon binds its socket from the 'run --socket' flag, not this key; keep the two in sync."
     },
     "log": {
       "type": "object",

@@ -14,8 +14,8 @@ Complete reference for `/etc/ezyshield/config.yaml` — log sources, enforcement
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `data_dir` | string | `/var/lib/ezyshield` | State directory; the SQLite database lives at `<data_dir>/ezyshield.db` |
-| `socket_path` | string | `/run/ezyshield/ezyshield.sock` | Daemon control socket (unix socket — there is never a TCP listener for control) |
+| `data_dir` | string | `/var/lib/ezyshield` | **Required** (`config validate` rejects an empty value). State directory for the **`dashboard`** command — its auth database is `<data_dir>/dashboard.db`. It does **not** set the daemon's SQLite database path: that is the `run --db` flag (default `/var/lib/ezyshield/ezyshield.db`). |
+| `socket_path` | string | `/run/ezyshield/ezyshield.sock` | Control-socket path the **`dashboard`** connects to (unix socket — there is never a TCP listener for control). It does **not** set the daemon's socket: the daemon binds the `run --socket` flag (default `/run/ezyshield/ezyshield.sock`), so a custom value must match `run --socket` or the dashboard points at a socket the daemon never creates. |
 | `rules_dir` | string | `/etc/ezyshield/rules.d` | Drop-in rule customizations: every `*.yaml` here merges over the built-in rules by `name` and survives updates (see the [rules guide](../guides/rules-customization.md)) |
 | `rules_path` | string | — | **Deprecated.** Replaces the built-in rules entirely (no merge; `rules.d` ignored) — freezes the install out of upstream rule tuning |
 | `log.level` | string | `info` | `debug` \| `info` \| `warn` \| `error` |
@@ -25,6 +25,15 @@ Complete reference for `/etc/ezyshield/config.yaml` — log sources, enforcement
 | `ai` | object | — | AI provider for ambiguous traffic (optional) |
 | `enrich` | object | — | GeoIP/ASN enrichment (optional) |
 | `dashboard` | object | — | Dashboard bind address and auth DB (optional) |
+
+> **The daemon ignores `data_dir` and `socket_path`; the `dashboard` command
+> consumes them** (and `data_dir` is additionally required by `config validate`).
+> The daemon (`ezyshield run`) takes its database path and control socket from
+> its own `--db` and `--socket` flags (defaults `/var/lib/ezyshield/ezyshield.db`
+> and `/run/ezyshield/ezyshield.sock`) and does not read these two keys. Setting
+> them in `config.yaml` moves the dashboard's auth DB and its connection target,
+> not the daemon's files — so keep `socket_path` in step with `run --socket`.
+> See the [CLI reference](cli.md) for the `run` and `dashboard` flags.
 
 ## collectors
 

@@ -14,8 +14,8 @@ Referência completa de `/etc/ezyshield/config.yaml` — fontes de log, backends
 
 | Campo | Tipo | Padrão | Descrição |
 |-------|------|--------|-----------|
-| `data_dir` | string | `/var/lib/ezyshield` | Diretório de estado; o banco SQLite fica em `<data_dir>/ezyshield.db` |
-| `socket_path` | string | `/run/ezyshield/ezyshield.sock` | Socket de controle do daemon (unix socket — nunca há listener TCP para controle) |
+| `data_dir` | string | `/var/lib/ezyshield` | **Obrigatório** (`config validate` rejeita valor vazio). Diretório de estado usado pelo comando **`dashboard`** — seu banco de auth é `<data_dir>/dashboard.db`. **Não** define o caminho do banco SQLite do daemon: isso é a flag `run --db` (default `/var/lib/ezyshield/ezyshield.db`). |
+| `socket_path` | string | `/run/ezyshield/ezyshield.sock` | Caminho do socket de controle ao qual o **`dashboard`** se conecta (unix socket — nunca há listener TCP para controle). **Não** define o socket do daemon: o daemon usa a flag `run --socket` (default `/run/ezyshield/ezyshield.sock`), então um valor customizado precisa casar com `run --socket`, ou o dashboard aponta para um socket que o daemon nunca cria. |
 | `rules_dir` | string | `/etc/ezyshield/rules.d` | Customizações de regras via drop-in: todo `*.yaml` aqui faz merge sobre as rules embutidas por `name` e sobrevive a updates (veja o [guia de regras](../guides/rules-customization.md)) |
 | `rules_path` | string | — | **Deprecated.** Substitui as rules embutidas por inteiro (sem merge; `rules.d` ignorado) — congela a instalação fora do tuning de regras do upstream |
 | `log.level` | string | `info` | `debug` \| `info` \| `warn` \| `error` |
@@ -25,6 +25,15 @@ Referência completa de `/etc/ezyshield/config.yaml` — fontes de log, backends
 | `ai` | objeto | — | Provedor de IA para tráfego ambíguo (opcional) |
 | `enrich` | objeto | — | Enriquecimento GeoIP/ASN (opcional) |
 | `dashboard` | objeto | — | Endereço de bind e banco de auth do dashboard (opcional) |
+
+> **O daemon ignora `data_dir` e `socket_path`; o comando `dashboard` os
+> consome** (e `data_dir` é adicionalmente exigido por `config validate`).
+> O daemon (`ezyshield run`) obtém o caminho do banco e o socket de controle das
+> suas próprias flags `--db` e `--socket` (defaults `/var/lib/ezyshield/ezyshield.db`
+> e `/run/ezyshield/ezyshield.sock`) e não lê essas duas chaves. Defini-las no
+> `config.yaml` move o banco de auth do dashboard e o alvo de conexão dele, não
+> os arquivos do daemon — então mantenha `socket_path` alinhado com `run --socket`.
+> Veja a [referência de CLI](cli.md) para as flags de `run` e `dashboard`.
 
 ## collectors
 

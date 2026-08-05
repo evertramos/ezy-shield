@@ -131,7 +131,7 @@ still escalates today.
 - **Escalating bans** — short first ban, permanent after repeated offences
 - **Local enforcement** — nftables, via a privilege-separated enforcer helper
 - **Edge enforcement** — push IP bans to a Cloudflare list
-- **SSH, Nginx, Apache (access + error), Caddy & Traefik parsers** with fuzz-tested, panic-safe parsing of hostile input
+- **SSH, Nginx, Apache, Caddy & Traefik parsers** with fuzz-tested, panic-safe parsing of hostile input
 - **Deterministic rule engine** — thresholds + scanner signatures; works with zero AI configured
 - **AI-assisted decisions (optional)** — Anthropic, any OpenAI-compatible endpoint, or local Ollama, with provider failover, a token budget, and verdict caching
 - **Prompt-injection defense** — log lines are treated as data, never instructions; AI output is schema-validated and clamped by policy (it can only suggest within limits)

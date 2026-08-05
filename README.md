@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://github.com/evertramos/ezy-shield/actions/workflows/ci.yaml"><img src="https://github.com/evertramos/ezy-shield/actions/workflows/ci.yaml/badge.svg" alt="CI"></a>
   <a href="https://github.com/evertramos/ezy-shield/actions/workflows/codeql.yaml"><img src="https://github.com/evertramos/ezy-shield/actions/workflows/codeql.yaml/badge.svg" alt="CodeQL"></a>
-  <a href="https://go.dev"><img src="https://img.shields.io/badge/go-1.24+-00ADD8.svg" alt="Go 1.24+"></a>
+  <a href="https://go.dev"><img src="https://img.shields.io/badge/go-1.26+-00ADD8.svg" alt="Go 1.26+"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL%203.0-blue.svg" alt="License: AGPL-3.0"></a>
 </p>
 
@@ -213,7 +213,7 @@ go build -o ezyshield-enforcer ./cmd/ezyshield-enforcer
 sudo mv ezyshield ezyshield-enforcer /usr/local/bin/
 ```
 
-Requires **Go 1.24+** and Linux with **nftables** for local enforcement.
+Requires **Go 1.26+** and Linux with **nftables** for local enforcement.
 
 Then:
 

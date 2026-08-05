@@ -30,7 +30,7 @@ print correctly.
 
 ## Go Conventions
 
-- Go ≥ 1.22, modules; `gofmt` + `golangci-lint` must pass (CI enforces)
+- Go ≥ 1.26 (matches `go.mod`), modules; `gofmt` + `golangci-lint` must pass (CI enforces)
 - Errors: wrap with `fmt.Errorf("context: %w", err)`; no `panic` outside `main`
 - Use `netip.Addr`/`netip.Prefix`, never string IPs internally
 - Context first arg everywhere; honor cancellation in all loops

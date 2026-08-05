@@ -204,7 +204,7 @@ ai:
 | `provider` | `anthropic` \| `openai` \| `ollama` (forma de provedor único) |
 | `model` | nome do modelo |
 | `api_key` | referência `env:VARNAME` (nunca inline) |
-| `endpoint` | URL base — usada pelo ollama (padrão `http://localhost:11434`) e por endpoints compatíveis com OpenAI |
+| `endpoint` | URL base apenas para o provedor **`ollama`** (padrão `http://localhost:11434`). Os provedores `anthropic` e `openai` a ignoram e sempre chamam suas APIs oficiais (`https://api.anthropic.com`, `https://api.openai.com`) — não há override de endpoint compatível com OpenAI. Mesmo comportamento nas formas de provedor único e de failover `providers`. |
 | `ambiguous_band` | `[low, high]` — apenas scores dentro da faixa consultam a IA |
 | `token_budget_daily` | teto diário de tokens; quando esgotado, as decisões voltam para as rules |
 | `cache_ttl` | duração do cache de vereditos |

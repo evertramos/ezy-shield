@@ -624,8 +624,11 @@ Códigos de saída: `0` salvo, `1` wizard abortado ou falha de escrita, `2` conf
 
 ## ezyshield update
 
-Autoatualiza os binários a partir do GitHub Releases (com verificação de
-checksum).
+Autoatualiza os binários a partir do GitHub Releases. O `checksums.txt` tem a
+assinatura verificada com `cosign` contra a identidade fixada do workflow de
+release quando disponível (qualquer divergência aborta; veja
+[Verificando releases](../security/verifying-releases.md)), e depois cada
+binário é verificado por checksum.
 
 ```bash
 # Verificar se existe uma release mais nova

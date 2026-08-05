@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -60,6 +61,10 @@ type updateOptions struct {
 	// in feeds the downgrade confirmation prompt. nil (or EOF, e.g. a piped
 	// stdin) counts as "no" — silence must never approve a downgrade.
 	in io.Reader
+
+	// runCosign execs cosign for checksums signature verification (issue
+	// #322). Injectable for tests; nil means update.RealCosignExec.
+	runCosign update.CosignExecFunc
 }
 
 func newUpdateCmd() *cobra.Command {
@@ -226,9 +231,25 @@ func runUpdate(ctx context.Context, opts updateOptions) error {
 		return fmt.Errorf("release %s has no asset %q — cannot verify", rel.TagName, checksumsFilename)
 	}
 
-	sums, err := client.DownloadChecksums(ctx, sumsAsset.URL)
+	rawSums, err := client.DownloadSmall(ctx, sumsAsset.URL)
 	if err != nil {
 		return fmt.Errorf("fetch checksums: %w", err)
+	}
+
+	// Verify the cosign keyless signature over checksums.txt BEFORE trusting
+	// any digest in it (issue #322): the checksums come from the same release
+	// origin as the binaries, so without the signature they only re-state
+	// what the release publisher chose. Signature present + cosign installed
+	// → verification is mandatory and fatal on mismatch. Signature assets
+	// missing (pre-signing releases) or cosign not installed → warn and
+	// continue, matching the documented get.sh behavior.
+	if err := verifyChecksumsSig(ctx, opts, out, client, rel, rawSums); err != nil {
+		return err
+	}
+
+	sums, err := update.ParseChecksums(bytes.NewReader(rawSums))
+	if err != nil {
+		return fmt.Errorf("parse checksums: %w", err)
 	}
 	mainSHA, ok := sums[mainName]
 	if !ok {
@@ -306,6 +327,52 @@ func runUpdate(ctx context.Context, opts updateOptions) error {
 // errWriter wraps an io.Writer and accumulates the first write error so call
 // sites don't have to plumb error checks through every status print. The
 // accumulated error is returned via the runUpdate return path.
+// verifyChecksumsSig verifies the release's cosign keyless signature over the
+// raw checksums.txt bytes (issue #322, SECURITY-REVIEW §8).
+//
+// Policy, matching docs/content/en/security/verifying-releases.md and get.sh:
+//   - signature assets present and cosign installed → verify; ANY mismatch is
+//     fatal (a hijacked release or compromised token must not update root-run
+//     binaries);
+//   - signature assets absent (releases published before signing landed) →
+//     warn and continue;
+//   - cosign not installed → warn and continue (integrity then rests on TLS
+//     to the release host, as documented).
+func verifyChecksumsSig(ctx context.Context, opts updateOptions, out *errWriter, client *update.Client, rel *update.Release, rawSums []byte) error {
+	sigAsset, sigOK := rel.FindAsset(checksumsFilename + ".sig")
+	certAsset, certOK := rel.FindAsset(checksumsFilename + ".pem")
+	if !sigOK || !certOK {
+		out.printf("WARNING: release %s has no signature assets (%s.sig/.pem) — skipping cosign verification.\n", rel.TagName, checksumsFilename)
+		return nil
+	}
+
+	sig, err := client.DownloadSmall(ctx, sigAsset.URL)
+	if err != nil {
+		return fmt.Errorf("fetch checksums signature: %w", err)
+	}
+	cert, err := client.DownloadSmall(ctx, certAsset.URL)
+	if err != nil {
+		return fmt.Errorf("fetch checksums certificate: %w", err)
+	}
+
+	runCosign := opts.runCosign
+	if runCosign == nil {
+		runCosign = update.RealCosignExec
+	}
+	err = update.VerifyChecksumsSignature(ctx, runCosign, rawSums, sig, cert)
+	switch {
+	case err == nil:
+		out.printf("Signature verified: %s was produced by the ezy-shield release workflow.\n", checksumsFilename)
+		return nil
+	case errors.Is(err, update.ErrCosignNotFound):
+		out.printf("WARNING: cosign is not installed — skipping signature verification of %s.\n", checksumsFilename)
+		out.printf("         Install cosign to verify releases: https://docs.sigstore.dev/cosign/system_config/installation/\n")
+		return nil
+	default:
+		return fmt.Errorf("signature verification of %s FAILED — refusing to update: %w", checksumsFilename, err)
+	}
+}
+
 type errWriter struct {
 	w   io.Writer
 	err error

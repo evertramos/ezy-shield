@@ -609,7 +609,11 @@ Exit codes: `0` saved, `1` wizard aborted or write failed, `2` config.yaml not f
 
 ## ezyshield update
 
-Self-update the binaries from GitHub Releases (checksum-verified).
+Self-update the binaries from GitHub Releases. `checksums.txt` is
+signature-verified with `cosign` against the pinned release-workflow identity
+when available (any mismatch aborts; see
+[Verifying releases](../security/verifying-releases.md)), then each binary is
+checksum-verified.
 
 ```bash
 # Check whether a newer release exists

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -26,6 +27,8 @@ type fixture struct {
 	enfSHA       string
 	checksumBody string
 	tag          string
+	rel          *update.Release
+	mux          *http.ServeMux
 }
 
 func newFixture(t *testing.T, tag string) *fixture {
@@ -58,8 +61,11 @@ func newFixture(t *testing.T, tag string) *fixture {
 	f.srv = httptest.NewTLSServer(mux)
 	t.Cleanup(f.srv.Close)
 
-	// Register the release endpoints now that we know f.srv.URL.
-	rel := update.Release{
+	// Register the release endpoints now that we know f.srv.URL. Handlers
+	// encode *f.rel per request so tests can append assets after creation
+	// (e.g. withSignatureAssets).
+	f.mux = mux
+	f.rel = &update.Release{
 		TagName: tag,
 		Assets: []update.Asset{
 			{Name: "ezyshield-linux-amd64", URL: f.srv.URL + "/dl/ezyshield-linux-amd64"},
@@ -68,13 +74,28 @@ func newFixture(t *testing.T, tag string) *fixture {
 		},
 	}
 	mux.HandleFunc("/repos/test/repo/releases/latest", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(rel)
+		_ = json.NewEncoder(w).Encode(f.rel)
 	})
 	mux.HandleFunc("/repos/test/repo/releases/tags/"+tag, func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(rel)
+		_ = json.NewEncoder(w).Encode(f.rel)
 	})
 
 	return f
+}
+
+// withSignatureAssets publishes checksums.txt.sig/.pem assets on the fixture
+// release, mimicking a signed release (issue #322).
+func (f *fixture) withSignatureAssets() {
+	f.mux.HandleFunc("/dl/checksums.txt.sig", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("FAKE_SIG"))
+	})
+	f.mux.HandleFunc("/dl/checksums.txt.pem", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("FAKE_CERT"))
+	})
+	f.rel.Assets = append(f.rel.Assets,
+		update.Asset{Name: "checksums.txt.sig", URL: f.srv.URL + "/dl/checksums.txt.sig"},
+		update.Asset{Name: "checksums.txt.pem", URL: f.srv.URL + "/dl/checksums.txt.pem"},
+	)
 }
 
 // optsFor builds updateOptions wired against the fixture, with --verify and
@@ -495,5 +516,117 @@ func TestResolveUpdateSource(t *testing.T) {
 		if gotRepo != c.wantRepo {
 			t.Errorf("resolveUpdateSource(%q) repo = %q, want %q", c.in, gotRepo, c.wantRepo)
 		}
+	}
+}
+
+// ── Signature verification (issue #322) ──────────────────────────────────────
+
+// TestRunUpdate_SignatureFailureAborts reproduces issue #322: with signature
+// assets published, a failed cosign verification must abort the update before
+// any binary is touched. Pre-fix, checksums.txt was trusted straight from the
+// release origin and no signature was ever checked.
+func TestRunUpdate_SignatureFailureAborts(t *testing.T) {
+	f := newFixture(t, "v0.2.0")
+	f.withSignatureAssets()
+	tmpDir := t.TempDir()
+	opts := f.optsFor(t, tmpDir, "v0.1.0")
+	opts.runCosign = func(_ context.Context, _ ...string) ([]byte, error) {
+		return []byte("Error: no matching signatures"), errors.New("exit status 1")
+	}
+	withTestClient(t, f)
+
+	err := runUpdate(context.Background(), opts)
+	if err == nil {
+		t.Fatal("expected update to abort on signature verification failure")
+	}
+	if !strings.Contains(err.Error(), "signature verification") {
+		t.Errorf("error should name signature verification, got: %v", err)
+	}
+	got, _ := os.ReadFile(opts.binaryPath)
+	if string(got) != "OLD_MAIN" {
+		t.Errorf("binary must not be replaced on signature failure; got %q", got)
+	}
+	got, _ = os.ReadFile(opts.enforcerPath)
+	if string(got) != "OLD_ENF" {
+		t.Errorf("enforcer must not be replaced on signature failure; got %q", got)
+	}
+}
+
+// TestRunUpdate_SignatureVerified asserts the verification actually runs on a
+// signed release and a passing verification lets the update complete.
+func TestRunUpdate_SignatureVerified(t *testing.T) {
+	f := newFixture(t, "v0.2.0")
+	f.withSignatureAssets()
+	tmpDir := t.TempDir()
+	opts := f.optsFor(t, tmpDir, "v0.1.0")
+	buf := &bytes.Buffer{}
+	opts.out = buf
+	cosignCalled := false
+	opts.runCosign = func(_ context.Context, args ...string) ([]byte, error) {
+		cosignCalled = true
+		joined := strings.Join(args, " ")
+		if !strings.Contains(joined, "verify-blob") {
+			t.Errorf("expected a verify-blob invocation, got: %s", joined)
+		}
+		return []byte("Verified OK"), nil
+	}
+	withTestClient(t, f)
+
+	if err := runUpdate(context.Background(), opts); err != nil {
+		t.Fatalf("runUpdate: %v", err)
+	}
+	if !cosignCalled {
+		t.Fatal("cosign verification was never invoked on a signed release")
+	}
+	if !strings.Contains(buf.String(), "Signature verified") {
+		t.Errorf("expected signature confirmation in output:\n%s", buf.String())
+	}
+	got, _ := os.ReadFile(opts.binaryPath)
+	if !bytes.Equal(got, f.mainBytes) {
+		t.Errorf("update should complete after verified signature; got %q", got)
+	}
+}
+
+// TestRunUpdate_CosignMissingWarnsAndProceeds mirrors the documented get.sh
+// behavior: no cosign on the host → warn loudly, continue on TLS integrity.
+func TestRunUpdate_CosignMissingWarnsAndProceeds(t *testing.T) {
+	f := newFixture(t, "v0.2.0")
+	f.withSignatureAssets()
+	tmpDir := t.TempDir()
+	opts := f.optsFor(t, tmpDir, "v0.1.0")
+	buf := &bytes.Buffer{}
+	opts.out = buf
+	opts.runCosign = func(_ context.Context, _ ...string) ([]byte, error) {
+		return nil, update.ErrCosignNotFound
+	}
+	withTestClient(t, f)
+
+	if err := runUpdate(context.Background(), opts); err != nil {
+		t.Fatalf("runUpdate: %v", err)
+	}
+	if !strings.Contains(buf.String(), "cosign is not installed") {
+		t.Errorf("expected cosign-missing warning in output:\n%s", buf.String())
+	}
+}
+
+// TestRunUpdate_UnsignedReleaseWarnsAndProceeds covers pre-signing releases:
+// no .sig/.pem assets → warn and continue (documented in verifying-releases).
+func TestRunUpdate_UnsignedReleaseWarnsAndProceeds(t *testing.T) {
+	f := newFixture(t, "v0.2.0")
+	tmpDir := t.TempDir()
+	opts := f.optsFor(t, tmpDir, "v0.1.0")
+	buf := &bytes.Buffer{}
+	opts.out = buf
+	opts.runCosign = func(_ context.Context, _ ...string) ([]byte, error) {
+		t.Error("cosign must not run when the release has no signature assets")
+		return nil, nil
+	}
+	withTestClient(t, f)
+
+	if err := runUpdate(context.Background(), opts); err != nil {
+		t.Fatalf("runUpdate: %v", err)
+	}
+	if !strings.Contains(buf.String(), "no signature assets") {
+		t.Errorf("expected unsigned-release warning in output:\n%s", buf.String())
 	}
 }

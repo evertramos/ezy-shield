@@ -1,6 +1,7 @@
 package update
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -236,9 +237,9 @@ func (c *Client) Download(ctx context.Context, u string, dst io.Writer) (int64, 
 	return n, nil
 }
 
-// DownloadChecksums fetches checksums.txt into memory (small file) and parses
-// it. Capped at maxChecksumSize.
-func (c *Client) DownloadChecksums(ctx context.Context, u string) (map[string]string, error) {
+// DownloadSmall fetches a small release asset (checksums, detached signature,
+// certificate) fully into memory, capped at maxChecksumSize.
+func (c *Client) DownloadSmall(ctx context.Context, u string) ([]byte, error) {
 	if err := requireHTTPS(u); err != nil {
 		return nil, err
 	}
@@ -250,13 +251,23 @@ func (c *Client) DownloadChecksums(ctx context.Context, u string) (map[string]st
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("download checksums: %w", err)
+		return nil, fmt.Errorf("download asset: %w", err)
 	}
 	defer resp.Body.Close() //nolint:errcheck
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("checksums %s: status %d", redactURL(u), resp.StatusCode)
+		return nil, fmt.Errorf("asset %s: status %d", redactURL(u), resp.StatusCode)
 	}
-	return ParseChecksums(io.LimitReader(resp.Body, maxChecksumSize))
+	return io.ReadAll(io.LimitReader(resp.Body, maxChecksumSize))
+}
+
+// DownloadChecksums fetches checksums.txt into memory (small file) and parses
+// it. Capped at maxChecksumSize.
+func (c *Client) DownloadChecksums(ctx context.Context, u string) (map[string]string, error) {
+	raw, err := c.DownloadSmall(ctx, u)
+	if err != nil {
+		return nil, fmt.Errorf("checksums: %w", err)
+	}
+	return ParseChecksums(bytes.NewReader(raw))
 }
 
 // requireHTTPS rejects any URL whose scheme isn't "https". This is a defense in

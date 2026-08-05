@@ -776,6 +776,21 @@ type allowlistSyncer interface {
 	SyncAllowlist(ctx context.Context, want []netip.Prefix) error
 }
 
+// staticAllowlistCovers reports whether prefix overlaps any static policy
+// allowlist / admin_cidrs entry. Used by handleUnallow to avoid dropping a
+// prefix from the enforcer's @allowed mirror when the static policy still
+// requires it (a prefix can live in both the config allowlist and the runtime
+// store). Overlaps (not exact match) is deliberate: keeping an entry the
+// static list still covers only ever over-protects, never under-protects.
+func (d *Daemon) staticAllowlistCovers(prefix netip.Prefix) bool {
+	for _, s := range d.staticAllowlist {
+		if s.Overlaps(prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // syncEnforcerAllowlist pushes the union of the policy allowlist
 // (policy.Allowlist + policy.AdminCIDRs, held in staticAllowlist) and the
 // runtime allowlist (store-owned entries) to the enforcer's @allowed set.

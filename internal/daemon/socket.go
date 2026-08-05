@@ -621,7 +621,17 @@ func (d *Daemon) handleUnallow(ctx context.Context, req SocketRequest) SocketRes
 	// waiting for the next SyncAllowlist reconcile. Failure is not fatal for
 	// the same reason as in handleAllow — an extra @allowed entry only
 	// over-protects until the next reconcile removes it.
-	if syncer, ok := d.enforcer.(allowlistSyncer); ok {
+	//
+	// BUT never drop a prefix that is still required by the static policy
+	// allowlist (policy.Allowlist / admin_cidrs): the same prefix can live in
+	// both the static config and the runtime store, and removing the runtime
+	// row must not punch a hole in the anti-lockout mirror for an entry the
+	// operator pinned in config (Strix review of #330). A no-op here is safe —
+	// the entry stays in @allowed, exactly as SyncAllowlist would keep it.
+	if d.staticAllowlistCovers(prefix) {
+		slog.InfoContext(ctx, "daemon: keeping enforcer @allowed entry (still in static policy allowlist)",
+			"prefix", prefix)
+	} else if syncer, ok := d.enforcer.(allowlistSyncer); ok {
 		if err := syncer.Unallow(ctx, prefix); err != nil {
 			slog.ErrorContext(ctx, "daemon: enforcer unallow failed",
 				"prefix", prefix, "err", err)

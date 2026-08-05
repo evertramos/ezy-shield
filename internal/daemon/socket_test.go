@@ -603,3 +603,45 @@ func TestHandleUnallow_LogsCLIAction(t *testing.T) {
 	}
 	containsAll(t, line, "level=INFO", "ip=10.0.0.1", "reason=cleanup", "source=cli")
 }
+
+// TestHandleUnallow_KeepsStaticallyRequiredPrefix (Strix review of #330): when
+// the removed prefix is also in the static policy allowlist, unallow must NOT
+// drop it from the enforcer's @allowed mirror — the static policy still
+// requires it, and punching a hole would risk lockout.
+func TestHandleUnallow_KeepsStaticallyRequiredPrefix(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	spy := &allowSpyEnforcer{}
+	d, err := New(Config{
+		Policy: &config.Policy{
+			Armed:            true,
+			BanThreshold:     config.DefaultBanThreshold,
+			ObserveThreshold: config.DefaultObserveThreshold,
+			MaxBansPerMinute: config.DefaultMaxBansPerMinute,
+			Strikes:          config.DefaultStrikes,
+			Allowlist:        []string{"192.0.2.0/24"}, // same prefix, statically pinned
+		},
+		Store:      db,
+		Enforcer:   spy,
+		SocketPath: "",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if resp := callSocket(t, d, SocketRequest{Verb: "allow", IP: "192.0.2.0/24"}); !resp.OK {
+		t.Fatalf("allow failed: %s", resp.Error)
+	}
+	if resp := callSocket(t, d, SocketRequest{Verb: "unallow", IP: "192.0.2.0/24"}); !resp.OK {
+		t.Fatalf("unallow failed: %s", resp.Error)
+	}
+
+	if len(spy.unallowed) != 0 {
+		t.Errorf("enforcer Unallow must not be called for a statically-required prefix, got %v", spy.unallowed)
+	}
+}

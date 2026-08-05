@@ -134,7 +134,7 @@ ezyshield report --json > report.json   # histórico por IP com evidências
 
 Ao usar Cloudflare Lists:
 
-1. **Sync idempotente**: o EzyShield reconcilia sua visão com o Cloudflare no startup do daemon e sempre que bans expiram (adiciona entradas faltantes, remove as obsoletas)
+1. **Sync idempotente**: o EzyShield reconcilia sua visão com o Cloudflare no startup do daemon, a cada 5 minutos e sempre que bans expiram (adiciona entradas faltantes, remove as obsoletas)
 2. **Fonte da verdade**: a tabela `bans_active` no SQLite é a fonte da verdade. Se o EzyShield cair e reiniciar, ele restaura os bloqueios do Cloudflare a partir do DB.
 3. **Rules alheias preservadas**: o EzyShield só toca na sua própria lista de IPs (`ezyshield_blocked`) e nas rules de WAF que ele mesmo criou (marcadas pela descrição). Rules do Cloudflare criadas à mão ficam intactas.
 

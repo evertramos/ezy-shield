@@ -160,19 +160,27 @@ collectors:
 	}
 }
 
+// An empty collectors list is valid — the strict loader and the daemon both
+// accept it — so `config validate` must WARN, not error. Otherwise the shipped
+// configs/config.yaml (collectors: []) would fail the project's own validate
+// command. Regression test for #339.
 func TestRunValidate_NoCollectors(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	cfg := writeFile(t, dir, "config.yaml", "data_dir: /tmp\n")
+	cfg := writeFile(t, dir, "config.yaml", "data_dir: /tmp\ncollectors: []\n")
 	pol := writeFile(t, dir, "policy.yaml", validPolicy)
 
 	var buf bytes.Buffer
 	code := runValidate(&buf, cfg, pol)
-	if code != validateExitError {
-		t.Errorf("exit code = %d, want %d", code, validateExitError)
+	if code != validateExitOK {
+		t.Errorf("exit code = %d, want %d (empty collectors should warn, not fail)", code, validateExitOK)
 	}
-	if !strings.Contains(buf.String(), "at least one collector") {
-		t.Errorf("expected collector requirement error, got: %s", buf.String())
+	out := buf.String()
+	if !strings.Contains(out, "no collectors configured") {
+		t.Errorf("expected 'no collectors configured' warning, got: %s", out)
+	}
+	if !strings.Contains(out, "warning") {
+		t.Errorf("expected a warning in the summary, got: %s", out)
 	}
 }
 

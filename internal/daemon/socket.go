@@ -193,8 +193,10 @@ func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
 		resp = d.handleUnban(ctx, req)
 	case "allow":
 		resp = d.handleAllow(ctx, req)
+	case "unallow":
+		resp = d.handleUnallow(ctx, req)
 	default:
-		resp = SocketResponse{Error: fmt.Sprintf("unknown verb %q; valid: status list list_allow events subscribe report arm arm_keep disarm ban unban allow", req.Verb)}
+		resp = SocketResponse{Error: fmt.Sprintf("unknown verb %q; valid: status list list_allow events subscribe report arm arm_keep disarm ban unban allow unallow", req.Verb)}
 	}
 
 	writeResponse(conn, resp)
@@ -580,6 +582,64 @@ func (d *Daemon) handleAllow(ctx context.Context, req SocketRequest) SocketRespo
 	)
 
 	d.publishActionEvent("allow", prefixDisplay(prefix), 0, ttl, req.Reason, "cli")
+
+	return SocketResponse{OK: true}
+}
+
+// handleUnallow removes prefix from the persistent runtime allowlist,
+// refreshes the daemon's in-memory allowlist, and drops the entry from the
+// enforcer's @allowed set (issue #330). This does not weaken Hard Rule 1 —
+// "allowlist always wins" applies to entries that exist; removal is the
+// explicit operator action the allow help text promises ("permanent until
+// explicitly removed"). Only store-owned runtime entries are removable:
+// config-file allowlist entries survive reloadAllowlist untouched.
+func (d *Daemon) handleUnallow(ctx context.Context, req SocketRequest) SocketResponse {
+	prefix, err := parseSocketTarget(req.IP)
+	if err != nil {
+		return SocketResponse{Error: err.Error()}
+	}
+	prefix = prefix.Masked()
+
+	removed, err := d.store.RemoveAllow(ctx, prefix)
+	if err != nil {
+		return SocketResponse{Error: fmt.Sprintf("store remove allow: %v", err)}
+	}
+	if removed == 0 {
+		return SocketResponse{Error: fmt.Sprintf("%s is not in the runtime allowlist (the target must match the stored entry exactly; config-file entries cannot be removed at runtime)", prefixDisplay(prefix))}
+	}
+
+	if err := d.store.AuditOp(ctx, "unallow", prefix, 0, req.Reason); err != nil {
+		slog.ErrorContext(ctx, "daemon: audit unallow", "prefix", prefix, "err", err)
+	}
+
+	if err := d.reloadAllowlist(ctx); err != nil {
+		slog.ErrorContext(ctx, "daemon: reload allowlist after remove", "err", err)
+	}
+
+	// Mirror of the handleAllow push: drop the entry from the enforcer's
+	// @allowed set so the raw/prerouting layout reflects the change without
+	// waiting for the next SyncAllowlist reconcile. Failure is not fatal for
+	// the same reason as in handleAllow — an extra @allowed entry only
+	// over-protects until the next reconcile removes it.
+	if syncer, ok := d.enforcer.(allowlistSyncer); ok {
+		if err := syncer.Unallow(ctx, prefix); err != nil {
+			slog.ErrorContext(ctx, "daemon: enforcer unallow failed",
+				"prefix", prefix, "err", err)
+		}
+	}
+
+	slog.InfoContext(ctx, "daemon: runtime allowlist updated",
+		"prefix", prefix, "removed", removed, "reason", req.Reason)
+
+	slog.InfoContext(ctx, "daemon: action",
+		"op", "unallow",
+		"ip", prefix.String(),
+		"ttl", time.Duration(0),
+		"reason", req.Reason,
+		"source", "cli",
+	)
+
+	d.publishActionEvent("unallow", prefixDisplay(prefix), 0, 0, req.Reason, "cli")
 
 	return SocketResponse{OK: true}
 }

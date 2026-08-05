@@ -476,3 +476,130 @@ func TestHandleBan_MappedSpellingStoresCanonicalRow(t *testing.T) {
 		t.Error("bans_active row not keyed by canonical 198.51.100.9 — mapped spelling created a split identity")
 	}
 }
+
+// ── unallow (issue #330) ─────────────────────────────────────────────────────
+
+// allowSpyEnforcer extends fakeEnforcer with the allowlistSyncer methods so
+// tests can assert the @allowed push/removal mirror.
+type allowSpyEnforcer struct {
+	fakeEnforcer
+	allowed   []netip.Prefix
+	unallowed []netip.Prefix
+}
+
+func (a *allowSpyEnforcer) Allow(_ context.Context, p netip.Prefix) error {
+	a.allowed = append(a.allowed, p)
+	return nil
+}
+
+func (a *allowSpyEnforcer) Unallow(_ context.Context, p netip.Prefix) error {
+	a.unallowed = append(a.unallowed, p)
+	return nil
+}
+
+func (a *allowSpyEnforcer) SyncAllowlist(_ context.Context, _ []netip.Prefix) error { return nil }
+
+// TestHandleUnallow_RemovesRuntimeEntry reproduces issue #330: the allow help
+// text promised "permanent (until explicitly removed)" but no removal path
+// existed — "unallow" was an unknown socket verb, store.RemoveAllow and the
+// enforcer's Unallow had zero call sites.
+func TestHandleUnallow_RemovesRuntimeEntry(t *testing.T) {
+	d := newTestDaemonForSocket(t, true /* armed */)
+	ctx := context.Background()
+
+	if resp := callSocket(t, d, SocketRequest{Verb: "allow", IP: "192.0.2.0/24", Reason: "office"}); !resp.OK {
+		t.Fatalf("allow failed: %s", resp.Error)
+	}
+
+	resp := callSocket(t, d, SocketRequest{Verb: "unallow", IP: "192.0.2.0/24", Reason: "office moved"})
+	if !resp.OK {
+		t.Fatalf("unallow failed: %s", resp.Error)
+	}
+
+	entries, err := d.store.ListAllow(ctx)
+	if err != nil {
+		t.Fatalf("ListAllow: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("allowlist should be empty after unallow, got %+v", entries)
+	}
+}
+
+// TestHandleUnallow_UnknownEntryErrors: removing something that isn't there
+// must be a clear error, not a silent OK.
+func TestHandleUnallow_UnknownEntryErrors(t *testing.T) {
+	d := newTestDaemonForSocket(t, true /* armed */)
+
+	resp := callSocket(t, d, SocketRequest{Verb: "unallow", IP: "198.51.100.7"})
+	if resp.OK {
+		t.Fatal("unallow of a nonexistent entry must fail")
+	}
+	if !strings.Contains(resp.Error, "not in the runtime allowlist") {
+		t.Errorf("error should explain the entry is absent, got: %s", resp.Error)
+	}
+}
+
+// TestHandleUnallow_PushesEnforcerRemoval: the enforcer's @allowed set must
+// mirror the runtime allowlist in both directions.
+func TestHandleUnallow_PushesEnforcerRemoval(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	spy := &allowSpyEnforcer{}
+	d, err := New(Config{
+		Policy: &config.Policy{
+			Armed:            true,
+			BanThreshold:     config.DefaultBanThreshold,
+			ObserveThreshold: config.DefaultObserveThreshold,
+			MaxBansPerMinute: config.DefaultMaxBansPerMinute,
+			Strikes:          config.DefaultStrikes,
+		},
+		Store:      db,
+		Enforcer:   spy,
+		SocketPath: "",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	pfx := netip.MustParsePrefix("192.0.2.0/24")
+	if resp := callSocket(t, d, SocketRequest{Verb: "allow", IP: "192.0.2.0/24"}); !resp.OK {
+		t.Fatalf("allow failed: %s", resp.Error)
+	}
+	if resp := callSocket(t, d, SocketRequest{Verb: "unallow", IP: "192.0.2.0/24"}); !resp.OK {
+		t.Fatalf("unallow failed: %s", resp.Error)
+	}
+
+	if len(spy.unallowed) != 1 || spy.unallowed[0] != pfx {
+		t.Errorf("enforcer Unallow calls = %v, want exactly [%s]", spy.unallowed, pfx)
+	}
+}
+
+// TestHandleUnallow_LogsCLIAction: unallow emits the same "daemon: action"
+// INFO line convention as every other operator verb.
+func TestHandleUnallow_LogsCLIAction(t *testing.T) {
+	buf := captureSlog(t)
+	d := newTestDaemonForSocket(t, true /* armed */)
+
+	if resp := callSocket(t, d, SocketRequest{Verb: "allow", IP: "10.0.0.1"}); !resp.OK {
+		t.Fatalf("allow failed: %s", resp.Error)
+	}
+	if resp := callSocket(t, d, SocketRequest{Verb: "unallow", IP: "10.0.0.1", Reason: "cleanup"}); !resp.OK {
+		t.Fatalf("unallow failed: %s", resp.Error)
+	}
+
+	var line string
+	for _, l := range strings.Split(buf.String(), "\n") {
+		if strings.Contains(l, `msg="daemon: action"`) && strings.Contains(l, "op=unallow") {
+			line = l
+		}
+	}
+	if line == "" {
+		t.Fatalf("no op=unallow action line found in:\n%s", buf.String())
+	}
+	containsAll(t, line, "level=INFO", "ip=10.0.0.1", "reason=cleanup", "source=cli")
+}

@@ -1371,3 +1371,44 @@ func TestActiveBans_ExpiredNeverPermanent(t *testing.T) {
 		t.Errorf("future ban = %+v (ok=%v), want Permanent=false 0<TTL<=1h", f, ok)
 	}
 }
+
+// TestRemoveAllow covers the runtime allowlist removal path (issue #330):
+// exact-match delete, idempotency, and no effect on other entries.
+func TestRemoveAllow(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	keep := netip.MustParsePrefix("10.0.0.0/8")
+	gone := netip.MustParsePrefix("192.0.2.0/24")
+	if err := db.AddAllow(ctx, keep, nil, "admin"); err != nil {
+		t.Fatalf("AddAllow keep: %v", err)
+	}
+	if err := db.AddAllow(ctx, gone, nil, "office"); err != nil {
+		t.Fatalf("AddAllow gone: %v", err)
+	}
+
+	n, err := db.RemoveAllow(ctx, gone)
+	if err != nil {
+		t.Fatalf("RemoveAllow: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("RemoveAllow removed %d rows, want 1", n)
+	}
+
+	entries, err := db.ListAllow(ctx)
+	if err != nil {
+		t.Fatalf("ListAllow: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Prefix != keep {
+		t.Errorf("remaining entries = %+v, want only %s", entries, keep)
+	}
+
+	// Idempotent: removing again is not an error, just zero rows.
+	n, err = db.RemoveAllow(ctx, gone)
+	if err != nil {
+		t.Fatalf("RemoveAllow (repeat): %v", err)
+	}
+	if n != 0 {
+		t.Errorf("repeat RemoveAllow removed %d rows, want 0", n)
+	}
+}

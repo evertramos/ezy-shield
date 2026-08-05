@@ -142,6 +142,7 @@ func (p *OpenAIProvider) Analyze(
 		return nil, usage, fmt.Errorf("ai: openai: %w", callErr)
 	}
 
+	verdicts = boundToBatch(ctx, verdicts, batch, p.Name())
 	verdicts = p.clamp(ctx, verdicts)
 	return verdicts, usage, nil
 }

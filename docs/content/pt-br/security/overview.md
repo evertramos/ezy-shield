@@ -92,8 +92,9 @@ Quando a IA está habilitada para eventos ambíguos (scores dentro da `ambiguous
 
 1. **Validação de schema**: a saída da IA é parseada em um tipo estruturado; respostas malformadas causam uma decisão de fallback.
 2. **Clamp pela policy**: a IA só pode sugerir dentro dos thresholds e durações de ban que você configurou. Ela não pode escalar além deles.
-3. **Audit trail**: todo veredito de IA (fonte, score, motivo) é persistido junto com o strike, então você pode auditar e sobrescrever se necessário.
-4. **Sem prompt injection**: linhas de log são passadas como dados, nunca interpoladas em instruções. O prompt é fixo e controlado.
+3. **Vínculo ao alvo**: um veredito só pode nomear um IP que estava no lote analisado. Se o modelo alucinar (ou for comprometido) e nomear qualquer outro endereço, o veredito é descartado com um warning — a IA nunca escolhe o alvo do ban, apenas pontua IPs que os logs de fato observaram.
+4. **Audit trail**: todo veredito de IA (fonte, score, motivo) é persistido junto com o strike, então você pode auditar e sobrescrever se necessário.
+5. **Sem prompt injection**: linhas de log são passadas como dados, nunca interpoladas em instruções. O prompt é fixo e controlado.
 
 ## Separação de privilégios
 

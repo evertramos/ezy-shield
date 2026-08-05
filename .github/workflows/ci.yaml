@@ -150,6 +150,9 @@ jobs:
       - name: get.sh no-stable-release message path (mocked GitHub API)
         id: getsh
         run: bash scripts/get-sh-message-test.sh
+      - name: Package lifecycle scripts (upgrade restarts, removal stops)
+        id: pkglifecycle
+        run: sh scripts/package-lifecycle-test.sh
       - name: Validate example configs against JSON schemas
         id: schemas
         run: |
@@ -168,6 +171,7 @@ jobs:
             echo "| required docs present | ${{ steps.reqdocs.outcome }} |"
             echo "| shellcheck ($(find scripts -name '*.sh' | wc -l) scripts) | ${{ steps.shellcheck.outcome }} |"
             echo "| get.sh no-stable-release message (#235) | ${{ steps.getsh.outcome }} |"
+            echo "| package upgrade/removal lifecycle (#354) | ${{ steps.pkglifecycle.outcome }} |"
             echo "| example configs vs JSON schemas | ${{ steps.schemas.outcome }} |"
             echo "| VitePress-safe placeholders | ${{ steps.placeholders.outcome }} |"
           } >> "$GITHUB_STEP_SUMMARY"

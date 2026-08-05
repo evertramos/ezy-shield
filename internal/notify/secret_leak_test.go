@@ -75,3 +75,24 @@ func TestSecretLeak_GenericWebhookTransportError(t *testing.T) {
 	err := n.Send(context.Background(), sdk.Notification{Severity: "warn", Title: "t"})
 	assertNoSecret(t, err, leakWebhookKey)
 }
+
+// TestSecretLeak_GenericWebhookHostRedacted verifies that for a generic
+// webhook the HOST is also stripped from transport errors — an operator's
+// webhook host can itself be secret (internal name or capability host), unlike
+// the well-known public API hosts of Telegram/Slack/Discord (Strix review of
+// #319, folded into #360).
+func TestSecretLeak_GenericWebhookHostRedacted(t *testing.T) {
+	secretHost := "secret-internal-host.example"
+	// Point at a closed port on that host name won't resolve; use a literal
+	// unroutable address but assert the error text carries neither.
+	n := NewWebhook("http://"+secretHost+"/hook?key="+leakWebhookKey, nil)
+
+	err := n.Send(context.Background(), sdk.Notification{Severity: "warn", Title: "t"})
+	if err == nil {
+		t.Fatal("expected a transport error")
+	}
+	if strings.Contains(err.Error(), secretHost) {
+		t.Errorf("generic webhook host must be redacted, leaked:\n  %v", err)
+	}
+	assertNoSecret(t, err, leakWebhookKey)
+}

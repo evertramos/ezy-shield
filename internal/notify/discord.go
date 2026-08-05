@@ -51,7 +51,7 @@ func (d *DiscordNotifier) Send(ctx context.Context, msg sdk.Notification) error 
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := d.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("discord: http: %w", redactTransportErr(err))
+		return fmt.Errorf("discord: http: %w", redactTransportErr(err, true))
 	}
 	defer resp.Body.Close() //nolint:errcheck
 	// Discord returns 204 No Content on success for webhook messages.

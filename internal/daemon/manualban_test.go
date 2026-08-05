@@ -261,7 +261,11 @@ func TestHandleBan_EnforcerFailure_ErrorsAndNoStoreRow(t *testing.T) {
 	}
 
 	ip := netip.MustParseAddr("203.0.113.9")
-	if _, _, _, active, err := db.GetBanInfo(ctx, ip); err == nil && active {
+	_, _, _, active, err := db.GetBanInfo(ctx, ip)
+	if err != nil {
+		t.Fatalf("GetBanInfo: %v", err)
+	}
+	if active {
 		t.Error("bans_active must not contain an IP the enforcer refused to ban")
 	}
 	for _, e := range mustAudit(t, db) {

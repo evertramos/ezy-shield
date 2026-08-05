@@ -251,6 +251,12 @@ rules:
 | `field`      | Event field to filter (optional)         |
 | `value`      | Exact field value (optional)             |
 | `contains`   | Substring match (optional)               |
+| `contains_any` | Any-of substring match (optional)      |
+
+`field` and a matcher (`value`, `contains`, or `contains_any` — mutually
+exclusive) only work as a pair: a rule that sets one without the other is
+rejected at load time. Without the pairing check, a matcher alone would count
+every event of the listed kinds, and a `field` alone would never fire.
 
 ### Example: block API scanners
 

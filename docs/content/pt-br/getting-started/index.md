@@ -254,6 +254,13 @@ rules:
 | `field`      | Campo do evento para filtro (opcional)   |
 | `value`      | Valor exato do campo (opcional)          |
 | `contains`   | Match de substring (opcional)            |
+| `contains_any` | Match de substring qualquer-um (opcional) |
+
+`field` e um matcher (`value`, `contains` ou `contains_any` — mutuamente
+exclusivos) só funcionam em par: uma regra que define um sem o outro é
+rejeitada no carregamento. Sem essa checagem de par, um matcher sozinho
+contaria todo evento dos kinds listados, e um `field` sozinho nunca
+dispararia.
 
 ### Exemplo: bloquear scanners de API
 

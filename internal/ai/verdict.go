@@ -1,10 +1,46 @@
 package ai
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"net/netip"
 	"strings"
+
+	"github.com/evertramos/ezy-shield/pkg/sdk"
 )
+
+// boundToBatch drops every verdict whose IP is not one of the analyzed batch
+// aggregates' IPs (issue #312, Hard Rule 1, SECURITY-REVIEW §5).
+//
+// Policy clamps bound the score, TTL, and allowlist — but not the target: a
+// hallucinating or compromised model could otherwise name an arbitrary,
+// never-observed IP and the decision engine (which acts on best.IP) would ban
+// it. Membership is representation-insensitive (IPv4-mapped IPv6 forms compare
+// equal to their IPv4 address, cf. #314), and surviving verdicts are rewritten
+// to the batch's canonical address so the engine's single-IP invariant holds.
+func boundToBatch(ctx context.Context, verdicts []sdk.Verdict, batch []sdk.Aggregate, provider string) []sdk.Verdict {
+	if len(verdicts) == 0 {
+		return verdicts
+	}
+	observed := make(map[netip.Addr]netip.Addr, len(batch))
+	for _, a := range batch {
+		observed[a.IP.Unmap()] = a.IP
+	}
+	out := make([]sdk.Verdict, 0, len(verdicts))
+	for _, v := range verdicts {
+		canonical, ok := observed[v.IP.Unmap()]
+		if !ok {
+			slog.WarnContext(ctx, "ai: dropping verdict for IP not in analyzed batch",
+				"provider", provider, "ip", v.IP, "score", v.Score)
+			continue
+		}
+		v.IP = canonical
+		out = append(out, v)
+	}
+	return out
+}
 
 // parseVerdictJSON unmarshals an AI provider's raw text response into dst.
 //

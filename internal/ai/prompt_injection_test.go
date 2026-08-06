@@ -300,3 +300,56 @@ func TestPromptInjection_PayloadContainsOnlyAggregatedCounters(t *testing.T) {
 		t.Error("expected aggregate IP to appear in payload; payload may be malformed")
 	}
 }
+
+// TestPromptInjection_VerdictIPNotInBatch_Dropped reproduces issue #312: a
+// hallucinating or compromised model names an IP that was never in the analyzed
+// batch. Policy clamps bound score/TTL/allowlist but not the target, so without
+// binding the verdict to the batch the decision engine would ban an arbitrary,
+// never-observed address. The off-batch verdict must be dropped; in-batch
+// verdicts must survive.
+func TestPromptInjection_VerdictIPNotInBatch_Dropped(t *testing.T) {
+	response := `{"results":[{"ip":"192.0.2.1","score":60,"category":"scanner","confidence":0.6,"reason":"observed","suggest_ttl_seconds":0},{"ip":"203.0.113.9","score":95,"category":"bruteforce","confidence":0.99,"reason":"never observed","suggest_ttl_seconds":86400}]}`
+
+	srv, _ := captureServer(t, response)
+	defer srv.Close()
+
+	p := makeProvider(t, srv, nil, 0, nil)
+	agg := injectionAggregate("192.0.2.1", "ua")
+
+	verdicts, _, err := p.Analyze(context.Background(), []sdk.Aggregate{agg}, sdk.TokenBudget{Remaining: 10000, DailyLimit: 100000})
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if len(verdicts) != 1 {
+		t.Fatalf("want exactly 1 verdict (the in-batch IP), got %d: %+v", len(verdicts), verdicts)
+	}
+	if got, want := verdicts[0].IP, agg.IP; got != want {
+		t.Errorf("surviving verdict IP = %s, want %s", got, want)
+	}
+}
+
+// TestPromptInjection_VerdictIPMappedForm_Kept verifies the batch-membership
+// check is representation-insensitive: a model echoing the IPv4-mapped IPv6
+// form (::ffff:a.b.c.d) of a batch IPv4 address must not be dropped, and the
+// surviving verdict must carry the batch's canonical address so the decision
+// engine's single-IP invariant holds (cf. #314).
+func TestPromptInjection_VerdictIPMappedForm_Kept(t *testing.T) {
+	response := `{"results":[{"ip":"::ffff:192.0.2.1","score":80,"category":"bruteforce","confidence":0.9,"reason":"mapped form","suggest_ttl_seconds":0}]}`
+
+	srv, _ := captureServer(t, response)
+	defer srv.Close()
+
+	p := makeProvider(t, srv, nil, 0, nil)
+	agg := injectionAggregate("192.0.2.1", "ua")
+
+	verdicts, _, err := p.Analyze(context.Background(), []sdk.Aggregate{agg}, sdk.TokenBudget{Remaining: 10000, DailyLimit: 100000})
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if len(verdicts) != 1 {
+		t.Fatalf("mapped-form verdict for a batch IP must be kept, got %d verdicts", len(verdicts))
+	}
+	if got, want := verdicts[0].IP, agg.IP; got != want {
+		t.Errorf("verdict IP = %s, want canonical batch address %s", got, want)
+	}
+}

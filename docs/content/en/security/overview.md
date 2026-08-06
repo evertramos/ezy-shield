@@ -90,8 +90,9 @@ When AI is enabled for ambiguous events (scores inside the configurable `ambiguo
 
 1. **Schema validation**: AI output is parsed into a structured type; malformed responses cause a fallback decision.
 2. **Policy clamping**: AI can only suggest within the ban thresholds and durations you configured. It cannot escalate beyond them.
-3. **Audit trail**: every AI verdict (source, score, reason) is persisted with the strike, so you can audit and override if needed.
-4. **No prompt injection**: Log lines are passed as data, never interpolated into instructions. The prompt is fixed and controlled.
+3. **Target binding**: a verdict can only name an IP that was in the analyzed batch. A hallucinating (or compromised) model naming any other address is discarded with a warning — the AI can never pick the ban target, only score IPs the logs actually observed.
+4. **Audit trail**: every AI verdict (source, score, reason) is persisted with the strike, so you can audit and override if needed.
+5. **No prompt injection**: Log lines are passed as data, never interpolated into instructions. The prompt is fixed and controlled.
 
 ## Privilege separation
 

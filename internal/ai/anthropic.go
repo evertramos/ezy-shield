@@ -119,6 +119,7 @@ func (p *AnthropicProvider) Analyze(
 		return nil, usage, fmt.Errorf("ai: anthropic: %w", callErr)
 	}
 
+	verdicts = boundToBatch(ctx, verdicts, batch, p.Name())
 	verdicts = p.clamp(ctx, verdicts)
 	return verdicts, usage, nil
 }

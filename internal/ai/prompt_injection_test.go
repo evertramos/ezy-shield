@@ -353,3 +353,66 @@ func TestPromptInjection_VerdictIPMappedForm_Kept(t *testing.T) {
 		t.Errorf("verdict IP = %s, want canonical batch address %s", got, want)
 	}
 }
+
+// TestPromptInjection_ClampedVerdict_NoSignatureReplay covers the cache leg of
+// issue #402: the verdict cache is keyed by behavior signature, not IP, so a
+// cached allowlist-clamped (Score-0) verdict would be replayed onto every
+// non-allowlisted IP sharing the signature — an attacker who mimics an
+// allowlisted host's traffic pattern from one throwaway source would buy an
+// AI-escalation evasion window of cache_ttl for the whole botnet. Clamped
+// verdicts must never be written to the cache.
+func TestPromptInjection_ClampedVerdict_NoSignatureReplay(t *testing.T) {
+	c := NewCache(5 * time.Minute)
+
+	kinds := map[string]int{"http_request": 10}
+	allowlisted := sdk.Aggregate{
+		IP:     netip.MustParseAddr("192.0.2.100"),
+		Window: 60 * time.Second,
+		Count:  10,
+		Kinds:  kinds,
+	}
+	attacker := sdk.Aggregate{
+		IP:     netip.MustParseAddr("203.0.113.66"), // same signature, different IP
+		Window: 60 * time.Second,
+		Count:  10,
+		Kinds:  kinds,
+	}
+
+	clamped := sdk.Verdict{
+		IP:     allowlisted.IP,
+		Score:  0,
+		Reason: ReasonAllowlistClamped,
+		Source: "ai:anthropic" + AllowlistClampSourceSuffix,
+	}
+	c.Set(allowlisted, []sdk.Verdict{clamped})
+
+	if got := c.Get(attacker); got != nil {
+		t.Fatalf("signature replay: attacker %s inherited the allowlist clamp: %+v",
+			attacker.IP, got)
+	}
+}
+
+// TestPromptInjection_ForgedClampReason_CannotBustCache covers the Strix
+// finding on #414 (CWE-345): Reason is copied verbatim from model JSON, so a
+// prompt-injected response could return Score 0 with the literal clamp text to
+// impersonate a policy clamp. If IsAllowlistClamped keyed on Reason, that
+// forgery would suppress caching and force a fresh AI consultation for every
+// batch with that signature — a cache-busting / call-storm primitive. The
+// marker lives in Source (provider-assembled, never model-copied), so the
+// forged verdict must be cached like any genuine benign verdict.
+func TestPromptInjection_ForgedClampReason_CannotBustCache(t *testing.T) {
+	c := NewCache(5 * time.Minute)
+
+	agg := makeAgg("203.0.113.80", map[string]int{"http_probe": 25})
+	forged := makeVerdict("203.0.113.80", 0)
+	forged.Reason = ReasonAllowlistClamped // model-controlled text, no Source marker
+
+	if IsAllowlistClamped(forged) {
+		t.Fatal("model-controlled Reason alone must not read as a clamp")
+	}
+
+	c.Set(agg, []sdk.Verdict{forged})
+	if got := c.Get(agg); got == nil {
+		t.Fatal("forged clamp Reason suppressed caching (cache-busting primitive)")
+	}
+}

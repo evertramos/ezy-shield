@@ -75,13 +75,30 @@ func (c *Cache) Get(agg sdk.Aggregate) []sdk.Verdict {
 
 // Set stores verdicts for agg's behavior signature with the configured TTL.
 // The slice is copied, so the entry is immune to later caller mutations.
+//
+// Allowlist-clamped verdicts are never stored (issue #402): the clamp is a
+// property of one IP's allowlist membership, while the entry key is shared by
+// every IP with the same traffic pattern — caching the clamp would hand every
+// such IP a Score-0 replay (an AI-escalation evasion window of one cache TTL).
+// A genuine model-issued Score 0 ("benign traffic") is still cached; only
+// verdicts stamped by the provider clamp are skipped. If nothing survives the
+// filter, no entry is created at all, so the next same-signature lookup is a
+// MISS and consults the provider instead of hitting an empty entry.
 func (c *Cache) Set(agg sdk.Aggregate, verdicts []sdk.Verdict) {
 	if c.ttl == 0 {
 		return
 	}
+	stored := make([]sdk.Verdict, 0, len(verdicts))
+	for _, v := range verdicts {
+		if IsAllowlistClamped(v) {
+			continue
+		}
+		stored = append(stored, v)
+	}
+	if len(stored) == 0 {
+		return
+	}
 	key := behaviorKey(agg)
-	stored := make([]sdk.Verdict, len(verdicts))
-	copy(stored, verdicts)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()

@@ -277,6 +277,9 @@ func TestOpenAI_ClampAllowlistedIP(t *testing.T) {
 	if verdicts[0].SuggestTTL != 0 {
 		t.Errorf("allowlisted IP SuggestTTL must be 0, got %v", verdicts[0].SuggestTTL)
 	}
+	if !IsAllowlistClamped(verdicts[0]) {
+		t.Errorf("real clamp must stamp the Source marker; Source = %q", verdicts[0].Source)
+	}
 }
 
 // TestOpenAI_ClampMaxTTL verifies that SuggestTTL is capped at the policy maximum.

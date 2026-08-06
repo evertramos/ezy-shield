@@ -616,26 +616,20 @@ func (d *Daemon) handleUnallow(ctx context.Context, req SocketRequest) SocketRes
 		slog.ErrorContext(ctx, "daemon: reload allowlist after remove", "err", err)
 	}
 
-	// Mirror of the handleAllow push: drop the entry from the enforcer's
-	// @allowed set so the raw/prerouting layout reflects the change without
-	// waiting for the next SyncAllowlist reconcile. Failure is not fatal for
-	// the same reason as in handleAllow — an extra @allowed entry only
-	// over-protects until the next reconcile removes it.
-	//
-	// BUT never drop a prefix that is still required by the static policy
-	// allowlist (policy.Allowlist / admin_cidrs): the same prefix can live in
-	// both the static config and the runtime store, and removing the runtime
-	// row must not punch a hole in the anti-lockout mirror for an entry the
-	// operator pinned in config (Strix review of #330). A no-op here is safe —
-	// the entry stays in @allowed, exactly as SyncAllowlist would keep it.
-	if d.staticAllowlistCovers(prefix) {
-		slog.InfoContext(ctx, "daemon: keeping enforcer @allowed entry (still in static policy allowlist)",
-			"prefix", prefix)
-	} else if syncer, ok := d.enforcer.(allowlistSyncer); ok {
-		if err := syncer.Unallow(ctx, prefix); err != nil {
-			slog.ErrorContext(ctx, "daemon: enforcer unallow failed",
-				"prefix", prefix, "err", err)
-		}
+	// Mirror of the handleAllow push, but as a full re-sync: recompute the
+	// exact static ∪ runtime union and push it via SyncAllowlist — the same
+	// primitive the startup path and the expiry sweep use. A targeted
+	// syncer.Unallow(prefix) guarded by an Overlaps check was wrong for the
+	// containment case (issue #404, review of PR #398): a static /32 inside a
+	// runtime-allowed /24 made the guard skip the removal, leaving the whole
+	// /24 in @allowed until restart. Re-syncing keeps every prefix the static
+	// policy (policy.Allowlist / admin_cidrs) still requires — anti-lockout,
+	// Hard Rule 1 — while dropping exactly what nothing requires any more.
+	// Failure is not fatal for the same reason as in handleAllow: a stale
+	// extra @allowed entry only over-protects until the next reconcile.
+	if err := d.syncEnforcerAllowlist(ctx); err != nil {
+		slog.ErrorContext(ctx, "daemon: enforcer allowlist re-sync after unallow failed",
+			"prefix", prefix, "err", err)
 	}
 
 	slog.InfoContext(ctx, "daemon: runtime allowlist updated",

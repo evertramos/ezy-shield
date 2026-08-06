@@ -382,6 +382,25 @@ sudo ezyshield allow --until 2026-08-01T00:00:00Z 198.51.100.8
 
 Allowlist is checked first. No rule can ban an allowlisted IP.
 
+## ezyshield unallow
+
+Remove an IP or CIDR from the runtime allowlist.
+
+```bash
+sudo ezyshield unallow 192.0.2.100
+sudo ezyshield unallow --reason "office moved" 192.0.2.0/24
+```
+
+| Flag | Description |
+|------|-------------|
+| `--reason` | free-text note recorded in the audit log |
+| `--socket` | control socket path override |
+
+The target must match the stored entry exactly (the same IP or CIDR that was
+allowed). Only runtime entries (added with `allow`) can be removed; entries
+from the static config allowlist require a config edit and daemon restart.
+Removing an entry also drops it from the enforcer's `@allowed` set.
+
 ## ezyshield scan
 
 Discover every listening TCP socket on the host and detect drift against the

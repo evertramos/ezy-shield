@@ -779,7 +779,8 @@ type allowlistSyncer interface {
 // syncEnforcerAllowlist pushes the union of the policy allowlist
 // (policy.Allowlist + policy.AdminCIDRs, held in staticAllowlist) and the
 // runtime allowlist (store-owned entries) to the enforcer's @allowed set.
-// Called at startup (after reloadAllowlist) and after each expiry sweep.
+// Called at startup (after reloadAllowlist), after each expiry sweep, and
+// after an operator unallow (handleUnallow, issue #404).
 // No-op when the enforcer doesn't implement the allowlistSyncer interface
 // (e.g. Cloudflare edge enforcer alone).
 //

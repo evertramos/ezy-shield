@@ -476,3 +476,260 @@ func TestHandleBan_MappedSpellingStoresCanonicalRow(t *testing.T) {
 		t.Error("bans_active row not keyed by canonical 198.51.100.9 — mapped spelling created a split identity")
 	}
 }
+
+// ── unallow (issue #330) ─────────────────────────────────────────────────────
+
+// allowSpyEnforcer extends fakeEnforcer with the allowlistSyncer methods so
+// tests can assert the @allowed push/removal mirror. SyncAllowlist calls are
+// recorded with their exact contents (copied — callers may reuse the slice)
+// so tests can assert what the enforcer's @allowed set would converge to,
+// not just that a call happened.
+type allowSpyEnforcer struct {
+	fakeEnforcer
+	allowed   []netip.Prefix
+	unallowed []netip.Prefix
+	synced    [][]netip.Prefix
+}
+
+func (a *allowSpyEnforcer) Allow(_ context.Context, p netip.Prefix) error {
+	a.allowed = append(a.allowed, p)
+	return nil
+}
+
+func (a *allowSpyEnforcer) Unallow(_ context.Context, p netip.Prefix) error {
+	a.unallowed = append(a.unallowed, p)
+	return nil
+}
+
+func (a *allowSpyEnforcer) SyncAllowlist(_ context.Context, want []netip.Prefix) error {
+	a.synced = append(a.synced, append([]netip.Prefix(nil), want...))
+	return nil
+}
+
+// lastSynced returns the contents of the most recent SyncAllowlist call, or
+// nil if none happened.
+func (a *allowSpyEnforcer) lastSynced() []netip.Prefix {
+	if len(a.synced) == 0 {
+		return nil
+	}
+	return a.synced[len(a.synced)-1]
+}
+
+// TestHandleUnallow_RemovesRuntimeEntry reproduces issue #330: the allow help
+// text promised "permanent (until explicitly removed)" but no removal path
+// existed — "unallow" was an unknown socket verb, store.RemoveAllow and the
+// enforcer's Unallow had zero call sites.
+func TestHandleUnallow_RemovesRuntimeEntry(t *testing.T) {
+	d := newTestDaemonForSocket(t, true /* armed */)
+	ctx := context.Background()
+
+	if resp := callSocket(t, d, SocketRequest{Verb: "allow", IP: "192.0.2.0/24", Reason: "office"}); !resp.OK {
+		t.Fatalf("allow failed: %s", resp.Error)
+	}
+
+	resp := callSocket(t, d, SocketRequest{Verb: "unallow", IP: "192.0.2.0/24", Reason: "office moved"})
+	if !resp.OK {
+		t.Fatalf("unallow failed: %s", resp.Error)
+	}
+
+	entries, err := d.store.ListAllow(ctx)
+	if err != nil {
+		t.Fatalf("ListAllow: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("allowlist should be empty after unallow, got %+v", entries)
+	}
+}
+
+// TestHandleUnallow_UnknownEntryErrors: removing something that isn't there
+// must be a clear error, not a silent OK.
+func TestHandleUnallow_UnknownEntryErrors(t *testing.T) {
+	d := newTestDaemonForSocket(t, true /* armed */)
+
+	resp := callSocket(t, d, SocketRequest{Verb: "unallow", IP: "198.51.100.7"})
+	if resp.OK {
+		t.Fatal("unallow of a nonexistent entry must fail")
+	}
+	if !strings.Contains(resp.Error, "not in the runtime allowlist") {
+		t.Errorf("error should explain the entry is absent, got: %s", resp.Error)
+	}
+}
+
+// TestHandleUnallow_PushesEnforcerRemoval: the enforcer's @allowed set must
+// mirror the runtime allowlist in both directions. Since issue #404 the
+// removal side goes through a full SyncAllowlist re-sync (static ∪ runtime),
+// so the assertion is on the synced contents: after unallow, the enforcer's
+// @allowed set converges to a set without the removed prefix.
+func TestHandleUnallow_PushesEnforcerRemoval(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	spy := &allowSpyEnforcer{}
+	d, err := New(Config{
+		Policy: &config.Policy{
+			Armed:            true,
+			BanThreshold:     config.DefaultBanThreshold,
+			ObserveThreshold: config.DefaultObserveThreshold,
+			MaxBansPerMinute: config.DefaultMaxBansPerMinute,
+			Strikes:          config.DefaultStrikes,
+		},
+		Store:      db,
+		Enforcer:   spy,
+		SocketPath: "",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	pfx := netip.MustParsePrefix("192.0.2.0/24")
+	if resp := callSocket(t, d, SocketRequest{Verb: "allow", IP: "192.0.2.0/24"}); !resp.OK {
+		t.Fatalf("allow failed: %s", resp.Error)
+	}
+	if resp := callSocket(t, d, SocketRequest{Verb: "unallow", IP: "192.0.2.0/24"}); !resp.OK {
+		t.Fatalf("unallow failed: %s", resp.Error)
+	}
+
+	if len(spy.synced) == 0 {
+		t.Fatal("unallow must re-sync the enforcer allowlist, but SyncAllowlist was never called")
+	}
+	if got := spy.lastSynced(); len(got) != 0 {
+		t.Errorf("enforcer @allowed after unallow of %s = %v, want empty (no static policy, runtime entry removed)", pfx, got)
+	}
+}
+
+// TestHandleUnallow_LogsCLIAction: unallow emits the same "daemon: action"
+// INFO line convention as every other operator verb.
+func TestHandleUnallow_LogsCLIAction(t *testing.T) {
+	buf := captureSlog(t)
+	d := newTestDaemonForSocket(t, true /* armed */)
+
+	if resp := callSocket(t, d, SocketRequest{Verb: "allow", IP: "10.0.0.1"}); !resp.OK {
+		t.Fatalf("allow failed: %s", resp.Error)
+	}
+	if resp := callSocket(t, d, SocketRequest{Verb: "unallow", IP: "10.0.0.1", Reason: "cleanup"}); !resp.OK {
+		t.Fatalf("unallow failed: %s", resp.Error)
+	}
+
+	var line string
+	for _, l := range strings.Split(buf.String(), "\n") {
+		if strings.Contains(l, `msg="daemon: action"`) && strings.Contains(l, "op=unallow") {
+			line = l
+		}
+	}
+	if line == "" {
+		t.Fatalf("no op=unallow action line found in:\n%s", buf.String())
+	}
+	containsAll(t, line, "level=INFO", "ip=10.0.0.1", "reason=cleanup", "source=cli")
+}
+
+// TestHandleUnallow_KeepsStaticallyRequiredPrefix (Strix review of #330): when
+// the removed prefix is also in the static policy allowlist, unallow must NOT
+// drop it from the enforcer's @allowed mirror — the static policy still
+// requires it, and punching a hole would risk lockout.
+func TestHandleUnallow_KeepsStaticallyRequiredPrefix(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	spy := &allowSpyEnforcer{}
+	d, err := New(Config{
+		Policy: &config.Policy{
+			Armed:            true,
+			BanThreshold:     config.DefaultBanThreshold,
+			ObserveThreshold: config.DefaultObserveThreshold,
+			MaxBansPerMinute: config.DefaultMaxBansPerMinute,
+			Strikes:          config.DefaultStrikes,
+			Allowlist:        []string{"192.0.2.0/24"}, // same prefix, statically pinned
+		},
+		Store:      db,
+		Enforcer:   spy,
+		SocketPath: "",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if resp := callSocket(t, d, SocketRequest{Verb: "allow", IP: "192.0.2.0/24"}); !resp.OK {
+		t.Fatalf("allow failed: %s", resp.Error)
+	}
+	if resp := callSocket(t, d, SocketRequest{Verb: "unallow", IP: "192.0.2.0/24"}); !resp.OK {
+		t.Fatalf("unallow failed: %s", resp.Error)
+	}
+
+	if len(spy.unallowed) != 0 {
+		t.Errorf("enforcer Unallow must not be called for a statically-required prefix, got %v", spy.unallowed)
+	}
+	want := netip.MustParsePrefix("192.0.2.0/24")
+	found := false
+	for _, p := range spy.lastSynced() {
+		if p == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("statically-required prefix %s missing from enforcer @allowed after unallow re-sync: %v", want, spy.lastSynced())
+	}
+}
+
+// TestHandleUnallow_ResyncsWhenStaticIsContainedInRemoved (issue #404, review
+// of PR #398): the old guard used Overlaps, so a static /32 *inside* a
+// runtime-allowed /24 made `unallow <the /24>` skip the enforcer removal
+// entirely — the whole /24 stayed in the nftables @allowed set until restart
+// or an allow-expiry sweep. The fix re-syncs the enforcer allowlist to the
+// exact static ∪ runtime union, so after removing the /24 only the static
+// /32 must remain in @allowed.
+func TestHandleUnallow_ResyncsWhenStaticIsContainedInRemoved(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	spy := &allowSpyEnforcer{}
+	d, err := New(Config{
+		Policy: &config.Policy{
+			Armed:            true,
+			BanThreshold:     config.DefaultBanThreshold,
+			ObserveThreshold: config.DefaultObserveThreshold,
+			MaxBansPerMinute: config.DefaultMaxBansPerMinute,
+			Strikes:          config.DefaultStrikes,
+			Allowlist:        []string{"192.0.2.7/32"}, // static host inside the runtime /24
+		},
+		Store:      db,
+		Enforcer:   spy,
+		SocketPath: "",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if resp := callSocket(t, d, SocketRequest{Verb: "allow", IP: "192.0.2.0/24"}); !resp.OK {
+		t.Fatalf("allow failed: %s", resp.Error)
+	}
+	if resp := callSocket(t, d, SocketRequest{Verb: "unallow", IP: "192.0.2.0/24"}); !resp.OK {
+		t.Fatalf("unallow failed: %s", resp.Error)
+	}
+
+	if len(spy.synced) == 0 {
+		t.Fatal("unallow must re-sync the enforcer allowlist when the static set is contained in the removed prefix, but SyncAllowlist was never called")
+	}
+	staticHost := netip.MustParsePrefix("192.0.2.7/32")
+	removed := netip.MustParsePrefix("192.0.2.0/24")
+	got := spy.lastSynced()
+	if len(got) != 1 || got[0] != staticHost {
+		t.Errorf("enforcer @allowed after unallow of %s = %v, want exactly [%s] (static host kept, /24 gone)", removed, got, staticHost)
+	}
+	for _, p := range got {
+		if p == removed {
+			t.Errorf("removed prefix %s still in enforcer @allowed set: %v", removed, got)
+		}
+	}
+}

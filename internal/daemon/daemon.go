@@ -101,6 +101,11 @@ type Config struct {
 	// EnfProbeTick overrides the enforcement health-probe interval (tests
 	// only; 0 = default 5m). See runEnforceProbe (issue #174).
 	EnfProbeTick time.Duration
+	// SSHRecheckTick / SSHRecheckDelay override the deferred anti-lockout
+	// re-evaluation poll interval and refusal→re-check delay (tests only;
+	// 0 = defaults). See sshrecheck.go (issue #420).
+	SSHRecheckTick  time.Duration
+	SSHRecheckDelay time.Duration
 }
 
 // enricherFrom converts a *enrich.Enricher into the geoLookup interface, or
@@ -144,6 +149,13 @@ type Daemon struct {
 	armWindowTick time.Duration
 	// enfProbeTick is the enforcement health-probe interval (0 = default 5m).
 	enfProbeTick time.Duration
+	// sshRecheckTick / sshRecheckDelay tune the deferred anti-lockout
+	// re-evaluation (0 = defaults; see sshrecheck.go, issue #420).
+	sshRecheckTick  time.Duration
+	sshRecheckDelay time.Duration
+	// sshRecheck holds the per-IP deferred re-checks armed after SSH-peer
+	// anti-lockout refusals that suppressed a would-be ban (issue #420).
+	sshRecheck sshRecheckQueue
 	// ineffDedup deduplicates ban_ineffective notifications systemically
 	// (ADR-0009 §4, issue #146).
 	ineffDedup ineffDedup
@@ -249,6 +261,8 @@ func New(dcfg Config) (*Daemon, error) {
 		policyPath:      dcfg.PolicyPath,
 		armWindowTick:   dcfg.ArmWindowTick,
 		enfProbeTick:    dcfg.EnfProbeTick,
+		sshRecheckTick:  dcfg.SSHRecheckTick,
+		sshRecheckDelay: dcfg.SSHRecheckDelay,
 	}
 
 	// Enforcement-anomaly delivery (ADR-0009 §4, issue #146): the engine
@@ -360,6 +374,10 @@ func (d *Daemon) Run(parentCtx context.Context) error {
 
 	// Keep the enforcement state fresh on quiet hosts (issue #174).
 	go d.runEnforceProbe(ctx)
+
+	// Re-evaluate IPs whose would-be ban was refused because of an
+	// ESTABLISHED SSH connection, once that connection is gone (issue #420).
+	go d.runSSHRecheck(ctx)
 
 	// Signal handling.
 	sigCh := make(chan os.Signal, 1)
@@ -475,6 +493,12 @@ func (d *Daemon) processRaw(ctx context.Context, raw sdk.RawLine) {
 		}
 
 		d.dispatch(ctx, action)
+
+		// An SSH-peer anti-lockout refusal that suppressed a would-be ban is
+		// re-examined after the connection closes — a fast-reconnect burst
+		// otherwise ends with in-window evidence nobody ever looks at again
+		// (issue #420).
+		d.maybeScheduleSSHRecheck(ctx, action, verdicts)
 	}
 }
 

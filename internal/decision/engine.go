@@ -33,6 +33,15 @@ import (
 // Callers should pause enforcement and send a critical alert.
 var ErrRateLimited = errors.New("decision: global ban rate limit exceeded")
 
+// ReasonAntiLockoutSSHPeer is the Action.Reason Decide emits when it refuses
+// to ban an IP because the kernel (or SSH_CLIENT) reports it as an active SSH
+// peer. Exported as a stable contract: the daemon keys its deferred
+// re-evaluation on this exact string (issue #420 — a fast-reconnect
+// bruteforcer can keep an ESTABLISHED connection visible for its whole
+// threshold window, so the refusal must be re-examined once the connection
+// closes). Pinned by TestAntiLockout_SSHPeerRefusal_ReasonIsStableContract.
+const ReasonAntiLockoutSSHPeer = "anti-lockout: active SSH peer"
+
 // Store is the persistence interface required by Engine.
 // The concrete *store.DB satisfies this interface.
 type Store interface {
@@ -154,7 +163,7 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 	for _, peer := range e.activeSSHPeers() {
 		if peer == ip {
 			slog.WarnContext(ctx, "decision: anti-lockout — refusing to ban active SSH peer", "ip", ip)
-			act := sdk.Action{IP: ip, Op: "record", Reason: "anti-lockout: active SSH peer", Verdicts: verdicts}
+			act := sdk.Action{IP: ip, Op: "record", Reason: ReasonAntiLockoutSSHPeer, Verdicts: verdicts}
 			if err := e.store.Audit(ctx, act); err != nil {
 				slog.ErrorContext(ctx, "decision: audit anti-lockout", "ip", ip, "err", err)
 			}

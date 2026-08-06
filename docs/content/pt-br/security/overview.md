@@ -59,6 +59,20 @@ ou a qualquer plataforma de edge. Mesmo um backend sem lógica própria de
 allowlist nunca recebe um endereço protegido — inclusive via um sync que o
 reintroduziria.
 
+**A re-checagem de SSH ao vivo protege uma *conexão*, não um endereço para
+sempre.** Um bruteforcer que reconecta mais rápido do que a tabela de peers é
+relida mantém uma conexão estabelecida visível em toda avaliação, então cada
+tentativa dentro da janela do threshold é (corretamente) recusada. Para fechar
+a brecha em que uma rajada dessas nunca seria banida, um IP cujo ban foi
+recusado *apenas* por causa de uma conexão SSH ativa é reavaliado logo depois
+que essa conexão fecha — a partir do histórico de eventos ainda dentro da
+janela, pelos mesmos guards (allowlist, uma nova sondagem de peer SSH ao vivo,
+rate limit de bans). Se a conexão ainda estiver estabelecida no momento da
+reavaliação — uma sessão legítima do operador — a recusa simplesmente se
+repete e nada é banido. Um ban só pode resultar de uma checagem completa que
+não encontrou nenhuma conexão SSH estabelecida naquele instante; a sessão do
+operador continua imbanível enquanto estiver aberta.
+
 ## Supremacia da allowlist
 
 A allowlist é checada PRIMEIRO, antes de qualquer decisão do rule engine. Um IP na allowlist não pode ser banido por nenhuma rule, decisão de IA ou tentativa de ban manual.

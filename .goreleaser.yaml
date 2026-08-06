@@ -195,10 +195,34 @@ dockers_v2:
       org.opencontainers.image.version: "{{ .Version }}"
       org.opencontainers.image.revision: "{{ .FullCommit }}"
       org.opencontainers.image.created: "{{ .Date }}"
-    # Image-level SBOM/attestation is a separate supply-chain follow-up; the
-    # release already ships per-artifact SPDX SBOMs (issue #100). Off here so
-    # the CI snapshot's local image build needs no syft.
-    sbom: false
+    # SBOM attestation for the pushed image (issue #407). On publish,
+    # goreleaser adds `--attest=type=sbom` to the buildx build: BuildKit's
+    # syft scanner produces a per-platform SPDX SBOM and attaches it to the
+    # image as an in-toto attestation (inspect with
+    # `docker buildx imagetools inspect <img> --format '{{ json .SBOM }}'`).
+    # Snapshot builds (the CI `packages` job, local testing) never attest —
+    # goreleaser only applies the flag on the publish path — so PR CI needs
+    # no syft/scanner and its local image build is unchanged.
+    sbom: true
+
+# Keyless signature for the pushed container image (issue #407) — produced
+# with the same cosign/OIDC flow that signs checksums.txt above, so one
+# identity covers files and image: the certificate subject is this repo's
+# release.yaml workflow. Each pushed tag (version + latest) is signed at its
+# manifest-list digest — ${digest} is recorded by dockers_v2 at push time,
+# and signing the digest rather than the bare tag means a later tag move
+# cannot inherit the signature. Runs only on publish (snapshots push nothing
+# and sign nothing) and is disabled by `--skip=sign` like the blob signing.
+# `artifacts: images` matches the dockers_v2 image artifacts.
+# Verification commands: docs/content/en/security/verifying-releases.md.
+docker_signs:
+  - id: image
+    cmd: cosign
+    artifacts: images
+    args:
+      - sign
+      - --yes
+      - ${artifact}@${digest}
 
 changelog:
   use: github-native

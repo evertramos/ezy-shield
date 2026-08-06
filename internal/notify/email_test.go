@@ -334,3 +334,52 @@ func TestEmail_SubjectHeaderInjectionBlocked(t *testing.T) {
 		t.Errorf("header section has %d lines, want 5:\n%s", got, headerSection)
 	}
 }
+
+// TestEmail_BodyBareCRNeutralized reproduces issue #403 (body-side sibling of
+// #320): an interior bare CR in untrusted Notification fields survived
+// TrimRight-only normalization and reached the SMTP DATA stream verbatim
+// (textproto's DotWriter forwards lone CRs unchanged). Against relays that
+// treat a lone CR as an end-of-line — the 2023 SMTP-smuggling class — a
+// log-derived string like "x\r.\rQUIT" becomes a DATA-termination primitive.
+// The wire body must contain no CR outside a CRLF pair. The fake server trims
+// only trailing "\r\n" per wire line, so any interior CR that reaches the wire
+// is preserved in the recorded body.
+func TestEmail_BodyBareCRNeutralized(t *testing.T) {
+	srv, addr := newFakeSMTP(t)
+	n := newTestEmail(t, addr)
+
+	msg := sdk.Notification{
+		Severity: "critical",
+		Title:    "probe from 192.0.2.10\r.\rDATA smuggle in title",
+		Body:     "x\r.\rQUIT",
+		Action: &sdk.Action{
+			IP:     netip.MustParseAddr("192.0.2.10"),
+			Op:     "ban",
+			Strike: 1,
+			Reason: "ssh brute force\r.\rMAIL FROM:<attacker@example.com>",
+		},
+	}
+	if err := n.Send(context.Background(), msg); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	sessions := srv.recorded()
+	if len(sessions) != 1 {
+		t.Fatalf("expected exactly 1 delivery (no DATA termination smuggling), got %d", len(sessions))
+	}
+	body := sessions[0].Body
+	if i := strings.IndexByte(body, '\r'); i >= 0 {
+		t.Errorf("bare CR reached the SMTP DATA stream at byte %d:\n%q", i, body)
+	}
+	// The payload text must survive as inert display data, not vanish.
+	if !strings.Contains(body, "QUIT") {
+		t.Errorf("neutralized body text missing from message:\n%s", body)
+	}
+	// No line of the delivered message may be an SMTP command fragment born
+	// from a CR split; the smuggled MAIL FROM must stay inside a display line.
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, "MAIL FROM:") || line == "." {
+			t.Errorf("smuggled SMTP framing surfaced as its own line: %q", line)
+		}
+	}
+}

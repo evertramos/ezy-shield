@@ -1093,22 +1093,25 @@ func TestEvaluate_WPProbe_ForgedSameOriginNeedsHostMatch(t *testing.T) {
 	}
 }
 
-// TestEvaluate_WPProbe_UnknownHostFallback: on log formats that carry no vhost
-// (nginx "combined"), the host field is empty and same-origin cannot be
-// decided; the auth-flow Referer alone then carves the hit out. Verifies the
-// documented fallback so combined-format WP installs also get the FP fix.
-func TestEvaluate_WPProbe_UnknownHostFallback(t *testing.T) {
+// TestEvaluate_WPProbe_UnknownHostFailsClosed: on log formats that carry no
+// vhost (nginx "combined"), the host field is empty so same-origin cannot be
+// PROVEN. The exclusion must fail closed and still count the hits — otherwise a
+// forged Referer ("…/wp-admin") would suppress a real brute force on those
+// formats (CWE-807, Strix finding on PR #427). Detection must not weaken.
+func TestEvaluate_WPProbe_UnknownHostFailsClosed(t *testing.T) {
 	e := mustEngine(t)
+	// A forged same-origin-looking Referer with NO vhost (host="") must not
+	// buy an evasion: these hits still count.
 	ref := "https://site.example/wp-login.php?reauth=1"
 	sample := []sdk.Event{
-		wpEvent("200", "/wp-login.php", ref, ""), // host empty
+		wpEvent("200", "/wp-login.php", ref, ""), // host empty → cannot prove origin
 		wpEvent("200", "/wp-login.php", ref, ""),
 		wpEvent("200", "/wp-login.php", ref, ""),
 		wpEvent("200", "/wp-login.php", ref, ""),
 	}
 	agg := makeAgg(ip1, w60, sample)
-	if hasWPProbe(e.Evaluate(context.Background(), agg)) {
-		t.Fatal("auth-flow referer must carve out even when host is unknown")
+	if !hasWPProbe(e.Evaluate(context.Background(), agg)) {
+		t.Fatal("host-unknown exclusion must fail closed — a forged referer must not evade http_wp_probe")
 	}
 }
 

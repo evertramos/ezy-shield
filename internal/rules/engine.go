@@ -61,12 +61,12 @@ type spec struct {
 // Semantics: an event that satisfies the rule's primary matcher is NOT counted
 // when its Field value contains any ContainsAny substring AND, when
 // SameOriginAs is set, the URL host of that Field value equals the value of the
-// SameOriginAs field on the same event. When the SameOriginAs field is empty on
-// the event (e.g. non-vhost "combined" logs carry no host), the origin can be
-// neither confirmed nor denied, so the same-origin condition is treated as
-// satisfied and the ContainsAny match alone decides — the exclusion still
-// protects those installs, at the cost of a forgeable Referer on formats that
-// omit the host (documented tradeoff, SECURITY-REVIEW §1/§2).
+// SameOriginAs field on the same event. When SameOriginAs is set but its field
+// is empty on the event (e.g. nginx "combined" logs carry no vhost), same-origin
+// cannot be PROVEN, so the exclusion FAILS CLOSED and the event is counted —
+// excluding on the attacker-supplied Referer alone would let a forged header
+// suppress the count (CWE-807, flagged by Strix on PR #427). SECURITY-REVIEW
+// §1/§2.
 //
 // Safety boundary: an exclusion can only make a rule fire LESS. It can never
 // raise a score, ban an IP, or bypass the downstream allowlist/anti-lockout
@@ -374,11 +374,17 @@ func excluded(ex *excludeSpec, ev sdk.Event) bool {
 		return true
 	}
 	// Same-origin gate: the URL host of val must equal the peer field's value.
-	// A missing/empty peer field (host unknown, e.g. non-vhost logs) cannot
-	// disprove same-origin, so the exclusion is allowed to stand.
+	// A missing/empty peer field (host unknown, e.g. nginx "combined" logs that
+	// carry no vhost) means same-origin cannot be PROVEN, so the exclusion
+	// fails closed and the event is counted. Excluding on the attacker-supplied
+	// value alone would let a forged Referer (e.g. "…/wp-admin") suppress the
+	// count on those formats — a wp-login brute-force evasion (CWE-807). The
+	// exclusion therefore only ever fires when the origin is verifiable
+	// (vhost-combined, JSON, Caddy); operators on plain "combined" logs that hit
+	// the false positive should tune the threshold via a rules.d drop-in.
 	peer := ev.Fields[ex.SameOriginAs]
 	if peer == "" {
-		return true
+		return false
 	}
 	return urlHost(val) == peer
 }

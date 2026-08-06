@@ -290,11 +290,14 @@ frio não faz:
 
 `Referer`/`host` são dados controlados pelo atacante; uma exclusão só pode
 fazer a regra disparar **menos**, nunca banir um IP nem burlar o gate de
-allowlist/anti-lockout. O gate `same_origin_as` limita a forja do Referer; em
-formatos de log sem vhost (nginx "combined"), `host` fica vazio e apenas o
-match de `contains_any` decide. Um `exclude` meio-especificado (sem `field` ou
-com `contains_any` vazio) é rejeitado no carregamento (fail-closed), como o
-pareamento field/matcher.
+allowlist/anti-lockout. O gate `same_origin_as` bloqueia a forja do Referer:
+ele só dispara quando a origem é **verificável** — a requisição carrega um
+vhost/host (nginx vhost-combined ou JSON, Caddy JSON) e o host do Referer é
+igual a ele. Em formatos de log sem vhost (nginx "combined"), `host` fica
+vazio, a mesma origem não pode ser provada, e a exclusão **falha fechada** (o
+hit é contado), de modo que um Referer forjado não suprime um brute force real.
+Um `exclude` meio-especificado (sem `field` ou com `contains_any` vazio) é
+rejeitado no carregamento (fail-closed), como o pareamento field/matcher.
 
 ### Exemplo: bloquear scanners de API
 

@@ -285,10 +285,14 @@ site's own login/admin flow carries a same-origin `Referer` pointing back at
 
 `Referer`/`host` are attacker-controlled data; an exclusion can only make a
 rule fire **less**, never ban an IP or bypass the allowlist/anti-lockout gate.
-The `same_origin_as` gate limits Referer forgery; on log formats that carry no
-vhost (nginx "combined"), `host` is empty and the `contains_any` match alone
-decides. A half-specified `exclude` (missing `field` or empty `contains_any`)
-is rejected at load time (fail-closed), like the field/matcher pairing.
+The `same_origin_as` gate blocks Referer forgery: it fires only when the origin
+is **verifiable** — the request carries a vhost/host (nginx vhost-combined or
+JSON, Caddy JSON) and the Referer host equals it. On log formats that carry no
+vhost (nginx "combined"), `host` is empty, same-origin cannot be proven, and the
+exclusion **fails closed** (the hit is counted) so a forged Referer cannot
+suppress a real brute force. A half-specified `exclude` (missing `field` or
+empty `contains_any`) is rejected at load time (fail-closed), like the
+field/matcher pairing.
 
 ### Example: block API scanners
 

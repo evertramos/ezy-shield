@@ -20,11 +20,18 @@
 #     zoneinfo, and a single non-root account. No shell, no package manager,
 #     no libc: the smallest possible attack surface for a root-capable tool.
 #   - Runs as non-root (uid/gid 65532) by DEFAULT. The main daemon needs no
-#     privileges. The enforcer, which needs CAP_NET_ADMIN, is started with an
-#     explicit entrypoint override and runtime capability grant (compose
-#     example + guide are the follow-up issue) — the image never bakes in a
-#     privileged default.
-#   - Both binaries ship in one image; ENTRYPOINT is the main CLI.
+#     privileges, and the image never bakes in a privileged default.
+#   - Both binaries ship in one image; ENTRYPOINT is the main CLI. The
+#     enforcer binary is included for version parity and smoke tests
+#     (`--entrypoint /usr/local/bin/ezyshield-enforcer <img> --version`), but
+#     HOST-FIREWALL ENFORCEMENT FROM THIS IMAGE IS NOT SUPPORTED (#407): the
+#     enforcer applies rules by exec'ing the `nft` userspace tool (plus `ss`
+#     for pre-ban socket teardown), which a scratch image cannot carry (no
+#     libc), and Docker's `--cap-add NET_ADMIN` grants no effective
+#     capability to a non-root entrypoint anyway (no ambient caps under
+#     `docker run`; COPY drops file caps; scratch has no RUN for setcap).
+#     Run the enforcer on the host and bind-mount its socket into the daemon
+#     container — see docs/internal/RELEASING.md, "Container image (GHCR)".
 
 # Stage 1 — assemble the arch-independent runtime data (CA certificates,
 # timezone database, a minimal passwd/group) on the BUILD platform. Pinning to

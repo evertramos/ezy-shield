@@ -154,9 +154,12 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # cosign (keyless signing of checksums.txt via this job's OIDC token)
-      # and syft (SPDX SBOMs) are invoked by goreleaser's signs:/sboms:
-      # sections (issue #100).
+      # cosign (keyless signing of checksums.txt AND the pushed container
+      # image via this job's OIDC token) and syft (SPDX SBOMs for the file
+      # artifacts) are invoked by goreleaser's signs:/sboms:/docker_signs:
+      # sections (issues #100, #407). The image SBOM is produced separately,
+      # by BuildKit's syft scanner inside the buildx build (dockers_v2
+      # sbom: true), not by this syft binary.
       - name: Install cosign
         uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
 
@@ -184,7 +187,9 @@ jobs:
       # the exact names scripts/get.sh expects, tarballs, checksums.txt +
       # cosign keyless signature (checksums.txt.sig/.pem), per-artifact SPDX
       # SBOMs, .deb/.rpm packages, and the multi-arch container image pushed to
-      # ghcr.io/evertramos/ezyshield (issue #101). rc/alpha/beta tags become
+      # ghcr.io/evertramos/ezyshield (issue #101) — cosign-signed at its
+      # digest with an SPDX SBOM attestation (issue #407), matching the
+      # supply-chain guarantees of every other artifact. rc/alpha/beta tags become
       # prereleases and never take "latest" (release.prerelease: auto in
       # .goreleaser.yaml). The same snapshot build is install-verified in
       # containers by the `packages` job in ci.yaml on every PR.
@@ -229,7 +234,7 @@ jobs:
             echo "- ezyshield-enforcer-linux-arm64"
             echo "- checksums.txt (+ .sig/.pem — cosign keyless signature)"
             echo "- *.spdx.json (SBOMs, one per artifact)"
-            echo "- ghcr.io/${{ github.repository_owner }}/ezyshield:${TAG#v} — container image (multi-arch: amd64, arm64)"
+            echo "- ghcr.io/${{ github.repository_owner }}/ezyshield:${TAG#v} — container image (multi-arch: amd64, arm64; cosign-signed at digest + SPDX SBOM attestation)"
             if [ "$IS_PRERELEASE" != "true" ]; then
               echo "- ghcr.io/${{ github.repository_owner }}/ezyshield:latest — moved to this release"
             fi

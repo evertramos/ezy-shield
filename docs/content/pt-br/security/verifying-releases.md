@@ -61,11 +61,48 @@ curl -sfLO "${BASE}/ezyshield-linux-amd64"
 sha256sum --check --ignore-missing checksums.txt
 ```
 
+## Verificar a imagem de container
+
+A imagem multi-arch `ghcr.io/evertramos/ezyshield` é assinada com a mesma
+identidade keyless de workflow do `checksums.txt`. A assinatura fica no
+registry, ao lado da imagem, então o cosign busca sozinho tudo de que
+precisa:
+
+```bash
+VERSION=v0.1.0   # a release que você está verificando (tags de imagem não têm o "v")
+cosign verify \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  --certificate-identity-regexp \
+    '^https://github\.com/evertramos/ezy-shield/\.github/workflows/release\.yaml@refs/(tags/v[0-9][^ ]*|heads/(main|dev))$' \
+  "ghcr.io/evertramos/ezyshield:${VERSION#v}"
+```
+
+Uma execução bem-sucedida lista as checagens feitas (assinatura, log de
+transparência, identidade do certificado) e imprime o payload assinado
+verificado em JSON. O cosign resolve a tag para o **digest** da imagem e
+verifica contra ele — uma tag movida ou re-publicada falha a verificação.
+Para a fixação mais forte, baixe e execute pelo digest —
+`ghcr.io/evertramos/ezyshield@sha256:<digest>` — usando o digest que a
+saída da verificação reporta.
+
+A imagem também carrega um **SBOM SPDX** por plataforma, anexado no build
+como atestação do BuildKit (gerado pelo scanner syft dentro do build de
+release — a contraparte, no container, dos assets `.spdx.json` da release).
+Inspecione com:
+
+```bash
+docker buildx imagetools inspect "ghcr.io/evertramos/ezyshield:${VERSION#v}" \
+  --format '{{ json .SBOM }}'
+```
+
 ## Notas
 
 - Releases publicadas **antes** da assinatura existir (release candidates
   iniciais da v0.1.0) não têm os assets `.sig`/`.pem`; para essas, a
-  integridade repousa apenas no TLS com `github.com`.
+  integridade repousa apenas no TLS com `github.com`. Da mesma forma,
+  imagens de container publicadas antes da assinatura de imagem existir não
+  carregam assinatura cosign nem atestação de SBOM — o `cosign verify` falha
+  nelas por design.
 - O script de instalação `get.ezyshield.com` executa essa mesma verificação
   automaticamente quando o `cosign` está instalado no host, e imprime um
   aviso (sem falhar) quando não está.

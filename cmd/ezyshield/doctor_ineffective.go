@@ -23,6 +23,17 @@ const ineffectiveRemedy = "traffic flows despite active bans — fix the enforce
 	"edge enforcement (Cloudflare/Bunny), real-IP parsing behind a CDN/proxy, or enforcer health. " +
 	"Per-IP action will not help (ADR-0009)"
 
+// doctorRODSN builds the DSN for the doctor's read-only diagnostics
+// connection. mode=ro: doctor must never mutate or migrate the daemon's
+// database. _pragma=busy_timeout(2000): wait up to 2 s instead of failing
+// with SQLITE_BUSY while the daemon holds a write lock — the mattn-style
+// _busy_timeout=2000 previously used here was silently ignored by
+// modernc.org/sqlite (issue #406, same class as #321).
+// TestDoctorRODSN_AppliesBusyTimeoutAndStaysReadOnly pins both effects.
+func doctorRODSN(dbPath string) string {
+	return "file:" + dbPath + "?mode=ro&_pragma=busy_timeout(2000)" //nolint:gosec // path is the admin-controlled --db flag
+}
+
 // checkBanIneffective inspects the store for fired ban_ineffective
 // diagnostics. dbPath is the SQLite database location (the daemon's --db).
 func checkBanIneffective(dbPath string) CheckResult {
@@ -31,9 +42,7 @@ func checkBanIneffective(dbPath string) CheckResult {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	// mode=ro: doctor must never mutate or migrate the daemon's database.
-	dsn := "file:" + dbPath + "?mode=ro&_busy_timeout=2000" //nolint:gosec // path is the admin-controlled --db flag
-	db, err := sql.Open("sqlite", dsn)
+	db, err := sql.Open("sqlite", doctorRODSN(dbPath))
 	if err != nil {
 		return CheckResult{Name: name, Status: statusNA, Hint: "cannot open database: " + err.Error()}
 	}

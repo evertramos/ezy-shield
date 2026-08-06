@@ -35,20 +35,36 @@ func openAuthStore(path string) (*authStore, error) {
 			return nil, fmt.Errorf("mkdir %s: %w", dir, err)
 		}
 	}
-	db, err := sql.Open("sqlite", path)
+	// Same pragma baseline as the daemon's main store (internal/store):
+	// WAL journal, 5 s busy retry, synchronous=NORMAL. The _pragma=name(value)
+	// form is the modernc.org/sqlite driver's syntax; mattn-style parameters
+	// are silently ignored by this driver (issues #321/#406). Before #406 this
+	// DSN had no pragmas at all: delete journal, busy_timeout=0, unbounded pool.
+	// TestOpenAuthStore_AppliesPragmasAndPoolCap pins the effective values.
+	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)" //nolint:gosec // path is the admin-controlled dashboard auth DB location
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
+
+	// SQLite allows only one concurrent writer; funnel all dashboard requests
+	// through a single connection like the main store does.
+	db.SetMaxOpenConns(1)
+
 	if _, err := db.ExecContext(context.Background(), authSchema); err != nil {
 		_ = db.Close() //nolint:errcheck // best-effort close on failed open
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
 	// Tighten the file mode after creation. sql.Open goes through the
 	// driver's own path, which does not honour a restrictive umask on all
-	// platforms; chmod after schema apply is portable.
-	if err := os.Chmod(path, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
-		_ = db.Close() //nolint:errcheck // best-effort close on failed chmod
-		return nil, fmt.Errorf("chmod %s: %w", path, err)
+	// platforms; chmod after schema apply is portable. In WAL mode the
+	// -wal/-shm sidecars are created by the schema apply above (i.e. before
+	// this chmod) and later carry password-hash pages, so tighten them too.
+	for _, p := range []string{path, path + "-wal", path + "-shm"} {
+		if err := os.Chmod(p, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
+			_ = db.Close() //nolint:errcheck // best-effort close on failed chmod
+			return nil, fmt.Errorf("chmod %s: %w", p, err)
+		}
 	}
 	return &authStore{db: db}, nil
 }

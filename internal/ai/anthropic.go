@@ -320,7 +320,7 @@ func (p *AnthropicProvider) clamp(ctx context.Context, verdicts []sdk.Verdict) [
 				slog.WarnContext(ctx, "ai: clamping verdict for allowlisted IP",
 					"ip", v.IP, "original_score", v.Score)
 				v.Score = 0
-				v.Reason = "clamped: allowlisted"
+				v.Reason = ReasonAllowlistClamped
 				v.SuggestTTL = 0
 				break
 			}

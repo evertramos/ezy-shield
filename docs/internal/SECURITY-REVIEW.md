@@ -135,6 +135,13 @@ bans. This is a direct injection channel.
 - [ ] The model's verdict is **advisory** and re-validated against policy
       server-side (see §2). A verdict saying "allowlist 6.6.6.6" or "ban
       1.2.3.0/8" is clamped/dropped, not executed.
+- [ ] The verdict's **target IP** is bound to the analyzed batch inside each
+      provider (`boundToBatch`, #312) **and re-validated at the daemon
+      chokepoint** (`bindVerdictsToIP` in `maybeConsultAI`, #402): a fresh or
+      cached verdict naming an off-request IP is dropped before it reaches the
+      decision engine or the verdict cache. Allowlist-clamped (Score-0)
+      verdicts are never cached (`Cache.Set`), so a clamp can't be replayed
+      onto other IPs sharing the behavior signature.
 - [ ] No secrets, internal IPs, or allowlist contents are sent in the prompt
       beyond what's strictly needed; minimize + redact (also saves tokens).
 - [ ] Token-budget breaker can't be tripped by an attacker to disable AI cheaply

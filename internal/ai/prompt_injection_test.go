@@ -353,3 +353,41 @@ func TestPromptInjection_VerdictIPMappedForm_Kept(t *testing.T) {
 		t.Errorf("verdict IP = %s, want canonical batch address %s", got, want)
 	}
 }
+
+// TestPromptInjection_ClampedVerdict_NoSignatureReplay covers the cache leg of
+// issue #402: the verdict cache is keyed by behavior signature, not IP, so a
+// cached allowlist-clamped (Score-0) verdict would be replayed onto every
+// non-allowlisted IP sharing the signature — an attacker who mimics an
+// allowlisted host's traffic pattern from one throwaway source would buy an
+// AI-escalation evasion window of cache_ttl for the whole botnet. Clamped
+// verdicts must never be written to the cache.
+func TestPromptInjection_ClampedVerdict_NoSignatureReplay(t *testing.T) {
+	c := NewCache(5 * time.Minute)
+
+	kinds := map[string]int{"http_request": 10}
+	allowlisted := sdk.Aggregate{
+		IP:     netip.MustParseAddr("192.0.2.100"),
+		Window: 60 * time.Second,
+		Count:  10,
+		Kinds:  kinds,
+	}
+	attacker := sdk.Aggregate{
+		IP:     netip.MustParseAddr("203.0.113.66"), // same signature, different IP
+		Window: 60 * time.Second,
+		Count:  10,
+		Kinds:  kinds,
+	}
+
+	clamped := sdk.Verdict{
+		IP:     allowlisted.IP,
+		Score:  0,
+		Reason: ReasonAllowlistClamped,
+		Source: "ai:anthropic",
+	}
+	c.Set(allowlisted, []sdk.Verdict{clamped})
+
+	if got := c.Get(attacker); got != nil {
+		t.Fatalf("signature replay: attacker %s inherited the allowlist clamp: %+v",
+			attacker.IP, got)
+	}
+}

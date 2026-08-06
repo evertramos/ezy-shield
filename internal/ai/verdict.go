@@ -11,6 +11,22 @@ import (
 	"github.com/evertramos/ezy-shield/pkg/sdk"
 )
 
+// ReasonAllowlistClamped is the Reason every provider clamp stamps on a
+// verdict whose score it zeroed because the target IP is allowlisted.
+// It doubles as the marker Cache.Set uses to refuse storing such verdicts
+// (see IsAllowlistClamped, issue #402).
+const ReasonAllowlistClamped = "clamped: allowlisted"
+
+// IsAllowlistClamped reports whether v is an allowlist-clamped verdict: not a
+// model judgment about the behavior, but a policy override tied to the one IP
+// that happened to be allowlisted. Such verdicts must never enter the
+// behavior-signature cache — the cache is keyed by traffic pattern, not IP, so
+// a cached clamp would replay Score 0 onto every non-allowlisted IP sharing
+// the signature for a full cache TTL (issue #402, SECURITY-REVIEW §5).
+func IsAllowlistClamped(v sdk.Verdict) bool {
+	return v.Score == 0 && v.Reason == ReasonAllowlistClamped
+}
+
 // boundToBatch drops every verdict whose IP is not one of the analyzed batch
 // aggregates' IPs (issue #312, Hard Rule 1, SECURITY-REVIEW §5).
 //

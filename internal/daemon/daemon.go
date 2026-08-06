@@ -478,10 +478,50 @@ func (d *Daemon) processRaw(ctx context.Context, raw sdk.RawLine) {
 	}
 }
 
+// bindVerdictsToIP enforces the AI-boundary target invariant at the daemon
+// chokepoint (issue #402, Hard Rule 1, SECURITY-REVIEW §5): every AI verdict
+// leaving maybeConsultAI must target the IP whose aggregates were analyzed.
+// A verdict naming any other address — a model-chosen victim smuggled in via
+// prompt injection, a hallucination, or a stale cache entry — is dropped, and
+// survivors are rewritten to the canonical requested address so the decision
+// engine's single-IP invariant holds.
+//
+// Providers already bound verdicts to their batch (boundToBatch, issue #312)
+// and the cache re-targets replayed entries (issue #311); this daemon-side
+// pass deliberately repeats the check once, centrally, so a future provider or
+// cache path that forgets its local bound cannot reintroduce the class
+// (defense in depth — do not remove the provider-level bounds in its name).
+//
+// Matching is representation-insensitive via Unmap (IPv4-mapped IPv6 forms
+// compare equal to their IPv4 address, cf. #314) but otherwise exact: netip
+// address equality includes the zone, so a zone mismatch in either direction
+// fails closed (dropped, never "close enough"-rebound).
+func bindVerdictsToIP(ctx context.Context, verdicts []sdk.Verdict, ip netip.Addr) []sdk.Verdict {
+	if len(verdicts) == 0 {
+		return verdicts
+	}
+	want := ip.Unmap()
+	out := make([]sdk.Verdict, 0, len(verdicts))
+	for _, v := range verdicts {
+		if v.IP.Unmap() != want {
+			slog.WarnContext(ctx, "daemon: dropping AI verdict for off-request IP",
+				"verdict_ip", v.IP, "requested_ip", ip, "score", v.Score, "source", v.Source)
+			continue
+		}
+		v.IP = ip
+		out = append(out, v)
+	}
+	return out
+}
+
 // maybeConsultAI checks if the highest-scoring verdict falls in the configured
 // ambiguous band; if so it calls the AI provider (with budget and cache checks)
 // and appends AI verdicts to the slice.  Returns verdicts unchanged when AI is
 // disabled, the band is unconfigured, or the score is outside the band.
+//
+// All returned AI verdicts — fresh or cached — pass through bindVerdictsToIP,
+// and fresh verdicts are bound before the cache Set so a poisoned target can
+// neither act now nor be replayed later.
 func (d *Daemon) maybeConsultAI(ctx context.Context, ip netip.Addr, verdicts []sdk.Verdict) []sdk.Verdict {
 	if d.aiProvider == nil || d.aiBudget == nil || d.aiCache == nil {
 		return verdicts
@@ -526,10 +566,12 @@ func (d *Daemon) maybeConsultAI(ctx context.Context, ip netip.Addr, verdicts []s
 	}
 
 	// Cache check — keyed on first (shortest) window aggregate behavior signature.
+	// Cache.Get already re-targets replayed verdicts to the requesting IP
+	// (issue #311); the bind below re-asserts that invariant at the chokepoint.
 	if len(aggs) > 0 {
 		if cached := d.aiCache.Get(aggs[0]); cached != nil {
 			slog.DebugContext(ctx, "daemon: ai cache hit", "ip", ip)
-			return append(verdicts, cached...)
+			return append(verdicts, bindVerdictsToIP(ctx, cached, ip)...)
 		}
 	}
 
@@ -560,6 +602,13 @@ func (d *Daemon) maybeConsultAI(ctx context.Context, ip netip.Addr, verdicts []s
 		d.aiBudgetWarned.Store(true)
 	}
 
+	// Bind BEFORE the cache Set: an off-request verdict must neither reach the
+	// decision engine now nor be stored for signature replay later (#402).
+	aiVerdicts = bindVerdictsToIP(ctx, aiVerdicts, ip)
+
+	// Cache.Set skips allowlist-clamped verdicts internally (issue #402), so a
+	// clamp for this IP is never replayed onto same-signature traffic from
+	// non-allowlisted sources.
 	if len(aggs) > 0 && len(aiVerdicts) > 0 {
 		d.aiCache.Set(aggs[0], aiVerdicts)
 	}

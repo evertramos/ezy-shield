@@ -212,7 +212,7 @@ ai:
 | `endpoint` | base URL for the **`ollama`** provider only (default `http://localhost:11434`). The `anthropic` and `openai` providers ignore it and always call their official APIs (`https://api.anthropic.com`, `https://api.openai.com`) — there is no OpenAI-compatible-endpoint override. Same in the single-provider and `providers` failover forms. |
 | `ambiguous_band` | `[low, high]` — only scores inside the band consult the AI. Omitted (or `[0, 0]`) defaults to `[30, 75]`; any other band with `low >= high` or values outside 0–100 is rejected at load |
 | `token_budget_daily` | daily token cap; when exhausted, decisions fall back to rules |
-| `cache_ttl` | verdict cache duration |
+| `cache_ttl` | verdict cache duration. Entries are keyed by behavior signature (event kind counts + window), not by IP, so identical attack patterns from different IPs reuse one verdict; on a hit the cached verdict is re-targeted to the IP being evaluated |
 | `providers` | multi-provider failover list (`name`, `priority`, `model`, `api_key`, `endpoint`, `token_budget_daily`); takes precedence over the single-provider fields |
 
 The AI verdict is always advisory: schema-validated, clamped by policy, and never able to ban an allowlisted IP.

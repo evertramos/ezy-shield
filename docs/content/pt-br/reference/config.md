@@ -209,7 +209,7 @@ ai:
 | `endpoint` | URL base apenas para o provedor **`ollama`** (padrão `http://localhost:11434`). Os provedores `anthropic` e `openai` a ignoram e sempre chamam suas APIs oficiais (`https://api.anthropic.com`, `https://api.openai.com`) — não há override de endpoint compatível com OpenAI. Mesmo comportamento nas formas de provedor único e de failover `providers`. |
 | `ambiguous_band` | `[low, high]` — apenas scores dentro da faixa consultam a IA. Omitida (ou `[0, 0]`) assume `[30, 75]`; qualquer outra faixa com `low >= high` ou valores fora de 0–100 é rejeitada no carregamento |
 | `token_budget_daily` | teto diário de tokens; quando esgotado, as decisões voltam para as rules |
-| `cache_ttl` | duração do cache de vereditos |
+| `cache_ttl` | duração do cache de vereditos. As entradas são indexadas pela assinatura de comportamento (contagem de kinds + janela), não pelo IP — padrões de ataque idênticos de IPs diferentes reutilizam um veredito; num hit o veredito em cache é redirecionado para o IP em avaliação |
 | `providers` | lista de failover multi-provedor (`name`, `priority`, `model`, `api_key`, `endpoint`, `token_budget_daily`); tem precedência sobre os campos de provedor único |
 
 O veredito da IA é sempre consultivo: validado por schema, limitado pela policy e nunca capaz de banir um IP da allowlist.

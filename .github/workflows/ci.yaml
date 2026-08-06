@@ -158,6 +158,7 @@ jobs:
         run: |
           pip install check-jsonschema --quiet
           check-jsonschema --schemafile docs/internal/schemas/config/config.schema.json configs/config.yaml
+          check-jsonschema --schemafile docs/internal/schemas/config/config.schema.json docs/internal/schemas/config/examples/full.yaml
           check-jsonschema --schemafile docs/internal/schemas/config/policy.schema.json configs/policy.yaml
       - name: Job summary
         if: always()

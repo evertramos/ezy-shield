@@ -10,6 +10,11 @@ package enforce
 // operator's live SSH session. This is the enforcement-side backstop of the
 // "allowlist always wins" invariant — the decision engine remains the
 // primary filter and its semantics are unchanged.
+//
+// Both target shapes (bare IP and Prefix) and the allowlist itself are
+// canonicalized for the overlap checks: IPv4-mapped IPv6 spellings
+// (::ffff:a.b.c.d) compare equal to their plain IPv4 forms (issue #365),
+// so the backstop holds regardless of which spelling reaches it.
 
 import (
 	"context"
@@ -40,11 +45,17 @@ type Gate struct {
 }
 
 // NewGate wraps inner with the centralized guard. allowlist should carry the
-// policy allowlist plus admin_cidrs (same slice the enforcers receive).
-// sshPeers is typically decision.ProcSSHPeers; nil disables the peer check
-// (the allowlist check always runs).
+// policy allowlist plus admin_cidrs (same slice the enforcers receive); it is
+// canonicalized on construction (IPv4-mapped spellings become plain IPv4, see
+// normalizeGatePrefix) so a mapped policy entry still protects its plain-v4
+// range. sshPeers is typically decision.ProcSSHPeers; nil disables the peer
+// check (the allowlist check always runs).
 func NewGate(inner sdk.Enforcer, allowlist []netip.Prefix, sshPeers func() []netip.Addr) *Gate {
-	return &Gate{inner: inner, allowlist: allowlist, sshPeers: sshPeers}
+	norm := make([]netip.Prefix, 0, len(allowlist))
+	for _, p := range allowlist {
+		norm = append(norm, normalizeGatePrefix(p))
+	}
+	return &Gate{inner: inner, allowlist: norm, sshPeers: sshPeers}
 }
 
 // Name returns the inner enforcer's name; the gate is transparent in logs
@@ -143,9 +154,23 @@ func gatePrefix(t sdk.Target) (netip.Prefix, bool) {
 		return netip.PrefixFrom(a, a.BitLen()), true
 	}
 	if t.Prefix.IsValid() {
-		return t.Prefix.Masked(), true
+		return normalizeGatePrefix(t.Prefix), true
 	}
 	return netip.Prefix{}, false
+}
+
+// normalizeGatePrefix canonicalizes an IPv4-mapped IPv6 prefix (::ffff:a.b.c.d
+// with bits >= 96) to its plain IPv4 form so mapped and plain spellings
+// compare equal in the overlap checks — the enforce-layer mirror of
+// decision.NormalizePrefix (issue #365, residue of #314). A mapped prefix
+// broader than /96 has no IPv4 equivalent and is left in v6 space (the layers
+// above refuse it before enforcement; here it can still overlap v6 entries).
+// Non-mapped prefixes are only Masked.
+func normalizeGatePrefix(p netip.Prefix) netip.Prefix {
+	if !p.Addr().Is4In6() || p.Bits() < 96 {
+		return p.Masked()
+	}
+	return netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96).Masked()
 }
 
 // gateKey renders a target for refusal logs.

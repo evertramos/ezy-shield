@@ -226,8 +226,12 @@ func TestMaybeConsultAI_ClampedVerdictNotCached(t *testing.T) {
 	requested := netip.MustParseAddr("192.0.2.1")
 	other := netip.MustParseAddr("203.0.113.66")
 
+	// Source carries the clamp marker exactly as a real provider clamp stamps
+	// it — Reason alone is model-controlled text and must not read as a clamp
+	// (Strix on #414, CWE-345; forgery is covered in internal/ai's tests).
 	prov := &rawAIProvider{verdicts: []sdk.Verdict{
-		{IP: requested, Score: 0, Reason: ai.ReasonAllowlistClamped, Source: "ai:raw-ai"},
+		{IP: requested, Score: 0, Reason: ai.ReasonAllowlistClamped,
+			Source: "ai:raw-ai" + ai.AllowlistClampSourceSuffix},
 	}}
 	d := newAIDaemon(t, prov)
 

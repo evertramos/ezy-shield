@@ -11,11 +11,17 @@ import (
 	"github.com/evertramos/ezy-shield/pkg/sdk"
 )
 
-// ReasonAllowlistClamped is the Reason every provider clamp stamps on a
-// verdict whose score it zeroed because the target IP is allowlisted.
-// It doubles as the marker Cache.Set uses to refuse storing such verdicts
-// (see IsAllowlistClamped, issue #402).
+// ReasonAllowlistClamped is the operator-facing Reason every provider clamp
+// stamps on a verdict whose score it zeroed because the target IP is
+// allowlisted. It is display-only: Reason is copied from model JSON on every
+// other path, so it must never be trusted as a clamp marker.
 const ReasonAllowlistClamped = "clamped: allowlisted"
+
+// AllowlistClampSourceSuffix marks a clamped verdict in Source. Source is
+// assembled exclusively by provider code ("ai:anthropic", …) and never copied
+// from model output, so — unlike Reason — the model cannot forge or suppress
+// this marker (Strix finding on #414, CWE-345).
+const AllowlistClampSourceSuffix = "+allowlist-clamp"
 
 // IsAllowlistClamped reports whether v is an allowlist-clamped verdict: not a
 // model judgment about the behavior, but a policy override tied to the one IP
@@ -23,8 +29,12 @@ const ReasonAllowlistClamped = "clamped: allowlisted"
 // behavior-signature cache — the cache is keyed by traffic pattern, not IP, so
 // a cached clamp would replay Score 0 onto every non-allowlisted IP sharing
 // the signature for a full cache TTL (issue #402, SECURITY-REVIEW §5).
+//
+// Detection keys on the Source suffix, not Reason: Reason is model-controlled
+// text, and matching it would let a prompt-injected response fake a clamp and
+// bust the cache (repeat AI consultations for the same signature).
 func IsAllowlistClamped(v sdk.Verdict) bool {
-	return v.Score == 0 && v.Reason == ReasonAllowlistClamped
+	return strings.HasSuffix(v.Source, AllowlistClampSourceSuffix)
 }
 
 // boundToBatch drops every verdict whose IP is not one of the analyzed batch

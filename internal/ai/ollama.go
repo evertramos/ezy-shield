@@ -210,6 +210,7 @@ func (p *OllamaProvider) clamp(ctx context.Context, verdicts []sdk.Verdict) []sd
 					"ip", v.IP, "original_score", v.Score)
 				v.Score = 0
 				v.Reason = ReasonAllowlistClamped
+				v.Source += AllowlistClampSourceSuffix
 				v.SuggestTTL = 0
 				break
 			}

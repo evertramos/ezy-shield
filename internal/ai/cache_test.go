@@ -196,6 +196,7 @@ func TestCache_ClampedVerdictNotStored(t *testing.T) {
 	agg := makeAgg("192.0.2.10", map[string]int{"ssh_fail": 12})
 	clamped := makeVerdict("192.0.2.10", 0)
 	clamped.Reason = ReasonAllowlistClamped
+	clamped.Source += AllowlistClampSourceSuffix
 
 	c.Set(agg, []sdk.Verdict{clamped})
 
@@ -216,6 +217,7 @@ func TestCache_MixedClampedAndGenuine_StoresOnlyGenuine(t *testing.T) {
 	agg := makeAgg("192.0.2.11", map[string]int{"http_404": 40})
 	clamped := makeVerdict("192.0.2.11", 0)
 	clamped.Reason = ReasonAllowlistClamped
+	clamped.Source += AllowlistClampSourceSuffix
 	genuine := makeVerdict("192.0.2.11", 70)
 
 	c.Set(agg, []sdk.Verdict{clamped, genuine})

@@ -25,16 +25,29 @@ const (
 	throttleMaxFailures = 5
 	throttleWindow      = time.Minute
 	throttleLockout     = time.Minute
+
+	// throttleGlobalMax caps total failed attempts across ALL usernames in a
+	// throttleWindow. The per-username throttle never trips for an attacker
+	// who sends a fresh username every request, so without a global ceiling
+	// they could grow the failures map and burn a ~300 ms decoy PBKDF2 per
+	// request indefinitely (issue #360). When the global budget is exhausted
+	// every login is rejected before the password lookup until the window
+	// drains — a self-healing brute-force circuit breaker. The bound sits
+	// well above throttleMaxFailures so a handful of honest fat-finger
+	// lockouts never trip it.
+	throttleGlobalMax = 100
 )
 
 type loginThrottle struct {
-	max      int
-	window   time.Duration
-	lockout  time.Duration
-	nowClock func() time.Time
+	max       int
+	window    time.Duration
+	lockout   time.Duration
+	globalMax int
+	nowClock  func() time.Time
 
-	mu       sync.Mutex
-	failures map[string]*failWindow
+	mu           sync.Mutex
+	failures     map[string]*failWindow
+	globalStamps []time.Time
 }
 
 // failWindow is the per-account tally. stamps holds failure times still
@@ -48,12 +61,24 @@ type failWindow struct {
 
 func newLoginThrottle() *loginThrottle {
 	return &loginThrottle{
-		max:      throttleMaxFailures,
-		window:   throttleWindow,
-		lockout:  throttleLockout,
-		nowClock: time.Now,
-		failures: make(map[string]*failWindow),
+		max:       throttleMaxFailures,
+		window:    throttleWindow,
+		lockout:   throttleLockout,
+		globalMax: throttleGlobalMax,
+		nowClock:  time.Now,
+		failures:  make(map[string]*failWindow),
 	}
+}
+
+// trimStamps drops timestamps at or before cutoff, reusing the backing array.
+func trimStamps(stamps []time.Time, cutoff time.Time) []time.Time {
+	trimmed := stamps[:0]
+	for _, s := range stamps {
+		if s.After(cutoff) {
+			trimmed = append(trimmed, s)
+		}
+	}
+	return trimmed
 }
 
 // Allow reports whether an authentication attempt for username may proceed
@@ -66,11 +91,20 @@ func (t *loginThrottle) Allow(username string) bool {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	now := t.nowClock()
+
+	// Global circuit breaker first: if the whole login surface is over budget
+	// for this window, reject before any per-account work so an attacker
+	// cycling usernames can't keep burning PBKDF2 (issue #360).
+	t.globalStamps = trimStamps(t.globalStamps, now.Add(-t.window))
+	if len(t.globalStamps) >= t.globalMax {
+		return false
+	}
+
 	w, ok := t.failures[username]
 	if !ok {
 		return true
 	}
-	now := t.nowClock()
 	if !w.lockedUntil.IsZero() && now.Before(w.lockedUntil) {
 		return false
 	}
@@ -92,22 +126,40 @@ func (t *loginThrottle) RecordFailure(username string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := t.nowClock()
+	cutoff := now.Add(-t.window)
+
+	// Record against the global window (bounded brute-force circuit breaker).
+	t.globalStamps = append(trimStamps(t.globalStamps, cutoff), now)
+
 	w := t.failures[username]
 	if w == nil {
 		w = &failWindow{}
 		t.failures[username] = w
 	}
-	// Drop stale stamps outside the sliding window.
-	cutoff := now.Add(-t.window)
-	trimmed := w.stamps[:0]
-	for _, s := range w.stamps {
-		if s.After(cutoff) {
-			trimmed = append(trimmed, s)
-		}
-	}
-	w.stamps = append(trimmed, now)
+	w.stamps = append(trimStamps(w.stamps, cutoff), now)
 	if len(w.stamps) >= t.max {
 		w.lockedUntil = now.Add(t.lockout)
+	}
+
+	// Keep the map bounded: an attacker cycling usernames creates one entry
+	// each, and expired entries would otherwise linger until that exact
+	// username is retried. Prune opportunistically once the map is larger
+	// than the global budget could justify.
+	if len(t.failures) > t.globalMax {
+		t.pruneLocked(now)
+	}
+}
+
+// pruneLocked drops entries with no in-window failures and no active lockout.
+// Caller must hold t.mu.
+func (t *loginThrottle) pruneLocked(now time.Time) {
+	cutoff := now.Add(-t.window)
+	for name, w := range t.failures {
+		w.stamps = trimStamps(w.stamps, cutoff)
+		locked := !w.lockedUntil.IsZero() && now.Before(w.lockedUntil)
+		if len(w.stamps) == 0 && !locked {
+			delete(t.failures, name)
+		}
 	}
 }
 

@@ -40,6 +40,16 @@ rules:
     kinds: [http_request]
     field: path
     contains: wp-login
+    # Do not count wp-login hits a real browser makes while already inside the
+    # site's own login/admin flow (issue #417): the WordPress re-auth / 2FA /
+    # password-change sequence (reauth=1, action=itsec-*, action=lostpassword)
+    # naturally fires ≥3 wp-login requests in 60s, but each carries a same-origin
+    # Referer pointing back at wp-login/wp-admin — a cold scanner does not. The
+    # same-origin gate (referer host == vhost) keeps a cross-vhost bot counted.
+    exclude:
+      field: referer
+      same_origin_as: host
+      contains_any: [wp-login, wp-admin]
     window: 60s
     threshold: 3
     score: 80
@@ -128,6 +138,14 @@ rules:
     kinds: [http_request]
     field: path
     contains: wp-login
+    # Same same-origin carve-out as http_wp_probe (issue #417): an admin who
+    # re-authenticates a few times an hour must not accumulate toward the
+    # low-&-slow threshold, while an anonymous scanner (no / cross-origin
+    # Referer) still counts every hit.
+    exclude:
+      field: referer
+      same_origin_as: host
+      contains_any: [wp-login, wp-admin]
     window: 3600s
     threshold: 10
     score: 75

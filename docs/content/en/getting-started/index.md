@@ -252,11 +252,43 @@ rules:
 | `value`      | Exact field value (optional)             |
 | `contains`   | Substring match (optional)               |
 | `contains_any` | Any-of substring match (optional)      |
+| `exclude`    | Carve out matched events (optional)      |
 
 `field` and a matcher (`value`, `contains`, or `contains_any` — mutually
 exclusive) only work as a pair: a rule that sets one without the other is
 rejected at load time. Without the pairing check, a matcher alone would count
 every event of the listed kinds, and a `field` alone would never fire.
+
+#### `exclude` — carve out legitimate traffic
+
+`exclude` removes an already-matched event from the count when a *second* field
+matches, so a path-based rule can skip a legitimate flow it would otherwise
+mistake for an attack. Sub-fields:
+
+| Sub-field         | Description                                             |
+|-------------------|---------------------------------------------------------|
+| `field`           | Event field to inspect for the exclusion                |
+| `contains_any`    | Skip the event if `field` contains any of these         |
+| `same_origin_as`  | (optional) also require the URL host of `field` to equal the value of this field |
+
+The built-in `http_wp_probe` / `http_wp_probe_sustained` rules use it to skip
+WordPress re-auth / 2FA / password-change hits — a real browser inside the
+site's own login/admin flow carries a same-origin `Referer` pointing back at
+`wp-login`/`wp-admin`, which a cold scanner does not:
+
+```yaml
+    exclude:
+      field: referer
+      same_origin_as: host   # referer host must equal the request vhost
+      contains_any: [wp-login, wp-admin]
+```
+
+`Referer`/`host` are attacker-controlled data; an exclusion can only make a
+rule fire **less**, never ban an IP or bypass the allowlist/anti-lockout gate.
+The `same_origin_as` gate limits Referer forgery; on log formats that carry no
+vhost (nginx "combined"), `host` is empty and the `contains_any` match alone
+decides. A half-specified `exclude` (missing `field` or empty `contains_any`)
+is rejected at load time (fail-closed), like the field/matcher pairing.
 
 ### Example: block API scanners
 

@@ -255,12 +255,46 @@ rules:
 | `value`      | Valor exato do campo (opcional)          |
 | `contains`   | Match de substring (opcional)            |
 | `contains_any` | Match de substring qualquer-um (opcional) |
+| `exclude`    | Descarta eventos já casados (opcional)   |
 
 `field` e um matcher (`value`, `contains` ou `contains_any` — mutuamente
 exclusivos) só funcionam em par: uma regra que define um sem o outro é
 rejeitada no carregamento. Sem essa checagem de par, um matcher sozinho
 contaria todo evento dos kinds listados, e um `field` sozinho nunca
 dispararia.
+
+#### `exclude` — descartar tráfego legítimo
+
+`exclude` remove um evento já casado da contagem quando um *segundo* campo
+casa, permitindo que uma regra baseada em path ignore um fluxo legítimo que
+ela confundiria com ataque. Subcampos:
+
+| Subcampo          | Descrição                                               |
+|-------------------|---------------------------------------------------------|
+| `field`           | Campo do evento a inspecionar para a exclusão           |
+| `contains_any`    | Descarta o evento se `field` contiver algum destes      |
+| `same_origin_as`  | (opcional) exige também que o host da URL em `field` seja igual ao valor deste campo |
+
+As regras embutidas `http_wp_probe` / `http_wp_probe_sustained` o usam para
+ignorar os hits de reautenticação / 2FA / troca de senha do WordPress — um
+navegador real dentro do próprio fluxo de login/admin do site carrega um
+`Referer` same-origin apontando para `wp-login`/`wp-admin`, o que um scanner
+frio não faz:
+
+```yaml
+    exclude:
+      field: referer
+      same_origin_as: host   # host do referer deve ser igual ao vhost da requisição
+      contains_any: [wp-login, wp-admin]
+```
+
+`Referer`/`host` são dados controlados pelo atacante; uma exclusão só pode
+fazer a regra disparar **menos**, nunca banir um IP nem burlar o gate de
+allowlist/anti-lockout. O gate `same_origin_as` limita a forja do Referer; em
+formatos de log sem vhost (nginx "combined"), `host` fica vazio e apenas o
+match de `contains_any` decide. Um `exclude` meio-especificado (sem `field` ou
+com `contains_any` vazio) é rejeitado no carregamento (fail-closed), como o
+pareamento field/matcher.
 
 ### Exemplo: bloquear scanners de API
 

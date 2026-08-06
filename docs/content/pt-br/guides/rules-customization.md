@@ -32,6 +32,14 @@ você coloca um arquivo em `/etc/ezyshield/rules.d/`.
 
 ## Exemplo: aumentar o threshold do wp-login
 
+Um drop-in de mesmo nome **substitui a regra inteira** (os campos não são
+mesclados), então copie todos os campos da embutida e mude só o necessário.
+Repare no bloco `exclude`: a `http_wp_probe` embutida o usa para ignorar o fluxo
+de reautenticação / 2FA / troca de senha do WordPress (um `Referer` same-origin
+apontando de volta para `wp-login`/`wp-admin`), de modo que um admin legítimo
+protegendo a própria conta nunca seja banido. Mantenha-o no seu override, a
+menos que você deliberadamente queira contar esses hits:
+
 ```yaml
 # /etc/ezyshield/rules.d/50-local.yaml
 rules:
@@ -40,6 +48,10 @@ rules:
     kinds: [http_request]
     field: path
     contains: wp-login
+    exclude:                   # mantém o carve-out de reauth/2FA (issue #417)
+      field: referer
+      same_origin_as: host
+      contains_any: [wp-login, wp-admin]
     window: 60s
     threshold: 10              # o default embutido é 3
     score: 80

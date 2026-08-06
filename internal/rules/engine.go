@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -36,17 +37,47 @@ func (d *duration) UnmarshalYAML(value *yaml.Node) error {
 // Field and Value/Contains/ContainsAny are optional; omitting Field matches all events of
 // the listed kinds. Value, Contains, and ContainsAny are mutually exclusive.
 type spec struct {
-	Name        string   `yaml:"name"`
-	Description string   `yaml:"description,omitempty"`
-	Kinds       []string `yaml:"kinds"`
-	Field       string   `yaml:"field,omitempty"`
-	Value       string   `yaml:"value,omitempty"`
-	Contains    string   `yaml:"contains,omitempty"`
-	ContainsAny []string `yaml:"contains_any,omitempty"`
-	Window      duration `yaml:"window"`
-	Threshold   int      `yaml:"threshold"`
-	Score       int      `yaml:"score"`
-	Category    string   `yaml:"category"`
+	Name        string       `yaml:"name"`
+	Description string       `yaml:"description,omitempty"`
+	Kinds       []string     `yaml:"kinds"`
+	Field       string       `yaml:"field,omitempty"`
+	Value       string       `yaml:"value,omitempty"`
+	Contains    string       `yaml:"contains,omitempty"`
+	ContainsAny []string     `yaml:"contains_any,omitempty"`
+	Exclude     *excludeSpec `yaml:"exclude,omitempty"`
+	Window      duration     `yaml:"window"`
+	Threshold   int          `yaml:"threshold"`
+	Score       int          `yaml:"score"`
+	Category    string       `yaml:"category"`
+}
+
+// excludeSpec is an optional sub-matcher that removes an already-matched event
+// from a rule's count (issue #417). It exists so a path-based rule can carve
+// out a legitimate flow that is otherwise indistinguishable from an attack —
+// e.g. http_wp_probe excludes wp-login hits whose Referer shows the request
+// came from the site's own login/admin pages (an interactive human re-auth /
+// 2FA / password-change flow) rather than a cold scanner hit.
+//
+// Semantics: an event that satisfies the rule's primary matcher is NOT counted
+// when its Field value contains any ContainsAny substring AND, when
+// SameOriginAs is set, the URL host of that Field value equals the value of the
+// SameOriginAs field on the same event. When the SameOriginAs field is empty on
+// the event (e.g. non-vhost "combined" logs carry no host), the origin can be
+// neither confirmed nor denied, so the same-origin condition is treated as
+// satisfied and the ContainsAny match alone decides — the exclusion still
+// protects those installs, at the cost of a forgeable Referer on formats that
+// omit the host (documented tradeoff, SECURITY-REVIEW §1/§2).
+//
+// Safety boundary: an exclusion can only make a rule fire LESS. It can never
+// raise a score, ban an IP, or bypass the downstream allowlist/anti-lockout
+// gate — those run regardless of which rule fired. Referer/host are
+// attacker-controlled; the worst an attacker can do by forging them is evade
+// THIS one rule (defense-in-depth: 404/400/503/xmlrpc/env/rce rules still
+// count independently), never cause a ban of someone else.
+type excludeSpec struct {
+	Field        string   `yaml:"field"`
+	ContainsAny  []string `yaml:"contains_any"`
+	SameOriginAs string   `yaml:"same_origin_as,omitempty"`
 }
 
 type rulesFile struct {
@@ -296,21 +327,72 @@ func countMatches(r spec, agg sdk.Aggregate) int {
 		if !exists {
 			continue
 		}
+		matched := false
 		if r.Value != "" && val == r.Value {
-			total++
+			matched = true
 		} else if r.Contains != "" && strings.Contains(val, r.Contains) {
-			total++
+			matched = true
 		} else if len(r.ContainsAny) > 0 {
 			// ContainsAny: OR logic — match if any substring is found
 			for _, sub := range r.ContainsAny {
 				if strings.Contains(val, sub) {
-					total++
+					matched = true
 					break
 				}
 			}
 		}
+		if matched && !excluded(r.Exclude, ev) {
+			total++
+		}
 	}
 	return total
+}
+
+// excluded reports whether ev should be dropped from a rule's count by its
+// optional exclusion sub-matcher (issue #417). A nil exclusion never excludes.
+// See excludeSpec for the full semantics and safety boundary.
+func excluded(ex *excludeSpec, ev sdk.Event) bool {
+	if ex == nil {
+		return false
+	}
+	val, ok := ev.Fields[ex.Field]
+	if !ok || val == "" {
+		// No value to inspect (e.g. missing/"-" Referer) → cannot exclude.
+		return false
+	}
+	found := false
+	for _, sub := range ex.ContainsAny {
+		if strings.Contains(val, sub) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return false
+	}
+	if ex.SameOriginAs == "" {
+		return true
+	}
+	// Same-origin gate: the URL host of val must equal the peer field's value.
+	// A missing/empty peer field (host unknown, e.g. non-vhost logs) cannot
+	// disprove same-origin, so the exclusion is allowed to stand.
+	peer := ev.Fields[ex.SameOriginAs]
+	if peer == "" {
+		return true
+	}
+	return urlHost(val) == peer
+}
+
+// urlHost extracts the lower-cased host (no port) from a URL-ish string such as
+// a Referer header value. It is deliberately lenient — Referer is
+// attacker-controlled data, so a value that does not parse simply yields "",
+// which fails the same-origin comparison (safe: the event is then counted).
+func urlHost(s string) string {
+	u, err := url.Parse(s)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	return strings.ToLower(u.Hostname())
 }
 
 func decodeRules(r io.Reader, out *rulesFile) error {
@@ -377,6 +459,38 @@ func validateRule(i int, r spec) error {
 	}
 	if r.Category == "" {
 		return fmt.Errorf("rule %q: category is required", r.Name)
+	}
+	if err := validateExclude(r); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateExclude checks the optional exclusion sub-matcher. Like every other
+// validation error here it fails closed at load time: a half-specified
+// exclusion (field with no substrings, or substrings with no field) can never
+// fire and would silently degrade a protective rule, so it is rejected.
+func validateExclude(r spec) error {
+	ex := r.Exclude
+	if ex == nil {
+		return nil
+	}
+	if r.Field == "" {
+		// An exclusion only ever removes events the primary matcher already
+		// counted; a kind-only rule scans Kinds, not Sample, so an exclusion
+		// there would be silently ignored. Reject rather than mislead.
+		return fmt.Errorf("rule %q: exclude requires a field-level rule (set 'field' and a matcher)", r.Name)
+	}
+	if ex.Field == "" {
+		return fmt.Errorf("rule %q: exclude.field is required", r.Name)
+	}
+	if len(ex.ContainsAny) == 0 {
+		return fmt.Errorf("rule %q: exclude.contains_any must be non-empty (an exclusion with no substrings never fires)", r.Name)
+	}
+	for _, sub := range ex.ContainsAny {
+		if sub == "" {
+			return fmt.Errorf("rule %q: exclude.contains_any entries must be non-empty (an empty substring matches everything)", r.Name)
+		}
 	}
 	return nil
 }

@@ -1,0 +1,4 @@
+site.example 2001:db8::1 - - [06/Aug/2026:04:04:23 +0000] "GET /wp-login.php?redirect_to=%2Fwp-admin%2F&reauth=1 HTTP/2.0" 200 5432 "https://site.example/wp-admin/" "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/150.0.0.0 Safari/537.36"
+site.example 2001:db8::1 - - [06/Aug/2026:04:04:40 +0000] "POST /wp-login.php HTTP/2.0" 200 3339 "https://site.example/wp-login.php?redirect_to=%2Fwp-admin%2F&reauth=1" "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/150.0.0.0 Safari/537.36"
+site.example 2001:db8::1 - - [06/Aug/2026:04:22:50 +0000] "POST /wp-login.php?action=itsec-2fa-on-board HTTP/2.0" 200 1024 "https://site.example/wp-login.php" "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/150.0.0.0 Safari/537.36"
+site.example 198.51.100.7 - - [06/Aug/2026:04:30:00 +0000] "POST /wp-login.php HTTP/2.0" 200 3339 "-" "python-requests/2.31.0"

@@ -30,6 +30,14 @@ file in `/etc/ezyshield/rules.d/`.
 
 ## Example: raise the wp-login threshold
 
+A same-named drop-in **replaces the whole rule** (fields are not merged), so
+copy every field of the built-in and change only what you need. Note the
+`exclude` block: the built-in `http_wp_probe` uses it to skip WordPress
+re-auth / 2FA / password-change hits (a same-origin `Referer` pointing back at
+`wp-login`/`wp-admin`) so a legitimate admin securing their account is never
+banned. Keep it in your override unless you deliberately want those hits
+counted:
+
 ```yaml
 # /etc/ezyshield/rules.d/50-local.yaml
 rules:
@@ -38,6 +46,10 @@ rules:
     kinds: [http_request]
     field: path
     contains: wp-login
+    exclude:                   # keep the re-auth/2FA carve-out (issue #417)
+      field: referer
+      same_origin_as: host
+      contains_any: [wp-login, wp-admin]
     window: 60s
     threshold: 10              # built-in default is 3
     score: 80

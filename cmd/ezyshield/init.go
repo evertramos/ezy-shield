@@ -1663,6 +1663,13 @@ func writeWordPressDropin(path string) (bool, error) {
 #     kinds: [http_request]
 #     field: path
 #     contains: wp-login
+#     # Skips the WordPress re-auth/2FA/password-change flow (same-origin
+#     # Referer to wp-login/wp-admin) so a legitimate admin is never banned.
+#     # Keep this block when overriding, or those hits count again (issue #417).
+#     exclude:
+#       field: referer
+#       same_origin_as: host
+#       contains_any: [wp-login, wp-admin]
 #     window: 60s
 #     threshold: 3
 #     score: 80

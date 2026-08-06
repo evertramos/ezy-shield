@@ -1,0 +1,6 @@
+[
+  {"kind": "http_request", "source_ip": "2001:db8::1",  "fields": {"method": "GET",  "path": "/wp-login.php?redirect_to=%2Fwp-admin%2F&reauth=1", "status": "200", "referer": "https://site.example/wp-admin/", "host": "site.example"}},
+  {"kind": "http_request", "source_ip": "2001:db8::1",  "fields": {"method": "POST", "path": "/wp-login.php",                                     "status": "200", "referer": "https://site.example/wp-login.php?redirect_to=%2Fwp-admin%2F&reauth=1", "host": "site.example"}},
+  {"kind": "http_request", "source_ip": "2001:db8::1",  "fields": {"method": "POST", "path": "/wp-login.php?action=itsec-2fa-on-board",           "status": "200", "referer": "https://site.example/wp-login.php", "host": "site.example"}},
+  {"kind": "http_request", "source_ip": "198.51.100.7", "fields": {"method": "POST", "path": "/wp-login.php",                                     "status": "200", "referer": "", "host": "site.example"}}
+]

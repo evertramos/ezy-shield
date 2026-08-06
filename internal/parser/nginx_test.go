@@ -167,6 +167,74 @@ func TestNginxParser_GoldenVhostCombined(t *testing.T) {
 	)
 }
 
+// TestNginxParser_GoldenWPReauth verifies that Referer and vhost host are
+// captured from the vhost-combined format (issue #417): the WordPress
+// re-auth/2FA flow carries same-origin auth-flow referers, while a cold
+// scanner line has an empty referer. Sanitized addresses only (Hard Rule 8).
+func TestNginxParser_GoldenWPReauth(t *testing.T) {
+	runNginxGoldenTest(t,
+		"../../fixtures/nginx/wp_reauth.log",
+		"../../fixtures/nginx/wp_reauth.log.golden.json",
+		"nginx:proxy-web-auto",
+		parser.NginxConfig{},
+	)
+}
+
+// TestNginxParser_RefererHostCaptured asserts the new referer/host fields are
+// populated across combined, vhost, and JSON formats, and that a "-" placeholder
+// normalizes to an empty string (issue #417).
+func TestNginxParser_RefererHostCaptured(t *testing.T) {
+	p := parser.NewNginxParser(discardLogger(), parser.NginxConfig{})
+	cases := []struct {
+		name        string
+		line        string
+		wantReferer string
+		wantHost    string
+	}{
+		{
+			name:        "combined captures referer, empty host",
+			line:        `192.0.2.30 - - [15/Jan/2025:10:00:01 +0000] "GET /wp-login.php HTTP/1.1" 200 12 "https://site.example/wp-admin/" "Mozilla/5.0"`,
+			wantReferer: "https://site.example/wp-admin/",
+			wantHost:    "",
+		},
+		{
+			name:        "vhost captures referer and host (lower-cased)",
+			line:        `Site.Example 192.0.2.31 - - [15/Jan/2025:10:00:01 +0000] "POST /wp-login.php HTTP/1.1" 200 12 "https://site.example/wp-login.php?reauth=1" "UA"`,
+			wantReferer: "https://site.example/wp-login.php?reauth=1",
+			wantHost:    "site.example",
+		},
+		{
+			name:        "dash referer normalizes to empty",
+			line:        `site.example 192.0.2.32 - - [15/Jan/2025:10:00:01 +0000] "GET /wp-login.php HTTP/1.1" 200 12 "-" "UA"`,
+			wantReferer: "",
+			wantHost:    "site.example",
+		},
+		{
+			name:        "json captures referer and host",
+			line:        `{"remote_addr":"192.0.2.33","request":"GET /wp-login.php HTTP/1.1","status":"200","body_bytes_sent":"10","http_referer":"https://site.example/wp-login.php","host":"site.example","http_user_agent":"UA"}`,
+			wantReferer: "https://site.example/wp-login.php",
+			wantHost:    "site.example",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			evs, err := p.Parse(sdk.RawLine{Source: "nginx:proxy", Line: []byte(tc.line), At: time.Now()})
+			if err != nil {
+				t.Fatalf("Parse error: %v", err)
+			}
+			if len(evs) != 1 {
+				t.Fatalf("event count: got %d, want 1", len(evs))
+			}
+			if got := evs[0].Fields["referer"]; got != tc.wantReferer {
+				t.Errorf("referer: got %q, want %q", got, tc.wantReferer)
+			}
+			if got := evs[0].Fields["host"]; got != tc.wantHost {
+				t.Errorf("host: got %q, want %q", got, tc.wantHost)
+			}
+		})
+	}
+}
+
 // TestNginxParser_GoldenDockerJSON tests automatic unwrapping of Docker
 // json-file log wrappers before parsing the inner nginx log line.
 func TestNginxParser_GoldenDockerJSON(t *testing.T) {

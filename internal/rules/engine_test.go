@@ -949,3 +949,274 @@ func TestNew_FieldMatcherCrossCheck(t *testing.T) {
 		})
 	}
 }
+
+// ---- issue #417: http_wp_probe / _sustained same-origin re-auth carve-out ----
+//
+// These tests use RFC 3849 / RFC 5737 documentation addresses and placeholder
+// hostnames only (Hard Rule 8). They encode the exact traffic shapes from the
+// 2026-08-06 kylian audit: a legitimate admin bouncing through the WordPress
+// re-auth / 2FA / password-change flow must produce ZERO strikes, while every
+// documented bot pattern must still strike.
+
+// wpEvent builds an http_request event carrying referer and host so the
+// same-origin exclusion (issue #417) can be exercised.
+func wpEvent(status, path, referer, host string) sdk.Event {
+	return sdk.Event{
+		Time:     t0,
+		SourceIP: ip1,
+		Kind:     "http_request",
+		Fields: map[string]string{
+			"status":  status,
+			"method":  "GET",
+			"path":    path,
+			"referer": referer,
+			"host":    host,
+		},
+	}
+}
+
+func hasWPProbe(verdicts []sdk.Verdict) bool {
+	for _, v := range verdicts {
+		if strings.Contains(v.Reason, "rule/http_wp_probe:") {
+			return true
+		}
+	}
+	return false
+}
+
+func hasWPProbeSustained(verdicts []sdk.Verdict) bool {
+	for _, v := range verdicts {
+		if strings.Contains(v.Reason, "rule/http_wp_probe_sustained:") {
+			return true
+		}
+	}
+	return false
+}
+
+// TestEvaluate_WPProbe_ReauthFlow_NoStrike is the primary repro from issue #417.
+// The admin's session expired; the browser walks reauth=1 → re-auth POST →
+// iThemes 2FA on-board → password change — every wp-login hit carries a
+// same-origin Referer pointing back at the login/admin pages. It must NOT fire.
+func TestEvaluate_WPProbe_ReauthFlow_NoStrike(t *testing.T) {
+	e := mustEngine(t)
+	const host = "site.example"
+	loginRef := "https://" + host + "/wp-login.php?redirect_to=%2Fwp-admin%2F&reauth=1"
+	adminRef := "https://" + host + "/wp-admin/"
+	sample := []sdk.Event{
+		wpEvent("200", "/wp-login.php?redirect_to=%2Fwp-admin%2F&reauth=1", adminRef, host),
+		wpEvent("200", "/wp-login.php", loginRef, host),
+		wpEvent("200", "/wp-login.php", loginRef, host),
+		wpEvent("200", "/wp-login.php", loginRef, host),
+		wpEvent("200", "/wp-login.php?action=lostpassword", loginRef, host),
+		wpEvent("200", "/wp-login.php?action=itsec-2fa-on-board", loginRef, host),
+		wpEvent("302", "/wp-login.php?action=itsec-update-password", loginRef, host),
+	}
+	agg := makeAgg(ip1, w60, sample)
+
+	if hasWPProbe(e.Evaluate(context.Background(), agg)) {
+		t.Fatal("re-auth/2FA flow (same-origin referer) must NOT trigger http_wp_probe")
+	}
+}
+
+// TestEvaluate_WPProbe_ColdScanner_Strikes: an anonymous scanner blasting
+// wp-login with no Referer (the classic brute) must still be caught.
+func TestEvaluate_WPProbe_ColdScanner_Strikes(t *testing.T) {
+	e := mustEngine(t)
+	const host = "site.example"
+	sample := []sdk.Event{
+		wpEvent("200", "/wp-login.php", "", host),
+		wpEvent("200", "/wp-login.php", "", host),
+		wpEvent("200", "/wp-login.php", "", host),
+	}
+	agg := makeAgg(ip1, w60, sample)
+
+	if !hasWPProbe(e.Evaluate(context.Background(), agg)) {
+		t.Fatal("cold scanner (no referer) must still trigger http_wp_probe")
+	}
+}
+
+// TestEvaluate_WPProbe_CrossVhostReferer_Strikes: the multi-vhost bot from the
+// audit hits site A's wp-login carrying a Referer for a DIFFERENT site (or the
+// site root). The same-origin gate keeps every such hit counted.
+func TestEvaluate_WPProbe_CrossVhostReferer_Strikes(t *testing.T) {
+	e := mustEngine(t)
+	sample := []sdk.Event{
+		// cross-vhost referer whose path even contains wp-login — still counted
+		// because the referer host != the request vhost.
+		wpEvent("301", "/wp-login.php", "http://other.example/wp-login.php", "site.example"),
+		// same-host referer but pointing at the site root (path has no wp-login/
+		// wp-admin) — not an auth-flow origin, so counted.
+		wpEvent("200", "/wp-login.php", "http://site.example/", "site.example"),
+		wpEvent("200", "/wp-login.php", "http://another.example/", "site.example"),
+	}
+	agg := makeAgg(ip1, w60, sample)
+
+	if !hasWPProbe(e.Evaluate(context.Background(), agg)) {
+		t.Fatal("cross-vhost / root-referer bot must still trigger http_wp_probe")
+	}
+}
+
+// TestEvaluate_WPProbe_PathSuffixEvasion_Strikes: the /wp-login.php/<payload>
+// suffix-evasion technique from the audit still counts (path contains wp-login;
+// no same-origin auth-flow referer).
+func TestEvaluate_WPProbe_PathSuffixEvasion_Strikes(t *testing.T) {
+	e := mustEngine(t)
+	const host = "site.example"
+	sample := []sdk.Event{
+		wpEvent("200", "/wp-login.php/xmlrpc.php", "", host),
+		wpEvent("200", "/wp-login.php/wp-json/jwt-auth/v1/token", "", host),
+		wpEvent("200", "/wp-login.php/wp-login.php", "", host),
+	}
+	agg := makeAgg(ip1, w60, sample)
+
+	if !hasWPProbe(e.Evaluate(context.Background(), agg)) {
+		t.Fatal("path-suffix evasion must still trigger http_wp_probe")
+	}
+}
+
+// TestEvaluate_WPProbe_ForgedSameOriginNeedsHostMatch documents the residual
+// forgery surface and its bound: a scanner that forges a same-origin auth-flow
+// Referer (host AND path both matching the target) evades THIS one rule — but
+// only when it wins the host match. A forged Referer for the wrong host does
+// not evade. (Defense-in-depth: 404/400/503/xmlrpc/env/rce rules still count.)
+func TestEvaluate_WPProbe_ForgedSameOriginNeedsHostMatch(t *testing.T) {
+	e := mustEngine(t)
+	// Forged referer host does not match the vhost → still counted.
+	sample := make([]sdk.Event, 3)
+	for i := range sample {
+		sample[i] = wpEvent("200", "/wp-login.php",
+			"https://wrong.example/wp-login.php", "site.example")
+	}
+	agg := makeAgg(ip1, w60, sample)
+	if !hasWPProbe(e.Evaluate(context.Background(), agg)) {
+		t.Fatal("forged referer for the wrong host must NOT evade http_wp_probe")
+	}
+}
+
+// TestEvaluate_WPProbe_UnknownHostFallback: on log formats that carry no vhost
+// (nginx "combined"), the host field is empty and same-origin cannot be
+// decided; the auth-flow Referer alone then carves the hit out. Verifies the
+// documented fallback so combined-format WP installs also get the FP fix.
+func TestEvaluate_WPProbe_UnknownHostFallback(t *testing.T) {
+	e := mustEngine(t)
+	ref := "https://site.example/wp-login.php?reauth=1"
+	sample := []sdk.Event{
+		wpEvent("200", "/wp-login.php", ref, ""), // host empty
+		wpEvent("200", "/wp-login.php", ref, ""),
+		wpEvent("200", "/wp-login.php", ref, ""),
+		wpEvent("200", "/wp-login.php", ref, ""),
+	}
+	agg := makeAgg(ip1, w60, sample)
+	if hasWPProbe(e.Evaluate(context.Background(), agg)) {
+		t.Fatal("auth-flow referer must carve out even when host is unknown")
+	}
+}
+
+// TestEvaluate_WPProbeSustained_ReauthFlow_NoStrike: the same carve-out covers
+// the low-&-slow tier — an admin re-authenticating a dozen times over an hour
+// must not accumulate toward the sustained threshold.
+func TestEvaluate_WPProbeSustained_ReauthFlow_NoStrike(t *testing.T) {
+	e := mustEngine(t)
+	const host = "site.example"
+	ref := "https://" + host + "/wp-login.php?reauth=1"
+	sample := make([]sdk.Event, 12) // sustained threshold is 10
+	for i := range sample {
+		sample[i] = wpEvent("200", "/wp-login.php", ref, host)
+	}
+	agg := makeAgg(ip1, 3600*time.Second, sample)
+	if hasWPProbeSustained(e.Evaluate(context.Background(), agg)) {
+		t.Fatal("sustained re-auth flow (same-origin) must NOT trigger http_wp_probe_sustained")
+	}
+}
+
+// TestEvaluate_WPProbeSustained_ColdScanner_Strikes: low-&-slow anonymous brute
+// (no referer) must still cross the sustained threshold.
+func TestEvaluate_WPProbeSustained_ColdScanner_Strikes(t *testing.T) {
+	e := mustEngine(t)
+	const host = "site.example"
+	sample := make([]sdk.Event, 12)
+	for i := range sample {
+		sample[i] = wpEvent("200", "/wp-login.php", "", host)
+	}
+	agg := makeAgg(ip1, 3600*time.Second, sample)
+	if !hasWPProbeSustained(e.Evaluate(context.Background(), agg)) {
+		t.Fatal("sustained cold scanner must still trigger http_wp_probe_sustained")
+	}
+}
+
+// TestValidateExclude rejects half-specified exclusion blocks at load time
+// (fail-closed), mirroring the field/matcher pair check of issue #316.
+func TestValidateExclude(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+	}{
+		{
+			name: "exclude without field",
+			content: `rules:
+  - name: test
+    kinds: [http_request]
+    field: path
+    contains: wp-login
+    exclude:
+      contains_any: [wp-admin]
+    window: 60s
+    threshold: 3
+    score: 80
+    category: scanner`,
+		},
+		{
+			name: "exclude without contains_any",
+			content: `rules:
+  - name: test
+    kinds: [http_request]
+    field: path
+    contains: wp-login
+    exclude:
+      field: referer
+    window: 60s
+    threshold: 3
+    score: 80
+    category: scanner`,
+		},
+		{
+			name: "exclude with empty substring",
+			content: `rules:
+  - name: test
+    kinds: [http_request]
+    field: path
+    contains: wp-login
+    exclude:
+      field: referer
+      contains_any: [""]
+    window: 60s
+    threshold: 3
+    score: 80
+    category: scanner`,
+		},
+		{
+			name: "exclude on kind-only rule",
+			content: `rules:
+  - name: test
+    kinds: [ssh_fail]
+    exclude:
+      field: referer
+      contains_any: [wp-admin]
+    window: 60s
+    threshold: 3
+    score: 80
+    category: bruteforce`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := filepath.Join(t.TempDir(), "rules.yaml")
+			if err := os.WriteFile(tmp, []byte(tc.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := rules.New(tmp, ""); err == nil {
+				t.Errorf("expected validation error for %q", tc.name)
+			}
+		})
+	}
+}

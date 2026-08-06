@@ -123,7 +123,7 @@ func (p *CaddyParser) parseCLF(raw string, at time.Time, origin string) (sdk.Eve
 		Time:     at,
 		SourceIP: ip,
 		Kind:     "http_request",
-		Fields:   caddyFields(m[2], m[3], m[4], m[5], "", "", ""),
+		Fields:   caddyFields(m[2], m[3], m[4], m[5], "", "", "", ""),
 		Origin:   origin,
 	}, true
 }
@@ -161,7 +161,7 @@ func (p *CaddyParser) parseJSON(raw string, at time.Time, origin string) (sdk.Ev
 		return sdk.Event{}, false
 	}
 
-	ua, xff := extractCaddyHeaders(req)
+	ua, xff, referer := extractCaddyHeaders(req)
 	ip = p.resolveXFF(ip, xff)
 
 	method := jsonString(req, "method")
@@ -176,27 +176,29 @@ func (p *CaddyParser) parseJSON(raw string, at time.Time, origin string) (sdk.Ev
 		Time:     at,
 		SourceIP: ip,
 		Kind:     "http_request",
-		Fields:   caddyFields(method, path, status, bytesSent, ua, host, duration),
+		Fields:   caddyFields(method, path, status, bytesSent, ua, host, duration, referer),
 		Origin:   origin,
 	}, true
 }
 
-// extractCaddyHeaders returns User-Agent and X-Forwarded-For from a Caddy
-// request's "headers" object. Header values are HTTP-style arrays of strings;
-// the first array element is used. Canonical casing is tried first, then
-// lowercase, since some Caddy configs preserve non-canonical names.
-func extractCaddyHeaders(req map[string]json.RawMessage) (ua, xff string) {
+// extractCaddyHeaders returns User-Agent, X-Forwarded-For, and Referer from a
+// Caddy request's "headers" object. Header values are HTTP-style arrays of
+// strings; the first array element is used. Canonical casing is tried first,
+// then lowercase, since some Caddy configs preserve non-canonical names. Both
+// the misspelled "Referer" (the HTTP wire spelling) and "Referrer" are tried.
+func extractCaddyHeaders(req map[string]json.RawMessage) (ua, xff, referer string) {
 	headersRaw, ok := req["headers"]
 	if !ok {
-		return "", ""
+		return "", "", ""
 	}
 	var headers map[string]json.RawMessage
 	if err := json.Unmarshal(headersRaw, &headers); err != nil {
-		return "", ""
+		return "", "", ""
 	}
 	ua = headerFirstString(headers, "User-Agent", "user-agent")
 	xff = headerFirstString(headers, "X-Forwarded-For", "x-forwarded-for")
-	return ua, xff
+	referer = headerFirstString(headers, "Referer", "referer", "Referrer", "referrer")
+	return ua, xff, referer
 }
 
 // headerFirstString returns the first value of the first matching header name.
@@ -259,7 +261,7 @@ func (p *CaddyParser) isTrustedProxy(ip netip.Addr) bool {
 }
 
 // caddyFields constructs the Event.Fields map, capping each value at its maximum length.
-func caddyFields(method, path, status, bytesSent, ua, host, duration string) map[string]string {
+func caddyFields(method, path, status, bytesSent, ua, host, duration, referer string) map[string]string {
 	if len(method) > maxMethodBytes {
 		method = method[:maxMethodBytes]
 	}
@@ -269,6 +271,18 @@ func caddyFields(method, path, status, bytesSent, ua, host, duration string) map
 	if len(ua) > maxUABytes {
 		ua = ua[:maxUABytes]
 	}
+	if referer == "-" {
+		referer = ""
+	}
+	if len(referer) > maxRefererBytes {
+		referer = referer[:maxRefererBytes]
+	}
+	// host is lower-cased so same-origin comparison (issue #417) is
+	// case-insensitive and consistent with the nginx parser.
+	if host == "-" {
+		host = ""
+	}
+	host = strings.ToLower(host)
 	if len(host) > maxHostBytes {
 		host = host[:maxHostBytes]
 	}
@@ -280,5 +294,6 @@ func caddyFields(method, path, status, bytesSent, ua, host, duration string) map
 		"ua":       ua,
 		"host":     host,
 		"duration": duration,
+		"referer":  referer,
 	}
 }

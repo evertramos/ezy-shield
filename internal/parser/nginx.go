@@ -14,23 +14,31 @@ import (
 
 // NginxParser-specific field length caps.
 const (
-	maxPathBytes   = 2048
-	maxUABytes     = 512
-	maxMethodBytes = 16
+	maxPathBytes    = 2048
+	maxUABytes      = 512
+	maxMethodBytes  = 16
+	maxRefererBytes = 2048
+	// host is capped at the package-shared maxHostBytes (defined in caddy.go).
 )
 
 // reNginxCombined matches the default nginx "combined" log format:
 //
 //	$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent "$http_referer" "$http_user_agent"
+//
+// Referer is captured (group 6) so field-level rules can distinguish an
+// interactive same-origin flow from a cold scanner hit (issue #417).
 var reNginxCombined = regexp.MustCompile(
-	`^(\S+)\s+-\s+\S+\s+\[[^\]]+\]\s+"([A-Z]{1,16})\s+(\S+)\s+\S+"\s+(\d{1,3})\s+(\d+|-)\s+"[^"]*"\s+"([^"]*)"`,
+	`^(\S+)\s+-\s+\S+\s+\[[^\]]+\]\s+"([A-Z]{1,16})\s+(\S+)\s+\S+"\s+(\d{1,3})\s+(\d+|-)\s+"([^"]*)"\s+"([^"]*)"`,
 )
 
 // reNginxVhostCombined matches the nginx-proxy/jwilder vhost-prefixed combined format:
 //
 //	$host $remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent "$http_referer" "$http_user_agent"
+//
+// Both the vhost ($host, group 1) and the referer (group 7) are captured so
+// same-origin exclusion (issue #417) can compare the referer host to the vhost.
 var reNginxVhostCombined = regexp.MustCompile(
-	`^\S+\s+(\S+)\s+-\s+\S+\s+\[[^\]]+\]\s+"([A-Z]{1,16})\s+(\S+)\s+\S+"\s+(\d{1,3})\s+(\d+|-)\s+"[^"]*"\s+"([^"]*)"`,
+	`^(\S+)\s+(\S+)\s+-\s+\S+\s+\[[^\]]+\]\s+"([A-Z]{1,16})\s+(\S+)\s+\S+"\s+(\d{1,3})\s+(\d+|-)\s+"([^"]*)"\s+"([^"]*)"`,
 )
 
 // NginxConfig holds optional configuration for NginxParser.
@@ -39,7 +47,8 @@ var reNginxVhostCombined = regexp.MustCompile(
 //
 // Compile a *regexp.Regexp with named capture groups and append it to CustomFormats.
 // Required groups: remote_addr, method, path, status, bytes.
-// Optional groups: ua (User-Agent), xff (X-Forwarded-For value).
+// Optional groups: ua (User-Agent), xff (X-Forwarded-For value),
+// referer (Referer header), host (vhost / server name).
 //
 // Example (nginx "common" format without referer/UA):
 //
@@ -147,7 +156,7 @@ func (p *NginxParser) parseCombined(raw string, at time.Time, origin string) (sd
 	if m == nil {
 		return sdk.Event{}, false
 	}
-	// m[1]=remote_addr m[2]=method m[3]=path m[4]=status m[5]=bytes m[6]=ua
+	// m[1]=remote_addr m[2]=method m[3]=path m[4]=status m[5]=bytes m[6]=referer m[7]=ua
 	ip, err := parseIP(m[1])
 	if err != nil {
 		p.logger.Debug("nginx: invalid IP in combined line",
@@ -155,11 +164,12 @@ func (p *NginxParser) parseCombined(raw string, at time.Time, origin string) (sd
 		)
 		return sdk.Event{}, false
 	}
+	// The "combined" format carries no vhost, so host is empty.
 	return sdk.Event{
 		Time:     at,
 		SourceIP: ip,
 		Kind:     "http_request",
-		Fields:   nginxFields(m[2], m[3], m[4], m[5], m[6]),
+		Fields:   nginxFields(m[2], m[3], m[4], m[5], m[7], m[6], ""),
 		Origin:   origin,
 	}, true
 }
@@ -194,12 +204,14 @@ func (p *NginxParser) parseJSON(raw string, at time.Time, origin string) (sdk.Ev
 	status := jsonString(obj, "status")
 	bytesSent := jsonString(obj, "body_bytes_sent", "bytes_sent")
 	ua := jsonString(obj, "http_user_agent", "user_agent", "agent")
+	referer := jsonString(obj, "http_referer", "referer", "referrer")
+	host := jsonString(obj, "host", "http_host", "server_name", "vhost")
 
 	return sdk.Event{
 		Time:     at,
 		SourceIP: ip,
 		Kind:     "http_request",
-		Fields:   nginxFields(method, path, status, bytesSent, ua),
+		Fields:   nginxFields(method, path, status, bytesSent, ua, referer, host),
 		Origin:   origin,
 	}, true
 }
@@ -212,11 +224,11 @@ func (p *NginxParser) parseVhostCombined(raw string, at time.Time, origin string
 	if m == nil {
 		return sdk.Event{}, false
 	}
-	// m[1]=remote_addr m[2]=method m[3]=path m[4]=status m[5]=bytes m[6]=ua
-	ip, err := parseIP(m[1])
+	// m[1]=host m[2]=remote_addr m[3]=method m[4]=path m[5]=status m[6]=bytes m[7]=referer m[8]=ua
+	ip, err := parseIP(m[2])
 	if err != nil {
 		p.logger.Debug("nginx: invalid IP in vhost combined line",
-			slog.String("raw", redactForLog(m[1])),
+			slog.String("raw", redactForLog(m[2])),
 		)
 		return sdk.Event{}, false
 	}
@@ -224,7 +236,7 @@ func (p *NginxParser) parseVhostCombined(raw string, at time.Time, origin string
 		Time:     at,
 		SourceIP: ip,
 		Kind:     "http_request",
-		Fields:   nginxFields(m[2], m[3], m[4], m[5], m[6]),
+		Fields:   nginxFields(m[3], m[4], m[5], m[6], m[8], m[7], m[1]),
 		Origin:   origin,
 	}, true
 }
@@ -280,7 +292,7 @@ func (p *NginxParser) parseCustom(raw string, at time.Time, origin string) (sdk.
 			Time:     at,
 			SourceIP: ip,
 			Kind:     "http_request",
-			Fields:   nginxFields(named["method"], named["path"], named["status"], named["bytes"], named["ua"]),
+			Fields:   nginxFields(named["method"], named["path"], named["status"], named["bytes"], named["ua"], named["referer"], named["host"]),
 			Origin:   origin,
 		}, true
 	}
@@ -337,7 +349,13 @@ func (p *NginxParser) firstUntrustedFromXFF(xff string) (netip.Addr, error) {
 }
 
 // nginxFields constructs the Event.Fields map, capping each value at its maximum length.
-func nginxFields(method, path, status, bytesSent, ua string) map[string]string {
+//
+// referer and host are attacker-controllable like every other field; they are
+// length-capped here and consumed only as data by field-level rules (issue
+// #417). A normalized "-" or "" referer/host is stored as an empty string so
+// rules need not special-case the placeholder. host is normalized to lower case
+// so same-origin comparison is case-insensitive.
+func nginxFields(method, path, status, bytesSent, ua, referer, host string) map[string]string {
 	if len(method) > maxMethodBytes {
 		method = method[:maxMethodBytes]
 	}
@@ -347,12 +365,27 @@ func nginxFields(method, path, status, bytesSent, ua string) map[string]string {
 	if len(ua) > maxUABytes {
 		ua = ua[:maxUABytes]
 	}
+	if referer == "-" {
+		referer = ""
+	}
+	if len(referer) > maxRefererBytes {
+		referer = referer[:maxRefererBytes]
+	}
+	if host == "-" {
+		host = ""
+	}
+	host = strings.ToLower(host)
+	if len(host) > maxHostBytes {
+		host = host[:maxHostBytes]
+	}
 	return map[string]string{
-		"method": method,
-		"path":   path,
-		"status": status,
-		"bytes":  bytesSent,
-		"ua":     ua,
+		"method":  method,
+		"path":    path,
+		"status":  status,
+		"bytes":   bytesSent,
+		"ua":      ua,
+		"referer": referer,
+		"host":    host,
 	}
 }
 

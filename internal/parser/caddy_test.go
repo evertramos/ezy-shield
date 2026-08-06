@@ -262,6 +262,27 @@ func TestCaddyParser_HeadersCase(t *testing.T) {
 	}
 }
 
+// TestCaddyParser_RefererCaptured verifies Referer is extracted from the JSON
+// request headers and the vhost host is lower-cased (issue #417) so the
+// same-origin wp-login exclusion works on Caddy too.
+func TestCaddyParser_RefererCaptured(t *testing.T) {
+	p := parser.NewCaddyParser(discardLogger(), parser.CaddyConfig{})
+	line := []byte(`{"request":{"remote_ip":"192.0.2.9","method":"POST","uri":"/wp-login.php","host":"Site.Example","headers":{"User-Agent":["UA"],"Referer":["https://site.example/wp-login.php?reauth=1"]}},"status":200,"size":0,"duration":0.001}`)
+	evs, err := p.Parse(sdk.RawLine{Source: "caddy:caddy", Line: line, At: time.Now()})
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	if len(evs) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(evs))
+	}
+	if got := evs[0].Fields["referer"]; got != "https://site.example/wp-login.php?reauth=1" {
+		t.Errorf("referer: got %q", got)
+	}
+	if got := evs[0].Fields["host"]; got != "site.example" {
+		t.Errorf("host (should be lower-cased): got %q", got)
+	}
+}
+
 // TestCaddyParser_XFF verifies that X-Forwarded-For is used only when the
 // connecting address is a configured trusted proxy (anti-spoofing).
 func TestCaddyParser_XFF(t *testing.T) {

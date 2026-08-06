@@ -253,15 +253,28 @@ func nftList(ctx context.Context, n nftnames.Names) ([]string, error) {
 	return append(ips4, ips6...), nil
 }
 
+// listSetOutput runs `nft list set` and returns its stdout. It is a variable
+// so tests can inject failures; this is the one nft invocation that needs
+// captured stdout, so it cannot go through nftRunner (fire-and-forget
+// script execution).
+var listSetOutput = func(ctx context.Context, family, tbl, set string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "nft", "list", "set", family, tbl, set) //nolint:gosec // names validated by nftnames.Resolve in this process
+	return cmd.Output()
+}
+
 func listSet(ctx context.Context, n nftnames.Names, set string) ([]string, error) {
 	// n.Table is "family name"; nft's CLI wants them as separate argv words.
 	family, tbl, _ := strings.Cut(n.Table, " ")
-	cmd := exec.CommandContext(ctx, "nft", "list", "set", family, tbl, set) //nolint:gosec // names validated by nftnames.Resolve in this process
-	out, err := cmd.Output()
+	out, err := listSetOutput(ctx, family, tbl, set)
 	if err != nil {
-		// "No such file or directory" means the set doesn't exist yet; treat as empty.
-		if strings.Contains(string(out), "No such file") ||
-			strings.Contains(err.Error(), "exit status") {
+		// The one benign failure is the set not existing yet (racy first
+		// boot): nft reports "No such file or directory" on STDERR, which
+		// cmd.Output captures in ExitError.Stderr. Every other non-zero exit
+		// (EPERM, missing CAP_NET_ADMIN, broken table state) must surface —
+		// swallowing it makes init/reload log an empty cache and desyncs the
+		// helper's blocked cache from the kernel (issue #318).
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && isNftAbsentErr(string(exitErr.Stderr)) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("nft list set %s: %w", set, err)

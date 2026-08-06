@@ -46,12 +46,14 @@ func (d *DiscordNotifier) Send(ctx context.Context, msg sdk.Notification) error 
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.webhookURL, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("discord: build request: %w", err)
+		// A malformed URL (e.g. control char in the webhook secret) makes
+		// NewRequest return a *url.Error embedding the full raw URL.
+		return fmt.Errorf("discord: build request: %w", redactTransportErr(err, true))
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := d.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("discord: http: %w", err)
+		return fmt.Errorf("discord: http: %w", redactTransportErr(err, true))
 	}
 	defer resp.Body.Close() //nolint:errcheck
 	// Discord returns 204 No Content on success for webhook messages.

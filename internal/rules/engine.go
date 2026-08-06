@@ -362,6 +362,19 @@ func validateRule(i int, r spec) error {
 	if (r.Value != "" && r.Contains != "") || (r.Value != "" && len(r.ContainsAny) > 0) || (r.Contains != "" && len(r.ContainsAny) > 0) {
 		return fmt.Errorf("rule %q: value, contains, and contains_any are mutually exclusive", r.Name)
 	}
+	// field and the matchers only work as a pair (issue #316): countMatches
+	// consults value/contains/contains_any only when field is set, and a
+	// field with no matcher can never increment. Either half alone is a
+	// silent footgun — over-matching every event of the listed kinds, or a
+	// protective rule that never fires — so both fail closed at load time,
+	// like every other validation error here.
+	hasMatcher := r.Value != "" || r.Contains != "" || len(r.ContainsAny) > 0
+	if hasMatcher && r.Field == "" {
+		return fmt.Errorf("rule %q: value/contains/contains_any require 'field' (without it the matcher is ignored and every event of the listed kinds counts)", r.Name)
+	}
+	if r.Field != "" && !hasMatcher {
+		return fmt.Errorf("rule %q: 'field' requires one of value, contains, or contains_any (without a matcher the rule can never fire)", r.Name)
+	}
 	if r.Category == "" {
 		return fmt.Errorf("rule %q: category is required", r.Name)
 	}

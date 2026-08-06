@@ -540,6 +540,36 @@ func (d *Daemon) maybeConsultAI(ctx context.Context, ip netip.Addr, verdicts []s
 		return verdicts
 	}
 
+	// ── Decided-outcome gates (issue #419) ──────────────────────────────────
+	// The decision engine takes the MAX score across verdicts (Decide), so a
+	// consult can only matter while the rules alone are still below the ban
+	// threshold. Once a rule has already decided "ban", an AI verdict is
+	// structurally unable to change the outcome — a lower AI score never
+	// reduces a rule ban. Skip the consult; the distinct log lines below let
+	// audits count the savings (61% of audited spend fell in these gates).
+	if highScore >= d.policy.BanThreshold {
+		slog.DebugContext(ctx, "daemon: ai consult skipped — rule score already decisive",
+			"ip", ip, "score", highScore, "ban_threshold", d.policy.BanThreshold)
+		return verdicts
+	}
+
+	// Likewise, an actively banned IP is a decided outcome: the engine's
+	// active-ban guard suppresses new strikes for the ban's duration, so a
+	// consult could only re-analyze traffic leaking past enforcement. Mirror
+	// the guard's one asymmetry (ADR-0009 §5): an ARMED engine ignores
+	// simulated (dry-run) bans — nothing is enforced for those, so the
+	// consult can still convert the episode into a real ban and proceeds.
+	// On a store error, fall through and consult (pre-#419 behavior): a
+	// wasted call is safer than silently muting the AI leg on a DB hiccup.
+	if _, _, dryBan, banned, err := d.store.GetBanInfo(ctx, ip.Unmap()); err != nil {
+		slog.WarnContext(ctx, "daemon: ai ban-state check failed; consulting anyway",
+			"ip", ip, "err", err)
+	} else if banned && (!dryBan || !d.policy.IsArmed()) {
+		slog.DebugContext(ctx, "daemon: ai consult skipped — IP already banned",
+			"ip", ip, "score", highScore, "dry_run", dryBan)
+		return verdicts
+	}
+
 	// Budget check — skip and warn once if daily limit is exhausted.
 	exceeded, err := d.aiBudget.Exceeded(ctx)
 	if err != nil {

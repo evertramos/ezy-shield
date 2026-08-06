@@ -591,8 +591,8 @@ func TestEndToEnd_AI_CalledForAmbiguousScore(t *testing.T) {
 		Strikes:          config.DefaultStrikes,
 	}
 
-	// The ssh_bruteforce rule fires at ≥5 failures and scores ~80 (above our
-	// ambiguous band [30,75]). We need a score between 30 and 75 to trigger AI.
+	// The ssh_bruteforce rule fires at ≥5 failures and scores ~80 (above the
+	// default ambiguous band). We need an in-band score to trigger AI.
 	// Use the observe band (score ≥ 10, < 90) with a low ban threshold override:
 	// Actually, set aiLo/aiHi wide enough to include the rule's score.
 	// The simplest way: configure the band to include the rule score (80).

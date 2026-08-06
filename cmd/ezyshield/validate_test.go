@@ -220,7 +220,7 @@ collectors:
 ai:
   provider: anthropic
   api_key: env:EZYSHIELD_VALIDATE_TEST_NOT_SET_XYZ
-  ambiguous_band: [30, 75]
+  ambiguous_band: [30, 69]
 `)
 	pol := writeFile(t, dir, "policy.yaml", validPolicy)
 
@@ -249,7 +249,7 @@ collectors:
 ai:
   provider: anthropic
   api_key: env:EZYSHIELD_VALIDATE_TEST_IS_SET
-  ambiguous_band: [30, 75]
+  ambiguous_band: [30, 69]
 `)
 	pol := writeFile(t, dir, "policy.yaml", validPolicy)
 
@@ -278,7 +278,7 @@ collectors:
 ai:
   provider: anthropic
   api_key: env:EZYSHIELD_VALIDATE_LEAK_TEST
-  ambiguous_band: [30, 75]
+  ambiguous_band: [30, 69]
 `)
 	pol := writeFile(t, dir, "policy.yaml", validPolicy)
 
@@ -385,5 +385,62 @@ func TestValidateCmd_FlagsRegistered(t *testing.T) {
 	}
 	if cmd.Flags().Lookup("policy") == nil {
 		t.Error("--policy flag missing")
+	}
+}
+
+// TestRunValidate_AIBandOverlapWarning: issue #419 — an ambiguous_band whose
+// upper bound reaches ban_threshold is a warning (exit 0), not an error, and
+// names both offending values so the operator knows what to lower.
+func TestRunValidate_AIBandOverlapWarning(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfg := writeFile(t, dir, "config.yaml", `
+data_dir: /tmp
+collectors:
+  - kind: journald
+    unit: sshd
+ai:
+  provider: ollama
+  ambiguous_band: [30, 75]
+`)
+	pol := writeFile(t, dir, "policy.yaml", validPolicy) // ban_threshold: 70
+
+	var buf bytes.Buffer
+	code := runValidate(&buf, cfg, pol)
+	if code != validateExitOK {
+		t.Errorf("exit code = %d, want %d (overlap is a warning, not an error)", code, validateExitOK)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "ambiguous_band [30, 75] overlaps policy ban_threshold (70)") {
+		t.Errorf("expected overlap warning naming both values, got: %s", out)
+	}
+	if !strings.Contains(out, "1 warning") {
+		t.Errorf("expected exactly 1 warning in summary, got: %s", out)
+	}
+}
+
+// TestRunValidate_AIBandBelowThreshold_NoOverlapWarning guards the quiet path:
+// the shipped default band [30, 69] with the default threshold must not warn.
+func TestRunValidate_AIBandBelowThreshold_NoOverlapWarning(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfg := writeFile(t, dir, "config.yaml", `
+data_dir: /tmp
+collectors:
+  - kind: journald
+    unit: sshd
+ai:
+  provider: ollama
+  ambiguous_band: [30, 69]
+`)
+	pol := writeFile(t, dir, "policy.yaml", validPolicy)
+
+	var buf bytes.Buffer
+	code := runValidate(&buf, cfg, pol)
+	if code != validateExitOK {
+		t.Errorf("exit code = %d, want %d", code, validateExitOK)
+	}
+	if strings.Contains(buf.String(), "overlaps policy ban_threshold") {
+		t.Errorf("unexpected overlap warning: %s", buf.String())
 	}
 }

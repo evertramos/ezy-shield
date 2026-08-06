@@ -178,7 +178,7 @@
           "items": {"type": "integer", "minimum": 0, "maximum": 100},
           "minItems": 2,
           "maxItems": 2,
-          "description": "Score range [low, high] sent to AI; outside this range the rule engine decides. Omitted defaults to [30, 75]."
+          "description": "Score range [low, high] sent to AI; outside this range the rule engine decides. Omitted defaults to [30, 69]. Keep high below the policy ban_threshold: scores at or above the threshold already decide a ban on rules alone and are never sent to the AI (a reaching band triggers a warning)."
         },
         "token_budget_daily": {
           "type": "integer",
@@ -187,7 +187,7 @@
         },
         "cache_ttl": {
           "type": "string",
-          "description": "Verdict cache TTL as a Go duration string (e.g. '1h'). Entries are keyed by behavior signature, not IP."
+          "description": "Verdict cache TTL as a Go duration string (e.g. '15m'). Omitted or 0 means the default 15m; the cache cannot be disabled. Entries are keyed by behavior signature, not IP."
         },
         "providers": {
           "type": "array",

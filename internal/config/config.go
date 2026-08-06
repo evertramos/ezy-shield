@@ -313,10 +313,42 @@ func LoadConfigReader(r io.Reader, name string) (*Config, error) {
 }
 
 // DefaultAmbiguousBand is applied when ai is configured but ambiguous_band is
-// omitted. It matches the value `ezyshield init` writes: scores in [30, 75]
-// consult the AI. Without a valid band the daemon silently never calls the
-// configured provider (issue #324).
-var DefaultAmbiguousBand = [2]int{30, 75}
+// omitted. It matches the value `ezyshield init` writes: scores in
+// [30, DefaultBanThreshold-1] consult the AI. Without a valid band the daemon
+// silently never calls the configured provider (issue #324).
+//
+// The upper bound deliberately stops just below DefaultBanThreshold: a score
+// at or above the ban threshold has already decided "ban" on its own (the
+// decision engine takes the max score), so consulting the AI for it is pure
+// token spend (issue #419) — see AIBandOverlapWarning.
+var DefaultAmbiguousBand = [2]int{30, DefaultBanThreshold - 1}
+
+// AIBandOverlapWarning returns a human-readable advisory when the configured
+// AI ambiguous band overlaps the policy ban threshold, or "" when there is
+// nothing to warn about (AI disabled, no provider, or no overlap).
+//
+// The overlap is a warning, not a validation error (backward compatibility —
+// the previously shipped default band [30, 75] overlapped the default
+// threshold 70): the daemon skips consults for scores >= ban_threshold either
+// way (issue #419), so an overlapping band only misleads the operator about
+// which scores actually reach the AI. Band and threshold live in different
+// files (config.yaml vs policy.yaml), so this cross-check runs where both are
+// loaded (daemon start, `ezyshield validate`) rather than in either loader.
+func AIBandOverlapWarning(cfg *Config, pol *Policy) string {
+	if cfg == nil || pol == nil || cfg.AI == nil {
+		return ""
+	}
+	if cfg.AI.Provider == "" && len(cfg.AI.Providers) == 0 {
+		return ""
+	}
+	lo, hi := cfg.AI.AmbiguousBand[0], cfg.AI.AmbiguousBand[1]
+	if hi < pol.BanThreshold {
+		return ""
+	}
+	return fmt.Sprintf(
+		"ai.ambiguous_band [%d, %d] overlaps policy ban_threshold (%d): scores >= %d already decide a ban on rules alone and the daemon skips their AI consult, so the overlap only wastes intent — lower the band's upper bound to at most %d",
+		lo, hi, pol.BanThreshold, pol.BanThreshold, pol.BanThreshold-1)
+}
 
 var validLogLevels = map[string]bool{
 	"debug": true, "info": true, "warn": true, "error": true,

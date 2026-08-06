@@ -33,6 +33,21 @@ func sourceID(parserName, path string) string {
 	return parserName + ":" + path
 }
 
+// defaultParsers returns the parser set the daemon routes collector lines
+// through. Every parser name accepted by config validation (see
+// internal/config validParserNames) must be handled by exactly one parser
+// here; otherwise a collector with that parser silently drops every line
+// (issue #308). The parser-coverage test in run_parsers_test.go enforces this.
+func defaultParsers(logger *slog.Logger) []sdk.Parser {
+	return []sdk.Parser{
+		parser.NewSSHParser(logger),
+		parser.NewNginxParser(logger, parser.NginxConfig{}),
+		parser.NewApacheErrorParser(logger),
+		parser.NewCaddyParser(logger, parser.CaddyConfig{}),
+		parser.NewTraefikParser(logger, parser.TraefikConfig{}),
+	}
+}
+
 func newRunCmd() *cobra.Command {
 	var (
 		configPath string
@@ -109,12 +124,7 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
 	slog.SetDefault(logger)
 
-	parsers := []sdk.Parser{
-		parser.NewSSHParser(logger),
-		parser.NewNginxParser(logger, parser.NginxConfig{}),
-		parser.NewCaddyParser(logger, parser.CaddyConfig{}),
-		parser.NewTraefikParser(logger, parser.TraefikConfig{}),
-	}
+	parsers := defaultParsers(logger)
 
 	collectors := buildCollectors(cfg, logger)
 

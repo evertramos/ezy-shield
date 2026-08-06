@@ -21,6 +21,9 @@
 #                (Debian/Ubuntu: `apt install qemu-system-arm qemu-efi-aarch64`).
 #   Custom image escape hatch: EZY_IMG_URL, EZY_GUEST_USER, EZY_FAMILY (deb|rhel),
 #                EZY_SUDO_GROUP override the preset for an image not in the table.
+#                Preset images are verified against the distro's published
+#                checksum file before first boot; a custom EZY_IMG_URL can be
+#                pinned with EZY_IMG_SHA256=<hex> (otherwise it is unverified).
 #
 #   ./scripts/qemu-e2e.sh config   # print the resolved plan (no VM) — CI-safe preflight
 #   ./scripts/qemu-e2e.sh up       # build + serve + boot + install(curl|sh) + init + verify
@@ -88,43 +91,44 @@ resolve_arch() {
 }
 
 # resolve_distro — map EZY_DISTRO (× EZY_ARCH) to a cloud image + guest settings.
-# Sets DISTRO_NAME FAMILY IMG_URL GUEST_USER SUDO_GROUP PKG_LIST BASE_IMG.
+# Sets DISTRO_NAME FAMILY IMG_URL GUEST_USER SUDO_GROUP PKG_LIST BASE_IMG,
+# plus SUMS_URL/SUMS_ALGO (the distro's published checksum file for the image).
 # Explicit EZY_* overrides win, so an image not in the table is still runnable.
 resolve_distro() {
-  local url="" user="" family="" name=""
+  local url="" user="" family="" name="" sums="" algo=""
   case "$DISTRO" in
     debian12)
-      name="Debian 12 (bookworm)"; family=deb; user=debian
+      name="Debian 12 (bookworm)"; family=deb; user=debian; sums=SHA512SUMS; algo=sha512
       case "$ARCH" in
         amd64) url="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2" ;;
         arm64) url="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-arm64.qcow2" ;;
       esac ;;
     debian13)
-      name="Debian 13 (trixie)"; family=deb; user=debian
+      name="Debian 13 (trixie)"; family=deb; user=debian; sums=SHA512SUMS; algo=sha512
       case "$ARCH" in
         amd64) url="https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2" ;;
         arm64) url="https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-arm64.qcow2" ;;
       esac ;;
     ubuntu2404)
-      name="Ubuntu 24.04 LTS (noble)"; family=deb; user=ubuntu
+      name="Ubuntu 24.04 LTS (noble)"; family=deb; user=ubuntu; sums=SHA256SUMS; algo=sha256
       case "$ARCH" in
         amd64) url="https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img" ;;
         arm64) url="https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img" ;;
       esac ;;
     ubuntu2504)
-      name="Ubuntu 25.04 (plucky)"; family=deb; user=ubuntu
+      name="Ubuntu 25.04 (plucky)"; family=deb; user=ubuntu; sums=SHA256SUMS; algo=sha256
       case "$ARCH" in
         amd64) url="https://cloud-images.ubuntu.com/releases/25.04/release/ubuntu-25.04-server-cloudimg-amd64.img" ;;
         arm64) url="https://cloud-images.ubuntu.com/releases/25.04/release/ubuntu-25.04-server-cloudimg-arm64.img" ;;
       esac ;;
     alma9)
-      name="AlmaLinux 9"; family=rhel; user=almalinux
+      name="AlmaLinux 9"; family=rhel; user=almalinux; sums=CHECKSUM; algo=sha256
       case "$ARCH" in
         amd64) url="https://repo.almalinux.org/almalinux/9/cloud/x86_64/images/AlmaLinux-9-GenericCloud-latest.x86_64.qcow2" ;;
         arm64) url="https://repo.almalinux.org/almalinux/9/cloud/aarch64/images/AlmaLinux-9-GenericCloud-latest.aarch64.qcow2" ;;
       esac ;;
     rocky9)
-      name="Rocky Linux 9"; family=rhel; user=rocky
+      name="Rocky Linux 9"; family=rhel; user=rocky; sums=CHECKSUM; algo=sha256
       case "$ARCH" in
         amd64) url="https://download.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud-Base.latest.x86_64.qcow2" ;;
         arm64) url="https://download.rockylinux.org/pub/rocky/9/images/aarch64/Rocky-9-GenericCloud-Base.latest.aarch64.qcow2" ;;
@@ -139,6 +143,16 @@ resolve_distro() {
   GUEST_USER="${EZY_GUEST_USER:-$user}"
   [ -n "$IMG_URL" ]    || die "no cloud image for $DISTRO/$ARCH (set EZY_IMG_URL to override)"
   [ -n "$GUEST_USER" ] || die "no guest user for $DISTRO (set EZY_GUEST_USER to override)"
+
+  # Image integrity source: presets verify against the checksum file the distro
+  # publishes next to the image (same directory, so the arch is covered too).
+  # A custom EZY_IMG_URL has no known checksum file — only EZY_IMG_SHA256 can
+  # pin it (see fetch_base_image).
+  if [ -n "${EZY_IMG_URL:-}" ]; then
+    SUMS_URL=""; SUMS_ALGO=sha256
+  else
+    SUMS_URL="${IMG_URL%/*}/$sums"; SUMS_ALGO="$algo"
+  fi
 
   case "$FAMILY" in
     deb)  SUDO_GROUP=sudo;  PKG_LIST=(curl nftables) ;;
@@ -213,6 +227,91 @@ stop_http() {
   fi
 }
 
+# expected_sum — extract the digest for file $2 from checksum file $1.
+# Handles both formats our distros publish: GNU coreutils lines
+# ("<hash>  <file>" — Debian SHA512SUMS, Alma CHECKSUM; "<hash> *<file>" —
+# Ubuntu SHA256SUMS) and BSD-style lines ("SHA256 (<file>) = <hash>" — Rocky).
+expected_sum() {
+  awk -v f="$2" '
+    ($1 == "SHA256" || $1 == "SHA512") && $2 == "(" f ")" { print $4; exit }
+    $2 == f || $2 == "*" f                                { print $1; exit }
+  ' "$1"
+}
+
+# file_sum — print the $SUMS_ALGO digest of file $1.
+file_sum() { "${SUMS_ALGO}sum" "$1" | awk '{print $1}'; }
+
+# fetch_base_image — download the cloud image (once, cached) and verify it
+# against the distro's published checksum file BEFORE it is ever booted.
+# The verified digest is recorded next to the image ("$BASE_IMG.<algo>"), so
+# re-runs re-check the cached file locally — a corrupted cache dies instead of
+# being silently reused — without re-downloading anything. The upstream URLs
+# are mutable `latest` aliases, so a cached image is compared against the
+# digest it was verified with at download time, not against today's upstream.
+fetch_base_image() {
+  local stamp="$BASE_IMG.$SUMS_ALGO" expected="" got=""
+
+  if [ -f "$BASE_IMG" ]; then
+    if [ -f "$stamp" ]; then
+      info "Verifying cached image against its recorded $SUMS_ALGO digest"
+      got="$(file_sum "$BASE_IMG")"
+      [ "$got" = "$(cat "$stamp")" ] || die "cached image failed verification: $BASE_IMG
+  expected $(cat "$stamp")
+  got      $got
+Remove it to force a fresh verified download:  rm '$BASE_IMG' '$stamp'"
+      return 0
+    fi
+    # Cache predates checksum verification (or the stamp was deleted). The
+    # upstream `latest` image may have legitimately moved on since this file
+    # was downloaded, so the only safe option is a fresh verified download.
+    warn "cached image has no verification record — re-downloading a verified copy"
+    rm -f "$BASE_IMG"
+  fi
+
+  # wget's --https-only (below) only constrains recursive follows, so enforce
+  # the transport explicitly. A non-https custom image is tolerated only when
+  # its content is pinned with EZY_IMG_SHA256.
+  case "$IMG_URL" in
+    https://*) ;;
+    *) if [ -n "${EZY_IMG_URL:-}" ] && [ -n "${EZY_IMG_SHA256:-}" ]; then
+         warn "EZY_IMG_URL is not https — relying on EZY_IMG_SHA256 for integrity"
+       else
+         die "refusing non-https image URL: $IMG_URL (use https, or pin a custom image with EZY_IMG_SHA256)"
+       fi ;;
+  esac
+
+  if [ -n "$SUMS_URL" ]; then
+    info "Fetching checksum file: $SUMS_URL"
+    wget -q --https-only -O "$RUNDIR/image.sums" "$SUMS_URL" \
+      || die "could not fetch checksum file: $SUMS_URL"
+    expected="$(expected_sum "$RUNDIR/image.sums" "${IMG_URL##*/}")"
+    [ -n "$expected" ] || die "no entry for ${IMG_URL##*/} in $SUMS_URL — refusing an unverifiable image"
+  elif [ -n "${EZY_IMG_SHA256:-}" ]; then
+    expected="$EZY_IMG_SHA256"
+  else
+    warn "custom EZY_IMG_URL without EZY_IMG_SHA256 — image integrity will NOT be verified"
+  fi
+
+  info "Downloading $DISTRO_NAME $ARCH cloud image (once, cached in $CACHE)"
+  wget -q --show-progress --https-only -O "$BASE_IMG.tmp" "$IMG_URL"
+
+  if [ -n "$expected" ]; then
+    info "Verifying download ($SUMS_ALGO)"
+    got="$(file_sum "$BASE_IMG.tmp")"
+    if [ "$got" != "$expected" ]; then
+      rm -f "$BASE_IMG.tmp"
+      die "checksum mismatch for $IMG_URL
+  expected $expected
+  got      $got
+Refusing to boot an unverified image."
+    fi
+    printf '%s\n' "$got" > "$stamp"
+  else
+    rm -f "$stamp"
+  fi
+  mv "$BASE_IMG.tmp" "$BASE_IMG"
+}
+
 provision() {
   info "Installing via the REAL installer: curl … | sudo sh -s -- --local  (EZYSHIELD_BASE_URL=$GW:$HTTP_PORT)"
   # --local + EZYSHIELD_LOCAL_ACK=1 (issue #17): custom-mirror installs are
@@ -263,7 +362,7 @@ boot_vm() {
     -m "$MEM" -smp "$CPUS" \
     -drive file="$OVERLAY",if=virtio \
     -drive file="$SEED",if=virtio,format=raw \
-    -nic user,model=virtio-net-pci,hostfwd=tcp::"$SSH_PORT"-:22 \
+    -nic user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:"$SSH_PORT"-:22 \
     -display none -serial file:"$SERIAL" \
     -pidfile "$PIDFILE" -daemonize
 }
@@ -285,6 +384,11 @@ cmd_config() {
   printf 'qemu binary : %s  [%s]\n' "$QEMU_BIN" "$qemu_state"
   printf 'firmware    : %s\n'       "$firmware"
   printf 'image URL   : %s\n'       "$IMG_URL"
+  local cksum
+  if [ -n "$SUMS_URL" ]; then cksum="$SUMS_URL  ($SUMS_ALGO)"
+  elif [ -n "${EZY_IMG_SHA256:-}" ]; then cksum="pinned via EZY_IMG_SHA256"
+  else cksum="NONE — custom EZY_IMG_URL without EZY_IMG_SHA256 (unverified)"; fi
+  printf 'checksums   : %s\n'       "$cksum"
   printf 'base image  : %s\n'       "$BASE_IMG"
   printf 'guest user  : %s  (sudo group: %s)\n' "$GUEST_USER" "$SUDO_GROUP"
   printf 'guest pkgs  : %s\n'       "${PKG_LIST[*]}"
@@ -317,11 +421,7 @@ cmd_up() {
   cp "$REPO/bin/ezyshield-enforcer" "$SERVE/ezyshield-enforcer-$SUFFIX"
   ( cd "$SERVE" && sha256sum "ezyshield-$SUFFIX" "ezyshield-enforcer-$SUFFIX" > checksums.txt )
 
-  if [ ! -f "$BASE_IMG" ]; then
-    info "Downloading $DISTRO_NAME $ARCH cloud image (once, cached in $CACHE)"
-    wget -q --show-progress -O "$BASE_IMG.tmp" "$IMG_URL"
-    mv "$BASE_IMG.tmp" "$BASE_IMG"
-  fi
+  fetch_base_image
 
   info "Creating fresh overlay disk"
   rm -f "$OVERLAY"
@@ -350,7 +450,9 @@ EOF
   cloud-localds "$SEED" "$RUNDIR/user-data" "$RUNDIR/meta-data"
 
   # Record what we booted so verify/ssh/down don't need the env re-set.
-  printf 'DISTRO=%s\nARCH=%s\nGUEST_USER=%s\n' "$DISTRO" "$ARCH" "$GUEST_USER" > "$VM_ENV"
+  # %q: the file is sourced later, and EZY_DISTRO/EZY_GUEST_USER are an escape
+  # hatch that can carry arbitrary strings — quote them, don't interpolate.
+  printf 'DISTRO=%q\nARCH=%q\nGUEST_USER=%q\n' "$DISTRO" "$ARCH" "$GUEST_USER" > "$VM_ENV"
 
   start_http
   boot_vm

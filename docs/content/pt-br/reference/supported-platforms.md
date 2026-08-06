@@ -32,7 +32,7 @@ Legenda:
 | Ubuntu | 24.04 LTS (noble) | ✅ | ☐ |
 | Ubuntu | 25.04 (plucky) | 🟢 | ☐ |
 | Debian | 12 (bookworm) | ✅ | ☐ |
-| Debian | 13 (trixie) | ☐ | ☐ |
+| Debian | 13 (trixie) | 🧪 | 🧪 |
 | AlmaLinux | 9 | 🧪 | 🧪 |
 | Rocky Linux | 9 | 🧪 | 🧪 |
 
@@ -73,7 +73,16 @@ scripts/qemu-e2e.sh down
 `EZY_DISTRO` aceita `debian12`, `debian13`, `ubuntu2404`, `ubuntu2504`,
 `alma9`, `rocky9`; `EZY_ARCH` aceita `amd64` (padrão: seu host) e `arm64`.
 Para uma imagem fora da tabela, defina `EZY_IMG_URL`, `EZY_GUEST_USER` e
-`EZY_FAMILY` (`deb` ou `rhel`) no lugar de `EZY_DISTRO`.
+`EZY_FAMILY` (`deb` ou `rhel`) no lugar de `EZY_DISTRO`, e fixe a imagem com
+`EZY_IMG_SHA256=<hex>`.
+
+As cloud images são baixadas por HTTPS e verificadas contra o arquivo de
+checksums publicado pela distro (`SHA512SUMS` / `SHA256SUMS` / `CHECKSUM`)
+antes do primeiro boot. O digest verificado fica cacheado ao lado da imagem,
+então re-execuções re-verificam o arquivo em cache sem baixar de novo — uma
+imagem cacheada corrompida aborta a execução em vez de ser reutilizada em
+silêncio. Uma `EZY_IMG_URL` customizada só é verificada quando
+`EZY_IMG_SHA256` está definida; sem ela o harness avisa e pula a verificação.
 
 ### Requisitos do host
 

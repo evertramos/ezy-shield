@@ -69,11 +69,15 @@ sha256sum --check --ignore-missing checksums.txt
 - O script de instalação `get.ezyshield.com` executa essa mesma verificação
   automaticamente quando o `cosign` está instalado no host, e imprime um
   aviso (sem falhar) quando não está.
-- O `ezyshield update` aplica a mesma política antes de confiar no
-  `checksums.txt`: com o `cosign` instalado, a assinatura é verificada contra
-  a identidade fixada do workflow e **qualquer divergência aborta o update**;
-  sem o `cosign` (ou numa release anterior à assinatura) ele avisa e continua
-  na integridade do TLS.
+- O `ezyshield update` é **mais estrito que o script de instalação**: antes de
+  confiar no `checksums.txt` ele verifica a assinatura contra a identidade
+  fixada do workflow e **falha fechado** — assets `.sig`/`.pem` ausentes,
+  `cosign` não instalado ou qualquer divergência na verificação abortam o
+  update (o updater roda como root, então um atacante capaz de remover os
+  assets de assinatura não pode rebaixá-lo a confiança sem assinatura). O
+  `--allow-unsigned` é o opt-out explícito para os dois casos de pré-requisito
+  ausente (release anterior à assinatura, host sem `cosign`); uma verificação
+  com falha aborta mesmo com a flag.
 - Pacotes deb/rpm instalados pelo repositório de pacotes são adicionalmente
   verificados por GPG pelo apt/dnf contra a chave de assinatura do
   repositório.

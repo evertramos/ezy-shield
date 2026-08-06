@@ -626,9 +626,14 @@ Códigos de saída: `0` salvo, `1` wizard abortado ou falha de escrita, `2` conf
 
 Autoatualiza os binários a partir do GitHub Releases. O `checksums.txt` tem a
 assinatura verificada com `cosign` contra a identidade fixada do workflow de
-release quando disponível (qualquer divergência aborta; veja
-[Verificando releases](../security/verifying-releases.md)), e depois cada
-binário é verificado por checksum.
+release (veja [Verificando releases](../security/verifying-releases.md)), e
+depois cada binário é verificado por checksum. A verificação de assinatura é
+**fail-closed**: `checksums.txt.sig`/`.pem` ausente, `cosign` não instalado ou
+verificação com falha abortam o update e nada é instalado. Use
+`--allow-unsigned` para prosseguir sem assinatura (assets de assinatura
+ausentes — ex.: uma release anterior à assinatura — ou host sem `cosign`); uma
+verificação **com falha** de uma assinatura presente sempre aborta, com ou sem
+a flag.
 
 ```bash
 # Verificar se existe uma release mais nova

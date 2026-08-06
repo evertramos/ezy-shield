@@ -611,9 +611,13 @@ Exit codes: `0` saved, `1` wizard aborted or write failed, `2` config.yaml not f
 
 Self-update the binaries from GitHub Releases. `checksums.txt` is
 signature-verified with `cosign` against the pinned release-workflow identity
-when available (any mismatch aborts; see
-[Verifying releases](../security/verifying-releases.md)), then each binary is
-checksum-verified.
+(see [Verifying releases](../security/verifying-releases.md)), then each
+binary is checksum-verified. Signature verification is **fail-closed**: a
+missing `checksums.txt.sig`/`.pem`, a missing `cosign` binary, or a failed
+verification aborts the update and nothing is installed. Pass
+`--allow-unsigned` to proceed without a signature (missing signature assets —
+e.g. a pre-signing release — or no `cosign` on the host); a **failed**
+verification of a present signature always aborts, with or without the flag.
 
 ```bash
 # Check whether a newer release exists

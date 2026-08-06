@@ -24,7 +24,9 @@ const (
 )
 
 // ErrCosignNotFound reports that the cosign binary is not installed. Callers
-// decide the policy (the updater warns and continues, matching get.sh).
+// decide the policy (the updater fails closed unless --allow-unsigned is
+// given — a distinct sentinel so that opt-out can never swallow a real
+// verification failure).
 var ErrCosignNotFound = errors.New("cosign not found in PATH")
 
 // CosignExecFunc runs cosign with args and returns its combined output. It is

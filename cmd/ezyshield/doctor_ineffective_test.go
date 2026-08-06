@@ -103,3 +103,34 @@ func TestCheckBanIneffective_CountNotCappedByDetailLimit(t *testing.T) {
 		t.Errorf("hint should label the truncated detail list:\n%s", res.Hint)
 	}
 }
+
+// TestDoctorRODSN_AppliesBusyTimeoutAndStaysReadOnly pins the RUNTIME effect
+// of the doctor's read-only DSN, mirroring internal/store/pragma_test.go
+// (issue #406, same class as #321): the previous mattn-style _busy_timeout=2000
+// parameter was silently ignored by modernc.org/sqlite, leaving busy_timeout=0
+// so the check could fail with SQLITE_BUSY the instant the daemon held a write
+// lock instead of waiting 2 s. mode=ro must survive the conversion.
+func TestDoctorRODSN_AppliesBusyTimeoutAndStaysReadOnly(t *testing.T) {
+	ctx := context.Background()
+	path, _ := newDoctorDB(t)
+
+	db, err := sql.Open("sqlite", doctorRODSN(path))
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	var busyTimeout int
+	if err := db.QueryRowContext(ctx, "PRAGMA busy_timeout").Scan(&busyTimeout); err != nil {
+		t.Fatalf("PRAGMA busy_timeout: %v", err)
+	}
+	if busyTimeout != 2000 {
+		t.Errorf("busy_timeout = %d, want 2000", busyTimeout)
+	}
+
+	// mode=ro is a safety invariant: the doctor must never mutate the
+	// daemon's database, so any write on this connection must fail.
+	if _, err := db.ExecContext(ctx, `CREATE TABLE doctor_ro_probe (x INTEGER)`); err == nil {
+		t.Error("write succeeded on the doctor connection, want read-only failure")
+	}
+}

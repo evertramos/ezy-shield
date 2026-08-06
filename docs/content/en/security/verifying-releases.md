@@ -69,6 +69,14 @@ sha256sum --check --ignore-missing checksums.txt
 - The `get.ezyshield.com` install script performs this same verification
   automatically when `cosign` is installed on the host, and prints a warning
   (without failing) when it is not.
+- `ezyshield update` is **stricter than the install script**: before trusting
+  `checksums.txt` it verifies the signature against the pinned workflow
+  identity and **fails closed** — missing `.sig`/`.pem` assets, a missing
+  `cosign` binary, or any verification mismatch aborts the update (the updater
+  runs as root, so an attacker able to strip the signature assets must not be
+  able to downgrade it to unsigned trust). `--allow-unsigned` is the explicit
+  opt-out for the two missing-prerequisite cases (pre-signing release, no
+  `cosign` on the host); a failed verification aborts even with the flag.
 - deb/rpm packages installed through the package repository are additionally
   GPG-verified by apt/dnf against the repository signing key.
 - SBOMs: download `<artifact>.spdx.json` from the release page to audit the

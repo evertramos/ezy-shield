@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -38,6 +39,11 @@ type updateOptions struct {
 	pinnedVersion  string
 	currentVersion string
 	assumeYes      bool
+	// allowUnsigned is the explicit operator opt-out from the fail-closed
+	// signature policy: it permits proceeding when the release has no
+	// signature assets or cosign is not installed. It NEVER permits
+	// proceeding past a failed verification of a present signature.
+	allowUnsigned bool
 
 	apiBaseURL string // override default api.github.com
 	repo       string // override evertramos/ezy-shield
@@ -60,6 +66,10 @@ type updateOptions struct {
 	// in feeds the downgrade confirmation prompt. nil (or EOF, e.g. a piped
 	// stdin) counts as "no" — silence must never approve a downgrade.
 	in io.Reader
+
+	// runCosign execs cosign for checksums signature verification (issue
+	// #322). Injectable for tests; nil means update.RealCosignExec.
+	runCosign update.CosignExecFunc
 }
 
 func newUpdateCmd() *cobra.Command {
@@ -67,13 +77,21 @@ func newUpdateCmd() *cobra.Command {
 		checkOnly     bool
 		pinnedVersion string
 		assumeYes     bool
+		allowUnsigned bool
 	)
 
 	cmd := &cobra.Command{
 		Use:   "update",
 		Short: "Self-update " + progName + " from GitHub Releases",
-		Long: `Check GitHub Releases for a newer ezyshield, verify SHA256 checksums,
-and atomically replace the on-disk binaries (ezyshield and ezyshield-enforcer).
+		Long: `Check GitHub Releases for a newer ezyshield, verify the release signature
+and SHA256 checksums, and atomically replace the on-disk binaries (ezyshield
+and ezyshield-enforcer).
+
+The cosign signature of checksums.txt is verified against the pinned release
+workflow identity before any digest is trusted. This is fail-closed: missing
+signature assets, a missing cosign binary, or a failed verification all abort
+the update. --allow-unsigned proceeds without a signature (missing assets or
+missing cosign only) — a FAILED verification always aborts, flag or not.
 
 By default fetches from the public repo evertramos/ezy-shield. Override the
 release source with the EZYSHIELD_UPDATE_URL environment variable (e.g. a
@@ -104,6 +122,7 @@ This command does NOT restart services. After a successful update, run:
 				pinnedVersion:  pinnedVersion,
 				currentVersion: version,
 				assumeYes:      assumeYes,
+				allowUnsigned:  allowUnsigned,
 				apiBaseURL:     apiBaseURL,
 				repo:           repo,
 				binaryPath:     selfPath,
@@ -122,6 +141,7 @@ This command does NOT restart services. After a successful update, run:
 	cmd.Flags().BoolVar(&checkOnly, "check", false, "check for updates without applying")
 	cmd.Flags().StringVar(&pinnedVersion, "version", "", "install a specific release tag (e.g. v0.2.0)")
 	cmd.Flags().BoolVarP(&assumeYes, "yes", "y", false, "skip the confirmation prompt when --version is a downgrade")
+	cmd.Flags().BoolVar(&allowUnsigned, "allow-unsigned", false, "proceed when the release has no signature assets or cosign is not installed (a FAILED signature verification still aborts)")
 
 	return cmd
 }
@@ -226,9 +246,25 @@ func runUpdate(ctx context.Context, opts updateOptions) error {
 		return fmt.Errorf("release %s has no asset %q — cannot verify", rel.TagName, checksumsFilename)
 	}
 
-	sums, err := client.DownloadChecksums(ctx, sumsAsset.URL)
+	rawSums, err := client.DownloadSmall(ctx, sumsAsset.URL)
 	if err != nil {
 		return fmt.Errorf("fetch checksums: %w", err)
+	}
+
+	// Verify the cosign keyless signature over checksums.txt BEFORE trusting
+	// any digest in it (issue #322): the checksums come from the same release
+	// origin as the binaries, so without the signature they only re-state
+	// what the release publisher chose. The policy is fail-closed — missing
+	// signature assets, missing cosign, or a failed verification all abort
+	// the update; --allow-unsigned relaxes only the two missing-prerequisite
+	// cases, never a failed verification (see verifyChecksumsSig).
+	if err := verifyChecksumsSig(ctx, opts, out, client, rel, rawSums); err != nil {
+		return err
+	}
+
+	sums, err := update.ParseChecksums(bytes.NewReader(rawSums))
+	if err != nil {
+		return fmt.Errorf("parse checksums: %w", err)
 	}
 	mainSHA, ok := sums[mainName]
 	if !ok {
@@ -306,6 +342,64 @@ func runUpdate(ctx context.Context, opts updateOptions) error {
 // errWriter wraps an io.Writer and accumulates the first write error so call
 // sites don't have to plumb error checks through every status print. The
 // accumulated error is returned via the runUpdate return path.
+// verifyChecksumsSig verifies the release's cosign keyless signature over the
+// raw checksums.txt bytes (issue #322, SECURITY-REVIEW §8).
+//
+// The policy is fail-closed (maintainer decision 2026-08-05, superseding the
+// get.sh-parity spec of issue #322 — Strix HIGH, CWE-347: the release asset
+// list is publisher-controlled, so treating stripped signature assets as a
+// warning would let an attacker downgrade a root-run update to unsigned
+// trust):
+//   - signature assets present and cosign installed → verify; ANY mismatch is
+//     fatal, --allow-unsigned included (the flag means "I accept unsigned",
+//     never "I accept forged");
+//   - signature assets absent, or cosign not installed → abort by default;
+//     --allow-unsigned proceeds with a loud warning (explicit operator
+//     opt-out, e.g. for pre-signing releases).
+func verifyChecksumsSig(ctx context.Context, opts updateOptions, out *errWriter, client *update.Client, rel *update.Release, rawSums []byte) error {
+	sigAsset, sigOK := rel.FindAsset(checksumsFilename + ".sig")
+	certAsset, certOK := rel.FindAsset(checksumsFilename + ".pem")
+	if !sigOK || !certOK {
+		if !opts.allowUnsigned {
+			return fmt.Errorf("release %s has no signature assets (%s.sig/.pem) — refusing to update: cannot prove the release came from the ezy-shield release workflow (a compromised publisher could have stripped them); pass --allow-unsigned to accept an unsigned release", rel.TagName, checksumsFilename)
+		}
+		out.printf("WARNING: release %s has no signature assets (%s.sig/.pem) — proceeding UNSIGNED because --allow-unsigned was given.\n", rel.TagName, checksumsFilename)
+		out.printf("         Integrity now rests solely on TLS to the release host.\n")
+		return nil
+	}
+
+	sig, err := client.DownloadSmall(ctx, sigAsset.URL)
+	if err != nil {
+		return fmt.Errorf("fetch checksums signature: %w", err)
+	}
+	cert, err := client.DownloadSmall(ctx, certAsset.URL)
+	if err != nil {
+		return fmt.Errorf("fetch checksums certificate: %w", err)
+	}
+
+	runCosign := opts.runCosign
+	if runCosign == nil {
+		runCosign = update.RealCosignExec
+	}
+	err = update.VerifyChecksumsSignature(ctx, runCosign, rawSums, sig, cert)
+	switch {
+	case err == nil:
+		out.printf("Signature verified: %s was produced by the ezy-shield release workflow.\n", checksumsFilename)
+		return nil
+	case errors.Is(err, update.ErrCosignNotFound):
+		if !opts.allowUnsigned {
+			return fmt.Errorf("cosign is not installed — refusing to update without verifying the %s signature (see the project's 'Verifying releases' docs for install instructions); pass --allow-unsigned to skip verification", checksumsFilename)
+		}
+		out.printf("WARNING: cosign is not installed — skipping signature verification of %s because --allow-unsigned was given.\n", checksumsFilename)
+		out.printf("         Install cosign to verify releases (see the project's 'Verifying releases' docs).\n")
+		return nil
+	default:
+		// Deliberately NOT gated on --allow-unsigned: a present-but-invalid
+		// signature is evidence of tampering, not a missing prerequisite.
+		return fmt.Errorf("signature verification of %s FAILED — refusing to update: %w", checksumsFilename, err)
+	}
+}
+
 type errWriter struct {
 	w   io.Writer
 	err error

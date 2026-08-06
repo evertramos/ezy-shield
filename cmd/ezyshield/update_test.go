@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -26,6 +27,8 @@ type fixture struct {
 	enfSHA       string
 	checksumBody string
 	tag          string
+	rel          *update.Release
+	mux          *http.ServeMux
 }
 
 func newFixture(t *testing.T, tag string) *fixture {
@@ -58,8 +61,11 @@ func newFixture(t *testing.T, tag string) *fixture {
 	f.srv = httptest.NewTLSServer(mux)
 	t.Cleanup(f.srv.Close)
 
-	// Register the release endpoints now that we know f.srv.URL.
-	rel := update.Release{
+	// Register the release endpoints now that we know f.srv.URL. Handlers
+	// encode *f.rel per request so tests can append assets after creation
+	// (e.g. withSignatureAssets).
+	f.mux = mux
+	f.rel = &update.Release{
 		TagName: tag,
 		Assets: []update.Asset{
 			{Name: "ezyshield-linux-amd64", URL: f.srv.URL + "/dl/ezyshield-linux-amd64"},
@@ -68,13 +74,37 @@ func newFixture(t *testing.T, tag string) *fixture {
 		},
 	}
 	mux.HandleFunc("/repos/test/repo/releases/latest", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(rel)
+		_ = json.NewEncoder(w).Encode(f.rel)
 	})
 	mux.HandleFunc("/repos/test/repo/releases/tags/"+tag, func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(rel)
+		_ = json.NewEncoder(w).Encode(f.rel)
 	})
 
 	return f
+}
+
+// withSignatureAssets publishes checksums.txt.sig/.pem assets on the fixture
+// release, mimicking a signed release (issue #322).
+func (f *fixture) withSignatureAssets() {
+	f.mux.HandleFunc("/dl/checksums.txt.sig", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("FAKE_SIG"))
+	})
+	f.mux.HandleFunc("/dl/checksums.txt.pem", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("FAKE_CERT"))
+	})
+	f.rel.Assets = append(f.rel.Assets,
+		update.Asset{Name: "checksums.txt.sig", URL: f.srv.URL + "/dl/checksums.txt.sig"},
+		update.Asset{Name: "checksums.txt.pem", URL: f.srv.URL + "/dl/checksums.txt.pem"},
+	)
+}
+
+// cosignOK is a runCosign stub for tests where signature verification is not
+// the behavior under test: it reports success without invoking cosign. The
+// update path fails closed on unsigned releases, so tests exercising other
+// concerns pair this with withSignatureAssets to model a normal signed
+// release.
+func cosignOK(_ context.Context, _ ...string) ([]byte, error) {
+	return []byte("Verified OK"), nil
 }
 
 // optsFor builds updateOptions wired against the fixture, with --verify and
@@ -123,8 +153,10 @@ func withTestClient(t *testing.T, f *fixture) {
 // then atomically replace both files.
 func TestRunUpdate_HappyPath(t *testing.T) {
 	f := newFixture(t, "v0.2.0")
+	f.withSignatureAssets()
 	tmpDir := t.TempDir()
 	opts := f.optsFor(t, tmpDir, "v0.1.0")
+	opts.runCosign = cosignOK
 	buf := &bytes.Buffer{}
 	opts.out = buf
 	withTestClient(t, f)
@@ -238,7 +270,9 @@ func TestRunUpdate_PinnedVersion(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t, target)
+			f.withSignatureAssets()
 			opts := f.optsFor(t, t.TempDir(), tc.current)
+			opts.runCosign = cosignOK
 			opts.pinnedVersion = target
 			opts.assumeYes = tc.assumeYes
 			if tc.stdin != "" {
@@ -281,12 +315,14 @@ func TestRunUpdate_PinnedVersion(t *testing.T) {
 
 func TestRunUpdate_ChecksumMismatch(t *testing.T) {
 	f := newFixture(t, "v0.2.0")
+	f.withSignatureAssets()
 	// Corrupt the served binary so its real digest no longer matches the
 	// checksum line we publish.
 	f.mainBytes = append(f.mainBytes, 'X')
 
 	tmpDir := t.TempDir()
 	opts := f.optsFor(t, tmpDir, "v0.1.0")
+	opts.runCosign = cosignOK
 	buf := &bytes.Buffer{}
 	opts.out = buf
 	withTestClient(t, f)
@@ -320,8 +356,10 @@ func TestRunUpdate_UnsupportedArch(t *testing.T) {
 
 func TestRunUpdate_TempBinaryIsExecutable(t *testing.T) {
 	f := newFixture(t, "v0.2.0")
+	f.withSignatureAssets()
 	tmpDir := t.TempDir()
 	opts := f.optsFor(t, tmpDir, "v0.1.0")
+	opts.runCosign = cosignOK
 
 	// Track whether verify was called and what permissions the file had at that time
 	var permChecked bool
@@ -495,5 +533,232 @@ func TestResolveUpdateSource(t *testing.T) {
 		if gotRepo != c.wantRepo {
 			t.Errorf("resolveUpdateSource(%q) repo = %q, want %q", c.in, gotRepo, c.wantRepo)
 		}
+	}
+}
+
+// ── Signature verification (issue #322) ──────────────────────────────────────
+
+// TestRunUpdate_SignatureFailureAborts reproduces issue #322: with signature
+// assets published, a failed cosign verification must abort the update before
+// any binary is touched. Pre-fix, checksums.txt was trusted straight from the
+// release origin and no signature was ever checked.
+func TestRunUpdate_SignatureFailureAborts(t *testing.T) {
+	f := newFixture(t, "v0.2.0")
+	f.withSignatureAssets()
+	tmpDir := t.TempDir()
+	opts := f.optsFor(t, tmpDir, "v0.1.0")
+	opts.runCosign = func(_ context.Context, _ ...string) ([]byte, error) {
+		return []byte("Error: no matching signatures"), errors.New("exit status 1")
+	}
+	withTestClient(t, f)
+
+	err := runUpdate(context.Background(), opts)
+	if err == nil {
+		t.Fatal("expected update to abort on signature verification failure")
+	}
+	if !strings.Contains(err.Error(), "signature verification") {
+		t.Errorf("error should name signature verification, got: %v", err)
+	}
+	got, _ := os.ReadFile(opts.binaryPath)
+	if string(got) != "OLD_MAIN" {
+		t.Errorf("binary must not be replaced on signature failure; got %q", got)
+	}
+	got, _ = os.ReadFile(opts.enforcerPath)
+	if string(got) != "OLD_ENF" {
+		t.Errorf("enforcer must not be replaced on signature failure; got %q", got)
+	}
+}
+
+// TestRunUpdate_SignatureVerified asserts the verification actually runs on a
+// signed release and a passing verification lets the update complete.
+func TestRunUpdate_SignatureVerified(t *testing.T) {
+	f := newFixture(t, "v0.2.0")
+	f.withSignatureAssets()
+	tmpDir := t.TempDir()
+	opts := f.optsFor(t, tmpDir, "v0.1.0")
+	buf := &bytes.Buffer{}
+	opts.out = buf
+	cosignCalled := false
+	opts.runCosign = func(_ context.Context, args ...string) ([]byte, error) {
+		cosignCalled = true
+		joined := strings.Join(args, " ")
+		if !strings.Contains(joined, "verify-blob") {
+			t.Errorf("expected a verify-blob invocation, got: %s", joined)
+		}
+		return []byte("Verified OK"), nil
+	}
+	withTestClient(t, f)
+
+	if err := runUpdate(context.Background(), opts); err != nil {
+		t.Fatalf("runUpdate: %v", err)
+	}
+	if !cosignCalled {
+		t.Fatal("cosign verification was never invoked on a signed release")
+	}
+	if !strings.Contains(buf.String(), "Signature verified") {
+		t.Errorf("expected signature confirmation in output:\n%s", buf.String())
+	}
+	got, _ := os.ReadFile(opts.binaryPath)
+	if !bytes.Equal(got, f.mainBytes) {
+		t.Errorf("update should complete after verified signature; got %q", got)
+	}
+}
+
+// TestRunUpdate_CosignMissingAborts pins the fail-closed default (maintainer
+// decision 2026-08-05, superseding the get.sh-parity spec of issue #322): a
+// root-run updater must not fall back to TLS-only trust just because cosign
+// isn't installed. Without --allow-unsigned, a missing cosign binary aborts
+// the update and nothing is installed.
+func TestRunUpdate_CosignMissingAborts(t *testing.T) {
+	f := newFixture(t, "v0.2.0")
+	f.withSignatureAssets()
+	tmpDir := t.TempDir()
+	opts := f.optsFor(t, tmpDir, "v0.1.0")
+	opts.runCosign = func(_ context.Context, _ ...string) ([]byte, error) {
+		return nil, update.ErrCosignNotFound
+	}
+	withTestClient(t, f)
+
+	err := runUpdate(context.Background(), opts)
+	if err == nil {
+		t.Fatal("expected update to abort when cosign is not installed")
+	}
+	if !strings.Contains(err.Error(), "cosign") {
+		t.Errorf("error should name cosign, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "--allow-unsigned") {
+		t.Errorf("error should mention the --allow-unsigned opt-out, got: %v", err)
+	}
+	got, _ := os.ReadFile(opts.binaryPath)
+	if string(got) != "OLD_MAIN" {
+		t.Errorf("binary must not be replaced when cosign is missing; got %q", got)
+	}
+	got, _ = os.ReadFile(opts.enforcerPath)
+	if string(got) != "OLD_ENF" {
+		t.Errorf("enforcer must not be replaced when cosign is missing; got %q", got)
+	}
+}
+
+// TestRunUpdate_UnsignedReleaseAborts pins the fail-closed default for absent
+// signature assets (Strix HIGH, CWE-347): the release JSON is publisher-
+// controlled, so an attacker who can strip checksums.txt.sig/.pem must not be
+// able to downgrade the update back to unsigned trust. Without
+// --allow-unsigned, missing assets abort the update and nothing is installed.
+func TestRunUpdate_UnsignedReleaseAborts(t *testing.T) {
+	f := newFixture(t, "v0.2.0")
+	tmpDir := t.TempDir()
+	opts := f.optsFor(t, tmpDir, "v0.1.0")
+	opts.runCosign = func(_ context.Context, _ ...string) ([]byte, error) {
+		t.Error("cosign must not run when the release has no signature assets")
+		return nil, nil
+	}
+	withTestClient(t, f)
+
+	err := runUpdate(context.Background(), opts)
+	if err == nil {
+		t.Fatal("expected update to abort when signature assets are missing")
+	}
+	if !strings.Contains(err.Error(), "signature") {
+		t.Errorf("error should name the missing signature, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "--allow-unsigned") {
+		t.Errorf("error should mention the --allow-unsigned opt-out, got: %v", err)
+	}
+	got, _ := os.ReadFile(opts.binaryPath)
+	if string(got) != "OLD_MAIN" {
+		t.Errorf("binary must not be replaced on an unsigned release; got %q", got)
+	}
+	got, _ = os.ReadFile(opts.enforcerPath)
+	if string(got) != "OLD_ENF" {
+		t.Errorf("enforcer must not be replaced on an unsigned release; got %q", got)
+	}
+}
+
+// TestRunUpdate_AllowUnsigned_MissingAssetsProceeds covers the explicit
+// operator opt-out: --allow-unsigned on a release without .sig/.pem assets
+// proceeds, but only with a loud warning naming the accepted risk.
+func TestRunUpdate_AllowUnsigned_MissingAssetsProceeds(t *testing.T) {
+	f := newFixture(t, "v0.2.0")
+	tmpDir := t.TempDir()
+	opts := f.optsFor(t, tmpDir, "v0.1.0")
+	opts.allowUnsigned = true
+	buf := &bytes.Buffer{}
+	opts.out = buf
+	opts.runCosign = func(_ context.Context, _ ...string) ([]byte, error) {
+		t.Error("cosign must not run when the release has no signature assets")
+		return nil, nil
+	}
+	withTestClient(t, f)
+
+	if err := runUpdate(context.Background(), opts); err != nil {
+		t.Fatalf("runUpdate: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "WARNING") || !strings.Contains(out, "no signature assets") {
+		t.Errorf("expected loud unsigned-release warning in output:\n%s", out)
+	}
+	got, _ := os.ReadFile(opts.binaryPath)
+	if !bytes.Equal(got, f.mainBytes) {
+		t.Errorf("--allow-unsigned should let the update complete; got %q", got)
+	}
+}
+
+// TestRunUpdate_AllowUnsigned_CosignMissingProceeds covers the other opt-out
+// case: --allow-unsigned with signature assets present but no cosign binary
+// proceeds with a loud warning.
+func TestRunUpdate_AllowUnsigned_CosignMissingProceeds(t *testing.T) {
+	f := newFixture(t, "v0.2.0")
+	f.withSignatureAssets()
+	tmpDir := t.TempDir()
+	opts := f.optsFor(t, tmpDir, "v0.1.0")
+	opts.allowUnsigned = true
+	buf := &bytes.Buffer{}
+	opts.out = buf
+	opts.runCosign = func(_ context.Context, _ ...string) ([]byte, error) {
+		return nil, update.ErrCosignNotFound
+	}
+	withTestClient(t, f)
+
+	if err := runUpdate(context.Background(), opts); err != nil {
+		t.Fatalf("runUpdate: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "WARNING") || !strings.Contains(out, "cosign is not installed") {
+		t.Errorf("expected loud cosign-missing warning in output:\n%s", out)
+	}
+	got, _ := os.ReadFile(opts.binaryPath)
+	if !bytes.Equal(got, f.mainBytes) {
+		t.Errorf("--allow-unsigned should let the update complete; got %q", got)
+	}
+}
+
+// TestRunUpdate_AllowUnsigned_InvalidSignatureStillAborts pins the boundary of
+// the opt-out: --allow-unsigned means "I accept unsigned", never "I accept
+// forged". A present-but-invalid signature aborts even with the flag.
+func TestRunUpdate_AllowUnsigned_InvalidSignatureStillAborts(t *testing.T) {
+	f := newFixture(t, "v0.2.0")
+	f.withSignatureAssets()
+	tmpDir := t.TempDir()
+	opts := f.optsFor(t, tmpDir, "v0.1.0")
+	opts.allowUnsigned = true
+	opts.runCosign = func(_ context.Context, _ ...string) ([]byte, error) {
+		return []byte("Error: no matching signatures"), errors.New("exit status 1")
+	}
+	withTestClient(t, f)
+
+	err := runUpdate(context.Background(), opts)
+	if err == nil {
+		t.Fatal("--allow-unsigned must not bypass a FAILED signature verification")
+	}
+	if !strings.Contains(err.Error(), "signature verification") {
+		t.Errorf("error should name signature verification, got: %v", err)
+	}
+	got, _ := os.ReadFile(opts.binaryPath)
+	if string(got) != "OLD_MAIN" {
+		t.Errorf("binary must not be replaced on signature failure; got %q", got)
+	}
+	got, _ = os.ReadFile(opts.enforcerPath)
+	if string(got) != "OLD_ENF" {
+		t.Errorf("enforcer must not be replaced on signature failure; got %q", got)
 	}
 }

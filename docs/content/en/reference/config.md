@@ -171,7 +171,7 @@ notify:
 
 Shared fields: `rate_limit_per_minute` (default 5) and `dedup_window_sec` (default 600) protect against notification storms. Every channel accepts an optional `severity` list (`info` \| `warn` \| `critical`).
 
-> Secret-typed fields (`bot_token`, `password`, `webhook_url`, webhook `url`) only accept `env:VARNAME` references — inline values are rejected at load time. Webhook header **values** are sent verbatim unless the entire value is an `env:` reference, which is resolved.
+> Secret-typed fields (`bot_token`, `password`, `webhook_url`, webhook `url`) only accept `env:VARNAME` references — inline values are rejected at load time. They are also **required** for their channel: a `telegram` block without `bot_token`, an `email` block without `password`, or a `slack`/`discord`/`webhook` block without its URL fails validation (the daemon resolves them at startup). Webhook header **values** are sent verbatim unless the entire value is an `env:` reference, which is resolved.
 
 > Email `tls: starttls` **fails closed**: if the SMTP server does not advertise STARTTLS (or a capability-stripping proxy hides it), the send errors instead of silently downgrading to plaintext. Set `tls: none` explicitly if you really intend to send unencrypted.
 
@@ -210,7 +210,7 @@ ai:
 | `model` | model name |
 | `api_key` | `env:VARNAME` reference (never inline) |
 | `endpoint` | base URL for the **`ollama`** provider only (default `http://localhost:11434`). The `anthropic` and `openai` providers ignore it and always call their official APIs (`https://api.anthropic.com`, `https://api.openai.com`) — there is no OpenAI-compatible-endpoint override. Same in the single-provider and `providers` failover forms. |
-| `ambiguous_band` | `[low, high]` — only scores inside the band consult the AI |
+| `ambiguous_band` | `[low, high]` — only scores inside the band consult the AI. Omitted (or `[0, 0]`) defaults to `[30, 75]`; any other band with `low >= high` or values outside 0–100 is rejected at load |
 | `token_budget_daily` | daily token cap; when exhausted, decisions fall back to rules |
 | `cache_ttl` | verdict cache duration |
 | `providers` | multi-provider failover list (`name`, `priority`, `model`, `api_key`, `endpoint`, `token_budget_daily`); takes precedence over the single-provider fields |

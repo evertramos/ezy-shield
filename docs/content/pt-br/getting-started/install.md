@@ -250,10 +250,13 @@ sudo apt update && sudo apt install --only-upgrade ezyshield
 sudo dnf upgrade ezyshield
 ```
 
-Os arquivos de configuração em `/etc/ezyshield` nunca são tocados pelo upgrade de pacote. Reinicie os serviços depois:
+Os arquivos de configuração em `/etc/ezyshield` nunca são tocados pelo
+upgrade de pacote. Serviços que estavam **rodando** são reiniciados
+automaticamente na versão nova; serviços que você parou ou desabilitou
+permanecem intocados. Para verificar:
 
 ```bash
-sudo systemctl restart ezyshield-enforcer ezyshield
+systemctl status ezyshield-enforcer ezyshield
 ```
 
 **Instalado via script** (binários em `/usr/local/bin`) — rode o script de

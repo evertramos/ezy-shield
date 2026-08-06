@@ -198,12 +198,39 @@ func formatEmailBody(msg sdk.Notification) string {
 	return sb.String()
 }
 
-// buildRawEmail constructs a minimal RFC 5322 message in memory.
+// sanitizeHeader strips CR, LF, and every other ASCII control character from a
+// header value (CWE-93, issue #320). Notification.Title is untrusted — the
+// daemon passes wrapped error text into it — and email is the only
+// line-oriented channel: an embedded CR/LF would terminate the Subject header
+// and inject arbitrary headers (e.g. Bcc) into the message. Runs of stripped
+// characters collapse to a single space so multi-line error text stays
+// readable on one header line.
+func sanitizeHeader(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	lastStripped := false
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			if !lastStripped {
+				b.WriteRune(' ')
+				lastStripped = true
+			}
+			continue
+		}
+		b.WriteRune(r)
+		lastStripped = false
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// buildRawEmail constructs a minimal RFC 5322 message in memory. Header values
+// pass through sanitizeHeader at this choke point so no caller can smuggle a
+// header-terminating CR/LF, wherever the value originated.
 func buildRawEmail(from string, to []string, subject, body string) []byte {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "From: %s\r\n", from)
-	fmt.Fprintf(&sb, "To: %s\r\n", strings.Join(to, ", "))
-	fmt.Fprintf(&sb, "Subject: %s\r\n", subject)
+	fmt.Fprintf(&sb, "From: %s\r\n", sanitizeHeader(from))
+	fmt.Fprintf(&sb, "To: %s\r\n", sanitizeHeader(strings.Join(to, ", ")))
+	fmt.Fprintf(&sb, "Subject: %s\r\n", sanitizeHeader(subject))
 	sb.WriteString("MIME-Version: 1.0\r\n")
 	sb.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
 	sb.WriteString("\r\n")

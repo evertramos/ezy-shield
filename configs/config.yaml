@@ -1,6 +1,6 @@
 # EzyShield main configuration — example/template
 # Secrets must never appear here. Use env: references or systemd LoadCredential=.
-# See docs/schemas/config/ for the full JSON schema (populated by issue #3).
+# See docs/internal/schemas/config/config.schema.json for the full JSON schema.
 
 # Directory for runtime state (SQLite, socket)
 data_dir: /var/lib/ezyshield

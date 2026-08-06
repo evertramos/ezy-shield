@@ -34,10 +34,15 @@ type DB struct {
 // Open opens (or creates) the SQLite database at path, enables WAL mode, and
 // applies any pending migrations. Call Close when done.
 func Open(ctx context.Context, path string) (*DB, error) {
-	// _journal=WAL: concurrent readers don't block writers.
-	// _busy_timeout=5000: retry for up to 5 s on SQLITE_BUSY instead of erroring.
-	// _synchronous=NORMAL: safe with WAL (no risk of corruption).
-	dsn := "file:" + path + "?_journal=WAL&_busy_timeout=5000&_synchronous=NORMAL" //nolint:gosec // path is the admin-controlled database location from config
+	// journal_mode(WAL): concurrent readers don't block writers.
+	// busy_timeout(5000): retry for up to 5 s on SQLITE_BUSY instead of erroring.
+	// synchronous(NORMAL): safe with WAL (no risk of corruption).
+	//
+	// The _pragma=name(value) form is the modernc.org/sqlite driver's syntax;
+	// mattn-style parameters (_journal=..., _busy_timeout=...) are silently
+	// ignored by modernc and left the store on delete-journal with no busy
+	// retry (issue #321). TestOpen_AppliesPragmas pins the effective values.
+	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)" //nolint:gosec // path is the admin-controlled database location from config
 	sqlDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("store: open %s: %w", path, err)

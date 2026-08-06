@@ -168,7 +168,7 @@ notify:
 
 Campos compartilhados: `rate_limit_per_minute` (padrão 5) e `dedup_window_sec` (padrão 600) protegem contra tempestades de notificação. Todo canal aceita uma lista `severity` opcional (`info` \| `warn` \| `critical`).
 
-> Campos do tipo segredo (`bot_token`, `password`, `webhook_url`, o `url` do webhook) só aceitam referências `env:VARNAME` — valores inline são rejeitados no carregamento. Os **valores** dos headers do webhook são enviados literalmente, a menos que o valor inteiro seja uma referência `env:`, que é resolvida.
+> Campos do tipo segredo (`bot_token`, `password`, `webhook_url`, o `url` do webhook) só aceitam referências `env:VARNAME` — valores inline são rejeitados no carregamento. Eles também são **obrigatórios** no seu canal: um bloco `telegram` sem `bot_token`, um `email` sem `password`, ou um `slack`/`discord`/`webhook` sem sua URL falha na validação (o daemon os resolve na inicialização). Os **valores** dos headers do webhook são enviados literalmente, a menos que o valor inteiro seja uma referência `env:`, que é resolvida.
 
 > O `tls: starttls` do email **falha fechado**: se o servidor SMTP não anunciar STARTTLS (ou um proxy que remove capacidades o esconder), o envio dá erro em vez de silenciosamente cair para texto puro. Defina `tls: none` explicitamente se realmente pretende enviar sem criptografia.
 
@@ -207,7 +207,7 @@ ai:
 | `model` | nome do modelo |
 | `api_key` | referência `env:VARNAME` (nunca inline) |
 | `endpoint` | URL base apenas para o provedor **`ollama`** (padrão `http://localhost:11434`). Os provedores `anthropic` e `openai` a ignoram e sempre chamam suas APIs oficiais (`https://api.anthropic.com`, `https://api.openai.com`) — não há override de endpoint compatível com OpenAI. Mesmo comportamento nas formas de provedor único e de failover `providers`. |
-| `ambiguous_band` | `[low, high]` — apenas scores dentro da faixa consultam a IA |
+| `ambiguous_band` | `[low, high]` — apenas scores dentro da faixa consultam a IA. Omitida (ou `[0, 0]`) assume `[30, 75]`; qualquer outra faixa com `low >= high` ou valores fora de 0–100 é rejeitada no carregamento |
 | `token_budget_daily` | teto diário de tokens; quando esgotado, as decisões voltam para as rules |
 | `cache_ttl` | duração do cache de vereditos |
 | `providers` | lista de failover multi-provedor (`name`, `priority`, `model`, `api_key`, `endpoint`, `token_budget_daily`); tem precedência sobre os campos de provedor único |

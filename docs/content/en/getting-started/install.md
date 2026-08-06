@@ -246,10 +246,12 @@ sudo apt update && sudo apt install --only-upgrade ezyshield
 sudo dnf upgrade ezyshield
 ```
 
-Config files in `/etc/ezyshield` are never touched by package upgrades. Restart the services afterwards:
+Config files in `/etc/ezyshield` are never touched by package upgrades.
+Services that were **running** are restarted automatically on the new
+version; services you had stopped or disabled stay untouched. To verify:
 
 ```bash
-sudo systemctl restart ezyshield-enforcer ezyshield
+systemctl status ezyshield-enforcer ezyshield
 ```
 
 **Installed via the install script** (binaries in `/usr/local/bin`) — re-run

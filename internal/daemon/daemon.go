@@ -808,6 +808,13 @@ func (d *Daemon) syncEnforcerAllowlist(ctx context.Context) error {
 // Bare IPs in policy.Allowlist are widened to a host prefix (/32 or /128) so
 // nftables can accept them in the "interval" set flag.
 //
+// IPv4-mapped spellings ("::ffff:192.0.2.0/120", copied from dual-stack logs)
+// are canonicalized to plain v4 (issue #405, allowlist side of #365): fed to
+// Gate.SyncAllowlist verbatim they would land in the nftables @allowed v6 set
+// as dead entries that never match IPv4 packets. Mapped prefixes broader than
+// /96 have no IPv4 equivalent and are kept as parsed — dropping an allowlist
+// entry would remove protection. Mirrors cmd/ezyshield parseAllowlist (#400).
+//
 // A nil policy returns nil (defensive; New rejects nil policy, but tests may
 // construct a Daemon differently in the future).
 func staticAllowlistFromPolicy(p *config.Policy) []netip.Prefix {
@@ -815,18 +822,25 @@ func staticAllowlistFromPolicy(p *config.Policy) []netip.Prefix {
 		return nil
 	}
 	prefixes := make([]netip.Prefix, 0, len(p.Allowlist)+len(p.AdminCIDRs))
+	appendPrefix := func(pfx netip.Prefix) {
+		if norm, err := decision.NormalizePrefix(pfx); err == nil {
+			pfx = norm
+		}
+		prefixes = append(prefixes, pfx)
+	}
 	for _, s := range p.Allowlist {
 		if pfx, err := netip.ParsePrefix(s); err == nil {
-			prefixes = append(prefixes, pfx)
+			appendPrefix(pfx)
 			continue
 		}
 		if a, err := netip.ParseAddr(s); err == nil {
+			a = a.Unmap()
 			prefixes = append(prefixes, netip.PrefixFrom(a, a.BitLen()))
 		}
 	}
 	for _, s := range p.AdminCIDRs {
 		if pfx, err := netip.ParsePrefix(s); err == nil {
-			prefixes = append(prefixes, pfx)
+			appendPrefix(pfx)
 		}
 	}
 	return prefixes

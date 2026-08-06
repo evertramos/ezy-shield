@@ -371,3 +371,134 @@ func TestGateSyncFiltersMappedPrefix(t *testing.T) {
 		t.Fatalf("inner Sync received %+v, want only %+v", got, clean)
 	}
 }
+
+// ── issue #405: forward the canonical spelling, not the caller's ─────────────
+//
+// PR #400 made the Gate *compare* canonically, but Ban/Sync still forwarded
+// the caller's original mapped spelling to the inner enforcer, where nftables
+// files it in the v6 set — a dead entry that can never match IPv4 packets.
+// The Gate must forward the unmapped form once the comparison passes.
+
+// TestGateBanForwardsCanonicalMappedTarget: a clean (non-refused) mapped
+// target must reach the inner enforcer in its plain form — IP and Prefix
+// shapes alike — while TTL and already-canonical targets pass unchanged.
+func TestGateBanForwardsCanonicalMappedTarget(t *testing.T) {
+	allowlist := []netip.Prefix{mustPrefix(t, "192.0.2.0/24")}
+	tests := []struct {
+		name string
+		in   sdk.Target
+		want sdk.Target
+	}{
+		{
+			"mapped single IP unmapped",
+			sdk.Target{IP: netip.MustParseAddr("::ffff:198.51.100.9"), TTL: 5 * time.Minute},
+			sdk.Target{IP: netip.MustParseAddr("198.51.100.9"), TTL: 5 * time.Minute},
+		},
+		{
+			"mapped prefix becomes plain v4",
+			sdk.Target{Prefix: mustPrefix(t, "::ffff:198.51.100.0/120")},
+			sdk.Target{Prefix: mustPrefix(t, "198.51.100.0/24")},
+		},
+		{
+			"plain v4 prefix untouched",
+			sdk.Target{Prefix: mustPrefix(t, "203.0.113.0/24")},
+			sdk.Target{Prefix: mustPrefix(t, "203.0.113.0/24")},
+		},
+		{
+			"real v6 prefix untouched",
+			sdk.Target{Prefix: mustPrefix(t, "2001:db8::/32")},
+			sdk.Target{Prefix: mustPrefix(t, "2001:db8::/32")},
+		},
+		{
+			"broad mapped prefix (<96, no v4 equivalent) forwarded as-is",
+			sdk.Target{Prefix: mustPrefix(t, "::ffff:0:0/95")},
+			sdk.Target{Prefix: mustPrefix(t, "::ffff:0:0/95")},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			inner := &unguardedEnforcer{}
+			g := NewGate(inner, allowlist, nil)
+			if err := g.Ban(context.Background(), tc.in); err != nil {
+				t.Fatalf("Ban(%+v): %v", tc.in, err)
+			}
+			if len(inner.bans) != 1 || inner.bans[0] != tc.want {
+				t.Errorf("inner Ban received %+v, want [%+v]", inner.bans, tc.want)
+			}
+		})
+	}
+}
+
+// TestGateUnbanForwardsCanonicalMappedTarget: Unban must forward the same
+// canonical spelling Ban now writes, or a mapped-spelled unban would miss the
+// plain-v4 entry and leave it stuck in the block set.
+func TestGateUnbanForwardsCanonicalMappedTarget(t *testing.T) {
+	inner := &unguardedEnforcer{}
+	g := NewGate(inner, nil, nil)
+	if err := g.Unban(context.Background(), sdk.Target{IP: netip.MustParseAddr("::ffff:198.51.100.9")}); err != nil {
+		t.Fatalf("Unban: %v", err)
+	}
+	want := sdk.Target{IP: netip.MustParseAddr("198.51.100.9")}
+	if len(inner.unbans) != 1 || inner.unbans[0] != want {
+		t.Errorf("inner Unban received %+v, want [%+v]", inner.unbans, want)
+	}
+}
+
+// TestGateSyncForwardsCanonicalMappedTargets: entries surviving the Sync
+// filter must be forwarded canonically too — same gap as Ban, reconcile path.
+func TestGateSyncForwardsCanonicalMappedTargets(t *testing.T) {
+	allowlist := []netip.Prefix{mustPrefix(t, "192.0.2.0/24")}
+	inner := &unguardedEnforcer{}
+	g := NewGate(inner, allowlist, nil)
+
+	want := []sdk.Target{
+		{Prefix: mustPrefix(t, "::ffff:192.0.2.0/121")},    // refused: inside allowlist
+		{Prefix: mustPrefix(t, "::ffff:198.51.100.0/120")}, // clean mapped → canonical
+		{IP: netip.MustParseAddr("::ffff:203.0.113.9")},    // clean mapped IP → canonical
+	}
+	if err := g.Sync(context.Background(), want); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	got := inner.syncs[0]
+	wantForwarded := []sdk.Target{
+		{Prefix: mustPrefix(t, "198.51.100.0/24")},
+		{IP: netip.MustParseAddr("203.0.113.9")},
+	}
+	if !slices.Equal(got, wantForwarded) {
+		t.Errorf("inner Sync received %+v, want %+v", got, wantForwarded)
+	}
+}
+
+// TestGateAllowlistForwardingCanonicalizesMapped: the Gate's AllowlistSyncer
+// pass-through (issue #317) must also forward canonical spellings — a mapped
+// allowlist prefix forwarded verbatim lands in the nftables @allowed v6 set
+// where it protects nothing (issue #405, allowlist side of #365).
+func TestGateAllowlistForwardingCanonicalizesMapped(t *testing.T) {
+	local := &allowSyncEnforcer{}
+	g := NewGate(local, nil, nil)
+
+	mapped := mustPrefix(t, "::ffff:192.0.2.0/120")
+	canonical := mustPrefix(t, "192.0.2.0/24")
+	realV6 := mustPrefix(t, "2001:db8::/32")
+
+	if err := g.Allow(context.Background(), mapped); err != nil {
+		t.Fatalf("Allow: %v", err)
+	}
+	if err := g.Unallow(context.Background(), mapped); err != nil {
+		t.Fatalf("Unallow: %v", err)
+	}
+	if err := g.SyncAllowlist(context.Background(), []netip.Prefix{mapped, realV6}); err != nil {
+		t.Fatalf("SyncAllowlist: %v", err)
+	}
+
+	if len(local.allows) != 1 || local.allows[0] != canonical {
+		t.Errorf("inner Allow received %v, want [%v]", local.allows, canonical)
+	}
+	if len(local.unallows) != 1 || local.unallows[0] != canonical {
+		t.Errorf("inner Unallow received %v, want [%v]", local.unallows, canonical)
+	}
+	wantSync := []netip.Prefix{canonical, realV6}
+	if len(local.syncAllows) != 1 || !slices.Equal(local.syncAllows[0], wantSync) {
+		t.Errorf("inner SyncAllowlist received %v, want one call with %v", local.syncAllows, wantSync)
+	}
+}

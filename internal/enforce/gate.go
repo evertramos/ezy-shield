@@ -15,6 +15,11 @@ package enforce
 // canonicalized for the overlap checks: IPv4-mapped IPv6 spellings
 // (::ffff:a.b.c.d) compare equal to their plain IPv4 forms (issue #365),
 // so the backstop holds regardless of which spelling reaches it.
+//
+// The gate also *forwards* the canonical spelling (issue #405, residue of
+// #365): a mapped target or allowlist prefix passed through verbatim would be
+// filed in the enforcers' v6 sets, where it can never match IPv4 packets — a
+// dead ban entry, or worse, a dead @allowed entry that protects nothing.
 
 import (
 	"context"
@@ -69,12 +74,14 @@ func (g *Gate) Ban(ctx context.Context, t sdk.Target) error {
 		slog.WarnContext(ctx, "enforce/gate: refusing ban", "target", gateKey(t), "reason", reason)
 		return fmt.Errorf("enforce/gate: refusing to ban %s (%s): %w", gateKey(t), reason, ErrGateRefused)
 	}
-	return g.inner.Ban(ctx, t)
+	return g.inner.Ban(ctx, normalizeGateTarget(t))
 }
 
 // Unban always passes through: removing a ban cannot violate the invariant.
+// The spelling is still canonicalized so an unban in the mapped form removes
+// the plain-v4 entry Ban wrote, instead of missing it (issue #405).
 func (g *Gate) Unban(ctx context.Context, t sdk.Target) error {
-	return g.inner.Unban(ctx, t)
+	return g.inner.Unban(ctx, normalizeGateTarget(t))
 }
 
 // Sync filters guarded targets out of the desired state with an audited
@@ -86,7 +93,7 @@ func (g *Gate) Sync(ctx context.Context, want []sdk.Target) error {
 			slog.WarnContext(ctx, "enforce/gate: dropping target from sync", "target", gateKey(t), "reason", reason)
 			continue
 		}
-		filtered = append(filtered, t)
+		filtered = append(filtered, normalizeGateTarget(t))
 	}
 	return g.inner.Sync(ctx, filtered)
 }
@@ -98,7 +105,7 @@ func (g *Gate) Sync(ctx context.Context, want []sdk.Target) error {
 // without a local allowlist mirror (edge-only setups) make this a no-op.
 func (g *Gate) Allow(ctx context.Context, prefix netip.Prefix) error {
 	if s, ok := g.inner.(AllowlistSyncer); ok {
-		return s.Allow(ctx, prefix)
+		return s.Allow(ctx, normalizeForwardPrefix(prefix))
 	}
 	return nil
 }
@@ -107,18 +114,27 @@ func (g *Gate) Allow(ctx context.Context, prefix netip.Prefix) error {
 // mirror; no-op when the inner has none.
 func (g *Gate) Unallow(ctx context.Context, prefix netip.Prefix) error {
 	if s, ok := g.inner.(AllowlistSyncer); ok {
-		return s.Unallow(ctx, prefix)
+		return s.Unallow(ctx, normalizeForwardPrefix(prefix))
 	}
 	return nil
 }
 
 // SyncAllowlist forwards the desired allowlist state to the inner enforcer's
-// @allowed mirror; no-op when the inner has none.
+// @allowed mirror; no-op when the inner has none. Entries are canonicalized
+// (issue #405): a mapped prefix forwarded verbatim would land in the nftables
+// @allowed v6 set as a dead entry protecting nothing. Duplicates that two
+// spellings of one range collapse into are harmless downstream (nft set
+// semantics; NftablesEnforcer.SyncAllowlist deduplicates via its want-set).
 func (g *Gate) SyncAllowlist(ctx context.Context, want []netip.Prefix) error {
-	if s, ok := g.inner.(AllowlistSyncer); ok {
-		return s.SyncAllowlist(ctx, want)
+	s, ok := g.inner.(AllowlistSyncer)
+	if !ok {
+		return nil
 	}
-	return nil
+	norm := make([]netip.Prefix, 0, len(want))
+	for _, p := range want {
+		norm = append(norm, normalizeForwardPrefix(p))
+	}
+	return s.SyncAllowlist(ctx, norm)
 }
 
 // refuse reports whether the target must be blocked from enforcement and why.
@@ -171,6 +187,34 @@ func normalizeGatePrefix(p netip.Prefix) netip.Prefix {
 		return p.Masked()
 	}
 	return netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96).Masked()
+}
+
+// normalizeForwardPrefix canonicalizes the *forwarded* spelling of a prefix
+// (issue #405): mapped prefixes with an IPv4 equivalent become plain v4;
+// everything else — plain v4, real v6, and mapped-broader-than-/96 (no v4
+// equivalent) — passes through byte-identical, so already-canonical callers
+// see no change in what reaches the inner enforcer.
+func normalizeForwardPrefix(p netip.Prefix) netip.Prefix {
+	if p.Addr().Is4In6() && p.Bits() >= 96 {
+		return normalizeGatePrefix(p)
+	}
+	return p
+}
+
+// normalizeGateTarget rewrites an IPv4-mapped spelling in an IP/Prefix target
+// to its canonical form before the target is forwarded to the inner enforcer
+// (issue #405, residue of #365): the gate *compares* canonically (refuse),
+// but forwarding the caller's original mapped spelling would file it in the
+// enforcers' v6 sets as a dead entry that never matches IPv4 packets.
+// ASN/Country targets and already-canonical spellings pass through unchanged;
+// TTL and every other field are preserved.
+func normalizeGateTarget(t sdk.Target) sdk.Target {
+	if t.IP.IsValid() {
+		t.IP = t.IP.Unmap()
+	} else if t.Prefix.IsValid() {
+		t.Prefix = normalizeForwardPrefix(t.Prefix)
+	}
+	return t
 }
 
 // gateKey renders a target for refusal logs.

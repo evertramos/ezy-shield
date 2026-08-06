@@ -225,7 +225,9 @@ func sanitizeHeader(s string) string {
 
 // buildRawEmail constructs a minimal RFC 5322 message in memory. Header values
 // pass through sanitizeHeader at this choke point so no caller can smuggle a
-// header-terminating CR/LF, wherever the value originated.
+// header-terminating CR/LF, wherever the value originated. The body is
+// canonicalized here for the same reason: no caller-supplied CR may reach the
+// DATA stream except as part of the CRLF line endings written below.
 func buildRawEmail(from string, to []string, subject, body string) []byte {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "From: %s\r\n", sanitizeHeader(from))
@@ -234,10 +236,16 @@ func buildRawEmail(from string, to []string, subject, body string) []byte {
 	sb.WriteString("MIME-Version: 1.0\r\n")
 	sb.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
 	sb.WriteString("\r\n")
-	// Normalize line endings to CRLF per RFC 5321.
-	lines := strings.Split(body, "\n")
-	for _, line := range lines {
-		line = strings.TrimRight(line, "\r")
+	// Normalize line endings to CRLF per RFC 5321. First fold CRLF to LF,
+	// then neutralize every remaining bare CR (issue #403, body-side sibling
+	// of #320): textproto's DotWriter forwards lone CRs to the wire
+	// unchanged, and relays of the 2023 SMTP-smuggling class treat a lone CR
+	// as an end-of-line, turning log-derived text like "x\r.\rQUIT" into a
+	// DATA-termination primitive. Replacing with a space (as sanitizeHeader
+	// does) keeps the surrounding text readable.
+	body = strings.ReplaceAll(body, "\r\n", "\n")
+	body = strings.ReplaceAll(body, "\r", " ")
+	for _, line := range strings.Split(body, "\n") {
 		sb.WriteString(line + "\r\n")
 	}
 	return []byte(sb.String())

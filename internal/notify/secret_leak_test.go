@@ -10,6 +10,7 @@ package notify
 import (
 	"context"
 	"net"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -74,6 +75,67 @@ func TestSecretLeak_GenericWebhookTransportError(t *testing.T) {
 
 	err := n.Send(context.Background(), sdk.Notification{Severity: "warn", Title: "t"})
 	assertNoSecret(t, err, leakWebhookKey)
+}
+
+// TestSecretLeak_BuildRequestError reproduces the review finding on #389:
+// a secret containing a control character (e.g. a trailing CR from a
+// CRLF-saved env file — SecretRef.Resolve() does not trim) makes
+// http.NewRequestWithContext fail with a *url.Error whose Error() embeds the
+// ENTIRE raw URL, secret included. The "build request" error path must be
+// redacted just like the client.Do path. No network I/O occurs: the request
+// never gets built.
+func TestSecretLeak_BuildRequestError(t *testing.T) {
+	crToken := leakBotToken + "\r"
+	crKey := leakWebhookKey + "\r"
+	msg := sdk.Notification{Severity: "warn", Title: "t"}
+
+	t.Run("telegram", func(t *testing.T) {
+		n := NewTelegram(crToken, []string{"42"})
+		assertNoSecret(t, n.Send(context.Background(), msg), leakBotToken)
+	})
+	t.Run("discord", func(t *testing.T) {
+		n := NewDiscord("https://discord.example/api/webhooks/1234/" + crKey)
+		assertNoSecret(t, n.Send(context.Background(), msg), leakWebhookKey)
+	})
+	t.Run("slack", func(t *testing.T) {
+		n := NewSlack("https://hooks.slack.example/services/T0000/B0000/"+crKey, "")
+		assertNoSecret(t, n.Send(context.Background(), msg), leakWebhookKey)
+	})
+	t.Run("webhook", func(t *testing.T) {
+		n := NewWebhook("https://hooks.internal.example/hook?key="+crKey, nil)
+		assertNoSecret(t, n.Send(context.Background(), msg), leakWebhookKey)
+	})
+}
+
+// TestSecretLeak_GenericWebhookResolvedAddrRedacted reproduces the second
+// review finding on #389: for a RESOLVABLE secret host, Go's dial error names
+// only the resolved IP, never the hostname ("dial tcp 127.0.0.1:33413:
+// connect: connection refused"), so a hostname-based scrub misses it and the
+// address survives into logs. For keepHost=false neither the hostname, nor
+// the resolved address, nor the port may appear in the error chain.
+// Loopback only — no network I/O leaves the host.
+func TestSecretLeak_GenericWebhookResolvedAddrRedacted(t *testing.T) {
+	var lc net.ListenConfig
+	l, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserving closed port: %v", err)
+	}
+	port := strconv.Itoa(l.Addr().(*net.TCPAddr).Port)
+	_ = l.Close() // port now refuses connections
+
+	// "localhost" resolves (to 127.0.0.1 and/or ::1) but the port is closed,
+	// so client.Do fails with a dial error naming the resolved IP:port.
+	n := NewWebhook("http://localhost:"+port+"/hook?key="+leakWebhookKey, nil)
+
+	err = n.Send(context.Background(), sdk.Notification{Severity: "warn", Title: "t"})
+	if err == nil {
+		t.Fatal("expected a transport error")
+	}
+	for _, leak := range []string{leakWebhookKey, "localhost", "127.0.0.1", "::1", port} {
+		if strings.Contains(err.Error(), leak) {
+			t.Errorf("keepHost=false error must not contain %q, got:\n  %v", leak, err)
+		}
+	}
 }
 
 // TestSecretLeak_GenericWebhookHostRedacted verifies that for a generic

@@ -85,7 +85,9 @@ func (t *TelegramNotifier) post(ctx context.Context, chatID, text string) error 
 	url := fmt.Sprintf("%s/bot%s/sendMessage", t.apiBase, t.token)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("build request: %w", err)
+		// A malformed URL (e.g. control char in the token) makes NewRequest
+		// return a *url.Error embedding the full raw URL, token included.
+		return fmt.Errorf("build request: %w", redactTransportErr(err, true))
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := t.client.Do(req)

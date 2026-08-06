@@ -71,7 +71,9 @@ func (w *WebhookNotifier) Send(ctx context.Context, msg sdk.Notification) error 
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, w.url, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("webhook: build request: %w", err)
+		// A malformed URL (e.g. control char from an untrimmed env value)
+		// makes NewRequest return a *url.Error embedding the full raw URL.
+		return fmt.Errorf("webhook: build request: %w", redactTransportErr(err, false))
 	}
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range w.headers {

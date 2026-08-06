@@ -331,22 +331,26 @@ func TestHandleEvents_FilterByIP(t *testing.T) {
 		}
 	}
 
-	// Filter to .1 → both the ban and the unban for that host, nothing for .2.
-	resp := callSocket(t, d, SocketRequest{Verb: "events", IP: "203.0.113.1"})
-	if !resp.OK {
-		t.Fatalf("events --ip failed: %s", resp.Error)
-	}
-	var entries []EventEntry
-	if err := json.Unmarshal(resp.Data, &entries); err != nil {
-		t.Fatalf("decode events: %v", err)
-	}
-	if len(entries) == 0 {
-		t.Fatal("expected rows for 203.0.113.1, got 0")
-	}
-	for _, e := range entries {
-		if e.IP != "203.0.113.1" {
-			t.Errorf("filter leaked a row for %s, want only 203.0.113.1", e.IP)
-		}
+	// Both plain and IPv4-mapped spellings select the same host rows.
+	for _, filter := range []string{"203.0.113.1", "::ffff:203.0.113.1"} {
+		t.Run(filter, func(t *testing.T) {
+			resp := callSocket(t, d, SocketRequest{Verb: "events", IP: filter})
+			if !resp.OK {
+				t.Fatalf("events --ip failed: %s", resp.Error)
+			}
+			var entries []EventEntry
+			if err := json.Unmarshal(resp.Data, &entries); err != nil {
+				t.Fatalf("decode events: %v", err)
+			}
+			if len(entries) == 0 {
+				t.Fatalf("expected rows for %s, got 0", filter)
+			}
+			for _, e := range entries {
+				if e.IP != "203.0.113.1" {
+					t.Errorf("filter leaked a row for %s, want only 203.0.113.1", e.IP)
+				}
+			}
+		})
 	}
 
 	// A non-address filter is rejected, not silently treated as "all".

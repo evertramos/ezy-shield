@@ -668,6 +668,7 @@ func (d *Daemon) handleEvents(ctx context.Context, req SocketRequest) SocketResp
 		if perr != nil {
 			return SocketResponse{Error: fmt.Sprintf("events: invalid ip %q: expected a bare address", req.IP)}
 		}
+		addr = addr.Unmap()
 		rows, err = d.store.AuditLogForIP(ctx, addr, limit)
 	} else {
 		rows, err = d.store.ListAuditLog(ctx, limit)

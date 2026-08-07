@@ -12,6 +12,7 @@ import (
 
 	"github.com/evertramos/ezy-shield/internal/ai"
 	"github.com/evertramos/ezy-shield/internal/config"
+	"github.com/evertramos/ezy-shield/internal/enforce"
 	"github.com/evertramos/ezy-shield/internal/notify"
 	"github.com/evertramos/ezy-shield/internal/parser"
 	"github.com/evertramos/ezy-shield/internal/store"
@@ -837,6 +838,68 @@ func TestSyncEnforcerAllowlist_EmptyRuntimeStillPushesPolicy(t *testing.T) {
 	}
 }
 
+// TestSyncEnforcerAllowlist_MappedPolicyEntryCanonicalized covers issue #405
+// (allowlist side of #365): a policy allowlist entry written in the
+// IPv4-mapped spelling ("::ffff:192.0.2.0/120" — dual-stack operators copy it
+// straight from logs) must reach the enforcer's @allowed set as the plain v4
+// prefix. Forwarded verbatim it would be filed in the nftables v6 set, where
+// it can never match IPv4 packets — the packet-level allowlist backstop would
+// silently protect nothing for that range.
+func TestSyncEnforcerAllowlist_MappedPolicyEntryCanonicalized(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	db, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	policy := &config.Policy{
+		Armed:            true,
+		BanThreshold:     config.DefaultBanThreshold,
+		ObserveThreshold: config.DefaultObserveThreshold,
+		MaxBansPerMinute: config.DefaultMaxBansPerMinute,
+		Strikes:          config.DefaultStrikes,
+		Allowlist:        []string{"::ffff:192.0.2.0/120"},
+		AdminCIDRs:       []string{"::ffff:203.0.113.0/120"},
+	}
+
+	inner := &fakeAllowSyncEnforcer{}
+	// Production shape from cmd/ezyshield/run.go: NewGate(NewMulti(...), ...).
+	gated := enforce.NewGate(enforce.NewMulti(inner), nil, nil)
+
+	d, err := New(Config{Policy: policy, Store: db, Enforcer: gated, SocketPath: ""})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := d.reloadAllowlist(ctx); err != nil {
+		t.Fatalf("reloadAllowlist: %v", err)
+	}
+	if err := d.syncEnforcerAllowlist(ctx); err != nil {
+		t.Fatalf("syncEnforcerAllowlist: %v", err)
+	}
+
+	calls := inner.SyncCalls()
+	if len(calls) != 1 {
+		t.Fatalf("SyncAllowlist call count = %d, want 1", len(calls))
+	}
+	got := newPrefixSet(calls[0])
+	want := newPrefixSet([]netip.Prefix{
+		netip.MustParsePrefix("192.0.2.0/24"),
+		netip.MustParsePrefix("203.0.113.0/24"),
+	})
+	if !got.equal(want) {
+		t.Errorf("SyncAllowlist got = %v, want %v (mapped policy entries must arrive as plain v4)",
+			calls[0], want)
+	}
+	for _, p := range calls[0] {
+		if p.Addr().Is4In6() {
+			t.Errorf("mapped spelling %v reached the enforcer's allowlist sync", p)
+		}
+	}
+}
+
 // TestSyncEnforcerAllowlist_NoPolicyEntries_OnlyRuntime covers the pre-existing
 // behaviour: with an empty policy allowlist and admin_cidrs, only runtime
 // store entries are pushed. Ensures the fix doesn't accidentally invent
@@ -878,6 +941,65 @@ func TestSyncEnforcerAllowlist_NoPolicyEntries_OnlyRuntime(t *testing.T) {
 	calls := enf.SyncCalls()
 	if len(calls) != 1 || len(calls[0]) != 1 || calls[0][0] != runtimePfx {
 		t.Errorf("SyncAllowlist got %v, want [%v]", calls, runtimePfx)
+	}
+}
+
+// TestSyncEnforcerAllowlist_ThroughGateAndMulti reproduces issue #317: run.go
+// always wraps the enforcer chain as Gate(Multi(...)), so the daemon's
+// allowlistSyncer type assertion runs against *enforce.Gate — not against the
+// nftables enforcer that actually implements it. Before the fix, Gate and
+// MultiEnforcer hid the interface and the kernel @allowed set silently stayed
+// empty (the ADR-0007 layer-4 anti-lockout backstop was dead in production).
+// This test wires the daemon exactly like run.go does and asserts the sync
+// still reaches the innermost enforcer.
+func TestSyncEnforcerAllowlist_ThroughGateAndMulti(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	db, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	policy := &config.Policy{
+		Armed:            true,
+		BanThreshold:     config.DefaultBanThreshold,
+		ObserveThreshold: config.DefaultObserveThreshold,
+		MaxBansPerMinute: config.DefaultMaxBansPerMinute,
+		Strikes:          config.DefaultStrikes,
+		Allowlist:        []string{"10.0.0.0/8"},
+		AdminCIDRs:       []string{"192.0.2.1/32"},
+	}
+
+	inner := &fakeAllowSyncEnforcer{}
+	// Production shape from cmd/ezyshield/run.go: NewGate(NewMulti(...), ...).
+	gated := enforce.NewGate(enforce.NewMulti(inner),
+		[]netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}, nil)
+
+	d, err := New(Config{Policy: policy, Store: db, Enforcer: gated, SocketPath: ""})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := d.reloadAllowlist(ctx); err != nil {
+		t.Fatalf("reloadAllowlist: %v", err)
+	}
+	if err := d.syncEnforcerAllowlist(ctx); err != nil {
+		t.Fatalf("syncEnforcerAllowlist: %v", err)
+	}
+
+	calls := inner.SyncCalls()
+	if len(calls) != 1 {
+		t.Fatalf("SyncAllowlist reached the inner enforcer %d times, want 1 — "+
+			"the Gate/Multi wrappers hide the allowlistSyncer interface (issue #317)", len(calls))
+	}
+	got := newPrefixSet(calls[0])
+	want := newPrefixSet([]netip.Prefix{
+		netip.MustParsePrefix("10.0.0.0/8"),
+		netip.MustParsePrefix("192.0.2.1/32"),
+	})
+	if !got.equal(want) {
+		t.Errorf("SyncAllowlist got = %v, want %v", calls[0], want)
 	}
 }
 
@@ -930,6 +1052,29 @@ func TestStaticAllowlistFromPolicy_UnitTable(t *testing.T) {
 				AdminCIDRs: []string{"also-not-a-cidr"},
 			},
 			wantStrs: nil,
+		},
+		{
+			// Issue #405 (allowlist side of #365): mapped spellings must be
+			// canonicalized before they reach Gate.SyncAllowlist, or they land
+			// in the nftables @allowed v6 set as dead entries that can never
+			// match IPv4 packets.
+			name: "ipv4-mapped forms canonicalized to plain v4",
+			policy: &config.Policy{
+				Allowlist:  []string{"::ffff:192.0.2.0/120", "::ffff:198.51.100.7"},
+				AdminCIDRs: []string{"::ffff:203.0.113.0/120"},
+			},
+			wantStrs: []string{"192.0.2.0/24", "198.51.100.7/32", "203.0.113.0/24"},
+		},
+		{
+			// A mapped prefix broader than /96 has no IPv4 equivalent; keep
+			// the parsed form rather than drop it — dropping an allowlist
+			// entry would remove protection (mirrors cmd/ezyshield
+			// parseAllowlist, PR #400).
+			name: "broad mapped prefix (<96) kept as parsed",
+			policy: &config.Policy{
+				Allowlist: []string{"::ffff:0:0/95"},
+			},
+			wantStrs: []string{"::ffff:0.0.0.0/95"},
 		},
 	}
 	for _, tc := range tests {

@@ -11,11 +11,10 @@ daemon. It gives operators a browser view of daemon state, active
 bans, allowlist entries, the recent audit trail and the strike
 timeline, plus in-page controls for manual ban / unban / allow.
 
-**Status: Phase 4 (final).** Authentication, live views, event log,
-strike timeline, WebSocket live updates, CSRF-protected write forms,
-per-account login throttle and a per-user session cap. Server-side
-redaction and multi-user RBAC are explicitly out of scope for this
-release.
+It provides authentication, live views, an event log, the strike
+timeline, WebSocket live updates, CSRF-protected write forms, a
+per-account login throttle, and a per-user session cap. Server-side
+redaction and multi-user RBAC are out of scope for this release.
 
 ---
 
@@ -24,8 +23,8 @@ release.
 The dashboard binds **exclusively to a loopback address** — `127.0.0.1`,
 `::1` or the literal `localhost`. Any other bind (`0.0.0.0`, a public
 interface, etc.) is refused at startup, both in
-`internal/dashboard.New()` and again in `Server.Run()`. This is a hard
-rule from `AGENTS.md §2` and `docs/internal/SECURITY-REVIEW.md §6`. The
+`internal/dashboard.New()` and again in `Server.Run()` — a hard
+invariant, checked twice so a config mistake can't expose it. The
 dashboard is therefore reachable only from the same host, and remote
 access is by design an *operator concern* handled outside the daemon.
 
@@ -66,8 +65,26 @@ bootstrap happens on the very first `ezyshield dashboard` startup:
    ======================================================================
    ```
 
-The plaintext password never touches disk. If you miss the banner,
-delete `dashboard.db` and restart — a fresh account will be generated.
+On an interactive terminal the plaintext password never touches disk.
+If you miss the banner, delete `dashboard.db` and restart — a fresh
+account will be generated.
+
+**Non-interactive stderr (systemd, Docker, cron).** When stderr is not
+a terminal — the common case for the documented install path — the
+banner above isn't printed, because it would otherwise be captured
+verbatim by journald or `docker logs`. Instead, the plaintext password
+is written once to `<data_dir>/dashboard.first-run-password` (mode
+`0600`), and only that file path is printed to stderr:
+
+```
+EzyShield dashboard: admin account created (username: admin).
+stderr is not a terminal — the initial password was written to:
+  /var/lib/ezyshield/dashboard.first-run-password (mode 0600)
+Read it once and remove it:
+  sudo cat /var/lib/ezyshield/dashboard.first-run-password && sudo rm /var/lib/ezyshield/dashboard.first-run-password
+```
+
+Read the file once and delete it — it is not removed automatically.
 
 ---
 
@@ -186,9 +203,8 @@ Wire envelope (JSON, always UTF-8 text frames):
 
 When a poll cycle finds more than 10 new events the bus coalesces the
 burst into one `refresh` message and the browser reloads the current
-page. That cap plus the 3 s cadence keeps the per-client wire rate
-well under the 10 messages/second dashboard budget from
-`AGENTS.md §2`.
+page. That cap plus the 3 s poll cadence keeps the per-client message
+rate low without an unbounded burst of individual `audit` frames.
 
 Reconnection is handled by the small `EzyLive` helper baked into the
 layout: exponential back-off starting at 1 s and capped at 30 s, with
@@ -269,9 +285,11 @@ Read-only — no forms.
 ### Session management
 
 - The store caps live sessions at **3 per account**. A fourth login
-  evicts the oldest slot silently, so a stolen cookie has a bounded
-  useful life and a shared machine can't accumulate abandoned
-  sessions.
+  evicts the oldest slot, so a stolen cookie has a bounded useful
+  life and a shared machine can't accumulate abandoned sessions.
+  The eviction is logged at INFO with `reason=cap_exceeded` so an
+  operator can spot unexpected activity; explicit logout and
+  idle-timeout expiry are not logged.
 - The cap is per-username: `alice`'s session is unaffected by
   `bob` hitting his cap.
 - Any authenticated request slides the expiry forward by the
@@ -282,8 +300,7 @@ Read-only — no forms.
 - Ban / unban / allow POST handlers parse the `ip` field with
   `netip.ParsePrefix` (falling back to `netip.ParseAddr` → /32 or
   /128) *before* any daemon RPC — hostnames, oversized strings and
-  garbage characters are rejected at the dashboard edge
-  (`SECURITY-REVIEW.md §1`).
+  garbage characters are rejected at the dashboard edge.
 - Operator-supplied reasons are prefixed with `dashboard:admin` so
   the daemon's `audit_log` distinguishes dashboard writes from CLI
   verbs. Empty reason produces the bare tag; filled reason produces

@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://github.com/evertramos/ezy-shield/actions/workflows/ci.yaml"><img src="https://github.com/evertramos/ezy-shield/actions/workflows/ci.yaml/badge.svg" alt="CI"></a>
   <a href="https://github.com/evertramos/ezy-shield/actions/workflows/codeql.yaml"><img src="https://github.com/evertramos/ezy-shield/actions/workflows/codeql.yaml/badge.svg" alt="CodeQL"></a>
-  <a href="https://go.dev"><img src="https://img.shields.io/badge/go-1.24+-00ADD8.svg" alt="Go 1.24+"></a>
+  <a href="https://go.dev"><img src="https://img.shields.io/badge/go-1.26+-00ADD8.svg" alt="Go 1.26+"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL%203.0-blue.svg" alt="License: AGPL-3.0"></a>
 </p>
 
@@ -83,7 +83,7 @@ EzyShield as the brain and keep fail2ban for enforcement.
 ## How it works
 
 ```
-logs (SSH, Nginx)
+logs (SSH, Nginx, Apache, Caddy, Traefik)
         │
         ▼
    [ Collector ]   ── tail file / journald
@@ -131,7 +131,7 @@ still escalates today.
 - **Escalating bans** — short first ban, permanent after repeated offences
 - **Local enforcement** — nftables, via a privilege-separated enforcer helper
 - **Edge enforcement** — push IP bans to a Cloudflare list
-- **SSH + Nginx parsers** with fuzz-tested, panic-safe parsing of hostile input
+- **SSH, Nginx, Apache, Caddy & Traefik parsers** with fuzz-tested, panic-safe parsing of hostile input
 - **Deterministic rule engine** — thresholds + scanner signatures; works with zero AI configured
 - **AI-assisted decisions (optional)** — Anthropic, any OpenAI-compatible endpoint, or local Ollama, with provider failover, a token budget, and verdict caching
 - **Prompt-injection defense** — log lines are treated as data, never instructions; AI output is schema-validated and clamped by policy (it can only suggest within limits)
@@ -182,7 +182,7 @@ echo "deb [signed-by=/usr/share/keyrings/ezyshield.gpg] https://packages.ezyshie
 sudo apt update && sudo apt install ezyshield
 ```
 
-GPG-signed repositories with `.deb` and `.rpm` for amd64/arm64 — dnf setup and details in the [install guide](docs/content/en/getting-started/install.md). Every release today is a release candidate, so this uses the `testing` suite; switch to `stable` once v0.1.0 ships.
+GPG-signed repositories with `.deb` and `.rpm` for amd64/arm64 — dnf setup and details in the [install guide](docs/content/en/getting-started/install.md). Every release today is a release candidate, so this uses the `testing` suite; switch to `stable` once v0.1.0 ships. See the [supported platforms matrix](docs/content/en/reference/supported-platforms.md) for the distros and architectures exercised by the end-to-end install test.
 
 ### Specific version (including release candidates)
 
@@ -213,7 +213,7 @@ go build -o ezyshield-enforcer ./cmd/ezyshield-enforcer
 sudo mv ezyshield ezyshield-enforcer /usr/local/bin/
 ```
 
-Requires **Go 1.24+** and Linux with **nftables** for local enforcement.
+Requires **Go 1.26+** and Linux with **nftables** for local enforcement.
 
 Then:
 
@@ -258,7 +258,7 @@ sudo ezyshield test notifier telegram
 |------|---------|
 | `/etc/ezyshield/config.yaml` | Log sources, enforcement backends, AI providers, notifications |
 | `/etc/ezyshield/policy.yaml` | Score thresholds, strike table, allowlists, rate limits |
-| `/etc/ezyshield/rules.yaml` | Detection rules |
+| `/etc/ezyshield/rules.d/*.yaml` | Optional drop-in rule customizations — the built-in detection rules ship embedded in the binary and update with it; files here merge over them by `name`. (`rules_path`, whole-file replacement, is deprecated.) |
 
 Secrets (API tokens, SMTP passwords) are **never** stored in YAML — reference
 them as `env:VARNAME` or via systemd `LoadCredential=`. Inline secret values are
@@ -307,7 +307,7 @@ versions — it will be published here. Ideas and requests are welcome in the
 
 EzyShield is a root-capable security daemon and is built accordingly:
 privilege separation for firewall writes, unix-socket control (no listening TCP
-port), a localhost-only dashboard plan, anti-lockout, action rate limiting, and
+port), a localhost-only dashboard, anti-lockout, action rate limiting, and
 secrets kept out of config and logs. Every change goes through a mandatory
 security review.
 

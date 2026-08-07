@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/evertramos/ezy-shield/internal/enforce"
+	"github.com/evertramos/ezy-shield/internal/nftnames"
 	"github.com/evertramos/ezy-shield/internal/ownership"
 )
 
@@ -20,7 +21,7 @@ import (
 // Anything outside this set is rejected to prevent pass-through of arbitrary
 // nft commands (SECURITY-REVIEW.md §3).
 var validVerbs = map[string]bool{
-	"add": true, "del": true, "flush": true, "list": true, "ping": true,
+	"add": true, "del": true, "flush": true, "list": true, "ping": true, "caps": true,
 	"allow_add": true, "allow_del": true, "allow_list": true, "allow_flush": true,
 }
 
@@ -31,9 +32,22 @@ type Server struct {
 	socketPath string
 	run        nftRunner
 	runSs      ssRunner // pre-ban TCP session teardown (issue #30)
+	// listFn reads the current blocked-set contents (defaults to the real
+	// `nft list set` exec). Injectable so unit tests can exercise the
+	// name-switch path without a real nft binary on the host.
+	listFn func(ctx context.Context, n nftnames.Names) ([]string, error)
 
 	mu      sync.RWMutex
 	blocked map[string]bool // canonical IP/CIDR strings currently in nft set
+
+	// names is the active nftables name set (issue #268). Boot initializes
+	// the defaults; the first request that resolves to a DIFFERENT name set
+	// switches once (init new table, reload cache, drop the empty default
+	// table) and pins — after pinning, requests naming anything else are
+	// rejected. One enforcer process manages exactly one table: the blocked
+	// cache above and the anti-lockout rule layout depend on that.
+	names  nftnames.Names
+	pinned bool
 
 	ln net.Listener
 }
@@ -41,11 +55,14 @@ type Server struct {
 // newServer creates a Server with the given socket path and nft runner.
 // Call listen() then serve() to start handling requests.
 func newServer(socketPath string, run nftRunner) *Server {
+	defaults, _ := nftnames.Resolve("", "") // cannot fail for empty inputs
 	return &Server{
 		socketPath: socketPath,
 		run:        run,
 		runSs:      realSsRunner,
+		listFn:     nftList,
 		blocked:    make(map[string]bool),
+		names:      defaults,
 	}
 }
 
@@ -87,10 +104,10 @@ func (s *Server) listen(ctx context.Context) error {
 // init initialises the nftables table/set/chain and loads the current set
 // state into the in-memory cache.
 func (s *Server) init(ctx context.Context) error {
-	if err := initTable(ctx, s.run); err != nil {
+	if err := initTable(ctx, s.run, s.names); err != nil {
 		return fmt.Errorf("enforcer: init nft table: %w", err)
 	}
-	ips, err := nftList(ctx)
+	ips, err := s.listFn(ctx, s.names)
 	if err != nil {
 		return fmt.Errorf("enforcer: load existing set state: %w", err)
 	}
@@ -145,9 +162,25 @@ func (s *Server) dispatch(ctx context.Context, req enforce.Request) enforce.Resp
 		return enforce.Response{OK: false, Error: fmt.Sprintf("unknown verb %q", req.Verb)}
 	}
 
+	// Resolve + pin the nftables names this request operates on (issue
+	// #268). Runs before the verb switch so every nft-touching verb goes
+	// through the same gate; ping/caps skip it (they touch no nft state and
+	// must keep working for probes regardless of name pinning).
+	names := s.names
+	if req.Verb != "ping" && req.Verb != "caps" {
+		var resp *enforce.Response
+		names, resp = s.resolveNames(ctx, req)
+		if resp != nil {
+			return *resp
+		}
+	}
+
 	switch req.Verb {
 	case "ping":
 		return enforce.Response{OK: true}
+
+	case "caps":
+		return enforce.Response{OK: true, Features: []string{enforce.FeatureCustomNames}}
 
 	case "list":
 		s.mu.RLock()
@@ -159,7 +192,7 @@ func (s *Server) dispatch(ctx context.Context, req enforce.Request) enforce.Resp
 		return enforce.Response{OK: true, IPs: ips}
 
 	case "flush":
-		if err := nftFlush(ctx, s.run); err != nil {
+		if err := nftFlush(ctx, s.run, names); err != nil {
 			return enforce.Response{OK: false, Error: err.Error()}
 		}
 		s.mu.Lock()
@@ -171,7 +204,7 @@ func (s *Server) dispatch(ctx context.Context, req enforce.Request) enforce.Resp
 		if err := validateIP(req.IP); err != nil {
 			return enforce.Response{OK: false, Error: err.Error()}
 		}
-		if err := nftAdd(ctx, s.run, req.IP, req.TTLSeconds); err != nil {
+		if err := nftAdd(ctx, s.run, names, req.IP, req.TTLSeconds); err != nil {
 			return enforce.Response{OK: false, Error: err.Error()}
 		}
 		s.mu.Lock()
@@ -192,7 +225,7 @@ func (s *Server) dispatch(ctx context.Context, req enforce.Request) enforce.Resp
 		if err := validateIP(req.IP); err != nil {
 			return enforce.Response{OK: false, Error: err.Error()}
 		}
-		if err := nftDel(ctx, s.run, req.IP); err != nil {
+		if err := nftDel(ctx, s.run, names, req.IP); err != nil {
 			// Typed signal: nft-native timeout (or an out-of-band flush) beat
 			// us to it. Desired end state (absent) is achieved — respond OK
 			// with a stable code the client can trace at DEBUG instead of
@@ -215,7 +248,7 @@ func (s *Server) dispatch(ctx context.Context, req enforce.Request) enforce.Resp
 		if err := validateIP(req.IP); err != nil {
 			return enforce.Response{OK: false, Error: err.Error()}
 		}
-		if err := nftAddAllow(ctx, s.run, req.IP); err != nil {
+		if err := nftAddAllow(ctx, s.run, names, req.IP); err != nil {
 			return enforce.Response{OK: false, Error: err.Error()}
 		}
 		return enforce.Response{OK: true}
@@ -224,7 +257,7 @@ func (s *Server) dispatch(ctx context.Context, req enforce.Request) enforce.Resp
 		if err := validateIP(req.IP); err != nil {
 			return enforce.Response{OK: false, Error: err.Error()}
 		}
-		if err := nftDelAllow(ctx, s.run, req.IP); err != nil {
+		if err := nftDelAllow(ctx, s.run, names, req.IP); err != nil {
 			// Symmetric with "del": already-absent maps to the typed OK code.
 			if errors.Is(err, errElementAbsent) {
 				return enforce.Response{OK: true, Code: enforce.CodeAlreadyAbsent}
@@ -234,14 +267,14 @@ func (s *Server) dispatch(ctx context.Context, req enforce.Request) enforce.Resp
 		return enforce.Response{OK: true}
 
 	case "allow_list":
-		ips, err := nftListAllow(ctx)
+		ips, err := nftListAllow(ctx, names)
 		if err != nil {
 			return enforce.Response{OK: false, Error: err.Error()}
 		}
 		return enforce.Response{OK: true, IPs: ips}
 
 	case "allow_flush":
-		if err := nftFlushAllow(ctx, s.run); err != nil {
+		if err := nftFlushAllow(ctx, s.run, names); err != nil {
 			return enforce.Response{OK: false, Error: err.Error()}
 		}
 		return enforce.Response{OK: true}
@@ -249,6 +282,76 @@ func (s *Server) dispatch(ctx context.Context, req enforce.Request) enforce.Resp
 
 	// unreachable given the validVerbs check above
 	return enforce.Response{OK: false, Error: "internal error"}
+}
+
+// resolveNames maps a request's Table/Set fields onto the active name set.
+// Empty fields mean "defaults" for wire-compat with older daemons. The first
+// request resolving to a non-active name set triggers a one-time switch;
+// afterwards the names are pinned for the process lifetime and conflicting
+// requests are rejected with an actionable error. Returns a non-nil response
+// on rejection.
+func (s *Server) resolveNames(ctx context.Context, req enforce.Request) (nftnames.Names, *enforce.Response) {
+	want, err := nftnames.Resolve(req.Table, req.Set)
+	if err != nil {
+		// Names failed the strict validation at THIS trust boundary — never
+		// proceed, never echo anything nft-adjacent back beyond the message.
+		slog.WarnContext(ctx, "enforcer: rejected invalid nftables names", "err", err.Error())
+		return nftnames.Names{}, &enforce.Response{OK: false, Error: err.Error()}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if want == s.names {
+		s.pinned = true
+		return want, nil
+	}
+	if s.pinned {
+		e := fmt.Sprintf("enforcer is active with table %q / set %q; restart ezyshield-enforcer to apply table %q / set %q",
+			s.names.Table, s.names.Set4, want.Table, want.Set4)
+		slog.WarnContext(ctx, "enforcer: rejected conflicting nftables names", "active_table", s.names.Table, "requested_table", want.Table)
+		return nftnames.Names{}, &enforce.Response{OK: false, Error: e}
+	}
+
+	if err := s.switchNamesLocked(ctx, want); err != nil {
+		return nftnames.Names{}, &enforce.Response{OK: false, Error: err.Error()}
+	}
+	return want, nil
+}
+
+// switchNamesLocked moves the enforcer from the boot-time default table to
+// the operator-configured one: init the new table's layout, reload the
+// blocked cache from it, best-effort delete the (empty, just-created)
+// default table, and pin. Caller holds s.mu.
+func (s *Server) switchNamesLocked(ctx context.Context, want nftnames.Names) error {
+	old := s.names
+	if err := initTable(ctx, s.run, want); err != nil {
+		return fmt.Errorf("enforcer: init table %q: %w", want.Table, err)
+	}
+	ips, err := s.listFn(ctx, want)
+	if err != nil {
+		return fmt.Errorf("enforcer: load state from table %q: %w", want.Table, err)
+	}
+	s.blocked = make(map[string]bool, len(ips))
+	for _, ip := range ips {
+		s.blocked[ip] = true
+	}
+	s.names = want
+	s.pinned = true
+
+	// The default table was created seconds ago at boot and never held
+	// elements under this configuration — delete it so `nft list ruleset`
+	// shows one EzyShield table, not two. Best-effort: a failure here is
+	// cosmetic, enforcement already happens in the new table.
+	if old.IsDefault() {
+		if err := s.run(ctx, []byte("delete table "+old.Table+"\n")); err != nil {
+			slog.WarnContext(ctx, "enforcer: could not remove default table after switch (cosmetic)",
+				"table", old.Table, "err", err.Error())
+		}
+	}
+	slog.InfoContext(ctx, "enforcer: switched nftables names",
+		"table", want.Table, "set", want.Set4, "existing_entries", len(ips))
+	return nil
 }
 
 func (s *Server) writeResp(conn net.Conn, resp enforce.Response) {

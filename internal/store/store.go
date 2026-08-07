@@ -34,10 +34,15 @@ type DB struct {
 // Open opens (or creates) the SQLite database at path, enables WAL mode, and
 // applies any pending migrations. Call Close when done.
 func Open(ctx context.Context, path string) (*DB, error) {
-	// _journal=WAL: concurrent readers don't block writers.
-	// _busy_timeout=5000: retry for up to 5 s on SQLITE_BUSY instead of erroring.
-	// _synchronous=NORMAL: safe with WAL (no risk of corruption).
-	dsn := "file:" + path + "?_journal=WAL&_busy_timeout=5000&_synchronous=NORMAL" //nolint:gosec // path is the admin-controlled database location from config
+	// journal_mode(WAL): concurrent readers don't block writers.
+	// busy_timeout(5000): retry for up to 5 s on SQLITE_BUSY instead of erroring.
+	// synchronous(NORMAL): safe with WAL (no risk of corruption).
+	//
+	// The _pragma=name(value) form is the modernc.org/sqlite driver's syntax;
+	// mattn-style parameters (_journal=..., _busy_timeout=...) are silently
+	// ignored by modernc and left the store on delete-journal with no busy
+	// retry (issue #321). TestOpen_AppliesPragmas pins the effective values.
+	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)" //nolint:gosec // path is the admin-controlled database location from config
 	sqlDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("store: open %s: %w", path, err)
@@ -147,10 +152,19 @@ func parseMigrationVersion(name string) (int, error) {
 // RecordStrike records a new strike for the IP in a, upserts the offender row
 // (preserving first_seen), inserts a ban into bans_active, and appends an
 // audit entry — all in one transaction.
+//
+// When a.Op is "dry_ban" (ADR-0009 §5) the bans_active row is marked
+// dry_run=1: a simulated ban that drives suppression in dry-run mode but is
+// never handed to an enforcer. A later real strike for the same IP
+// overwrites the row with dry_run=0 via the upsert.
 func (s *DB) RecordStrike(ctx context.Context, a sdk.Action) error {
 	ip := a.IP.String()
 	now := nowRFC3339()
 	ttlSec := int64(a.TTL.Seconds())
+	dryRun := 0
+	if a.Op == "dry_ban" {
+		dryRun = 1
+	}
 
 	verdictsJSON, err := json.Marshal(a.Verdicts)
 	if err != nil {
@@ -190,17 +204,18 @@ func (s *DB) RecordStrike(ctx context.Context, a sdk.Action) error {
 	// A new ban resets the suppression counters: they are per-ban state for
 	// the ban_ineffective diagnostic (ADR-0009).
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO bans_active (ip, banned_at, expires_at, strike_num, reason)
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO bans_active (ip, banned_at, expires_at, strike_num, reason, dry_run)
+		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(ip) DO UPDATE SET
 			banned_at              = excluded.banned_at,
 			expires_at             = excluded.expires_at,
 			strike_num             = excluded.strike_num,
 			reason                 = excluded.reason,
+			dry_run                = excluded.dry_run,
 			suppressed_total       = 0,
 			suppressed_after_grace = 0,
 			ineffective_fired      = 0
-	`, ip, now, expiresAt, a.Strike, a.Reason); err != nil {
+	`, ip, now, expiresAt, a.Strike, a.Reason, dryRun); err != nil {
 		return fmt.Errorf("store: upsert ban: %w", err)
 	}
 
@@ -216,27 +231,28 @@ func (s *DB) RecordStrike(ctx context.Context, a sdk.Action) error {
 }
 
 // GetBanInfo returns the active-ban metadata for ip: when the ban was
-// applied and at which strike. found is false when ip has no row in
-// bans_active (permanent or not-yet-expired — callers rely on the daemon's
-// expiry ticker to keep stale rows pruned). All SQL uses parameterized
-// queries; ip is never interpolated into the query string (Hard Rule §4).
-func (s *DB) GetBanInfo(ctx context.Context, ip netip.Addr) (time.Time, int, bool, error) {
+// applied, at which strike, and whether it is a simulated (dry-run) ban.
+// found is false when ip has no row in bans_active (permanent or
+// not-yet-expired — callers rely on the daemon's expiry ticker to keep
+// stale rows pruned). All SQL uses parameterized queries; ip is never
+// interpolated into the query string (Hard Rule §4).
+func (s *DB) GetBanInfo(ctx context.Context, ip netip.Addr) (time.Time, int, bool, bool, error) {
 	var bannedAtStr string
-	var strike int
+	var strike, dryRun int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT banned_at, strike_num FROM bans_active WHERE ip = ?`,
-		ip.String()).Scan(&bannedAtStr, &strike)
+		`SELECT banned_at, strike_num, dry_run FROM bans_active WHERE ip = ?`,
+		ip.String()).Scan(&bannedAtStr, &strike, &dryRun)
 	if err == sql.ErrNoRows {
-		return time.Time{}, 0, false, nil
+		return time.Time{}, 0, false, false, nil
 	}
 	if err != nil {
-		return time.Time{}, 0, false, fmt.Errorf("store: GetBanInfo %s: %w", ip, err)
+		return time.Time{}, 0, false, false, fmt.Errorf("store: GetBanInfo %s: %w", ip, err)
 	}
 	bannedAt, err := time.Parse(time.RFC3339Nano, bannedAtStr)
 	if err != nil {
-		return time.Time{}, 0, false, fmt.Errorf("store: GetBanInfo parse banned_at: %w", err)
+		return time.Time{}, 0, false, false, fmt.Errorf("store: GetBanInfo parse banned_at: %w", err)
 	}
-	return bannedAt, strike, true, nil
+	return bannedAt, strike, dryRun != 0, true, nil
 }
 
 // RecordSuppressed increments the suppression counters on ip's active ban row
@@ -394,11 +410,14 @@ func (s *DB) GetStrikeCount(ctx context.Context, ip netip.Addr) (int, error) {
 	return count, nil
 }
 
-// ActiveBans returns all bans currently in bans_active (including permanent ones).
+// ActiveBans returns all bans currently in bans_active (including permanent
+// ones). Simulated dry-run bans are returned with Op="dry_ban" so callers can
+// tell them apart — enforcement paths MUST skip everything but Op=="ban"
+// (ADR-0009 §5: a simulated ban is never enforced).
 // Callers should call ExpireBans first to flush stale entries.
 func (s *DB) ActiveBans(ctx context.Context) ([]sdk.Action, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT ip, banned_at, expires_at, strike_num, reason FROM bans_active
+		SELECT ip, banned_at, expires_at, strike_num, reason, dry_run FROM bans_active
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("store: ActiveBans: %w", err)
@@ -413,8 +432,9 @@ func (s *DB) ActiveBans(ctx context.Context) ([]sdk.Action, error) {
 			expiresAt sql.NullString
 			strikeNum int
 			reason    string
+			dryRun    int
 		)
-		if err := rows.Scan(&ipStr, &bannedAt, &expiresAt, &strikeNum, &reason); err != nil {
+		if err := rows.Scan(&ipStr, &bannedAt, &expiresAt, &strikeNum, &reason, &dryRun); err != nil {
 			return nil, fmt.Errorf("store: ActiveBans scan: %w", err)
 		}
 
@@ -424,24 +444,36 @@ func (s *DB) ActiveBans(ctx context.Context) ([]sdk.Action, error) {
 		}
 
 		var ttl time.Duration
+		permanent := !expiresAt.Valid // expires_at NULL = no expiry
 		if expiresAt.Valid {
 			et, err := time.Parse(time.RFC3339Nano, expiresAt.String)
 			if err != nil {
 				return nil, fmt.Errorf("store: parse expires_at: %w", err)
 			}
 			remaining := time.Until(et)
-			if remaining < 0 {
-				remaining = 0
+			if remaining <= 0 {
+				// Expired but not yet removed by the ban-expiry tick: not an
+				// active ban — skip it. Clamping to 0 here (the old
+				// behaviour) made it indistinguishable from a permanent ban,
+				// so it rendered as "permanent" in list and was re-synced
+				// into nftables with no timeout (issue #279). Deleting the
+				// row stays the reaper's job.
+				continue
 			}
 			ttl = remaining
 		}
 
+		op := "ban"
+		if dryRun != 0 {
+			op = "dry_ban"
+		}
 		out = append(out, sdk.Action{
-			IP:     ip,
-			Op:     "ban",
-			TTL:    ttl,
-			Strike: strikeNum,
-			Reason: reason,
+			IP:        ip,
+			Op:        op,
+			TTL:       ttl,
+			Permanent: permanent,
+			Strike:    strikeNum,
+			Reason:    reason,
 		})
 	}
 	return out, rows.Err()
@@ -452,10 +484,12 @@ func (s *DB) ActiveBans(ctx context.Context) ([]sdk.Action, error) {
 func (s *DB) ExpireBans(ctx context.Context, now time.Time) (int, error) {
 	nowStr := now.UTC().Format(time.RFC3339Nano)
 
-	// Audit expired bans before deleting them.
+	// Audit expired bans before deleting them. Simulated (dry-run) bans
+	// expire through the same sweep — only the audit reason differs.
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO audit_log (recorded_at, op, ip, ttl_seconds, strike_num, reason)
-		SELECT ?, 'expire', ip, 0, strike_num, 'ttl expired'
+		SELECT ?, 'expire', ip, 0, strike_num,
+		       CASE WHEN dry_run = 1 THEN 'simulated ttl expired' ELSE 'ttl expired' END
 		FROM bans_active
 		WHERE expires_at IS NOT NULL AND expires_at < ?
 	`, nowStr, nowStr)
@@ -845,4 +879,59 @@ func (s *DB) TodayUsage(ctx context.Context, provider string) (sdk.Usage, error)
 
 func nowRFC3339() string {
 	return time.Now().UTC().Format(time.RFC3339Nano)
+}
+
+// SetState upserts a daemon_state key/value pair. Keys are engine-internal
+// identifiers (never log-derived data); values are opaque strings owned by
+// the caller. All SQL is parameterized (Hard Rule §4).
+func (s *DB) SetState(ctx context.Context, key, value string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO daemon_state (key, value, updated_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(key) DO UPDATE SET
+			value      = excluded.value,
+			updated_at = excluded.updated_at
+	`, key, value, nowRFC3339())
+	if err != nil {
+		return fmt.Errorf("store: SetState %s: %w", key, err)
+	}
+	return nil
+}
+
+// GetState returns the value for key; found is false when the key is absent.
+func (s *DB) GetState(ctx context.Context, key string) (string, bool, error) {
+	var value string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT value FROM daemon_state WHERE key = ?`, key).Scan(&value)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("store: GetState %s: %w", key, err)
+	}
+	return value, true, nil
+}
+
+// DeleteState removes key from daemon_state. Missing keys are not an error.
+func (s *DB) DeleteState(ctx context.Context, key string) error {
+	if _, err := s.db.ExecContext(ctx,
+		`DELETE FROM daemon_state WHERE key = ?`, key); err != nil {
+		return fmt.Errorf("store: DeleteState %s: %w", key, err)
+	}
+	return nil
+}
+
+// AuditSystem appends an audit entry for a system-level operation that has
+// no target IP (arm, disarm, arm_revert, ...). The ip column carries the
+// literal "system" so existing audit consumers keep working unchanged.
+// audit_log remains append-only.
+func (s *DB) AuditSystem(ctx context.Context, op, reason string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO audit_log (recorded_at, op, ip, ttl_seconds, strike_num, reason)
+		VALUES (?, ?, 'system', 0, 0, ?)
+	`, nowRFC3339(), op, reason)
+	if err != nil {
+		return fmt.Errorf("store: AuditSystem %s: %w", op, err)
+	}
+	return nil
 }

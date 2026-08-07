@@ -589,3 +589,75 @@ func TestNetns_BanUnban(t *testing.T) {
 	// Actual test is in cmd/ezyshield-enforcer/server_test.go (integration).
 	t.Log("root + nft detected; full integration test lives in cmd/ezyshield-enforcer")
 }
+
+// ── Custom table/set names on the client (issue #268) ────────────────────────
+
+// TestWithNames_DefaultsStayOffTheWire: configuring the default names (or
+// none) must produce requests WITHOUT table/set fields and must not probe
+// caps — byte-compat with older helpers.
+func TestWithNames_DefaultsStayOffTheWire(t *testing.T) {
+	ms := newMockHelper(t)
+	e := enforce.New(ms.sock, nil, enforce.WithNames("inet ezyshield", "blocked"))
+
+	if err := e.Ban(context.Background(), sdk.Target{IP: netip.MustParseAddr("203.0.113.5")}); err != nil {
+		t.Fatalf("Ban: %v", err)
+	}
+	reqs := ms.recorded()
+	if len(reqs) != 1 {
+		t.Fatalf("requests = %d, want 1 (no caps probe for defaults); %+v", len(reqs), reqs)
+	}
+	if reqs[0].Table != "" || reqs[0].Set != "" {
+		t.Errorf("default names leaked onto the wire: table=%q set=%q", reqs[0].Table, reqs[0].Set)
+	}
+}
+
+// TestWithNames_CustomNamesOnEveryRequest: custom names ride on every RPC
+// after a one-time caps probe.
+func TestWithNames_CustomNamesOnEveryRequest(t *testing.T) {
+	ms := newMockHelper(t)
+	ms.setResponse("caps", enforce.Response{OK: true, Features: []string{enforce.FeatureCustomNames}})
+	e := enforce.New(ms.sock, nil, enforce.WithNames("inet mytable", "myblocked"))
+
+	if err := e.Ban(context.Background(), sdk.Target{IP: netip.MustParseAddr("203.0.113.5")}); err != nil {
+		t.Fatalf("Ban: %v", err)
+	}
+	if err := e.Unban(context.Background(), sdk.Target{IP: netip.MustParseAddr("203.0.113.5")}); err != nil {
+		t.Fatalf("Unban: %v", err)
+	}
+	if err := e.Sync(context.Background(), nil); err != nil { // Sync issues a "list" RPC
+		t.Fatalf("Sync: %v", err)
+	}
+
+	reqs := ms.recorded()
+	if len(reqs) < 4 || reqs[0].Verb != "caps" {
+		t.Fatalf("expected caps probe first then 3 RPCs, got %+v", reqs)
+	}
+	for _, r := range reqs[1:] {
+		if r.Table != "inet mytable" || r.Set != "myblocked" {
+			t.Errorf("request %q missing custom names: table=%q set=%q", r.Verb, r.Table, r.Set)
+		}
+	}
+}
+
+// TestWithNames_OldHelperIsFatal: a helper that does not support custom
+// names (unknown caps verb) must fail EVERY call loudly — never silently
+// enforce into the default table while config names another.
+func TestWithNames_OldHelperIsFatal(t *testing.T) {
+	ms := newMockHelper(t)
+	ms.setResponse("caps", enforce.Response{OK: false, Error: `unknown verb "caps"`})
+	e := enforce.New(ms.sock, nil, enforce.WithNames("inet mytable", ""))
+
+	err := e.Ban(context.Background(), sdk.Target{IP: netip.MustParseAddr("203.0.113.5")})
+	if err == nil {
+		t.Fatal("Ban succeeded against a helper without custom-name support")
+	}
+	if !strings.Contains(err.Error(), "update ezyshield-enforcer") {
+		t.Errorf("error not actionable: %v", err)
+	}
+	// The failed probe must have stopped the RPC: no "add" reached the wire.
+	for _, r := range ms.recorded() {
+		if r.Verb == "add" {
+			t.Error("add reached the helper despite failed capability probe")
+		}
+	}
+}

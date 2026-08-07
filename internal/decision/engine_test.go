@@ -31,6 +31,7 @@ type mockStore struct {
 	strikes             map[string]int
 	banBannedAt         map[string]time.Time // ip → active ban start (presence = banned)
 	banStrike           map[string]int       // ip → strike_num of active ban
+	banDry              map[string]bool      // ip → dry_run flag of active ban
 	supTotal            map[string]int       // ip → suppressed_total
 	supAfter            map[string]int       // ip → suppressed_after_grace
 	supFired            map[string]bool      // ip → ineffective_fired
@@ -48,6 +49,7 @@ func newMock(initial map[string]int) *mockStore {
 		strikes:     make(map[string]int),
 		banBannedAt: make(map[string]time.Time),
 		banStrike:   make(map[string]int),
+		banDry:      make(map[string]bool),
 		supTotal:    make(map[string]int),
 		supAfter:    make(map[string]int),
 		supFired:    make(map[string]bool),
@@ -70,24 +72,37 @@ func (m *mockStore) setBanned(ip netip.Addr, active bool) {
 	if active {
 		m.banBannedAt[k] = time.Now()
 		m.banStrike[k] = 1
+		m.banDry[k] = false
 		return
 	}
 	delete(m.banBannedAt, k)
 	delete(m.banStrike, k)
+	delete(m.banDry, k)
 	delete(m.supTotal, k)
 	delete(m.supAfter, k)
 	delete(m.supFired, k)
 }
 
-func (m *mockStore) GetBanInfo(_ context.Context, ip netip.Addr) (time.Time, int, bool, error) {
+// setSimulatedBan seeds an active dry-run ban row (dry_run=1) for ip at the
+// given strike, as if RecordStrike ran with Op="dry_ban" (ADR-0009 §5).
+func (m *mockStore) setSimulatedBan(ip netip.Addr, strike int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k := ip.String()
+	m.banBannedAt[k] = time.Now()
+	m.banStrike[k] = strike
+	m.banDry[k] = true
+}
+
+func (m *mockStore) GetBanInfo(_ context.Context, ip netip.Addr) (time.Time, int, bool, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	k := ip.String()
 	bannedAt, ok := m.banBannedAt[k]
 	if !ok {
-		return time.Time{}, 0, false, nil
+		return time.Time{}, 0, false, false, nil
 	}
-	return bannedAt, m.banStrike[k], true, nil
+	return bannedAt, m.banStrike[k], m.banDry[k], true, nil
 }
 
 func (m *mockStore) RecordSuppressed(_ context.Context, ip netip.Addr, afterGrace bool) (int, int, bool, error) {
@@ -167,9 +182,11 @@ func (m *mockStore) RecordStrike(_ context.Context, a sdk.Action) error {
 	defer m.mu.Unlock()
 	k := a.IP.String()
 	m.strikes[k]++
-	// Mirror the real store's bans_active upsert: new ban resets counters.
+	// Mirror the real store's bans_active upsert: new ban resets counters;
+	// dry_run mirrors the Op (ADR-0009 §5).
 	m.banBannedAt[k] = time.Now()
 	m.banStrike[k] = a.Strike
+	m.banDry[k] = a.Op == "dry_ban"
 	m.supTotal[k] = 0
 	m.supAfter[k] = 0
 	m.supFired[k] = false
@@ -456,9 +473,15 @@ func TestDecide(t *testing.T) {
 				t.Errorf("Verdicts len = %d, want %d", len(act.Verdicts), len(tc.verdicts))
 			}
 
-			// Dry-run MUST NOT call RecordStrike.
-			if tc.wantOp == "dry_ban" && len(st.banned) > 0 {
-				t.Errorf("dry_ban called RecordStrike %d time(s); must be 0", len(st.banned))
+			// Dry-run records its strike too (ADR-0009 §5), but the recorded
+			// action MUST carry Op="dry_ban" so every enforcement path skips
+			// it — an Op="ban" write from a dry-run engine would be enforced.
+			if tc.wantOp == "dry_ban" {
+				if len(st.banned) != 1 {
+					t.Errorf("dry_ban called RecordStrike %d time(s); must be 1 (ADR-0009 §5)", len(st.banned))
+				} else if st.banned[0].Op != "dry_ban" {
+					t.Errorf("dry_ban recorded Op=%q; a dry-run write must never look enforceable", st.banned[0].Op)
+				}
 			}
 			// Real bans MUST call RecordStrike.
 			if tc.wantOp == "ban" && len(st.banned) == 0 {
@@ -727,10 +750,13 @@ func TestActiveBanGuard_TwoConcurrentIPs_NoContamination(t *testing.T) {
 	}
 }
 
-// TestActiveBanGuard_DryRunSkipsGuard verifies that the active-ban guard is
-// NOT applied in dry-run mode (armed=false): the engine still emits dry_ban
-// even when the IP has an active ban, because dry-run never writes anything.
-func TestActiveBanGuard_DryRunSkipsGuard(t *testing.T) {
+// TestActiveBanGuard_DryRunSuppressesLikeArmed verifies that the active-ban
+// guard IS applied in dry-run mode (ADR-0009 §5, issue #145): an active ban
+// — here a real one left over from an armed period — suppresses further
+// sentencing exactly as it would while armed, instead of stacking dry
+// strikes inside one episode. (Pre-#145 semantics skipped the guard because
+// dry-run wrote nothing; both halves changed together.)
+func TestActiveBanGuard_DryRunSuppressesLikeArmed(t *testing.T) {
 	pol := armedPolicy()
 	pol.Armed = false
 
@@ -742,21 +768,20 @@ func TestActiveBanGuard_DryRunSkipsGuard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
-	// Dry-run still computes the escalation path, not suppressed.
-	if act.Op != "dry_ban" {
-		t.Errorf("dry-run Op = %q, want dry_ban", act.Op)
+	if act.Op != "already_banned" {
+		t.Errorf("dry-run Op = %q, want already_banned — the guard must mirror armed", act.Op)
 	}
-	// Must not call RecordStrike or BumpLastSeen.
+	// Suppression path: no new strike, but last_seen is bumped (same as armed).
 	if len(st.banned) > 0 {
-		t.Errorf("dry-run: RecordStrike called %d time(s)", len(st.banned))
+		t.Errorf("suppression: RecordStrike called %d time(s)", len(st.banned))
 	}
-	if len(st.lastSeenBumps) > 0 {
-		t.Errorf("dry-run: BumpLastSeen called %d time(s)", len(st.lastSeenBumps))
+	if len(st.lastSeenBumps) != 1 {
+		t.Errorf("suppression: BumpLastSeen called %d time(s), want 1", len(st.lastSeenBumps))
 	}
 }
 
-// TestDecide_DryRunEscalation verifies strike escalation is computed correctly
-// in dry-run mode even though nothing is written to the store.
+// TestDecide_DryRunEscalation verifies strike escalation is computed — and
+// recorded (ADR-0009 §5) — correctly in dry-run mode, rung for rung.
 func TestDecide_DryRunEscalation(t *testing.T) {
 	pol := armedPolicy()
 	pol.Armed = false
@@ -773,6 +798,11 @@ func TestDecide_DryRunEscalation(t *testing.T) {
 	} {
 		t.Run("dry_ban_strike_"+string(rune('1'+i)), func(t *testing.T) {
 			st := newMock(map[string]int{ip1.String(): want.existing})
+			// The prior ban (that produced the existing strikes) has expired;
+			// keep it recent so escalations stay rate-limit-exempt like armed.
+			if want.existing > 0 {
+				st.setLastStrike(ip1, time.Now().Add(-time.Minute), time.Second)
+			}
 			engine := mustEngine(t, pol, st)
 
 			act, err := engine.Decide(context.Background(), []sdk.Verdict{mkVerdict(ip1, 85, "bruteforce")})
@@ -788,9 +818,12 @@ func TestDecide_DryRunEscalation(t *testing.T) {
 			if act.Strike != want.existing+1 {
 				t.Errorf("Strike = %d, want %d", act.Strike, want.existing+1)
 			}
-			// Must not persist anything.
-			if len(st.banned) > 0 {
-				t.Error("dry_ban must not call RecordStrike")
+			// The dry strike and simulated ban ARE persisted (ADR-0009 §5).
+			if len(st.banned) != 1 {
+				t.Fatalf("RecordStrike calls = %d, want 1 — dry_ban records its strike", len(st.banned))
+			}
+			if st.banned[0].Op != "dry_ban" {
+				t.Errorf("recorded Op = %q, want dry_ban", st.banned[0].Op)
 			}
 		})
 	}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,20 +18,22 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/evertramos/ezy-shield/internal/config"
+	"github.com/evertramos/ezy-shield/internal/daemon"
 	"github.com/evertramos/ezy-shield/internal/enforce"
 )
 
 const (
 	statusPass = "PASS"
 	statusFail = "FAIL"
+	statusWarn = "WARN"
 	statusNA   = "N/A"
 )
 
 // CheckResult is the result of a single doctor check.
 type CheckResult struct {
 	Name   string `json:"name"`
-	Status string `json:"status"`         // PASS | FAIL | N/A
-	Hint   string `json:"hint,omitempty"` // human-readable hint shown on FAIL/N/A
+	Status string `json:"status"`         // PASS | FAIL | WARN | N/A
+	Hint   string `json:"hint,omitempty"` // human-readable hint shown on FAIL/WARN/N/A
 }
 
 // DoctorSummary aggregates all check counts.
@@ -38,10 +41,11 @@ type DoctorSummary struct {
 	Total int `json:"total"`
 	Pass  int `json:"pass"`
 	Fail  int `json:"fail"`
+	Warn  int `json:"warn"`
 }
 
 func newDoctorCmd() *cobra.Command {
-	var configDir string
+	var configDir, dbPath, socketPath string
 
 	cmd := &cobra.Command{
 		Use:   "doctor",
@@ -51,23 +55,29 @@ func newDoctorCmd() *cobra.Command {
   - file permissions -- config files are not world-readable
   - nft binary -- nftables is installed
   - journald -- journalctl is present and accessible
+  - install shadowing -- a previous script install (scripts/get.sh) isn't
+    silently shadowing a package install via PATH or systemd unit precedence
 
 Each check prints PASS, FAIL, or N/A with a remediation hint on failure.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runDoctor(cmd, configDir, jsonOutput)
+			return runDoctor(cmd, configDir, dbPath, socketPath, jsonOutput)
 		},
 	}
 
 	cmd.Flags().StringVar(&configDir, "config-dir", "/etc/ezyshield",
 		"directory containing config.yaml and policy.yaml")
+	cmd.Flags().StringVar(&dbPath, "db", "/var/lib/ezyshield/ezyshield.db",
+		"path to the SQLite database (read-only diagnostics)")
+	cmd.Flags().StringVar(&socketPath, "socket", daemon.DefaultSocketPath,
+		"daemon control socket (queried for the live enforcement state)")
 
 	return cmd
 }
 
 // runDoctor runs all health checks and writes results to cmd.
 // jsonOut controls whether output is JSON (true) or human-readable (false).
-func runDoctor(cmd *cobra.Command, configDir string, jsonOut bool) error {
+func runDoctor(cmd *cobra.Command, configDir, dbPath, socketPath string, jsonOut bool) error {
 	checks := []CheckResult{
 		checkFileExists(filepath.Join(configDir, "config.yaml"), "config.yaml"),
 		checkFileParses(filepath.Join(configDir, "config.yaml"), "config.yaml"),
@@ -84,7 +94,16 @@ func runDoctor(cmd *cobra.Command, configDir string, jsonOut bool) error {
 		checkDockerSocket(),
 		checkEnvFile(filepath.Join(configDir, envFileName)),
 	}
+	checks = append(checks, checkAllowlistBreadth(configDir)...)
 	checks = append(checks, checkCloudflareEnforcers(configDir)...)
+	// issue #240: PATH/systemd shadowing between a script install and a
+	// package install. New function + this single registration line only --
+	// see doctor_shadow.go.
+	checks = append(checks, checkInstallShadowing(os.Getenv("PATH"))...)
+	// issue #146: fired ban_ineffective diagnostics (read-only DB query).
+	checks = append(checks, checkBanIneffective(dbPath))
+	// issue #174: honest enforcement state from the running daemon.
+	checks = append(checks, checkEnforcementState(socketPath))
 
 	summary := DoctorSummary{Total: len(checks)}
 	for _, c := range checks {
@@ -93,6 +112,8 @@ func runDoctor(cmd *cobra.Command, configDir string, jsonOut bool) error {
 			summary.Pass++
 		case statusFail:
 			summary.Fail++
+		case statusWarn:
+			summary.Warn++
 		}
 	}
 
@@ -189,6 +210,69 @@ func checkFilePerms(path, label string) CheckResult {
 		}
 	}
 	return CheckResult{Name: label + ": permissions", Status: statusPass}
+}
+
+// maxSafeAllowlistPrefixLen is the narrowest (numerically largest) private
+// prefix length this check treats as "safe": anything at or below this bit
+// count (i.e. /16, /12, /8, ...) covers 65k+ addresses. Issue #210: an
+// allowlisted range can never be banned (allowlist always wins, hard rule
+// #1), so a blanket private-range entry silently exempts a large swath of
+// address space from enforcement forever.
+const maxSafeAllowlistPrefixLen = 16
+
+// checkAllowlistBreadth warns when policy.yaml's allowlist contains a very
+// broad private (RFC1918 / IPv6 ULA) range -- prefix length <= 16 (i.e.
+// /16, /12, /8). This is the same failure mode issue #210 fixed for
+// `ezyshield init`-generated policies (which used to write the entire
+// 172.16.0.0/12 for docker); this check catches the pattern in hand-edited
+// policies and in policies generated before the fix, which init does not
+// rewrite (see writeGeneratedPolicy's commented example and the docs note
+// in docs/content/en/reference/policy.md).
+//
+// Returns N/A when policy.yaml is absent or fails to parse -- checkFileExists
+// / checkFileParses already surface those failures. Never FAILs: a broad
+// allowlist entry may be a deliberate, informed operator choice (the
+// commented example `init` now writes explains the trade-off), so this is
+// advisory, not blocking.
+func checkAllowlistBreadth(configDir string) []CheckResult {
+	path := filepath.Join(configDir, "policy.yaml")
+	name := "policy.yaml: allowlist breadth"
+
+	pol, err := config.LoadPolicy(path)
+	if err != nil {
+		return []CheckResult{{
+			Name:   name,
+			Status: statusNA,
+			Hint:   "policy.yaml missing or invalid -- see the policy.yaml: exists / parses checks above",
+		}}
+	}
+
+	var results []CheckResult
+	for _, entry := range pol.Allowlist {
+		prefix, err := netip.ParsePrefix(entry)
+		if err != nil {
+			continue // bare IPs (host routes) are always narrow; skip non-CIDR entries
+		}
+		if !prefix.Addr().IsPrivate() {
+			continue // public ranges are out of scope for this check
+		}
+		if prefix.Bits() > maxSafeAllowlistPrefixLen {
+			continue // narrow enough
+		}
+		results = append(results, CheckResult{
+			Name:   name,
+			Status: statusWarn,
+			Hint: fmt.Sprintf(
+				"%q is a broad private range (/%d) that can never be banned -- "+
+					"allowlist always wins over rules, AI, and geo blocking. If this isn't deliberate, "+
+					"narrow it in %s; see the commented example there for the opt-in trade-off",
+				entry, prefix.Bits(), path),
+		})
+	}
+	if len(results) == 0 {
+		return []CheckResult{{Name: name, Status: statusPass}}
+	}
+	return results
 }
 
 // checkNFTPresent returns PASS when the nft binary is found in PATH.

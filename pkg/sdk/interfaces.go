@@ -24,6 +24,14 @@ type AIProvider interface {
 // Sync reconciles the enforcer's state with the desired target set; it must be
 // called at startup and periodically to handle TTL expiry on platforms that lack
 // native TTL support.
+//
+// Contract: the daemon places a single centralized allowlist / anti-lockout
+// gate ahead of the enforcer fan-out, and that gate is the authoritative
+// guard — no Ban or Sync target that overlaps the allowlist/admin CIDRs or an
+// active operator SSH session ever reaches an Enforcer. Implementations may
+// keep their own allowlist checks as belt-and-braces, but must not rely on
+// being the only line of defense, and new implementations get the protection
+// for free.
 type Enforcer interface {
 	Name() string
 	Ban(ctx context.Context, t Target) error

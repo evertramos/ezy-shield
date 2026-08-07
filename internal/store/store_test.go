@@ -841,7 +841,7 @@ func TestGetBanInfo_NotPresent(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
 
-	_, _, found, err := db.GetBanInfo(ctx, ip1)
+	_, _, _, found, err := db.GetBanInfo(ctx, ip1)
 	if err != nil {
 		t.Fatalf("GetBanInfo on empty DB: %v", err)
 	}
@@ -860,7 +860,7 @@ func TestGetBanInfo_PresentAfterStrike(t *testing.T) {
 	if err := db.RecordStrike(ctx, action(ip1, 2, time.Hour)); err != nil {
 		t.Fatalf("RecordStrike: %v", err)
 	}
-	bannedAt, strike, found, err := db.GetBanInfo(ctx, ip1)
+	bannedAt, strike, _, found, err := db.GetBanInfo(ctx, ip1)
 	if err != nil {
 		t.Fatalf("GetBanInfo: %v", err)
 	}
@@ -891,7 +891,7 @@ func TestGetBanInfo_FalseAfterExpiry(t *testing.T) {
 		t.Fatalf("ExpireBans: %v", err)
 	}
 
-	_, _, found, err := db.GetBanInfo(ctx, ip1)
+	_, _, _, found, err := db.GetBanInfo(ctx, ip1)
 	if err != nil {
 		t.Fatalf("GetBanInfo post-expiry: %v", err)
 	}
@@ -915,7 +915,7 @@ func TestGetBanInfo_PermanentNeverExpires(t *testing.T) {
 		t.Fatalf("ExpireBans: %v", err)
 	}
 
-	_, strike, found, err := db.GetBanInfo(ctx, ip1)
+	_, strike, _, found, err := db.GetBanInfo(ctx, ip1)
 	if err != nil {
 		t.Fatalf("GetBanInfo post-expire: %v", err)
 	}
@@ -1185,5 +1185,230 @@ func TestHadIneffectiveBan_Default(t *testing.T) {
 	}
 	if had {
 		t.Error("want false for offender without ineffective bans")
+	}
+}
+
+// ── dry-run simulated bans (ADR-0009 §5, issue #145) ─────────────────────────
+
+// dryAction mirrors action() with Op="dry_ban" — a dry-run simulated ban.
+func dryAction(ip netip.Addr, strike int, ttl time.Duration) sdk.Action {
+	a := action(ip, strike, ttl)
+	a.Op = "dry_ban"
+	return a
+}
+
+// TestDryRunBan_FlagRoundTrip verifies a dry_ban strike stores dry_run=1 and
+// GetBanInfo/ActiveBans both report it as simulated, and that a subsequent
+// real strike overwrites the flag (the armed engine falls through leftover
+// simulated bans and records a real one).
+func TestDryRunBan_FlagRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	if err := db.RecordStrike(ctx, dryAction(ip1, 1, time.Hour)); err != nil {
+		t.Fatalf("RecordStrike dry: %v", err)
+	}
+
+	_, strike, dryRun, found, err := db.GetBanInfo(ctx, ip1)
+	if err != nil || !found {
+		t.Fatalf("GetBanInfo: found=%v err=%v", found, err)
+	}
+	if !dryRun {
+		t.Error("GetBanInfo dryRun = false, want true for a dry_ban row")
+	}
+	if strike != 1 {
+		t.Errorf("strike = %d, want 1", strike)
+	}
+
+	bans, err := db.ActiveBans(ctx)
+	if err != nil {
+		t.Fatalf("ActiveBans: %v", err)
+	}
+	if len(bans) != 1 || bans[0].Op != "dry_ban" {
+		t.Fatalf("ActiveBans = %+v, want one entry with Op=dry_ban", bans)
+	}
+
+	// A real strike for the same IP must clear the flag via the upsert.
+	if err := db.RecordStrike(ctx, action(ip1, 2, time.Hour)); err != nil {
+		t.Fatalf("RecordStrike real: %v", err)
+	}
+	_, _, dryRun, found, err = db.GetBanInfo(ctx, ip1)
+	if err != nil || !found {
+		t.Fatalf("GetBanInfo after real strike: found=%v err=%v", found, err)
+	}
+	if dryRun {
+		t.Error("dry_run still set after a real strike — the enforcer sync would skip a REAL ban")
+	}
+}
+
+// TestDryRunBan_ExpiresWithDistinctAuditReason verifies simulated bans expire
+// through the normal sweep and the audit entry names the simulated TTL.
+func TestDryRunBan_ExpiresWithDistinctAuditReason(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	if err := db.RecordStrike(ctx, dryAction(ip1, 1, time.Millisecond)); err != nil {
+		t.Fatalf("RecordStrike dry: %v", err)
+	}
+	n, err := db.ExpireBans(ctx, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("ExpireBans: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("expired = %d, want 1", n)
+	}
+
+	entries, err := db.ListAuditLog(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListAuditLog: %v", err)
+	}
+	var found bool
+	for _, e := range entries {
+		if e.Op == "expire" && e.Reason == "simulated ttl expired" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no audit entry with reason 'simulated ttl expired'; entries=%+v", entries)
+	}
+}
+
+// // ── daemon_state kv + system audits (issue #228) ─────────────────────────────
+
+func TestDaemonState_RoundTrip(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	if _, found, err := db.GetState(ctx, "arm_window_expires_at"); err != nil || found {
+		t.Fatalf("empty state: found=%v err=%v, want absent", found, err)
+	}
+	if err := db.SetState(ctx, "arm_window_expires_at", "2026-07-22T10:00:00Z"); err != nil {
+		t.Fatalf("SetState: %v", err)
+	}
+	v, found, err := db.GetState(ctx, "arm_window_expires_at")
+	if err != nil || !found || v != "2026-07-22T10:00:00Z" {
+		t.Fatalf("GetState = (%q, %v, %v)", v, found, err)
+	}
+	// Upsert overwrites.
+	if err := db.SetState(ctx, "arm_window_expires_at", "2026-07-23T10:00:00Z"); err != nil {
+		t.Fatalf("SetState upsert: %v", err)
+	}
+	v, _, _ = db.GetState(ctx, "arm_window_expires_at")
+	if v != "2026-07-23T10:00:00Z" {
+		t.Errorf("after upsert = %q", v)
+	}
+	if err := db.DeleteState(ctx, "arm_window_expires_at"); err != nil {
+		t.Fatalf("DeleteState: %v", err)
+	}
+	if _, found, _ := db.GetState(ctx, "arm_window_expires_at"); found {
+		t.Error("state still present after delete")
+	}
+	// Deleting a missing key is not an error.
+	if err := db.DeleteState(ctx, "never-existed"); err != nil {
+		t.Errorf("DeleteState missing key: %v", err)
+	}
+}
+
+func TestAuditSystem_AppendsRow(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	if err := db.AuditSystem(ctx, "arm", "operator armed"); err != nil {
+		t.Fatalf("AuditSystem: %v", err)
+	}
+	entries, err := db.ListAuditLog(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListAuditLog: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Op != "arm" || entries[0].IP != "system" {
+		t.Errorf("entries = %+v, want one op=arm ip=system row", entries)
+	}
+}
+
+// TestActiveBans_ExpiredNeverPermanent (issue #279): the three expiry states
+// must stay distinguishable — a ban whose remaining time reached zero is NOT
+// active (skipped; the expiry tick owns deletion) and must never come back
+// disguised as permanent, which both rendered "permanent" in list and
+// re-synced into nftables with no timeout.
+func TestActiveBans_ExpiredNeverPermanent(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestDB(t)
+
+	expired := netip.MustParseAddr("203.0.113.1")
+	perm := netip.MustParseAddr("203.0.113.2")
+	future := netip.MustParseAddr("203.0.113.3")
+
+	// 1ns TTL: expires_at lands in the past by the time we query.
+	if err := s.RecordManualBan(ctx, expired, time.Nanosecond, "expired row"); err != nil {
+		t.Fatalf("seed expired: %v", err)
+	}
+	if err := s.RecordManualBan(ctx, perm, 0, "permanent row"); err != nil {
+		t.Fatalf("seed permanent: %v", err)
+	}
+	if err := s.RecordManualBan(ctx, future, time.Hour, "future row"); err != nil {
+		t.Fatalf("seed future: %v", err)
+	}
+
+	bans, err := s.ActiveBans(ctx)
+	if err != nil {
+		t.Fatalf("ActiveBans: %v", err)
+	}
+	got := make(map[netip.Addr]sdk.Action, len(bans))
+	for _, b := range bans {
+		got[b.IP] = b
+	}
+
+	if _, ok := got[expired]; ok {
+		t.Errorf("expired ban returned as active: %+v", got[expired])
+	}
+	p, ok := got[perm]
+	if !ok || !p.Permanent || p.TTL != 0 {
+		t.Errorf("permanent ban = %+v (ok=%v), want Permanent=true TTL=0", p, ok)
+	}
+	f, ok := got[future]
+	if !ok || f.Permanent || f.TTL <= 0 || f.TTL > time.Hour {
+		t.Errorf("future ban = %+v (ok=%v), want Permanent=false 0<TTL<=1h", f, ok)
+	}
+}
+
+// TestRemoveAllow covers the runtime allowlist removal path (issue #330):
+// exact-match delete, idempotency, and no effect on other entries.
+func TestRemoveAllow(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	keep := netip.MustParsePrefix("10.0.0.0/8")
+	gone := netip.MustParsePrefix("192.0.2.0/24")
+	if err := db.AddAllow(ctx, keep, nil, "admin"); err != nil {
+		t.Fatalf("AddAllow keep: %v", err)
+	}
+	if err := db.AddAllow(ctx, gone, nil, "office"); err != nil {
+		t.Fatalf("AddAllow gone: %v", err)
+	}
+
+	n, err := db.RemoveAllow(ctx, gone)
+	if err != nil {
+		t.Fatalf("RemoveAllow: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("RemoveAllow removed %d rows, want 1", n)
+	}
+
+	entries, err := db.ListAllow(ctx)
+	if err != nil {
+		t.Fatalf("ListAllow: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Prefix != keep {
+		t.Errorf("remaining entries = %+v, want only %s", entries, keep)
+	}
+
+	// Idempotent: removing again is not an error, just zero rows.
+	n, err = db.RemoveAllow(ctx, gone)
+	if err != nil {
+		t.Fatalf("RemoveAllow (repeat): %v", err)
+	}
+	if n != 0 {
+		t.Errorf("repeat RemoveAllow removed %d rows, want 0", n)
 	}
 }

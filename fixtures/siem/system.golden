@@ -1,0 +1,6 @@
+--- json ---
+{"schema_version":1,"timestamp":"2025-01-15T10:00:01Z","vendor":"ezy","product":"EzyShield","version":"1.4.2","action":"arm","rule":"operator armed enforcement","score":0,"strike":0,"ttl_seconds":0,"actor":"manual","node":"edge-01"}
+--- cef ---
+CEF:0|ezy|EzyShield|1.4.2|arm|Enforcement armed|2|act=arm rt=1736935201000 cs1Label=rule cs1=operator armed enforcement cs2Label=actor cs2=manual cn1Label=score cn1=0 cn2Label=strike cn2=0 cn3Label=ttlSeconds cn3=0 dvchost=edge-01
+--- rfc5424 ---
+<134>1 2025-01-15T10:00:01Z edge-01 EzyShield - arm [ezyShield@32473 action="arm" rule="operator armed enforcement" actor="manual" score="0" strike="0" ttlSeconds="0" node="edge-01"] arm rule=operator armed enforcement

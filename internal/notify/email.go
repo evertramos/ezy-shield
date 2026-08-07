@@ -89,11 +89,19 @@ func (e *EmailNotifier) sendSTARTTLS(ctx context.Context, addr, from string, to 
 		return fmt.Errorf("smtp client: %w", err)
 	}
 	defer c.Close() //nolint:errcheck
-	if ok, _ := c.Extension("STARTTLS"); ok {
-		tlsCfg := &tls.Config{ServerName: e.host, MinVersion: tls.VersionTLS12} //nolint:gosec
-		if err := c.StartTLS(tlsCfg); err != nil {
-			return fmt.Errorf("starttls: %w", err)
-		}
+	// Fail closed when STARTTLS is unavailable (issue #360): the operator
+	// chose tls: "starttls", so silently delivering in plaintext — whether
+	// the server never offered it or a MITM stripped the capability — would
+	// downgrade the configured security mode and leak credentials on the
+	// wire without any signal. An operator who genuinely wants plaintext can
+	// set tls: "none" explicitly.
+	ok, _ := c.Extension("STARTTLS")
+	if !ok {
+		return fmt.Errorf("starttls: server did not advertise STARTTLS; refusing to send in plaintext (set tls: \"none\" to allow, or fix the server)")
+	}
+	tlsCfg := &tls.Config{ServerName: e.host, MinVersion: tls.VersionTLS12} //nolint:gosec
+	if err := c.StartTLS(tlsCfg); err != nil {
+		return fmt.Errorf("starttls: %w", err)
 	}
 	return e.authAndDeliver(c, from, to, body)
 }
@@ -190,19 +198,54 @@ func formatEmailBody(msg sdk.Notification) string {
 	return sb.String()
 }
 
-// buildRawEmail constructs a minimal RFC 5322 message in memory.
+// sanitizeHeader strips CR, LF, and every other ASCII control character from a
+// header value (CWE-93, issue #320). Notification.Title is untrusted — the
+// daemon passes wrapped error text into it — and email is the only
+// line-oriented channel: an embedded CR/LF would terminate the Subject header
+// and inject arbitrary headers (e.g. Bcc) into the message. Runs of stripped
+// characters collapse to a single space so multi-line error text stays
+// readable on one header line.
+func sanitizeHeader(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	lastStripped := false
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			if !lastStripped {
+				b.WriteRune(' ')
+				lastStripped = true
+			}
+			continue
+		}
+		b.WriteRune(r)
+		lastStripped = false
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// buildRawEmail constructs a minimal RFC 5322 message in memory. Header values
+// pass through sanitizeHeader at this choke point so no caller can smuggle a
+// header-terminating CR/LF, wherever the value originated. The body is
+// canonicalized here for the same reason: no caller-supplied CR may reach the
+// DATA stream except as part of the CRLF line endings written below.
 func buildRawEmail(from string, to []string, subject, body string) []byte {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "From: %s\r\n", from)
-	fmt.Fprintf(&sb, "To: %s\r\n", strings.Join(to, ", "))
-	fmt.Fprintf(&sb, "Subject: %s\r\n", subject)
+	fmt.Fprintf(&sb, "From: %s\r\n", sanitizeHeader(from))
+	fmt.Fprintf(&sb, "To: %s\r\n", sanitizeHeader(strings.Join(to, ", ")))
+	fmt.Fprintf(&sb, "Subject: %s\r\n", sanitizeHeader(subject))
 	sb.WriteString("MIME-Version: 1.0\r\n")
 	sb.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
 	sb.WriteString("\r\n")
-	// Normalize line endings to CRLF per RFC 5321.
-	lines := strings.Split(body, "\n")
-	for _, line := range lines {
-		line = strings.TrimRight(line, "\r")
+	// Normalize line endings to CRLF per RFC 5321. First fold CRLF to LF,
+	// then neutralize every remaining bare CR (issue #403, body-side sibling
+	// of #320): textproto's DotWriter forwards lone CRs to the wire
+	// unchanged, and relays of the 2023 SMTP-smuggling class treat a lone CR
+	// as an end-of-line, turning log-derived text like "x\r.\rQUIT" into a
+	// DATA-termination primitive. Replacing with a space (as sanitizeHeader
+	// does) keeps the surrounding text readable.
+	body = strings.ReplaceAll(body, "\r\n", "\n")
+	body = strings.ReplaceAll(body, "\r", " ")
+	for _, line := range strings.Split(body, "\n") {
 		sb.WriteString(line + "\r\n")
 	}
 	return []byte(sb.String())

@@ -37,7 +37,8 @@ seguros para scripts:
 | `report <ip>` | Objeto: relatório de abuso versionado (`schema_version`, `ip`, `country`, `asn`, `current_ban`, `strikes`, `actions`, mais `evidence` com `--evidence`) |
 | `report` | Array de resumos de ofensores (`ip`, `first_seen`, `last_seen`, `total_strikes`, `banned`, `permanent`, `country`, `asn`) |
 | `watch` | NDJSON: um objeto de evento por linha |
-| `doctor` | Objeto: `checks` (`name`, `status`, `hint`) e `summary` (`total`, `pass`, `fail`) |
+| `scan` | Objeto: `listeners`, `new_listeners` (cada socket, todos os campos da struct `scan.Listener`: `Addr`, `Protocol`, `UID`, `Inode`, `PID`, `ExePath`, `UserName`, `IsPublic`, `OwnerType`, `UnitName`, `ContainerID`, `ContainerName`, `ContainerImage`, `LogSource`) |
+| `doctor` | Objeto: `checks` (`name`, `status`, `hint`) e `summary` (`total`, `pass`, `fail`, `warn`) |
 | `config show` | Objeto: `config`, `policy` (valores efetivos, segredos redigidos) |
 | `version` | Objeto: `version`, `commit`, `build_date` |
 
@@ -70,6 +71,16 @@ no host), **Collectors**, **Allowlist**, **Edge enforcers**, **AI analysis**,
 por linha. A estilização segue as [convenções globais de cores](#cores);
 saída por pipe permanece texto puro.
 
+Quando o Docker é detectado, a seção **Environment** enumera as sub-redes de
+bridge do Docker que realmente existem no host e coloca na allowlist apenas
+essas — nunca uma faixa RFC1918 genérica. Se a enumeração falhar, o wizard
+recua para a sub-rede padrão do bridge do Docker (`172.17.0.0/16`) sozinha e
+imprime um aviso `!`. Hosts sem Docker não recebem nenhuma entrada
+relacionada a Docker na allowlist. Veja a seção de allowlist na
+[Referência de Policy](policy.md) para o trade-off de ampliar isso
+deliberadamente, e rode `ezyshield doctor` depois — ele avisa sobre qualquer
+entrada privada da allowlist `/16` ou mais ampla.
+
 Ao final, imprime uma seção **Summary**:
 
 - o que foi configurado (coletores, enforcers, IA) e o que foi pulado, com o
@@ -90,6 +101,22 @@ Flags:
 - `--config-dir <dir>` — escreve os arquivos em outro diretório; pula a
   instalação das units do systemd e o start dos serviços (os próximos passos
   passam a usar o `run` em primeiro plano).
+- `--non-interactive`, `-n` — configuração automatizada (sem TTY), guiada por
+  `--answers` e/ou pelas flags de sobrescrita abaixo. Produz a mesma
+  configuração validada que o assistente gera (sempre `armed: false`). Veja o
+  [guia de instalação não-interativa](../guides/automation.md) para o esquema do
+  arquivo de respostas e exemplos de Ansible/cloud-init.
+- `--answers <caminho>` — arquivo de respostas YAML (implica
+  `--non-interactive`; as flags sobrescrevem os valores do arquivo). Chaves
+  desconhecidas são rejeitadas.
+- `--force` — sobrescreve um `config.yaml`/`policy.yaml` existente (só no modo
+  não-interativo; sem ela, uma reexecução recusa, igual ao assistente).
+- `--admin-ips`, `--monitor-ssh`, `--enable-ai`, `--ai-provider`, `--ai-model`,
+  `--ai-key-env` — sobrescritas por resposta para o caminho não-interativo. O
+  `--ai-key-env` recebe um **NOME** de variável de ambiente, nunca a chave em
+  si; um segredo literal em qualquer flag ou valor do arquivo é rejeitado.
+- `--json` — com `--non-interactive`, emite o resumo como JSON no stdout (o
+  progresso vai para o stderr).
 
 ## ezyshield run
 
@@ -146,6 +173,39 @@ Se a conexão com o daemon cair (ex.: reinício), o `watch` reconecta
 automaticamente com backoff. Pressione `Ctrl-C` para sair. O daemon precisa
 estar em execução (`ezyshield run` ou `sudo systemctl start ezyshield`).
 
+## ezyshield arm
+
+Arma o enforcement após um pre-flight obrigatório (issue #228). O daemon sai
+de dry-run para bloqueio real; a transição é persistida no `policy.yaml` e
+auditada — sem editar config, sem restart.
+
+```bash
+sudo ezyshield arm [--for 1h] [--keep] [--force]
+```
+
+O pre-flight reporta pass/warn/fail para: enforcer configurado, cobertura de
+`admin_cidrs` e allowlist, uma simulação de auto-ban com o IP da sua sessão
+SSH, e atividade recente em dry-run. Checks reprovados recusam a transição.
+
+| Flag | Significado |
+|------|-------------|
+| `--for <dur>` | Arma temporariamente (1m–7d): sem confirmação via `--keep`, o daemon reverte para dry-run quando a janela expira e notifica. A reversão é do lado do daemon — sobrevive à queda da sua sessão. |
+| `--keep` | Confirma a janela ativa; armado vira incondicional |
+| `--force` | Sobrepõe checks reprovados — exceto o check de auto-ban, que nunca é contornável |
+| `--socket` | Caminho do socket de controle do daemon |
+
+O `ezyshield status` mostra o prazo de auto-reversão enquanto a janela está
+ativa.
+
+## ezyshield disarm
+
+Volta para o modo dry-run. Sem pre-flight — ir em direção ao dry-run é sempre
+a direção segura. Persistido no `policy.yaml` e auditado.
+
+```bash
+sudo ezyshield disarm
+```
+
 ## ezyshield status
 
 Mostra o status do daemon e do enforcer.
@@ -182,7 +242,12 @@ ezyshield list --by-asn
 # Entradas da allowlist
 ezyshield list --allow
 
-# Saída em JSON
+# Histórico de ações (bans, expirações, unbans, allows) — mais recentes primeiro
+ezyshield list --audit
+ezyshield list --audit --ip 203.0.113.42
+ezyshield list --audit --limit 50
+
+# Saída em JSON (funciona com --audit também)
 ezyshield list --json
 ```
 
@@ -191,12 +256,19 @@ ezyshield list --json
 | `--allow` | lista as entradas da allowlist em vez dos banimentos |
 | `--by-country` | agrega os banimentos por país (requer enriquecimento GeoIP) |
 | `--by-asn` | agrega os banimentos por ASN (requer enriquecimento GeoIP) |
+| `--audit` | mostra o histórico de ações em vez dos banimentos ativos |
+| `--ip` | com `--audit`: filtra o histórico para um único endereço IP |
+| `--limit` | com `--audit`: número máximo de linhas (padrão 100) |
 | `--socket` | override do caminho do socket de controle |
 
 Colunas de banimento: `IP / STRIKE / TTL / COUNTRY / ASN / REASON`.
 Colunas da allowlist: `IP/CIDR / EXPIRES / REASON`.
+Colunas de auditoria: `TIME / IP / ACTION / STRIKE / TTL / REASON` (mais
+recentes primeiro; `TTL` é `perm` para ban permanente e `-` para ações sem TTL).
 
-Para o histórico por IP com evidências, use `ezyshield report`.
+`list --audit` mostra apenas a trilha de auditoria (timestamps, ações,
+strikes, motivos). Para o histórico completo de um ofensor, com vereditos de
+detecção e evidências, use `ezyshield report`.
 
 ## ezyshield report
 
@@ -254,8 +326,17 @@ Timestamps são UTC (RFC 3339).
 
 Bane manualmente um IP ou CIDR.
 
+Bans manuais passam pelos **mesmos guards de segurança das decisões
+automáticas** (issue #211): um alvo que sobrepõe a allowlist, os
+`admin_cidrs` ou uma entrada `allow` de runtime é recusado; um alvo que
+cobre uma sessão SSH ativa (inclusive a sua — a CLI encaminha o IP do seu
+cliente) é recusado; e bans manuais contam contra `max_bans_per_minute`.
+Recusas nomeiam o guard, saem com código ≠ 0 e são registradas no audit
+log como `ban_refused`. Não há override — allowlist e anti-lockout são
+hard rules, e o botão do rate limit é o `max_bans_per_minute` da policy.
+
 ```bash
-# Banir usando a tabela de strikes da policy (TTL do strike 1)
+# Banir permanentemente
 sudo ezyshield ban 203.0.113.42
 
 # Duração explícita
@@ -267,7 +348,7 @@ sudo ezyshield ban 203.0.113.0/24
 
 | Flag | Descrição |
 |------|-----------|
-| `--ttl` | duração do banimento (`5m`, `24h`, `7d`); vazio = tabela de strikes da policy |
+| `--ttl` | duração do banimento (`5m`, `24h`, `7d`); vazio = permanente |
 | `--reason` | motivo em texto livre armazenado no log de auditoria |
 | `--socket` | override do caminho do socket de controle |
 
@@ -315,6 +396,67 @@ sudo ezyshield allow --until 2026-08-01T00:00:00Z 198.51.100.8
 A allowlist é verificada primeiro. Nenhuma regra pode banir um IP que está na
 allowlist.
 
+## ezyshield unallow
+
+Remove um IP ou CIDR da allowlist de runtime.
+
+```bash
+sudo ezyshield unallow 192.0.2.100
+sudo ezyshield unallow --reason "escritório mudou" 192.0.2.0/24
+```
+
+| Flag | Descrição |
+|------|-----------|
+| `--reason` | nota em texto livre registrada no audit log |
+| `--socket` | override do caminho do socket de controle |
+
+O alvo precisa corresponder exatamente à entrada armazenada (o mesmo IP ou
+CIDR que foi permitido). Apenas entradas de runtime (adicionadas com `allow`)
+podem ser removidas; entradas da allowlist estática do config exigem edição do
+arquivo e restart do daemon. Remover uma entrada também a retira do set
+`@allowed` do enforcer.
+
+## ezyshield scan
+
+Descobre todos os sockets TCP em escuta no host e detecta desvios (drift) em
+relação à baseline anterior. É um comando de reconhecimento somente-leitura —
+responde "o que está exposto, qual processo é o dono e onde estão os logs?" e
+nunca bane.
+
+```bash
+# Escaneia e imprime a tabela de listeners
+sudo ezyshield scan
+
+# Saída legível por máquina
+sudo ezyshield scan --json
+```
+
+Para cada socket no estado `LISTEN` (lido de `/proc/net/tcp` e
+`/proc/net/tcp6`) ele resolve o PID e o binário donos, o usuário, o dono
+(unidade systemd ou container Docker) e uma fonte de log. Os resultados são
+armazenados como baseline no banco SQLite; em execuções seguintes, os listeners
+que não estavam na baseline anterior são marcados com `[NEW]`. Um listener
+**público** sem fonte de log resolvível é reportado como `⚠ no logs`, para que
+um serviço exposto à internet que o EzyShield não consegue observar se destaque.
+
+| Flag | Padrão | Descrição |
+|------|--------|-----------|
+| `--db` | `/var/lib/ezyshield/ezyshield.db` | caminho do banco SQLite que guarda a baseline |
+
+Colunas da tabela: `PROTO / ADDR:PORT / PID / BINARY / USER / OWNER /
+UNIT/CONTAINER / LOG SOURCE`.
+
+Execute como root. Com o caminho `--db` padrão, o comando cria e lê o banco em
+`/var/lib/ezyshield`, o que exige privilégios — então uma execução sem root
+falha ali, a não ser que você aponte `--db` para um local gravável. Com um
+banco gravável, os metadados por socket que você não tem permissão para
+resolver (o binário, o dono e a fonte de log de processos que não são seus)
+degradam graciosamente — por exemplo, `PID` `0`, binário vazio — em vez de
+falhar o scan. O comando segue o
+[contrato global de códigos de saída](#códigos-de-saída); com `--json` imprime
+apenas JSON no stdout, com os sockets recém-detectados também reunidos em
+`new_listeners`.
+
 ## ezyshield doctor
 
 Valida a configuração, as permissões e as fontes de log.
@@ -326,6 +468,7 @@ sudo ezyshield doctor
 | Flag | Padrão | Descrição |
 |------|--------|-----------|
 | `--config-dir` | `/etc/ezyshield` | diretório de configuração a verificar |
+| `--db` | `/var/lib/ezyshield/ezyshield.db` | banco para a checagem read-only de ban_ineffective |
 
 Verificações:
 - config.yaml / policy.yaml existem, fazem parse e têm permissões/dono seguros
@@ -334,6 +477,23 @@ Verificações:
 - socket do enforcer alcançável
 - socket do docker presente (quando coletores Docker estão configurados)
 - permissões do arquivo de segredos `.env`
+- amplitude da allowlist: **WARN** (não FAIL) quando a allowlist do
+  `policy.yaml` contém uma faixa privada (RFC1918/ULA) `/16` ou mais ampla —
+  essa faixa nunca pode ser banida, então ela isenta silenciosamente um
+  pedaço grande do espaço de endereços do enforcement para sempre. Veja a
+  seção de allowlist na [Referência de Policy](policy.md).
+- diagnóstico ban_ineffective: **FAIL** quando um ban ativo é marcado ineficaz (tráfego passando apesar do ban) — nomeia os IPs e aponta o remédio sistêmico (edge enforcement / real-IP parsing / saúde do enforcer); **WARN** quando nenhum ban está ineficaz no momento, mas algum offender foi marcado historicamente; **PASS** caso contrário. Consulta read-only ao banco em `--db`.
+- **Estado do enforcement** (issue #174) — a saúde real do caminho de
+  enforcement, derivada dos resultados reais do enforcer, não só da config, e
+  re-verificada por um probe de reconcile periódico (a cada 5 minutos) para
+  continuar honesta em hosts quietos. Mostrado em destaque na saída texto e
+  como campo estável `enforcement_state` no `--json`:
+  - `ACTIVE` — armado, enforcer saudável, bans são aplicados
+  - `DRY-RUN` — detecção rodando mas **nada é aplicado**
+  - `DEGRADED` — armado, mas o Ban/Sync recente do enforcer **falhou**; bans podem não estar sendo aplicados (com o detalhe da falha)
+  - `DISABLED` — nenhum enforcer configurado; só detecção
+
+  Como checagem é **FAIL** quando armado mas o enforcer está DEGRADED (bans não aplicados); **WARN** em DRY-RUN ou DISABLED; N/A quando o daemon não está rodando.
 
 Para exercitar de verdade os enforcers e os canais de notificação, use
 `ezyshield test enforcer` e `ezyshield test notifier`.
@@ -383,6 +543,7 @@ sudo ezyshield config enforcer cloudflare
 
 - A escrita é atômica (arquivo temporário + rename); o arquivo anterior é mantido como `config.yaml.bak` e a configuração mesclada é revalidada antes de qualquer coisa tocar o disco. Comentários não são preservados — recupere-os do `.bak` se necessário.
 - Tokens secretos vão para o arquivo `.env` ao lado do `config.yaml` (modo 0600), nunca para o `config.yaml` em si (`api_token: env:CLOUDFLARE_API_TOKEN`).
+- Múltiplas contas Cloudflare são suportadas: com contas já configuradas, o wizard pergunta se você quer reconfigurar uma existente ou adicionar outra; cada conta mantém sua própria variável de ambiente de token (`CLOUDFLARE_API_TOKEN_<NOME>`). Veja a seção multi-conta do guia da Cloudflare.
 - Em caso de sucesso, o comando imprime as chaves alteradas e os próximos passos (`config validate`, reiniciar o daemon). Se o wizard for abortado, nada é escrito.
 
 Nomes disponíveis: `cloudflare`.
@@ -483,8 +644,16 @@ Códigos de saída: `0` salvo, `1` wizard abortado ou falha de escrita, `2` conf
 
 ## ezyshield update
 
-Autoatualiza os binários a partir do GitHub Releases (com verificação de
-checksum).
+Autoatualiza os binários a partir do GitHub Releases. O `checksums.txt` tem a
+assinatura verificada com `cosign` contra a identidade fixada do workflow de
+release (veja [Verificando releases](../security/verifying-releases.md)), e
+depois cada binário é verificado por checksum. A verificação de assinatura é
+**fail-closed**: `checksums.txt.sig`/`.pem` ausente, `cosign` não instalado ou
+verificação com falha abortam o update e nada é instalado. Use
+`--allow-unsigned` para prosseguir sem assinatura (assets de assinatura
+ausentes — ex.: uma release anterior à assinatura — ou host sem `cosign`); uma
+verificação **com falha** de uma assinatura presente sempre aborta, com ou sem
+a flag.
 
 ```bash
 # Verificar se existe uma release mais nova
@@ -496,6 +665,12 @@ sudo ezyshield update
 # Atualizar/reverter para uma versão específica
 sudo ezyshield update --version v0.1.0
 ```
+
+`--version` também é o caminho oficial de rollback: quando a tag é mais antiga
+que a versão em execução, o comando avisa — o schema do banco de dados nunca é
+revertido, então mantenha um backup — e pede confirmação (`[y/N]`, padrão
+não). Use `--yes` (`-y`) para rollbacks não interativos; sem essa flag, uma
+execução sem terminal recusa o downgrade.
 
 Se você instalou via apt/dnf, prefira o gerenciador de pacotes (veja o guia de
 instalação).
@@ -575,12 +750,22 @@ Os verbos pré-1.0 `test-enforce <name>` e `test-notify <name>` continuam funcio
 |------|-----------|
 | `--json` | Saída em JSON (veja as [convenções globais](#convenções-globais) para os formatos) |
 | `--no-color` | Desabilita a saída colorida (a variável de ambiente `NO_COLOR` também é respeitada) |
-| `--version` | Imprime a versão e sai |
 | `-h, --help` | Mostra o texto de ajuda |
 
 `--config` / `--policy` **não** são globais — existem nos comandos que leem
 esses arquivos (`run`, `config show`, `validate`, `dashboard`), com defaults
 em `/etc/ezyshield`.
+
+### Flags exclusivas do comando raiz
+
+| Flag | Descrição |
+|------|-----------|
+| `-v, --version` | Imprime a versão e sai |
+
+Diferente de `--json`/`--no-color`, `-v`/`--version` só é registrada no
+comando raiz `ezyshield` e **não** é herdada pelos subcomandos — `ezyshield
+ban --version` falha com `unknown flag: --version`. Use `ezyshield version`
+(ou `ezyshield --version`) para checar a versão.
 
 ## Exemplos
 

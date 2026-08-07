@@ -264,3 +264,122 @@ func TestEmail_UnreachableHostReturnsError(t *testing.T) {
 		t.Fatal("expected error connecting to unreachable host, got nil")
 	}
 }
+
+// TestEmail_StartTLSFailsClosedWithoutAdvertise reproduces issue #360: with
+// tls: "starttls", if the server never advertises STARTTLS (fakeSMTP doesn't,
+// mimicking a capability-stripping MITM), delivery must error instead of
+// silently falling back to plaintext and leaking the message/credentials.
+func TestEmail_StartTLSFailsClosedWithoutAdvertise(t *testing.T) {
+	srv, addr := newFakeSMTP(t)
+	_ = srv
+	host, portStr, _ := net.SplitHostPort(addr)
+	var port int
+	if _, err := fmt.Sscan(portStr, &port); err != nil {
+		t.Fatalf("bad addr %q: %v", addr, err)
+	}
+	n := notify.NewEmail("shield@example.com", []string{"admin@example.com"},
+		host, port, "", "", "starttls")
+
+	err := n.Send(context.Background(), sdk.Notification{Severity: "warn", Title: "t"})
+	if err == nil {
+		t.Fatal("starttls mode must fail closed when the server does not advertise STARTTLS")
+	}
+	if !strings.Contains(err.Error(), "starttls") {
+		t.Errorf("error should name the starttls failure, got: %v", err)
+	}
+	if len(srv.recorded()) != 0 {
+		t.Error("no message may be delivered when STARTTLS is unavailable in starttls mode")
+	}
+}
+
+// TestEmail_SubjectHeaderInjectionBlocked reproduces issue #320 (CWE-93):
+// Notification.Title carries wrapped error text (daemon.notifyCritical), so a
+// CR/LF inside it would terminate the Subject header and inject arbitrary
+// headers (e.g. Bcc) into the RFC 5322 message. The header section (everything
+// before the first blank line) must contain no injected header; occurrences in
+// the body are inert display text and are allowed.
+func TestEmail_SubjectHeaderInjectionBlocked(t *testing.T) {
+	srv, addr := newFakeSMTP(t)
+	n := newTestEmail(t, addr)
+
+	msg := sdk.Notification{
+		Severity: "critical",
+		Title:    "enforcer ban failed\r\nBcc: attacker@example.com\r\nX-Injected: 1",
+	}
+	if err := n.Send(context.Background(), msg); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	// The fake server records DATA with line endings normalized to "\n".
+	body := strings.ReplaceAll(srv.recorded()[0].Body, "\r\n", "\n")
+	headerSection, _, found := strings.Cut(body, "\n\n")
+	if !found {
+		t.Fatalf("message has no header/body separator:\n%s", body)
+	}
+	headerLines := strings.Split(headerSection, "\n")
+	for _, line := range headerLines {
+		for _, hdr := range []string{"Bcc:", "X-Injected:"} {
+			if strings.HasPrefix(line, hdr) {
+				t.Errorf("injected header %q made it into the header section:\n%s", line, headerSection)
+			}
+		}
+	}
+	if !strings.Contains(headerSection, "Subject: [EzyShield] CRITICAL:") {
+		t.Errorf("Subject header missing or malformed:\n%s", headerSection)
+	}
+	// The header section is a fixed set of lines (From/To/Subject/
+	// MIME-Version/Content-Type): the sanitized title must stay on the single
+	// Subject line and add no headers.
+	if got := len(headerLines); got != 5 {
+		t.Errorf("header section has %d lines, want 5:\n%s", got, headerSection)
+	}
+}
+
+// TestEmail_BodyBareCRNeutralized reproduces issue #403 (body-side sibling of
+// #320): an interior bare CR in untrusted Notification fields survived
+// TrimRight-only normalization and reached the SMTP DATA stream verbatim
+// (textproto's DotWriter forwards lone CRs unchanged). Against relays that
+// treat a lone CR as an end-of-line — the 2023 SMTP-smuggling class — a
+// log-derived string like "x\r.\rQUIT" becomes a DATA-termination primitive.
+// The wire body must contain no CR outside a CRLF pair. The fake server trims
+// only trailing "\r\n" per wire line, so any interior CR that reaches the wire
+// is preserved in the recorded body.
+func TestEmail_BodyBareCRNeutralized(t *testing.T) {
+	srv, addr := newFakeSMTP(t)
+	n := newTestEmail(t, addr)
+
+	msg := sdk.Notification{
+		Severity: "critical",
+		Title:    "probe from 192.0.2.10\r.\rDATA smuggle in title",
+		Body:     "x\r.\rQUIT",
+		Action: &sdk.Action{
+			IP:     netip.MustParseAddr("192.0.2.10"),
+			Op:     "ban",
+			Strike: 1,
+			Reason: "ssh brute force\r.\rMAIL FROM:<attacker@example.com>",
+		},
+	}
+	if err := n.Send(context.Background(), msg); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	sessions := srv.recorded()
+	if len(sessions) != 1 {
+		t.Fatalf("expected exactly 1 delivery (no DATA termination smuggling), got %d", len(sessions))
+	}
+	body := sessions[0].Body
+	if i := strings.IndexByte(body, '\r'); i >= 0 {
+		t.Errorf("bare CR reached the SMTP DATA stream at byte %d:\n%q", i, body)
+	}
+	// The payload text must survive as inert display data, not vanish.
+	if !strings.Contains(body, "QUIT") {
+		t.Errorf("neutralized body text missing from message:\n%s", body)
+	}
+	// No line of the delivered message may be an SMTP command fragment born
+	// from a CR split; the smuggled MAIL FROM must stay inside a display line.
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, "MAIL FROM:") || line == "." {
+			t.Errorf("smuggled SMTP framing surfaced as its own line: %q", line)
+		}
+	}
+}

@@ -32,13 +32,30 @@ logs (SSH, Nginx)
 
 EzyShield has a hard rule: **your active SSH session and admin CIDRs can never be banned**, even if they match an attack pattern.
 
-Before any ban is written to the firewall:
+Before any ban is written to the firewall, two independent checks run in sequence:
 
-1. Detect the SSH peer IP from `SSH_CLIENT` env var
-2. Check admin CIDRs from policy.yaml
-3. If either matches the target IP, reject the ban
+1. **Allowlist check**: the target IP is matched against the static allowlist —
+   your configured `allowlist`, `admin_cidrs` from policy.yaml, and the SSH
+   peer captured when the daemon started.
+2. **Live SSH re-check**: the target IP is matched against the SSH peers
+   active right now — from the kernel's connection table (`/proc/net/tcp` and
+   `/proc/net/tcp6`, remote ends of established connections to the sshd
+   port(s) — works under systemd, no environment needed; sshd ports read from
+   `sshd_config`, fallback 22) and, in interactive contexts, from the current
+   `SSH_CLIENT` env var.
+
+If either check matches, the ban is rejected.
+
+Manual bans (`ezyshield ban`) pass the exact same guards — including the
+ban rate limit — and refused attempts are recorded in the audit log.
 
 This is enforced in code, not a rule. No misconfigured threshold can lock you out.
+
+The check runs twice, in independent layers: the decision engine filters
+first, and a single gate ahead of all enforcement backends re-checks every
+ban and every reconcile before it can reach nftables or any edge platform.
+Even a backend with no allowlist logic of its own can never receive a
+protected address — including via a sync that would re-introduce it.
 
 ## Allowlist supremacy
 
@@ -54,7 +71,7 @@ admin_cidrs:
 
 ## Rate limiting
 
-A broken rule or poisoned feed cannot ban the entire internet. The `max_bans_per_minute` cap (default 30) rejects excess bans with an explicit error — never silently, never by dropping the limit.
+A broken rule or poisoned feed cannot ban the entire internet. The `max_bans_per_minute` cap (default 30) rejects excess bans with an explicit error — never silently, never by dropping the limit. Escalation bans re-blocking an IP whose previous ban ended within `escalation_exempt_window` (default 24h) are exempt from this cap, so a returning repeat offender is never let back in while the rate limit is saturated; first-time bans always count against the cap.
 
 ## Secret handling
 
@@ -73,8 +90,9 @@ When AI is enabled for ambiguous events (scores inside the configurable `ambiguo
 
 1. **Schema validation**: AI output is parsed into a structured type; malformed responses cause a fallback decision.
 2. **Policy clamping**: AI can only suggest within the ban thresholds and durations you configured. It cannot escalate beyond them.
-3. **Audit trail**: every AI verdict (source, score, reason) is persisted with the strike, so you can audit and override if needed.
-4. **No prompt injection**: Log lines are passed as data, never interpolated into instructions. The prompt is fixed and controlled.
+3. **Target binding**: a verdict can only name an IP that was in the analyzed batch. A hallucinating (or compromised) model naming any other address is discarded with a warning — the AI can never pick the ban target, only score IPs the logs actually observed.
+4. **Audit trail**: every AI verdict (source, score, reason) is persisted with the strike, so you can audit and override if needed.
+5. **No prompt injection**: Log lines are passed as data, never interpolated into instructions. The prompt is fixed and controlled.
 
 ## Privilege separation
 
@@ -85,7 +103,7 @@ The enforcer is not a library. It's a separate process. The main daemon cannot d
 
 ## No network listeners
 
-EzyShield opens no network listener for control (the optional dashboard binds to 127.0.0.1 only, and refuses anything else). Control is via:
+EzyShield opens no network listener for control (the optional dashboard binds to a loopback address — `127.0.0.1` or `::1` — only, and refuses anything else). Control is via:
 - CLI: `ezyshield ban`, `ezyshield list`, etc. (local only)
 - Unix socket: `/run/ezyshield/ezyshield.sock` (filesystem permissions)
 
@@ -104,7 +122,6 @@ Every action is logged to SQLite:
 - When: timestamp
 - What: IP, rule, score, decision (ban/allow/defer)
 - Why: rule name, AI response (if AI was consulted)
-- How: which backend enforced it (nftables, Cloudflare, manual)
 
 Export for compliance:
 
@@ -116,7 +133,7 @@ ezyshield report --json > report.json   # per-IP history with evidence
 
 When using Cloudflare Lists:
 
-1. **Idempotent sync**: EzyShield reconciles its view with Cloudflare at daemon startup and whenever bans expire (adds missing entries, removes stale ones)
+1. **Idempotent sync**: EzyShield reconciles its view with Cloudflare at daemon startup, every 5 minutes, and whenever bans expire (adds missing entries, removes stale ones)
 2. **Source of truth**: `bans_active` table in SQLite is the source of truth. If EzyShield crashes and restarts, it will restore Cloudflare blocks from the DB.
 3. **Non-ezyshield rules preserved**: EzyShield only touches its own IP list (`ezyshield_blocked`) and the WAF rules it created (tagged by description). Hand-created Cloudflare rules are left alone.
 
@@ -160,7 +177,7 @@ EzyShield maintains:
 - Allowlist for whitelisted traffic
 - Dry-run mode for testing before enforcement
 
-Suitable for SOC 2, ISO 27001, and GDPR requirements where request logging is necessary.
+This audit log data can support SOC 2, ISO 27001, and GDPR request-logging requirements — compliance itself depends on the organizational controls you build around it, not on EzyShield alone.
 
 ## Reporting security issues
 

@@ -48,6 +48,11 @@ type daemonStore interface {
 	Unban(ctx context.Context, ip netip.Addr) error
 	UnbanPrefix(ctx context.Context, prefix netip.Prefix) (int, error)
 	AuditOp(ctx context.Context, op string, prefix netip.Prefix, ttl time.Duration, reason string) error
+	// Arm/disarm support (issue #228): persisted runtime state + system audits.
+	SetState(ctx context.Context, key, value string) error
+	GetState(ctx context.Context, key string) (string, bool, error)
+	DeleteState(ctx context.Context, key string) error
+	AuditSystem(ctx context.Context, op, reason string) error
 	RecordManualBan(ctx context.Context, ip netip.Addr, ttl time.Duration, reason string) error
 	AddAllow(ctx context.Context, prefix netip.Prefix, expiresAt *time.Time, reason string) error
 	RemoveAllow(ctx context.Context, prefix netip.Prefix) (int, error)
@@ -86,6 +91,16 @@ type Config struct {
 	SocketPath string             // defaults to DefaultSocketPath
 	Version    string
 	MaxIPs     int // LRU cap; 0 = DefaultMaxIPs
+	// PolicyPath is the policy.yaml location; the arm/disarm verbs persist
+	// armed-state changes there (issue #228). Empty = runtime-only flips
+	// (tests).
+	PolicyPath string
+	// ArmWindowTick overrides the auto-revert poll interval (tests only;
+	// 0 = default 15s).
+	ArmWindowTick time.Duration
+	// EnfProbeTick overrides the enforcement health-probe interval (tests
+	// only; 0 = default 5m). See runEnforceProbe (issue #174).
+	EnfProbeTick time.Duration
 }
 
 // enricherFrom converts a *enrich.Enricher into the geoLookup interface, or
@@ -123,8 +138,20 @@ type Daemon struct {
 	aiBudgetWarned atomic.Bool // guards the single "budget exceeded" WARN
 
 	socketPath string
-	startTime  time.Time
-	version    string
+	// policyPath is where arm/disarm persist the armed flag ("" = skip).
+	policyPath string
+	// armWindowTick is the auto-revert poll interval (0 = default 15s).
+	armWindowTick time.Duration
+	// enfProbeTick is the enforcement health-probe interval (0 = default 5m).
+	enfProbeTick time.Duration
+	// ineffDedup deduplicates ban_ineffective notifications systemically
+	// (ADR-0009 §4, issue #146).
+	ineffDedup ineffDedup
+	// enfHealth tracks enforcer Ban/Sync health for the honest
+	// enforcement-state reporting (issue #174).
+	enfHealth enfHealth
+	startTime time.Time
+	version   string
 
 	// evidenceJournalctl and evidenceDockerSocket override the journalctl
 	// binary and Docker engine socket used by on-demand evidence extraction
@@ -164,11 +191,15 @@ func New(dcfg Config) (*Daemon, error) {
 		return nil, fmt.Errorf("daemon: Store must not be nil")
 	}
 
-	rulesPath := ""
+	// RulesDir is defaulted by config.LoadConfigReader; a nil/hand-built
+	// Cfg (tests) gets no overlay dir, which means embed-only — identical
+	// to the pre-#136 behavior.
+	rulesPath, rulesDir := "", ""
 	if dcfg.Cfg != nil {
 		rulesPath = dcfg.Cfg.RulesPath
+		rulesDir = dcfg.Cfg.RulesDir
 	}
-	ruleEng, err := rules.New(rulesPath)
+	ruleEng, err := rules.New(rulesPath, rulesDir)
 	if err != nil {
 		return nil, fmt.Errorf("daemon: rule engine: %w", err)
 	}
@@ -215,7 +246,14 @@ func New(dcfg Config) (*Daemon, error) {
 		socketPath:      socketPath,
 		version:         dcfg.Version,
 		startTime:       time.Now(),
+		policyPath:      dcfg.PolicyPath,
+		armWindowTick:   dcfg.ArmWindowTick,
+		enfProbeTick:    dcfg.EnfProbeTick,
 	}
+
+	// Enforcement-anomaly delivery (ADR-0009 §4, issue #146): the engine
+	// detects, the daemon delivers. Injected before any goroutine starts.
+	decEng.SetDiagnostics(d)
 
 	if dcfg.Cfg != nil && dcfg.Cfg.AI != nil {
 		d.aiLo = dcfg.Cfg.AI.AmbiguousBand[0]
@@ -245,7 +283,7 @@ func (d *Daemon) Run(parentCtx context.Context) error {
 
 	slog.InfoContext(ctx, "daemon: starting",
 		"version", d.version,
-		"armed", d.policy.Armed,
+		"armed", d.policy.IsArmed(),
 		"socket", d.socketPath,
 	)
 
@@ -314,6 +352,14 @@ func (d *Daemon) Run(parentCtx context.Context) error {
 
 	// Expire temporal allowlist entries periodically.
 	go d.runExpireAllows(ctx)
+
+	// Settle an arm window whose deadline passed while the daemon was down,
+	// then keep watching it (issue #228).
+	d.checkArmWindow(ctx, time.Now())
+	go d.runArmWindow(ctx)
+
+	// Keep the enforcement state fresh on quiet hosts (issue #174).
+	go d.runEnforceProbe(ctx)
 
 	// Signal handling.
 	sigCh := make(chan os.Signal, 1)
@@ -432,10 +478,50 @@ func (d *Daemon) processRaw(ctx context.Context, raw sdk.RawLine) {
 	}
 }
 
+// bindVerdictsToIP enforces the AI-boundary target invariant at the daemon
+// chokepoint (issue #402, Hard Rule 1, SECURITY-REVIEW §5): every AI verdict
+// leaving maybeConsultAI must target the IP whose aggregates were analyzed.
+// A verdict naming any other address — a model-chosen victim smuggled in via
+// prompt injection, a hallucination, or a stale cache entry — is dropped, and
+// survivors are rewritten to the canonical requested address so the decision
+// engine's single-IP invariant holds.
+//
+// Providers already bound verdicts to their batch (boundToBatch, issue #312)
+// and the cache re-targets replayed entries (issue #311); this daemon-side
+// pass deliberately repeats the check once, centrally, so a future provider or
+// cache path that forgets its local bound cannot reintroduce the class
+// (defense in depth — do not remove the provider-level bounds in its name).
+//
+// Matching is representation-insensitive via Unmap (IPv4-mapped IPv6 forms
+// compare equal to their IPv4 address, cf. #314) but otherwise exact: netip
+// address equality includes the zone, so a zone mismatch in either direction
+// fails closed (dropped, never "close enough"-rebound).
+func bindVerdictsToIP(ctx context.Context, verdicts []sdk.Verdict, ip netip.Addr) []sdk.Verdict {
+	if len(verdicts) == 0 {
+		return verdicts
+	}
+	want := ip.Unmap()
+	out := make([]sdk.Verdict, 0, len(verdicts))
+	for _, v := range verdicts {
+		if v.IP.Unmap() != want {
+			slog.WarnContext(ctx, "daemon: dropping AI verdict for off-request IP",
+				"verdict_ip", v.IP, "requested_ip", ip, "score", v.Score, "source", v.Source)
+			continue
+		}
+		v.IP = ip
+		out = append(out, v)
+	}
+	return out
+}
+
 // maybeConsultAI checks if the highest-scoring verdict falls in the configured
 // ambiguous band; if so it calls the AI provider (with budget and cache checks)
 // and appends AI verdicts to the slice.  Returns verdicts unchanged when AI is
 // disabled, the band is unconfigured, or the score is outside the band.
+//
+// All returned AI verdicts — fresh or cached — pass through bindVerdictsToIP,
+// and fresh verdicts are bound before the cache Set so a poisoned target can
+// neither act now nor be replayed later.
 func (d *Daemon) maybeConsultAI(ctx context.Context, ip netip.Addr, verdicts []sdk.Verdict) []sdk.Verdict {
 	if d.aiProvider == nil || d.aiBudget == nil || d.aiCache == nil {
 		return verdicts
@@ -480,10 +566,12 @@ func (d *Daemon) maybeConsultAI(ctx context.Context, ip netip.Addr, verdicts []s
 	}
 
 	// Cache check — keyed on first (shortest) window aggregate behavior signature.
+	// Cache.Get already re-targets replayed verdicts to the requesting IP
+	// (issue #311); the bind below re-asserts that invariant at the chokepoint.
 	if len(aggs) > 0 {
 		if cached := d.aiCache.Get(aggs[0]); cached != nil {
 			slog.DebugContext(ctx, "daemon: ai cache hit", "ip", ip)
-			return append(verdicts, cached...)
+			return append(verdicts, bindVerdictsToIP(ctx, cached, ip)...)
 		}
 	}
 
@@ -514,6 +602,13 @@ func (d *Daemon) maybeConsultAI(ctx context.Context, ip netip.Addr, verdicts []s
 		d.aiBudgetWarned.Store(true)
 	}
 
+	// Bind BEFORE the cache Set: an off-request verdict must neither reach the
+	// decision engine now nor be stored for signature replay later (#402).
+	aiVerdicts = bindVerdictsToIP(ctx, aiVerdicts, ip)
+
+	// Cache.Set skips allowlist-clamped verdicts internally (issue #402), so a
+	// clamp for this IP is never replayed onto same-signature traffic from
+	// non-allowlisted sources.
 	if len(aggs) > 0 && len(aiVerdicts) > 0 {
 		d.aiCache.Set(aggs[0], aiVerdicts)
 	}
@@ -620,10 +715,14 @@ func (d *Daemon) dispatch(ctx context.Context, action sdk.Action) {
 
 	if action.Op == "ban" && d.enforcer != nil {
 		t := sdk.Target{IP: action.IP, TTL: action.TTL}
-		if err := d.enforcer.Ban(ctx, t); err != nil {
+		err := d.enforcer.Ban(ctx, t)
+		if err != nil {
 			slog.ErrorContext(ctx, "daemon: enforcer ban failed", "ip", action.IP, "err", err)
 			d.notifyCritical(ctx, fmt.Sprintf("enforcer ban failed for %s: %v", action.IP, err))
 		}
+		// Enforcement-state health (issue #174): a failed ban flips the
+		// daemon to DEGRADED so status/doctor stop claiming protection.
+		d.recordEnforceResult(ctx, "ban", err)
 	}
 
 	if d.notifier != nil && (action.Op == "ban" || action.Op == "dry_ban" || action.Op == "notify_only") {
@@ -651,6 +750,22 @@ func (d *Daemon) isRuntimeAllowlisted(ip netip.Addr) bool {
 	return false
 }
 
+// runtimeAllowlistOverlap reports whether prefix overlaps any entry of the
+// in-memory runtime allowlist (operator 'allow' entries), returning the
+// first overlapping entry. Overlap in either direction counts: a manual ban
+// of a range that CONTAINS an allowlisted prefix would lock those hosts out
+// just as surely as banning them directly (issue #211).
+func (d *Daemon) runtimeAllowlistOverlap(prefix netip.Prefix) (bool, netip.Prefix) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	for _, p := range d.runtimeAllowlist {
+		if p.Overlaps(prefix) {
+			return true, p
+		}
+	}
+	return false, netip.Prefix{}
+}
+
 // reloadAllowlist rebuilds the in-memory runtime allowlist from the store.
 // Called at startup and after expiry sweeps so the in-memory view never lags
 // behind the persisted state.
@@ -670,6 +785,10 @@ func (d *Daemon) reloadAllowlist(ctx context.Context) error {
 }
 
 // syncEnforcer loads active bans from the store and calls Enforcer.Sync.
+// Simulated dry-run bans (Op=="dry_ban", ADR-0009 §5) are NEVER handed to
+// the enforcer: they exist only to mirror suppression/escalation while
+// armed=false, and must not materialise as real firewall rules — not even
+// after the operator flips armed=true and the daemon restarts.
 func (d *Daemon) syncEnforcer(ctx context.Context) error {
 	if d.enforcer == nil {
 		return nil
@@ -680,15 +799,26 @@ func (d *Daemon) syncEnforcer(ctx context.Context) error {
 	}
 	targets := make([]sdk.Target, 0, len(bans))
 	for _, b := range bans {
+		if b.Op != "ban" {
+			continue
+		}
 		targets = append(targets, sdk.Target{IP: b.IP, TTL: b.TTL})
 	}
-	return d.enforcer.Sync(ctx, targets)
+	err = d.enforcer.Sync(ctx, targets)
+	// Enforcement-state health (issue #174): reconcile is the periodic
+	// signal that flips DEGRADED→ACTIVE on recovery (and ACTIVE→DEGRADED if
+	// the firewall backend went away between bans).
+	d.recordEnforceResult(ctx, "sync", err)
+	return err
 }
 
 // allowlistSyncer is the optional side of sdk.Enforcer that mirrors the
-// daemon's allowlist to a local firewall — currently only satisfied by the
-// nftables enforcer. Kept out of sdk.Enforcer proper because edge enforcers
-// (Cloudflare) don't have a matching concept.
+// daemon's allowlist to a local firewall — implemented by the nftables
+// enforcer and forwarded through the enforce.Gate / enforce.MultiEnforcer
+// wrappers run.go always applies (enforce.AllowlistSyncer is the exported
+// mirror of this interface; compile-time guards in internal/enforce keep the
+// wrappers forwarding — issue #317). Kept out of sdk.Enforcer proper because
+// edge enforcers (Cloudflare) don't have a matching concept.
 type allowlistSyncer interface {
 	Allow(ctx context.Context, prefix netip.Prefix) error
 	Unallow(ctx context.Context, prefix netip.Prefix) error
@@ -698,7 +828,8 @@ type allowlistSyncer interface {
 // syncEnforcerAllowlist pushes the union of the policy allowlist
 // (policy.Allowlist + policy.AdminCIDRs, held in staticAllowlist) and the
 // runtime allowlist (store-owned entries) to the enforcer's @allowed set.
-// Called at startup (after reloadAllowlist) and after each expiry sweep.
+// Called at startup (after reloadAllowlist), after each expiry sweep, and
+// after an operator unallow (handleUnallow, issue #404).
 // No-op when the enforcer doesn't implement the allowlistSyncer interface
 // (e.g. Cloudflare edge enforcer alone).
 //
@@ -726,6 +857,13 @@ func (d *Daemon) syncEnforcerAllowlist(ctx context.Context) error {
 // Bare IPs in policy.Allowlist are widened to a host prefix (/32 or /128) so
 // nftables can accept them in the "interval" set flag.
 //
+// IPv4-mapped spellings ("::ffff:192.0.2.0/120", copied from dual-stack logs)
+// are canonicalized to plain v4 (issue #405, allowlist side of #365): fed to
+// Gate.SyncAllowlist verbatim they would land in the nftables @allowed v6 set
+// as dead entries that never match IPv4 packets. Mapped prefixes broader than
+// /96 have no IPv4 equivalent and are kept as parsed — dropping an allowlist
+// entry would remove protection. Mirrors cmd/ezyshield parseAllowlist (#400).
+//
 // A nil policy returns nil (defensive; New rejects nil policy, but tests may
 // construct a Daemon differently in the future).
 func staticAllowlistFromPolicy(p *config.Policy) []netip.Prefix {
@@ -733,18 +871,25 @@ func staticAllowlistFromPolicy(p *config.Policy) []netip.Prefix {
 		return nil
 	}
 	prefixes := make([]netip.Prefix, 0, len(p.Allowlist)+len(p.AdminCIDRs))
+	appendPrefix := func(pfx netip.Prefix) {
+		if norm, err := decision.NormalizePrefix(pfx); err == nil {
+			pfx = norm
+		}
+		prefixes = append(prefixes, pfx)
+	}
 	for _, s := range p.Allowlist {
 		if pfx, err := netip.ParsePrefix(s); err == nil {
-			prefixes = append(prefixes, pfx)
+			appendPrefix(pfx)
 			continue
 		}
 		if a, err := netip.ParseAddr(s); err == nil {
+			a = a.Unmap()
 			prefixes = append(prefixes, netip.PrefixFrom(a, a.BitLen()))
 		}
 	}
 	for _, s := range p.AdminCIDRs {
 		if pfx, err := netip.ParsePrefix(s); err == nil {
-			prefixes = append(prefixes, pfx)
+			appendPrefix(pfx)
 		}
 	}
 	return prefixes

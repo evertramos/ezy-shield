@@ -83,13 +83,28 @@ EzyShield uses a two-tier detection model to catch both rapid attackers and "low
 
 ### Adjusting Thresholds
 
-To customize thresholds, point `rules_path` in config.yaml at your own rules file (start from the shipped `/etc/ezyshield/rules.yaml.example`) and adjust the `window` and `threshold` fields — the built-in rules are embedded in the binary, so editing repo files has no effect on an installed daemon:
+To customize thresholds, override the built-in rule with a drop-in in
+`/etc/ezyshield/rules.d/` — a `*.yaml` file with a top-level `rules:` key and an
+entry whose `name` matches the built-in. A same-named drop-in **replaces the
+whole rule** (fields are not merged), so you must copy every field of the
+built-in and change `window`/`threshold`; a partial entry fails validation and,
+because an invalid drop-in fails closed, the daemon refuses to start. The
+built-in rules are embedded in the binary, so editing repo files has no effect
+on an installed daemon. See [Customizing Detection Rules](rules-customization.md)
+for the full mechanism:
 
 ```yaml
-- name: http_wp_probe_sustained
-  window: 3600s        # 1 hour
-  threshold: 10        # adjust for your environment
-  score: 75
+# /etc/ezyshield/rules.d/50-wp-probe.yaml
+rules:
+  - name: http_wp_probe_sustained   # same name as the built-in => replaces it
+    description: "Sustained wp-login attempts (low & slow bruteforce)"
+    kinds: [http_request]
+    field: path
+    contains: wp-login
+    window: 3600s                   # 1 hour
+    threshold: 10                   # adjust for your environment
+    score: 75
+    category: bruteforce
 ```
 
 **Guidelines**:

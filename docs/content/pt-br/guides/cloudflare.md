@@ -6,13 +6,13 @@ order: 1
 
 # Bloqueio de IPs na Edge da Cloudflare
 
-Este guia mostra como configurar o EzyShield para bloquear IPs maliciosos na edge da Cloudflare usando o modo **Lists** (recomendado para a maioria das implantações).
+Bloqueie IPs maliciosos na edge da Cloudflare. Este guia usa o modo **Lists**, recomendado para a maioria das implantações.
 
 ## Comparação entre Modos
 
 EzyShield oferece dois modos de bloqueio na Cloudflare:
 
-| Recurso | Lists (Recomendado) | Rulesets (Legado) |
+| Recurso | Lists | Rulesets |
 |---------|------------------|-------------------|
 | **Chamadas de API por bloqueio** | 1 (account-level) | 1 por zone |
 | **Capacidade de IPs** | 10.000 | ~200 por rule |
@@ -21,7 +21,12 @@ EzyShield oferece dois modos de bloqueio na Cloudflare:
 | **Plano gratuito** | ✅ (1 list, 10k items) | ✅ |
 | **Menor privilégio** | ❌ (precisa token account-level) | ✅ (token zone-level) |
 
-O modo **Lists** é recomendado a menos que você precise de controle por zone ou não possa usar tokens account-level.
+Os dois modos são totalmente suportados — escolha por implantação (e, em
+configurações multi-conta, por conta). **Lists** atende a maioria das
+implantações multi-zone; **rulesets** atende controle por zone, tokens de
+menor privilégio (zone-level) ou contas cuja cota de custom lists já está
+ocupada. Rodar uma conta em lists e outra em rulesets é uma configuração
+perfeitamente normal.
 
 ## Configuração do Modo Lists
 
@@ -34,6 +39,9 @@ O modo **Lists** é recomendado a menos que você precise de controle por zone o
    - **Account → Account Filter Lists → Edit** (obrigatório para gerenciar a lista de IPs)
    - Para cada zone que quiser gerenciar regras WAF automaticamente:
      - **Zone → Firewall Services → Edit** (opcional; obrigatório ao usar `zone_ids`)
+   - **Zone → Zone → Read** (opcional; obrigatório apenas para a resposta
+     "cobrir **todas** as zones" do wizard, que enumera as zones da conta) —
+     veja a [referência de permissões da Cloudflare](https://developers.cloudflare.com/fundamentals/api/reference/permissions/)
 5. Defina restrições conforme necessário (allowlist de IP, TTL, etc.)
 6. Copie o token imediatamente — você não conseguirá vê-lo novamente
 
@@ -53,7 +61,7 @@ O modo **Lists** é recomendado a menos que você precise de controle por zone o
 Salve o token de API como variável de ambiente:
 
 ```bash
-export EZYSHIELD_CF_TOKEN="seu_token_api_aqui"
+export CLOUDFLARE_API_TOKEN="seu_token_api_aqui"
 ```
 
 Adicione ao `config.yaml`:
@@ -61,7 +69,7 @@ Adicione ao `config.yaml`:
 ```yaml
 enforce:
   cloudflare:
-    api_token: env:EZYSHIELD_CF_TOKEN
+    api_token: env:CLOUDFLARE_API_TOKEN
     mode: lists
     account_id: seu_account_id_32_caracteres_hex
     # Opcional: gerenciar regras WAF automaticamente por zone
@@ -79,18 +87,34 @@ enforce:
 Execute o comando de diagnóstico:
 
 ```bash
-ezyshield doctor cloudflare
+ezyshield test enforcer cloudflare
 ```
 
-Este comando irá:
-- Verificar se o token de API tem as permissões corretas
-- Testar conectividade com a Cloudflare
-- Listar zones acessíveis
-- Mostrar o status da lista (criada, quantidade de items, etc.)
+Ele verifica as permissões do token, testa a conectividade com a Cloudflare, lista as zones que você consegue acessar e mostra o status da lista (existência, quantidade de items).
+
+### Cobertura de zones no wizard
+
+Os dois entry points do wizard (`init` e `config enforcer cloudflare`)
+perguntam, no modo lists, **quais zones a regra de bloqueio deve cobrir**:
+
+- **`all`** — o wizard enumera todas as zones que o token consegue ler na
+  conta (com paginação) e persiste esse snapshot em `zone_ids`; a config
+  fica explícita, e rodar o wizard de novo captura domínios adicionados
+  depois. Precisa de **Zone → Zone → Read**; sem essa permissão o wizard
+  degrada graciosamente para o caminho manual e nomeia o escopo que falta.
+- **Zone IDs explícitos** — exatamente essas zones, nada é enumerado.
+- **ENTER** — configuração manual (o wizard imprime a regra para colar por zone).
+
+Para `all`/explícito, o wizard imediatamente cria-ou-verifica a WAF Custom
+Rule em cada zone alvo (idempotente com o gerenciamento de regras do próprio
+enforcer — rodar de novo nunca duplica) e imprime um relatório por zone:
+`configured` / `already present` / `FAILED (HTTP xxx: motivo)`, com
+instruções manuais para cada zone que falhou. Falha parcial nunca aborta: a
+config é salva mesmo assim e o daemon tenta as zones que falharam a cada sync.
 
 ### Passo 5: (Opcional) Configuração Manual da Regra WAF
 
-**Se você NÃO configurou `zone_ids`** no passo 3, você deve criar a regra WAF Custom manualmente para cada zone:
+**Se você NÃO configurou `zone_ids`** no passo 3 (ou respondeu ENTER no wizard), você deve criar a regra WAF Custom manualmente para cada zone:
 
 1. Vá em **Domain → Security → WAF → Custom rules**
 2. Clique em **Create Rule**
@@ -104,23 +128,23 @@ Este comando irá:
 
 Se você configurou `zone_ids`, este passo é **automático** — as regras são criadas no primeiro Sync.
 
-## Configuração do Modo Rulesets (Legado)
+## Configuração do Modo Rulesets
 
-Para implantações que precisam de controle por zone ou não podem usar tokens account-level:
+Para implantações que querem controle por zone ou não podem usar tokens account-level:
 
 ### Passo 1: Criar Token de API de Nível de Zone
 
 1. Vá em **Zone → API Tokens** (no painel da zone)
 2. Crie um token com:
    - **Zone → Firewall → Edit** em cada zone
-3. Salve o token como `EZYSHIELD_CF_TOKEN`
+3. Salve o token como `CLOUDFLARE_API_TOKEN`
 
 ### Passo 2: Configurar EzyShield
 
 ```yaml
 enforce:
   cloudflare:
-    api_token: env:EZYSHIELD_CF_TOKEN
+    api_token: env:CLOUDFLARE_API_TOKEN
     mode: rulesets
     zone_ids:
       - zone_1
@@ -183,7 +207,7 @@ Isso é esperado se seu token de API tiver apenas Account Filter Lists:Edit (nã
 Verifique:
 1. `zone_ids` está configurado em `config.yaml`
 2. Seu token tem permissão `Zone → Firewall Services → Edit`
-3. Execute `ezyshield doctor cloudflare` para verificar erros de permissão
+3. Execute `ezyshield test enforcer cloudflare` para verificar erros de permissão
 4. Verifique os logs: `ezyshield status` → procure por entradas da Cloudflare
 
 ### "List at capacity" (10k items)
@@ -194,25 +218,43 @@ Se você atingir o limite de 10k items do plano gratuito, você tem duas opçõe
 
 ## Configuração Multi-Conta
 
-Para gerenciar múltiplas contas da Cloudflare a partir de um único daemon EzyShield:
+Agências e freelancers costumam gerenciar sites espalhados por contas
+Cloudflare separadas, cada uma com seu próprio token de API. Um único daemon
+EzyShield cuida de todas: cada ban é aplicado em todas as contas
+configuradas, e uma falha em uma conta nunca bloqueia as demais.
+
+Os wizards fazem essa configuração por você — tanto `ezyshield init` (etapa
+de CDN) quanto `ezyshield config enforcer cloudflare` perguntam **"Add
+another Cloudflare account?"** depois de cada conta. Cada conta recebe seu
+próprio nome, modo (lists ou rulesets — misturar é normal), token validado e
+sua própria variável no `.env` (`CLOUDFLARE_API_TOKEN` para uma única conta
+sem nome, `CLOUDFLARE_API_TOKEN_<NOME>` para contas nomeadas). Rodar
+`config enforcer cloudflare` de novo permite escolher uma conta existente
+para reconfigurar ou adicionar outra.
+
+A config resultante:
 
 ```yaml
 enforce:
   cloudflare:
     # Conta 1
     - name: cliente_a
-      api_token: env:EZYSHIELD_CF_TOKEN_A
+      api_token: env:CLOUDFLARE_API_TOKEN_CLIENTE_A
       mode: lists
       account_id: account_a_id
       zone_ids: [zone_a1, zone_a2]
-    # Conta 2
+    # Conta 2 — um modo diferente por conta é normal
     - name: cliente_b
-      api_token: env:EZYSHIELD_CF_TOKEN_B
-      mode: lists
-      account_id: account_b_id
+      api_token: env:CLOUDFLARE_API_TOKEN_CLIENTE_B
+      mode: rulesets
+      zone_ids: [zone_b1]
 ```
 
-Cada conta recebe gerenciamento independente de lista. Os logs mostrarão `enforce/cloudflare[cliente_a]` e `enforce/cloudflare[cliente_b]` para clareza.
+Com mais de uma conta, cada entrada precisa de um `name` único (o wizard
+garante isso, e se oferece para nomear uma entrada pré-existente sem nome).
+Cada conta recebe gerenciamento independente de listas/regras e status
+por conta em `test enforcer cloudflare` e `doctor`. Os logs mostram
+`cloudflare[cliente_a]` e `cloudflare[cliente_b]` como o nome do enforcer para clareza.
 
 ## Limitação de Taxa
 
@@ -236,12 +278,7 @@ Após configurar, valide seu setup com:
 ezyshield test enforcer cloudflare --config-dir /etc/ezyshield/
 ```
 
-Este comando irá:
-- Verificar se o token de API é válido e ativo
-- Verificar acesso à conta e zones
-- Validar permissões da Cloudflare para seu token
-- Relatar o que funciona e o que está faltando
-- Fornecer sugestões claras de correção
+Ele confirma que o token é válido e ativo, verifica o acesso à conta e às zones, valida as permissões da Cloudflare do token e relata o que funciona, o que está faltando e como corrigir cada lacuna.
 
 **Exemplo de saída (modo lists com zone_ids):**
 
@@ -250,9 +287,9 @@ Cloudflare enforcer (mode: lists): pass
 ────────────────────────────────────
 ✓ Token validity: Token ID: abc...def, status: active
 ✓ Account access: Account ID: 0123456789abcdef
-✓ List access (read): List "ezyshield_blocked" found (147 items, ID: lstxxxxx)
-✓ Zone WAF access: Zone example.com (zone_id: aaa111) — WAF rule access OK
-✗ Zone WAF access: Zone shop.example.org (zone_id: ccc333) — 403 Forbidden
+✓ List access (read): List "ezyshield_blocked" found (ID: lstxxxxx, 147 items)
+✓ Zone WAF access: Zone aaa111 — WAF rule access OK (2 custom rule(s) in use)
+✗ Zone WAF access: Zone ccc333 — 403 Forbidden
   └─ Ensure token has Zone:Firewall Services:Edit on this zone
 
 Result: 4/5 checks passed, 1 failed
@@ -264,6 +301,6 @@ Result: 4/5 checks passed, 1 failed
 
 ## Veja Também
 
-- ADR-0002: Estratégia de Bloqueio na Cloudflare (ver repositório ezy-shield `docs/internal/adr/`)
+- ADR-0002: Cloudflare edge enforcement — IP Access Rules → Rulesets → Lists (ver repositório ezy-shield `docs/internal/adr/`)
 - [Documentação da API Cloudflare: Custom IP Lists](https://developers.cloudflare.com/api/operations/lists-list-lists)
 - [Painel da Cloudflare](https://dash.cloudflare.com)

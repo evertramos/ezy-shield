@@ -106,6 +106,7 @@ func (p *OllamaProvider) Analyze(
 		return nil, usage, fmt.Errorf("ai: ollama: %w", callErr)
 	}
 
+	verdicts = boundToBatch(ctx, verdicts, batch, p.Name())
 	verdicts = p.clamp(ctx, verdicts)
 	return verdicts, usage, nil
 }
@@ -208,7 +209,8 @@ func (p *OllamaProvider) clamp(ctx context.Context, verdicts []sdk.Verdict) []sd
 				slog.WarnContext(ctx, "ai: clamping verdict for allowlisted IP",
 					"ip", v.IP, "original_score", v.Score)
 				v.Score = 0
-				v.Reason = "clamped: allowlisted"
+				v.Reason = ReasonAllowlistClamped
+				v.Source += AllowlistClampSourceSuffix
 				v.SuggestTTL = 0
 				break
 			}

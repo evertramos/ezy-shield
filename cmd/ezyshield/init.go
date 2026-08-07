@@ -4,10 +4,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,6 +21,7 @@ import (
 
 	"github.com/evertramos/ezy-shield/configs"
 	"github.com/evertramos/ezy-shield/internal/config"
+	"github.com/evertramos/ezy-shield/internal/decision"
 	"github.com/evertramos/ezy-shield/internal/ownership"
 )
 
@@ -50,19 +53,32 @@ const (
 
 func newInitCmd() *cobra.Command {
 	var (
-		configDir  string
-		yes        bool
-		skipSystem bool
+		configDir      string
+		yes            bool
+		skipSystem     bool
+		nonInteractive bool
+		answersPath    string
+		force          bool
 	)
 
 	cmd := &cobra.Command{
 		Use:   "init",
-		Short: "Interactive setup wizard",
+		Short: "Interactive setup wizard (or scripted with --non-interactive)",
 		Long: `Detect the environment, ask a few questions, write config files,
 install systemd units, and start EzyShield in dry-run mode.
 
 Pass --yes to accept all smart defaults without prompting.
-Pass --config-dir to write files elsewhere (skips systemd/service steps — useful for testing).`,
+Pass --config-dir to write files elsewhere (skips systemd/service steps — useful for testing).
+
+Non-interactive (for Ansible / cloud-init / Terraform / golden images):
+
+  --non-interactive (-n) runs without a TTY, driven by --answers and/or the
+  override flags, producing the same validated config the wizard produces.
+  Detection still runs; answers pin or override the result. Secrets are NEVER
+  passed as flags or answers-file values — reference an env var NAME and put
+  the value in the .env file. The config is always generated with armed: false.
+  Re-running against an existing config refuses without --force. With --json
+  the summary is emitted as JSON on stdout (progress goes to stderr).`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := requireRootForWrites(cmd, configDir); err != nil {
@@ -70,6 +86,14 @@ Pass --config-dir to write files elsewhere (skips systemd/service steps — usef
 			}
 			if configDir != defaultConfigDir {
 				skipSystem = true
+			}
+			// --answers implies --non-interactive (a file cannot be answered
+			// interactively).
+			if nonInteractive || answersPath != "" {
+				if yes {
+					return fmt.Errorf("--yes and --non-interactive are mutually exclusive; --non-interactive already runs without prompts")
+				}
+				return runNonInteractiveInit(cmd, configDir, skipSystem, force, answersPath)
 			}
 			return runInitWizard(cmd, configDir, yes, skipSystem)
 		},
@@ -79,6 +103,27 @@ Pass --config-dir to write files elsewhere (skips systemd/service steps — usef
 		"directory to write configuration files")
 	cmd.Flags().BoolVar(&yes, "yes", false,
 		"accept all defaults without interactive prompts")
+
+	// Non-interactive (scripted) flags.
+	cmd.Flags().BoolVarP(&nonInteractive, "non-interactive", "n", false,
+		"scripted setup: no prompts, driven by --answers and flags")
+	cmd.Flags().StringVar(&answersPath, "answers", "",
+		"path to a YAML answers file (implies --non-interactive; flags override file values)")
+	cmd.Flags().BoolVar(&force, "force", false,
+		"overwrite an existing config.yaml/policy.yaml (non-interactive only)")
+	// Per-answer overrides. --ai-key-env carries an env var NAME, never a key.
+	cmd.Flags().String("admin-ips", "",
+		"admin IPs/CIDRs for the allowlist, comma/space separated (overrides answers)")
+	cmd.Flags().Bool("monitor-ssh", true,
+		"monitor SSH via journald (overrides answers)")
+	cmd.Flags().Bool("enable-ai", false,
+		"enable AI analysis (overrides answers)")
+	cmd.Flags().String("ai-provider", "",
+		"AI provider: anthropic|openai|ollama (overrides answers)")
+	cmd.Flags().String("ai-model", "",
+		"AI model (overrides answers)")
+	cmd.Flags().String("ai-key-env", "",
+		"env var NAME holding the AI API key — never the key itself (overrides answers)")
 
 	return cmd
 }
@@ -110,9 +155,17 @@ type wizardState struct {
 	nftPath       string
 	hasDocker     bool
 	allContainers []dockerContainer
-	sshUnit       string
-	publicIP      string
-	sshSourceIP   string
+	// dockerAllowlist holds the docker bridge subnets to write into the
+	// generated policy allowlist (issue #210). Populated by
+	// detectDockerBridgeSubnets() during environment detection — empty when
+	// docker isn't detected, so buildAllowlist never needs its own docker
+	// gate. Never the whole 172.16.0.0/12 supernet: either the subnets that
+	// actually exist on the host, or (enumeration failure only) the single
+	// default bridge subnet.
+	dockerAllowlist []string
+	sshUnit         string
+	publicIP        string
+	sshSourceIP     string
 
 	hasWordPress bool
 	wpRulesPath  string
@@ -134,8 +187,8 @@ type wizardState struct {
 
 	// cdn holds CDN-detection + CF-subflow state. Populated by runCDNStep
 	// during askQuestions (see init_cdn.go). Non-nil after askQuestions
-	// returns so downstream writers can rely on nil checks on cdn.cfCfg
-	// alone. Its String() masks the CF token.
+	// returns so downstream writers can rely on len(cdn.cfAccounts) checks
+	// alone. Its String() masks every CF token.
 	cdn *cdnStep
 }
 
@@ -189,69 +242,11 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 		sc = bufio.NewScanner(os.Stdin)
 	}
 
-	// ── Environment detection ─────────────────────────────────────────────
-	p.println("")
-	p.println(st.header("Environment"))
-
 	state := &wizardState{}
 	sum := &initSummary{}
 
-	state.osArch = runtime.GOOS + "/" + runtime.GOARCH
-	p.printf("  OS/arch: %s\n", state.osArch)
-
-	state.nftPath = detectNFT()
-	if state.nftPath != "" {
-		p.println(st.ok("nftables: " + state.nftPath))
-	} else {
-		p.println(st.fail("nftables: not found"))
-		if !skipSystem {
-			if p.err != nil {
-				return fmt.Errorf("writing output: %w", p.err)
-			}
-			state.nftPath = offerInstallNFT(sc, yes, p.w)
-			if state.nftPath != "" {
-				p.println(st.ok("nftables: " + state.nftPath + " (installed)"))
-			} else {
-				p.println(st.warn("nftables: skipped — only dry-run and edge enforcement will work"))
-			}
-		}
-	}
-
-	state.allContainers = detectDockerContainers()
-	state.hasDocker = len(state.allContainers) > 0
-	if state.hasDocker {
-		p.println(st.ok(fmt.Sprintf("docker: %d container(s) running", len(state.allContainers))))
-	} else {
-		p.println(st.fail("docker: not running / no containers"))
-	}
-
-	state.hasWordPress = hasWordPressContainers(state.allContainers)
-	if state.hasWordPress {
-		state.wpRulesPath = filepath.Join(configDir, "rules.yaml")
-		p.println(st.ok("WordPress detected — will write custom rules: " + state.wpRulesPath))
-	}
-
-	p.println("\n  Detecting web servers...")
-	state.webServers = detectWebServers(state.allContainers)
-	renderWebServerSummary(p, state.webServers)
-
-	state.sshUnit = detectSSHUnit()
-	p.println(st.ok("SSH unit: " + state.sshUnit))
-
-	state.publicIP = fetchPublicIP()
-	if state.publicIP != "" {
-		p.println(st.ok("public IP: " + state.publicIP))
-	} else {
-		p.println(st.warn("public IP: unknown (ifconfig.me unreachable)"))
-	}
-
-	state.sshSourceIP = sshSourceIP()
-	if state.sshSourceIP != "" {
-		p.println(st.ok("SSH source: " + state.sshSourceIP))
-	}
-
-	if p.err != nil {
-		return fmt.Errorf("writing output: %w", p.err)
+	if err := detectEnvironment(p, st, state, configDir, sc, yes, skipSystem); err != nil {
+		return err
 	}
 
 	// ── Questions (sectioned sub-flows) ───────────────────────────────────
@@ -331,32 +326,48 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 		envTouched = envTouched || wrote || kept
 	}
 
-	// Cloudflare token: written to the same .env file, one line per token.
-	// Merge semantics preserve any AI KEY= line written above (issue #43).
-	// The token itself is NEVER logged — only "wrote" / "kept".
-	if state.cdn != nil && state.cdn.cfEnabled && state.cdn.cfToken != "" && state.cdn.cfTokenEnvVar != "" {
-		wrote, kept, err := writeCloudflareEnvFile(configDir, state.cdn.cfTokenEnvVar, state.cdn.cfToken)
-		if err != nil {
-			return err
+	// Cloudflare tokens: written to the same .env file, one line per account
+	// token. Merge semantics preserve any AI KEY= line written above (issue
+	// #43). The tokens themselves are NEVER logged — only "wrote" / "kept".
+	if state.cdn != nil && state.cdn.cfEnabled {
+		for i := range state.cdn.cfAccounts {
+			acct := &state.cdn.cfAccounts[i]
+			if acct.token == "" || acct.tokenEnvVar == "" {
+				continue
+			}
+			wrote, kept, err := writeCloudflareEnvFile(configDir, acct.tokenEnvVar, acct.token)
+			if err != nil {
+				return err
+			}
+			switch {
+			case kept:
+				p.println(st.ok("kept " + envPath + " (existing " + acct.tokenEnvVar + " preserved)"))
+			case wrote:
+				p.println(st.ok("wrote " + envPath + " (chmod 600, " + acct.tokenEnvVar + " merged)"))
+			}
+			envTouched = envTouched || wrote || kept
 		}
-		switch {
-		case kept:
-			p.println(st.ok("kept " + envPath + " (existing Cloudflare token preserved)"))
-		case wrote:
-			p.println(st.ok("wrote " + envPath + " (chmod 600, Cloudflare token merged)"))
-		}
-		envTouched = envTouched || wrote || kept
 	}
 	if envTouched {
 		sum.files = append(sum.files, envPath+" (mode 0600 — secret tokens live here, never in config.yaml)")
 	}
 
+	rulesDir := filepath.Join(configDir, "rules.d")
+	if err := ensureRulesDir(rulesDir); err != nil {
+		return err
+	}
+	sum.files = append(sum.files, rulesDir+" (drop-in rule customizations — merged over the built-in rules)")
 	if state.hasWordPress {
-		if err := writeWordPressRules(state.wpRulesPath); err != nil {
+		wrote, err := writeWordPressDropin(state.wpRulesPath)
+		if err != nil {
 			return err
 		}
-		p.println(st.ok("wrote " + state.wpRulesPath))
-		sum.files = append(sum.files, state.wpRulesPath)
+		if wrote {
+			p.println(st.ok("wrote " + state.wpRulesPath + " (commented tuning template)"))
+			sum.files = append(sum.files, state.wpRulesPath)
+		} else {
+			p.println(st.ok("kept " + state.wpRulesPath + " (existing drop-in preserved)"))
+		}
 	}
 
 	if p.err != nil {
@@ -419,6 +430,97 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 	return p.err
 }
 
+// detectEnvironment runs the wizard's environment-detection pass, filling
+// state and printing the "Environment" section. Shared verbatim by the
+// interactive wizard (runInitWizard) and the non-interactive driver
+// (runNonInteractiveInit) so both see identical detection — issue #231's
+// requirement that detection still runs in scripted mode, with answers
+// pinning/overriding the result. sc is consulted ONLY for the nftables
+// install offer and may be nil in --yes / non-interactive mode (offerInstallNFT
+// auto-accepts when yes is true and never touches sc).
+func detectEnvironment(p *wPrinter, st styler, state *wizardState, configDir string,
+	sc *bufio.Scanner, yes, skipSystem bool) error {
+	p.println("")
+	p.println(st.header("Environment"))
+
+	state.osArch = runtime.GOOS + "/" + runtime.GOARCH
+	p.printf("  OS/arch: %s\n", state.osArch)
+
+	state.nftPath = detectNFT()
+	if state.nftPath != "" {
+		p.println(st.ok("nftables: " + state.nftPath))
+	} else {
+		p.println(st.fail("nftables: not found"))
+		if !skipSystem {
+			if p.err != nil {
+				return fmt.Errorf("writing output: %w", p.err)
+			}
+			state.nftPath = offerInstallNFT(sc, yes, p.w)
+			if state.nftPath != "" {
+				p.println(st.ok("nftables: " + state.nftPath + " (installed)"))
+			} else {
+				p.println(st.warn("nftables: skipped — only dry-run and edge enforcement will work"))
+			}
+		}
+	}
+
+	state.allContainers = detectDockerContainers()
+	state.hasDocker = len(state.allContainers) > 0
+	if state.hasDocker {
+		p.println(st.ok(fmt.Sprintf("docker: %d container(s) running", len(state.allContainers))))
+
+		// Allowlist only the docker bridge subnets that actually exist on
+		// this host (issue #210) — never the whole 172.16.0.0/12 supernet,
+		// which would exempt >1M RFC1918 addresses from enforcement forever
+		// (allowlist always wins).
+		subnets, usedFallback := detectDockerBridgeSubnets()
+		state.dockerAllowlist = subnets
+		switch {
+		case usedFallback:
+			p.println(st.warn(fmt.Sprintf(
+				"docker networks: could not enumerate — allowlisting the default bridge subnet only (%s)",
+				defaultDockerBridgeSubnet)))
+		case len(subnets) == 0:
+			p.println(st.ok("docker networks: no bridge subnets found — no docker allowlist entry added"))
+		default:
+			p.println(st.ok(fmt.Sprintf("docker networks: allowlisting %d bridge subnet(s): %s",
+				len(subnets), strings.Join(subnets, ", "))))
+		}
+	} else {
+		p.println(st.fail("docker: not running / no containers"))
+	}
+
+	state.hasWordPress = hasWordPressContainers(state.allContainers)
+	if state.hasWordPress {
+		state.wpRulesPath = filepath.Join(configDir, "rules.d", "10-wordpress.yaml")
+		p.println(st.ok("WordPress detected — rules are built in; tuning drop-in: " + state.wpRulesPath))
+	}
+
+	p.println("\n  Detecting web servers...")
+	state.webServers = detectWebServers(state.allContainers)
+	renderWebServerSummary(p, state.webServers)
+
+	state.sshUnit = detectSSHUnit()
+	p.println(st.ok("SSH unit: " + state.sshUnit))
+
+	state.publicIP = detectPublicIP()
+	if state.publicIP != "" {
+		p.println(st.ok("public IP: " + state.publicIP))
+	} else {
+		p.println(st.warn("public IP: unknown (ifconfig.me unreachable)"))
+	}
+
+	state.sshSourceIP = sshSourceIP()
+	if state.sshSourceIP != "" {
+		p.println(st.ok("SSH source: " + state.sshSourceIP))
+	}
+
+	if p.err != nil {
+		return fmt.Errorf("writing output: %w", p.err)
+	}
+	return nil
+}
+
 // initSummary accumulates what the wizard configured, skipped, and wrote,
 // for the final Summary section (issue #102). Purely presentational —
 // nothing in here feeds back into wizard decisions.
@@ -461,10 +563,16 @@ func summarizeChoices(state *wizardState, sum *initSummary, yes bool) {
 	switch {
 	case state.cdn == nil:
 		// askQuestions always sets cdn; nil only in unit tests.
-	case state.cdn.cfEnabled && state.cdn.cfCfg != nil:
-		sum.configured = append(sum.configured,
-			fmt.Sprintf("enforcer: cloudflare (mode %s, action %s)",
-				state.cdn.cfCfg.Mode, state.cdn.cfCfg.Action))
+	case state.cdn.cfEnabled && len(state.cdn.cfAccounts) > 0:
+		for _, acct := range state.cdn.cfAccounts {
+			label := "cloudflare"
+			if acct.cfg.Name != "" {
+				label = "cloudflare/" + acct.cfg.Name
+			}
+			sum.configured = append(sum.configured,
+				fmt.Sprintf("enforcer: %s (mode %s, action %s)",
+					label, acct.cfg.Mode, acct.cfg.Action))
+		}
 	case state.cdn.cfAttempted:
 		// The loud abort banner (issue #93) already printed the specific
 		// reason; this line makes sure the failure also survives into the
@@ -575,10 +683,26 @@ func askQuestions(out io.Writer, sc *bufio.Scanner, state *wizardState, yes bool
 	p.println(st.header("Allowlist"))
 	defaultAdmin := state.sshSourceIP
 	if defaultAdmin == "" {
+		// No SSH_CLIENT (sudo su -, console, automation): fall back to the
+		// kernel-derived SSH peers — the same source the daemon's
+		// anti-lockout uses under systemd (issue #175).
+		if peers := decision.ProcSSHPeers(); len(peers) > 0 {
+			defaultAdmin = peers[0].String()
+			p.println(st.ok("detected your SSH client via /proc: " + defaultAdmin))
+		}
+	}
+	if defaultAdmin == "" {
 		defaultAdmin = state.publicIP
 	}
 	if rawAdmin := ask("Admin IP(s) to allowlist (space or comma separated)", defaultAdmin); rawAdmin != "" {
-		state.adminIPs = splitIPs(rawAdmin)
+		state.adminIPs = validAdminEntries(p, st, splitIPs(rawAdmin))
+	}
+	if len(state.adminIPs) == 0 {
+		// Strong recommendation (issue #175): admin_cidrs is the durable
+		// anti-lockout protection; live-session detection alone only covers
+		// connections that exist at decision time.
+		p.println(st.warn("admin_cidrs will be EMPTY — strongly recommended to add your management"))
+		p.println(st.warn("IPs later in policy.yaml; 'ezyshield arm' will flag this before arming."))
 	}
 
 	// CDN detection + Cloudflare subflow — runs BEFORE AI so the loud-skip
@@ -692,15 +816,32 @@ func writeGeneratedConfig(path string, state *wizardState) error {
 	if _, err := os.Stat(path); err == nil {
 		return fmt.Errorf("%s already exists — delete it to regenerate", path)
 	}
+	data, err := renderGeneratedConfig(state)
+	if err != nil {
+		return err
+	}
+	//nolint:gosec // 0640: group-readable; no secrets here (SecretRef env: references only)
+	if err := os.WriteFile(path, data, 0o640); err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	if err := applyDaemonOwnership(path, 0o640); err != nil {
+		return fmt.Errorf("set ownership on %s: %w", path, err)
+	}
+	return nil
+}
 
+// renderGeneratedConfig builds the config.yaml body from state and validates
+// it through the strict loader before returning the bytes. Extracted from
+// writeGeneratedConfig so the non-interactive driver (issue #231) renders and
+// validates the exact same YAML the wizard writes, without duplicating the
+// generation logic. No file I/O; credential fields are emitted only as
+// `env:VARNAME` references, never inline secrets.
+func renderGeneratedConfig(state *wizardState) ([]byte, error) {
 	var b strings.Builder
 	b.WriteString("# EzyShield config — generated by 'ezyshield init'\n")
 	b.WriteString("# Secrets must use 'env:VARNAME' references, never inline values.\n\n")
 	fmt.Fprintf(&b, "data_dir: /var/lib/ezyshield\n")
 	fmt.Fprintf(&b, "socket_path: %s\n", daemonSockPath)
-	if state.wpRulesPath != "" {
-		fmt.Fprintf(&b, "rules_path: %s\n", state.wpRulesPath)
-	}
 	b.WriteString("log:\n  level: info\n")
 
 	hasSSH := state.monitorSSH && state.sshUnit != ""
@@ -721,14 +862,16 @@ func writeGeneratedConfig(path string, state *wizardState) error {
 		}
 	}
 
-	hasCF := state.cdn != nil && state.cdn.cfEnabled && state.cdn.cfCfg != nil
+	hasCF := state.cdn != nil && state.cdn.cfEnabled && len(state.cdn.cfAccounts) > 0
 	if state.nftPath != "" || hasCF {
 		b.WriteString("enforce:\n")
 		if state.nftPath != "" {
-			b.WriteString("  nftables:\n")
-			fmt.Fprintf(&b, "    socket: %s\n", enforcerSockPath)
-			b.WriteString("    table: inet ezyshield\n")
-			b.WriteString("    set: blocked\n")
+			// The empty mapping is the whole configuration (issue #268): its
+			// presence switches local enforcement on, and table/set/socket
+			// all have real, honored defaults. Emitting any of them here
+			// would just pin today's defaults into every generated config —
+			// reference/config.md documents how to customize when needed.
+			b.WriteString("  nftables: {}\n")
 		}
 		if hasCF {
 			emitCloudflareYAML(&b, state.cdn)
@@ -752,10 +895,22 @@ func writeGeneratedConfig(path string, state *wizardState) error {
 
 	// validate before writing — catches any field mismatch immediately
 	if _, err := config.LoadConfigReader(bytes.NewReader(data), "generated config"); err != nil {
-		return fmt.Errorf("generated config.yaml failed validation: %w", err)
+		return nil, fmt.Errorf("generated config.yaml failed validation: %w", err)
 	}
+	return data, nil
+}
 
-	//nolint:gosec // 0640: group-readable; no secrets here (SecretRef env: references only)
+// writeGeneratedPolicy writes policy.yaml using only valid Policy fields.
+// Validates via LoadPolicyReader before writing to disk.
+func writeGeneratedPolicy(path string, state *wizardState) error {
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("%s already exists — delete it to regenerate", path)
+	}
+	data, err := renderGeneratedPolicy(state)
+	if err != nil {
+		return err
+	}
+	//nolint:gosec // 0640: group-readable; no secrets in policy
 	if err := os.WriteFile(path, data, 0o640); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
@@ -765,13 +920,13 @@ func writeGeneratedConfig(path string, state *wizardState) error {
 	return nil
 }
 
-// writeGeneratedPolicy writes policy.yaml using only valid Policy fields.
-// Validates via LoadPolicyReader before writing to disk.
-func writeGeneratedPolicy(path string, state *wizardState) error {
-	if _, err := os.Stat(path); err == nil {
-		return fmt.Errorf("%s already exists — delete it to regenerate", path)
-	}
-
+// renderGeneratedPolicy builds the policy.yaml body from state and validates
+// it through the strict loader before returning the bytes. Extracted from
+// writeGeneratedPolicy so the non-interactive driver (issue #231) renders and
+// validates the exact same YAML the wizard writes. armed is taken from
+// state.armed, which the non-interactive driver forces to false (Hard Rule 1,
+// dry-run default). No file I/O and no secrets.
+func renderGeneratedPolicy(state *wizardState) ([]byte, error) {
 	var b strings.Builder
 	b.WriteString("# EzyShield policy — generated by 'ezyshield init'\n\n")
 	fmt.Fprintf(&b, "armed: %v\n", state.armed)
@@ -789,6 +944,18 @@ func writeGeneratedPolicy(path string, state *wizardState) error {
 	for _, ip := range buildAllowlist(state) {
 		fmt.Fprintf(&b, "  - %s\n", ip)
 	}
+	// Issue #210: only real, detected subnets are written above. Broader
+	// internal ranges are opt-in — the commented example below (written
+	// into policy.yaml itself, not just this source file) shows how, and
+	// spells out the trade-off so a future editor doesn't uncomment it
+	// without understanding the consequence.
+	b.WriteString("# To allow a broader internal range (VPN, office LAN, a multi-host docker\n")
+	b.WriteString("# overlay) deliberately, uncomment and edit the line below.\n")
+	b.WriteString("# Trade-off: an allowlisted range can NEVER be banned (allowlist always wins\n")
+	b.WriteString("# over rules, AI, and geo blocking) — the broader the range, the more of your\n")
+	b.WriteString("# network permanently loses enforcement coverage.\n")
+	b.WriteString("# 'ezyshield doctor' warns if any private allowlist entry is /16 or broader.\n")
+	b.WriteString("#   - 10.0.0.0/8\n")
 
 	if len(state.adminIPs) > 0 {
 		b.WriteString("admin_cidrs:\n")
@@ -803,17 +970,9 @@ func writeGeneratedPolicy(path string, state *wizardState) error {
 
 	// validate before writing
 	if _, err := config.LoadPolicyReader(bytes.NewReader(data), "generated policy"); err != nil {
-		return fmt.Errorf("generated policy.yaml failed validation: %w", err)
+		return nil, fmt.Errorf("generated policy.yaml failed validation: %w", err)
 	}
-
-	//nolint:gosec // 0640: group-readable; no secrets in policy
-	if err := os.WriteFile(path, data, 0o640); err != nil {
-		return fmt.Errorf("writing %s: %w", path, err)
-	}
-	if err := applyDaemonOwnership(path, 0o640); err != nil {
-		return fmt.Errorf("set ownership on %s: %w", path, err)
-	}
-	return nil
+	return data, nil
 }
 
 // writeOrKeepEnvFile writes /etc/ezyshield/.env with the operator-supplied
@@ -1130,6 +1289,126 @@ func detectDockerContainers() []dockerContainer {
 	return containers
 }
 
+// defaultDockerBridgeSubnet is Docker Engine's out-of-the-box default bridge
+// subnet (the "docker0" bridge). Used ONLY as a fallback when network
+// enumeration fails (issue #210) — never as a substitute for the actual
+// host subnets, and never widened to the 172.16.0.0/12 supernet.
+const defaultDockerBridgeSubnet = "172.17.0.0/16"
+
+// dockerNetworkLister enumerates the docker bridge network subnets present
+// on the host. It is a package-level var so tests can override it without a
+// real docker daemon (see init_allowlist_test.go); production code always
+// uses listDockerBridgeSubnets.
+var dockerNetworkLister = listDockerBridgeSubnets
+
+// dockerNetworkInspect mirrors the subset of `docker network inspect` JSON
+// output this package needs. Docker's own output is treated as untrusted
+// external input, same as any other subprocess result: it is decoded with
+// encoding/json (never interpolated into a shell command or trusted as a
+// pre-validated CIDR), and every subnet string is re-validated with
+// netip.ParsePrefix before being accepted (§1 SECURITY-REVIEW: input
+// handling).
+type dockerNetworkInspect struct {
+	Driver string `json:"Driver"`
+	IPAM   struct {
+		Config []struct {
+			Subnet string `json:"Subnet"`
+		} `json:"Config"`
+	} `json:"IPAM"`
+}
+
+// listDockerBridgeSubnets asks the docker CLI for every network's inspect
+// payload and returns the deduplicated subnets of bridge-driver networks
+// only — the networks that place container IPs on a host-routed subnet and
+// therefore need an enforcement exemption. host/none/overlay/macvlan
+// networks are skipped: they either have no subnet of their own or aren't
+// what the original 172.16.0.0/12 entry was meant to cover.
+//
+// Returns an error on any failure (docker not reachable, malformed output,
+// timeout). Callers MUST fall back to defaultDockerBridgeSubnet in that
+// case — never skip the allowlist entry silently, and never widen it.
+func listDockerBridgeSubnets(ctx context.Context) ([]string, error) {
+	//nolint:gosec // fixed args, no user input
+	idsOut, err := exec.CommandContext(ctx, "docker", "network", "ls", "-q").Output()
+	if err != nil {
+		return nil, fmt.Errorf("docker network ls: %w", err)
+	}
+	var ids []string
+	for _, line := range strings.Split(strings.TrimSpace(string(idsOut)), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			ids = append(ids, line)
+		}
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	// ids come from docker's own output, not from a shell string — they are
+	// passed as separate argv entries below (exec.Command never invokes a
+	// shell), so there is no command-injection surface regardless of their
+	// content. We still never trust them as anything other than opaque
+	// tokens: they are neither parsed nor interpolated, only forwarded.
+	args := append([]string{"network", "inspect"}, ids...)
+	//nolint:gosec // args are argv entries (no shell), see comment above
+	out, err := exec.CommandContext(ctx, "docker", args...).Output()
+	if err != nil {
+		return nil, fmt.Errorf("docker network inspect: %w", err)
+	}
+
+	return parseDockerBridgeSubnets(out)
+}
+
+// parseDockerBridgeSubnets decodes the JSON payload from `docker network
+// inspect` and returns the deduplicated subnets of bridge-driver networks
+// only, in first-seen order. Split out from listDockerBridgeSubnets so the
+// untrusted-input handling (§1 SECURITY-REVIEW) can be unit tested without a
+// real docker daemon: malformed JSON, non-bridge drivers, and unparsable
+// subnet strings are all exercised directly in init_allowlist_test.go.
+func parseDockerBridgeSubnets(data []byte) ([]string, error) {
+	var networks []dockerNetworkInspect
+	if err := json.Unmarshal(data, &networks); err != nil {
+		return nil, fmt.Errorf("parsing docker network inspect output: %w", err)
+	}
+
+	seen := make(map[string]bool)
+	var subnets []string
+	for _, n := range networks {
+		if n.Driver != "bridge" {
+			continue
+		}
+		for _, c := range n.IPAM.Config {
+			prefix, err := netip.ParsePrefix(strings.TrimSpace(c.Subnet))
+			if err != nil {
+				// Never trust docker's output blindly — skip anything that
+				// doesn't parse as a CIDR rather than writing it verbatim
+				// into policy.yaml.
+				continue
+			}
+			cidr := prefix.String()
+			if !seen[cidr] {
+				seen[cidr] = true
+				subnets = append(subnets, cidr)
+			}
+		}
+	}
+	return subnets, nil
+}
+
+// detectDockerBridgeSubnets enumerates the docker bridge subnets that
+// actually exist on the host, falling back to the single default bridge
+// subnet (never the /12 supernet) on any enumeration failure. The bool
+// return reports whether the fallback was used, so the caller can surface a
+// warning to the operator instead of silently narrowing coverage.
+func detectDockerBridgeSubnets() (subnets []string, usedFallback bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	got, err := dockerNetworkLister(ctx)
+	if err != nil {
+		return []string{defaultDockerBridgeSubnet}, true
+	}
+	return got, false
+}
+
 // confirmWebServerCollectors prompts the operator for each detected web
 // server and returns the collector list to write into config.yaml.
 //
@@ -1190,6 +1469,12 @@ func detectSSHUnit() string {
 	return "ssh" // Debian/Ubuntu default
 }
 
+// detectPublicIP is the seam through which detectEnvironment fetches the
+// server's public IP. It defaults to fetchPublicIP (a real network call) and
+// is a package var so tests drive detection hermetically, without hitting the
+// network — the same pattern used for dockerNetworkLister and tokenReader.
+var detectPublicIP = fetchPublicIP
+
 func fetchPublicIP() string {
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Get("https://ifconfig.me") //nolint:noctx // client-level timeout is sufficient
@@ -1220,13 +1505,24 @@ func sshSourceIP() string {
 
 // ── Policy helpers ───────────────────────────────────────────────────────────
 
-// buildAllowlist returns loopback + docker bridge range + server public IP.
+// buildAllowlist returns loopback + real docker bridge subnets (if any) +
+// server public IP.
+//
+// Issue #210: this intentionally does NOT add a blanket RFC1918 entry.
+// Non-docker hosts get no docker-related entry at all; docker hosts get
+// only the subnets detected in state.dockerAllowlist (populated during
+// environment detection — see the "docker networks" block in
+// runInitWizard and detectDockerBridgeSubnets below). Allowlisted ranges
+// can never be banned (allowlist always wins, hard rule #1), so this stays
+// as narrow as possible by default — see the commented example
+// writeGeneratedPolicy appends for how an operator opts into something
+// broader.
 func buildAllowlist(state *wizardState) []string {
 	list := []string{
 		"127.0.0.1/32",
 		"::1/128",
-		"172.16.0.0/12",
 	}
+	list = append(list, state.dockerAllowlist...)
 	if state.publicIP != "" {
 		list = append(list, state.publicIP+"/32")
 	}
@@ -1250,6 +1546,25 @@ func normalizeToPrefix(ip string) string {
 }
 
 // splitIPs splits a space- or comma-separated string of IPs/CIDRs.
+// validAdminEntries keeps only entries that parse as an IP or CIDR
+// (netip validation, issue #175); invalid ones are reported and dropped so
+// a typo never lands in policy.yaml as a dead allowlist entry.
+func validAdminEntries(p *wPrinter, st styler, entries []string) []string {
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if _, err := netip.ParseAddr(e); err == nil {
+			out = append(out, e)
+			continue
+		}
+		if _, err := netip.ParsePrefix(e); err == nil {
+			out = append(out, e)
+			continue
+		}
+		p.println(st.warn("ignoring invalid admin IP/CIDR: " + e))
+	}
+	return out
+}
+
 func splitIPs(s string) []string {
 	s = strings.ReplaceAll(s, ",", " ")
 	fields := strings.Fields(s)
@@ -1297,25 +1612,78 @@ func hasWordPressContainers(containers []dockerContainer) bool {
 	return false
 }
 
-// writeWordPressRules writes the embedded rules.yaml to path so operators can
-// customize WordPress-specific detection (xmlrpc, wp-login, .env probing).
-// The on-disk file is identical to the embedded defaults; rules_path in
-// config.yaml activates it and allows site-specific edits without recompiling.
-func writeWordPressRules(path string) error {
-	data, err := configs.FS.ReadFile("rules.yaml")
-	if err != nil {
-		return fmt.Errorf("reading embedded rules.yaml: %w", err)
+// ensureRulesDir creates the rules.d drop-in directory (issue #136) so every
+// install — WordPress or not — has a discoverable customization surface.
+// Drop-ins placed there merge over the embedded base rules by name and
+// survive binary updates. Idempotent.
+func ensureRulesDir(dir string) error {
+	//nolint:gosec // 0750: matches the config dir; rules contain no secrets
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return fmt.Errorf("creating %s: %w", dir, err)
 	}
-	header := "# EzyShield rules — generated by 'ezyshield init' (WordPress mode)\n" +
-		"# WordPress containers detected; this file enables xmlrpc, wp-login, and\n" +
-		"# .env probing rules. Edit to add or tune rules without recompiling.\n\n"
-	content := append([]byte(header), data...)
-	//nolint:gosec // 0640: group-readable; rules contain no secrets
-	if err := os.WriteFile(path, content, 0o640); err != nil {
-		return fmt.Errorf("writing %s: %w", path, err)
-	}
-	if err := applyDaemonOwnership(path, 0o640); err != nil {
-		return fmt.Errorf("set ownership on %s: %w", path, err)
+	if err := applyDaemonOwnership(dir, 0o750); err != nil {
+		return fmt.Errorf("set ownership on %s: %w", dir, err)
 	}
 	return nil
+}
+
+// writeWordPressDropin writes a fully-commented tuning template to path
+// (issue #136). The WordPress detection rules are part of the embedded base
+// and are already active — this file materializes NOTHING (the pre-#136 flow
+// copied the whole embedded ruleset to disk and pointed rules_path at it,
+// silently freezing the install out of upstream rule tuning). Uncommenting
+// an entry here overrides just that rule, and everything else keeps riding
+// binary updates.
+//
+// Returns wrote=false when the file already exists — a re-run must never
+// clobber operator edits.
+func writeWordPressDropin(path string) (bool, error) {
+	if _, err := os.Stat(path); err == nil {
+		return false, nil
+	} else if !os.IsNotExist(err) {
+		return false, fmt.Errorf("checking %s: %w", path, err)
+	}
+	const template = `# EzyShield rules.d drop-in — generated by 'ezyshield init' (WordPress detected)
+#
+# The WordPress detection rules (wp-login, xmlrpc, .env probing) are BUILT IN
+# and already active — you do not need this file for detection to work.
+#
+# To tune a rule, uncomment it below and adjust; the entry overrides the
+# built-in rule with the same name. Everything you do NOT override keeps
+# receiving upstream tuning with every EzyShield update.
+#
+# After editing: sudo systemctl restart ezyshield
+# (an invalid file stops the daemon from starting — it fails closed)
+#
+# Current built-in values shown as of the version that generated this file.
+#
+# rules:
+#   - name: http_wp_probe
+#     description: "WordPress login probe"
+#     kinds: [http_request]
+#     field: path
+#     contains: wp-login
+#     window: 60s
+#     threshold: 3
+#     score: 80
+#     category: scanner
+#
+#   - name: http_xmlrpc_abuse
+#     description: "XML-RPC brute force (pingback/auth abuse)"
+#     kinds: [http_request]
+#     field: path
+#     contains: xmlrpc.php
+#     window: 60s
+#     threshold: 5
+#     score: 80
+#     category: bruteforce
+`
+	//nolint:gosec // 0640: group-readable; rules contain no secrets
+	if err := os.WriteFile(path, []byte(template), 0o640); err != nil {
+		return false, fmt.Errorf("writing %s: %w", path, err)
+	}
+	if err := applyDaemonOwnership(path, 0o640); err != nil {
+		return false, fmt.Errorf("set ownership on %s: %w", path, err)
+	}
+	return true, nil
 }

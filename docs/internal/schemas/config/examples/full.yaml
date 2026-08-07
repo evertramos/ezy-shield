@@ -1,0 +1,91 @@
+# Schema regression fixture (issue #325): exercises EVERY top-level section of
+# config.yaml so the CI schema check fails if config.schema.json drifts from
+# internal/config/config.go again. Values are fixtures — RFC 5737 addresses,
+# env: references only, no real IDs.
+data_dir: /var/lib/ezyshield
+socket_path: /run/ezyshield/ezyshield.sock
+rules_dir: /etc/ezyshield/rules.d
+
+log:
+  level: info
+
+collectors:
+  - kind: file
+    path: /var/log/nginx/access.log
+    parser: nginx
+  - kind: journald
+    unit: ssh.service
+  - kind: docker
+    container: wordpress-site
+    parser: apache
+
+enforce:
+  nftables:
+    socket: /run/ezyshield-enforcer/enforcer.sock
+    table: inet ezyshield
+    set: blocked
+  cloudflare:
+    - name: main
+      api_token: env:EZYSHIELD_CF_TOKEN
+      mode: lists
+      account_id: acc-fixture-123
+      list_name: ezyshield_blocked
+      zone_ids: [zone-fixture-1]
+      action: block
+    - name: client_a
+      api_token: env:EZYSHIELD_CF_TOKEN_A
+      mode: rulesets
+      zone_ids: [zone-fixture-2]
+      action: challenge
+
+ai:
+  provider: anthropic
+  model: claude-haiku-4-5
+  api_key: env:EZYSHIELD_AI_KEY
+  ambiguous_band: [30, 75]
+  token_budget_daily: 200000
+  cache_ttl: 1h
+  providers:
+    - name: anthropic
+      priority: 0
+      api_key: env:EZYSHIELD_AI_KEY
+    - name: ollama
+      priority: 1
+      endpoint: http://localhost:11434
+
+notify:
+  rate_limit_per_minute: 5
+  dedup_window_sec: 600
+  telegram:
+    bot_token: env:EZYSHIELD_TELEGRAM_TOKEN
+    chat_ids: ["42"]
+    severity: [warn, critical]
+  email:
+    from: shield@example.com
+    to: [admin@example.com]
+    host: smtp.example.com
+    port: 587
+    username: shield
+    password: env:EZYSHIELD_SMTP_PASSWORD
+    tls: starttls
+    severity: [critical]
+  slack:
+    webhook_url: env:EZYSHIELD_SLACK_WEBHOOK
+    channel: "#security"
+  discord:
+    webhook_url: env:EZYSHIELD_DISCORD_WEBHOOK
+  webhook:
+    url: env:EZYSHIELD_WEBHOOK_URL
+    headers:
+      Authorization: env:EZYSHIELD_WEBHOOK_AUTH
+    severity: [warn, critical]
+
+enrich:
+  db_path: /var/lib/ezyshield/GeoLite2-Country.mmdb
+  asn_path: /var/lib/ezyshield/GeoLite2-ASN.mmdb
+  auto_update: true
+  license_key: env:EZYSHIELD_MAXMIND_KEY
+
+dashboard:
+  addr: 127.0.0.1:9090
+  auth_db_path: /var/lib/ezyshield/dashboard.db

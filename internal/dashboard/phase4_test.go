@@ -1,10 +1,13 @@
 package dashboard
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -159,7 +162,9 @@ func TestLoginRateLimit_EndToEnd(t *testing.T) {
 }
 
 func TestSessionCap_EvictsOldest(t *testing.T) {
-	s := newSessionStore(time.Hour)
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	s := newSessionStore(time.Hour, logger)
 	first, _, err := s.Create("admin")
 	if err != nil {
 		t.Fatalf("Create 1: %v", err)
@@ -181,6 +186,9 @@ func TestSessionCap_EvictsOldest(t *testing.T) {
 	if got := s.userLen("admin"); got != 3 {
 		t.Fatalf("userLen = %d, want 3", got)
 	}
+	if buf.Len() != 0 {
+		t.Fatalf("no eviction log expected before the cap is exceeded, got: %q", buf.String())
+	}
 
 	fourth, _, err := s.Create("admin")
 	if err != nil {
@@ -197,10 +205,33 @@ func TestSessionCap_EvictsOldest(t *testing.T) {
 	if got := s.userLen("admin"); got != 3 {
 		t.Fatalf("userLen after cap = %d, want 3", got)
 	}
+
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("want exactly one eviction log line, got %d: %q", len(lines), buf.String())
+	}
+	line := lines[0]
+	if !strings.Contains(line, `msg="dashboard session evicted"`) {
+		t.Errorf("eviction log missing expected msg: %q", line)
+	}
+	if !strings.Contains(line, "user=admin") {
+		t.Errorf("eviction log missing user=admin: %q", line)
+	}
+	if !strings.Contains(line, "reason=cap_exceeded") {
+		t.Errorf("eviction log missing reason=cap_exceeded: %q", line)
+	}
+
+	// Explicit logout is user-initiated and expected — must not emit the
+	// cap-eviction line.
+	buf.Reset()
+	s.Delete(fourth)
+	if buf.Len() != 0 {
+		t.Errorf("explicit Delete must not emit an eviction log, got: %q", buf.String())
+	}
 }
 
 func TestSessionCap_ScopedPerUser(t *testing.T) {
-	s := newSessionStore(time.Hour)
+	s := newSessionStore(time.Hour, nil)
 	aliceTok, _, err := s.Create("alice")
 	if err != nil {
 		t.Fatalf("alice create: %v", err)
@@ -343,3 +374,57 @@ type statusRecorder struct {
 func (r *statusRecorder) Header() http.Header         { return r.header }
 func (r *statusRecorder) Write(b []byte) (int, error) { return len(b), nil }
 func (r *statusRecorder) WriteHeader(status int)      { r.status = status }
+
+// TestLoginThrottle_GlobalBudgetCapsUsernameCycling reproduces issue #360:
+// an attacker sending a fresh username each request never trips the
+// per-username throttle, so without a global ceiling the failures map grows
+// unbounded and each request burns a decoy PBKDF2. Once the global budget is
+// exhausted, Allow must reject every login until the window drains.
+func TestLoginThrottle_GlobalBudgetCapsUsernameCycling(t *testing.T) {
+	th := newLoginThrottle()
+	fakeNow := time.Unix(3_000_000, 0)
+	th.nowClock = func() time.Time { return fakeNow }
+
+	for i := 0; i < th.globalMax; i++ {
+		u := "attacker-" + strconv.Itoa(i)
+		if !th.Allow(u) {
+			t.Fatalf("distinct username %q should be allowed before the global budget is spent", u)
+		}
+		th.RecordFailure(u)
+	}
+
+	// Global budget spent: a brand-new username is now rejected too.
+	if th.Allow("fresh-victim") {
+		t.Fatal("global budget exhausted — a new username must be rejected before PBKDF2")
+	}
+
+	// Draining the window restores service.
+	fakeNow = fakeNow.Add(2 * time.Minute)
+	if !th.Allow("fresh-victim") {
+		t.Fatal("global lockout must clear once the window drains")
+	}
+}
+
+// TestLoginThrottle_MapPrunesExpiredEntries: the failures map must not grow
+// without bound — expired single-failure entries are pruned once the map
+// exceeds the global budget (issue #360).
+func TestLoginThrottle_MapPrunesExpiredEntries(t *testing.T) {
+	th := newLoginThrottle()
+	fakeNow := time.Unix(4_000_000, 0)
+	th.nowClock = func() time.Time { return fakeNow }
+
+	for i := 0; i < th.globalMax+5; i++ {
+		th.RecordFailure("u-" + strconv.Itoa(i))
+	}
+	// Advance past the window so every recorded stamp is stale, then record
+	// one more failure to trigger the opportunistic prune.
+	fakeNow = fakeNow.Add(2 * time.Minute)
+	th.RecordFailure("trigger")
+
+	th.mu.Lock()
+	n := len(th.failures)
+	th.mu.Unlock()
+	if n > th.globalMax {
+		t.Errorf("failures map has %d entries after prune, want <= %d", n, th.globalMax)
+	}
+}

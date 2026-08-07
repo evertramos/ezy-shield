@@ -11,10 +11,18 @@ package enforce
 // Request is sent from the main daemon to the privileged enforcer helper.
 // IP must be a valid netip.Addr or netip.Prefix string; raw nft syntax
 // is never accepted and will be rejected by the helper.
+//
+// Table/Set carry the operator-configured nftables names (issue #268).
+// Empty means "helper defaults" — requests from older daemons therefore keep
+// working unchanged. The helper re-validates the names itself via
+// internal/nftnames (it never trusts the daemon), pins the first resolved
+// name set for its lifetime, and rejects requests naming anything else.
 type Request struct {
 	Verb       string `json:"verb"`
 	IP         string `json:"ip,omitempty"`
 	TTLSeconds int64  `json:"ttl_seconds,omitempty"` // 0 = permanent
+	Table      string `json:"table,omitempty"`
+	Set        string `json:"set,omitempty"`
 }
 
 // Response is returned by the helper for every request.
@@ -29,7 +37,16 @@ type Response struct {
 	Error string   `json:"error,omitempty"`
 	Code  string   `json:"code,omitempty"`
 	IPs   []string `json:"ips,omitempty"` // populated for "list" verb
+	// Features is populated for the "caps" verb: the helper's supported
+	// optional capabilities. The daemon probes this before relying on a
+	// capability an older helper would silently ignore (issue #268 — a
+	// custom table name must never silently fall back to the default).
+	Features []string `json:"features,omitempty"`
 }
+
+// FeatureCustomNames is advertised by helpers that honor Request.Table /
+// Request.Set. Daemons configured with non-default names require it.
+const FeatureCustomNames = "custom_names"
 
 // CodeAlreadyAbsent is returned on a successful "del" or "allow_del" when the
 // target element was already gone from the nftables set — for example because

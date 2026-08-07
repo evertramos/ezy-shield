@@ -150,11 +150,15 @@ jobs:
       - name: get.sh no-stable-release message path (mocked GitHub API)
         id: getsh
         run: bash scripts/get-sh-message-test.sh
+      - name: Package lifecycle scripts (upgrade restarts, removal stops)
+        id: pkglifecycle
+        run: sh scripts/package-lifecycle-test.sh
       - name: Validate example configs against JSON schemas
         id: schemas
         run: |
           pip install check-jsonschema --quiet
           check-jsonschema --schemafile docs/internal/schemas/config/config.schema.json configs/config.yaml
+          check-jsonschema --schemafile docs/internal/schemas/config/config.schema.json docs/internal/schemas/config/examples/full.yaml
           check-jsonschema --schemafile docs/internal/schemas/config/policy.schema.json configs/policy.yaml
       - name: Job summary
         if: always()
@@ -168,6 +172,7 @@ jobs:
             echo "| required docs present | ${{ steps.reqdocs.outcome }} |"
             echo "| shellcheck ($(find scripts -name '*.sh' | wc -l) scripts) | ${{ steps.shellcheck.outcome }} |"
             echo "| get.sh no-stable-release message (#235) | ${{ steps.getsh.outcome }} |"
+            echo "| package upgrade/removal lifecycle (#354) | ${{ steps.pkglifecycle.outcome }} |"
             echo "| example configs vs JSON schemas | ${{ steps.schemas.outcome }} |"
             echo "| VitePress-safe placeholders | ${{ steps.placeholders.outcome }} |"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -192,6 +197,16 @@ jobs:
         run: |
           set -o pipefail
           go test -fuzz=FuzzNginxParser -fuzztime=10s ./internal/parser/ | tee fuzz-nginx.txt
+      - name: Fuzz proc SSH-peer parser (10s)
+        id: fproc
+        run: |
+          set -o pipefail
+          go test -fuzz=FuzzProcTCPPeers -fuzztime=10s ./internal/decision/ | tee fuzz-proc.txt
+      - name: Fuzz SIEM formatters (10s)
+        id: fsiem
+        run: |
+          set -o pipefail
+          go test -fuzz=FuzzSIEMFormatters -fuzztime=10s ./internal/siem/ | tee fuzz-siem.txt
       - name: Job summary
         if: always()
         run: |
@@ -204,6 +219,8 @@ jobs:
             echo "|---|---|---|"
             echo "| FuzzSSHParser | $(execs fuzz-ssh.txt) | ${{ steps.fssh.outcome }} |"
             echo "| FuzzNginxParser | $(execs fuzz-nginx.txt) | ${{ steps.fnginx.outcome }} |"
+            echo "| FuzzProcTCPPeers | $(execs fuzz-proc.txt) | ${{ steps.fproc.outcome }} |"
+            echo "| FuzzSIEMFormatters | $(execs fuzz-siem.txt) | ${{ steps.fsiem.outcome }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   govulncheck:
@@ -265,12 +282,27 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      # Container image (issue #101): dockers_v2 needs a buildx
+      # (docker-container) builder to produce the arm64 image. QEMU is set up
+      # defensively — the build needs no emulation (the Dockerfile's data stage
+      # is pinned to $BUILDPLATFORM and the scratch stage only COPYs prebuilt
+      # binaries) but binfmt keeps it robust. The snapshot builds the images
+      # locally and pushes nothing.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
       - name: goreleaser snapshot
         uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
           version: "~> v2"
-          args: release --snapshot --clean
+          # Signing and SBOMs (issue #100) only run on real releases: keyless
+          # signing needs the release job's OIDC identity, and neither cosign
+          # nor syft is installed on this runner. The packaging surface this
+          # job install-verifies is unaffected by the skip. The container image
+          # (issue #101) IS built here (dockers_v2, snapshot = build, no push).
+          args: release --snapshot --clean --skip=sign,sbom
       - name: Verify .deb on debian:12
         run: |
           docker run --rm -v "$PWD/dist:/dist:ro" debian:12 bash -ec '
@@ -297,11 +329,34 @@ jobs:
             rpm -e ezyshield
             test -d /var/lib/ezyshield
           '
+      # Container image (issue #101): the snapshot above built per-arch images
+      # locally. Run the amd64 one exactly as a user would evaluate the release.
+      - name: Smoke-test container image
+        run: |
+          IMG=$(jq -r '.[] | select(.type=="Docker Image" and (.name|endswith("-amd64"))) | .name' dist/artifacts.json | head -1)
+          test -n "$IMG" || { echo "::error::no amd64 container image in dist/artifacts.json"; exit 1; }
+          echo "Testing image: $IMG"
+          # 1) version prints and exits 0
+          docker run --rm "$IMG" version
+          # 2) doctor runs gracefully in the minimal image: it FAILs/N/As checks
+          #    (no config, no nft, no journald) but must exit cleanly and never
+          #    panic — issue #101 AC ("doctor may report missing privileges").
+          if out=$(docker run --rm "$IMG" doctor 2>&1); then rc=0; else rc=$?; fi
+          echo "$out"
+          test "$rc" -eq 0 || { echo "::error::doctor exited $rc (expected graceful 0)"; exit 1; }
+          test -n "$out" || { echo "::error::doctor produced no output"; exit 1; }
+          if echo "$out" | grep -qi 'panic:'; then echo "::error::doctor panicked"; exit 1; fi
+          # 3) both binaries ship: run the enforcer via an entrypoint override
+          docker run --rm --entrypoint /usr/local/bin/ezyshield-enforcer "$IMG" --version
+          # 4) non-root by default (privilege separation preserved)
+          user=$(docker inspect "$IMG" --format '{{.Config.User}}')
+          test "$user" = "65532:65532" || { echo "::error::image runs as '$user', expected 65532:65532"; exit 1; }
+          echo "container smoke OK: version + doctor(graceful rc=$rc) + enforcer + non-root ($user)"
       - name: Job summary
         run: |
           {
-            echo "### 📦 Packages (goreleaser snapshot)"
-            echo "_Builds the full release snapshot and installs the resulting .deb/.rpm in real containers — packaging breaks here, before any tag exists._"
+            echo "### 📦 Packages + container (goreleaser snapshot)"
+            echo "_Builds the full release snapshot and installs the resulting .deb/.rpm in real containers, then runs the container image — packaging or image breaks here, before any tag exists._"
             echo ""
             echo "| Artifact | Size |"
             echo "|---|---|"
@@ -312,6 +367,7 @@ jobs:
             echo ""
             echo "- debian:12 — dpkg install, version, doctor runs, systemd-analyze verify ✅"
             echo "- rockylinux:9 — rpm install + clean removal, data dir preserved ✅"
+            echo "- container (amd64) — version, doctor graceful (no panic), enforcer runs, non-root 65532 ✅"
           } >> "$GITHUB_STEP_SUMMARY"
 
   security-review-gate:

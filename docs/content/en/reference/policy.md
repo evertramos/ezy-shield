@@ -52,13 +52,27 @@ block_countries: []   # ISO 3166-1 alpha-2, e.g. [CN, RU]
 block_asns: []        # e.g. [AS16276, AS14061]
 ```
 
+Every value above is the loader default, with one exception: `observe_threshold`
+has **no** default — `applyDefaults` leaves it untouched, so omitting it yields
+`0` (notify on any score below `ban_threshold`). The `40` shown here mirrors the
+shipped `configs/policy.yaml` as a sensible starting point; see the
+[Thresholds](#thresholds) table below.
+
 ## armed
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `armed` | bool | `false` | `true` = enforce bans; `false` = dry-run: the full pipeline runs and logs `dry_ban` decisions, but nothing is blocked and nothing is written to the ban store |
+| `armed` | bool | `false` | `true` = enforce bans; `false` = dry-run: the full pipeline runs and records `dry_ban` decisions, but no enforcer is called, so nothing is actually blocked |
 
 Dry-run is the default on purpose — run it until `ezyshield doctor` is clean and the decisions in the log look right.
+
+Dry-run still **records** (ADR-0009 §5): each `dry_ban` writes the strike, a
+simulated ban row (`dry_run=1`) in `bans_active`, and an audit entry through the
+same `RecordStrike` path as a real ban, and it suppresses follow-up events from
+that IP just like a real ban. Only the enforcer call is skipped. Because strikes
+are cumulative and persist, an IP that re-offends after you set `armed: true`
+can start higher on the ladder than a fresh offender — the dry-run history
+counts.
 
 ## Thresholds
 
@@ -116,6 +130,43 @@ admin_cidrs:
   - 10.0.0.0/8
 ```
 
+Because an allowlisted range can **never** be banned, keep entries as narrow
+as the traffic you actually need to exempt — a broad private range silently
+removes enforcement from everything inside it, permanently.
+
+### Docker hosts
+
+When `ezyshield init` detects Docker, it allowlists only the bridge network
+subnets that actually exist on the host (enumerated via the Docker API/CLI),
+never a blanket RFC1918 range. If enumeration fails, it falls back to
+Docker's own default bridge subnet (`172.17.0.0/16`) alone — still never the
+entire `172.16.0.0/12`. Hosts without Docker get no docker-related allowlist
+entry at all.
+
+The generated `policy.yaml` includes a commented-out example for adding a
+broader internal range (VPN, office LAN, a multi-host docker overlay)
+deliberately:
+
+```yaml
+# To allow a broader internal range (VPN, office LAN, a multi-host docker
+# overlay) deliberately, uncomment and edit the line below.
+# Trade-off: an allowlisted range can NEVER be banned (allowlist always wins
+# over rules, AI, and geo blocking) — the broader the range, the more of your
+# network permanently loses enforcement coverage.
+# 'ezyshield doctor' warns if any private allowlist entry is /16 or broader.
+#   - 10.0.0.0/8
+```
+
+`ezyshield doctor` warns (not fails) when the allowlist contains a private
+(RFC1918/ULA) range at `/16` or broader, whatever put it there.
+
+> **Upgrading from an older EzyShield?** `init` never rewrites an existing
+> `policy.yaml`, so a config generated before this fix keeps its
+> `172.16.0.0/12` entry unchanged. Review the `allowlist` section of your
+> `policy.yaml` and narrow that entry to your real docker bridge subnet(s)
+> (`docker network ls` / `docker network inspect`) — `ezyshield doctor` flags
+> the old entry as a WARN to remind you.
+
 ## Geo blocking
 
 | Field | Type | Description |
@@ -132,7 +183,15 @@ sudo ezyshield config validate   # strict schema + constraint check
 sudo ezyshield doctor            # full environment check
 ```
 
-Unknown keys fail validation; out-of-range values (e.g. `ban_threshold: 0`, `max_bans_per_minute: 0`) are rejected with the exact reason.
+Unknown keys fail validation, and genuinely out-of-range values are rejected
+with the exact reason — e.g. `ban_threshold: 150` (must be in `[1, 100]`),
+`observe_threshold` ≥ `ban_threshold`, or a negative `max_bans_per_minute`.
+
+One subtlety: an **explicit `0`** for `ban_threshold` or `max_bans_per_minute`
+is **not** rejected. Defaults are applied *before* the range check, so a `0`
+(indistinguishable from an omitted field) is replaced by the default — `70` and
+`30` respectively — and then passes. `observe_threshold` is the exception: it
+has no default, so `0` stays `0`.
 
 ## SSH probe / aggressive tier
 

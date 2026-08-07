@@ -277,6 +277,9 @@ func TestOpenAI_ClampAllowlistedIP(t *testing.T) {
 	if verdicts[0].SuggestTTL != 0 {
 		t.Errorf("allowlisted IP SuggestTTL must be 0, got %v", verdicts[0].SuggestTTL)
 	}
+	if !IsAllowlistClamped(verdicts[0]) {
+		t.Errorf("real clamp must stamp the Source marker; Source = %q", verdicts[0].Source)
+	}
 }
 
 // TestOpenAI_ClampMaxTTL verifies that SuggestTTL is capped at the policy maximum.
@@ -420,5 +423,26 @@ func TestOpenAI_Name(t *testing.T) {
 	p := &OpenAIProvider{}
 	if p.Name() != "openai" {
 		t.Errorf("Name: want openai, got %q", p.Name())
+	}
+}
+
+// TestOpenAI_DropVerdictIPNotInBatch verifies a verdict naming an IP absent
+// from the analyzed batch is dropped (issue #312, SECURITY-REVIEW §5).
+func TestOpenAI_DropVerdictIPNotInBatch(t *testing.T) {
+	recorded := `{"results":[{"ip":"203.0.113.9","score":95,"category":"bruteforce","confidence":0.99,"reason":"never observed","suggest_ttl_seconds":86400}]}`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(openaiResponse(recorded, 100, 30)))
+	}))
+	defer srv.Close()
+
+	p := makeOpenAIProvider(t, srv, nil, 0, nil)
+	verdicts, _, err := p.Analyze(context.Background(), []sdk.Aggregate{sampleAggregate("192.0.2.1")}, sdk.TokenBudget{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(verdicts) != 0 {
+		t.Errorf("off-batch verdict must be dropped, got %+v", verdicts)
 	}
 }

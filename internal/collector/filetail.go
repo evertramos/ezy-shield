@@ -173,18 +173,18 @@ func (c *FileTailCollector) Run(ctx context.Context, out chan<- sdk.RawLine) err
 				lastSize = fi.Size()
 			}
 
-			// Parse each inotify event.
+			// Parse each inotify event. Only Mask and Len are needed: Mask
+			// drives rotation detection, Len skips the trailing name field.
+			// Wd and Cookie are intentionally not decoded (single watch, no
+			// rename tracking).
 			for offset := 0; offset+inotifyEventSize <= nr; {
-				var ev unix.InotifyEvent
 				// Use binary.NativeEndian (no unsafe) per the spec.
 				evBytes := ibuf[offset : offset+inotifyEventSize]
-				ev.Wd = int32(binary.NativeEndian.Uint32(evBytes[0:4])) //nolint:gosec // inotify Wd is a kernel-assigned watch descriptor; the int32↔uint32 round-trip is intentional
-				ev.Mask = binary.NativeEndian.Uint32(evBytes[4:8])
-				ev.Cookie = binary.NativeEndian.Uint32(evBytes[8:12])
-				ev.Len = binary.NativeEndian.Uint32(evBytes[12:16])
-				offset += inotifyEventSize + int(ev.Len)
+				mask := binary.NativeEndian.Uint32(evBytes[4:8])
+				evLen := binary.NativeEndian.Uint32(evBytes[12:16])
+				offset += inotifyEventSize + int(evLen)
 
-				if ev.Mask&(unix.IN_MOVE_SELF|unix.IN_DELETE_SELF) != 0 {
+				if mask&(unix.IN_MOVE_SELF|unix.IN_DELETE_SELF) != 0 {
 					rotated = true
 				}
 			}

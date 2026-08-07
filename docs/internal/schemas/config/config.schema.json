@@ -1,18 +1,75 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/evertramos/ezy-shield/docs/schemas/config/config.schema.json",
+  "$id": "https://github.com/evertramos/ezy-shield/docs/internal/schemas/config/config.schema.json",
   "title": "EzyShield config.yaml",
-  "description": "Main runtime configuration. No secrets may appear here; use env:VARNAME references for any credential field.",
+  "description": "Main runtime configuration. No secrets may appear here; use env:VARNAME references for any credential field. Mirrors internal/config/config.go — update both together.",
   "type": "object",
   "additionalProperties": false,
+  "$defs": {
+    "secretRef": {
+      "type": "string",
+      "pattern": "^(env:[A-Z_][A-Z0-9_]*)?$",
+      "description": "Secret reference. Must be 'env:VARNAME' — inline secrets are forbidden and rejected at load time."
+    },
+    "severityList": {
+      "type": "array",
+      "items": {"type": "string", "enum": ["info", "warn", "critical"]},
+      "description": "Severity levels to forward on this channel. Empty/omitted means all severities."
+    },
+    "cloudflareAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["api_token"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,32}$",
+          "description": "Operator-chosen label to disambiguate accounts in logs. Optional for a single account; required and unique with multiple accounts."
+        },
+        "api_token": {"$ref": "#/$defs/secretRef"},
+        "mode": {
+          "type": "string",
+          "enum": ["lists", "rulesets"],
+          "description": "Enforcement backend. Empty defaults to 'lists' (account-level Custom IP List); 'rulesets' manages per-zone WAF Custom Rules."
+        },
+        "account_id": {
+          "type": "string",
+          "description": "Cloudflare account ID; required when mode is 'lists'."
+        },
+        "list_name": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_]{1,50}$",
+          "description": "Custom IP List name for mode 'lists'. Defaults to 'ezyshield_blocked'; auto-created when missing."
+        },
+        "zone_ids": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Zones to manage. Required when mode is 'rulesets'; optional WAF auto-management in 'lists' mode."
+        },
+        "action": {
+          "type": "string",
+          "enum": ["block", "challenge", "js_challenge"],
+          "description": "Rule action; default 'block'."
+        }
+      }
+    }
+  },
   "properties": {
     "data_dir": {
       "type": "string",
-      "description": "Directory for runtime state (SQLite database, unix socket)."
+      "description": "State directory used by the dashboard command (auth DB at <data_dir>/dashboard.db); required by 'config validate'. Does not set the daemon's database path, which comes from the 'run --db' flag."
     },
     "socket_path": {
       "type": "string",
-      "description": "Control unix socket path; CLI commands connect here."
+      "description": "Control unix socket path the dashboard connects to. The daemon binds its socket from the 'run --socket' flag, not this key; keep the two in sync."
+    },
+    "rules_path": {
+      "type": "string",
+      "description": "DEPRECATED whole-file rule replacement: when set, the file replaces the embedded base entirely and rules.d drop-ins are ignored. Prefer rules_dir drop-ins."
+    },
+    "rules_dir": {
+      "type": "string",
+      "description": "Overrides the rules.d drop-in directory (default /etc/ezyshield/rules.d). Drop-ins merge over the embedded base by rule name and survive binary updates."
     },
     "log": {
       "type": "object",
@@ -36,7 +93,7 @@
         "properties": {
           "kind": {
             "type": "string",
-            "enum": ["file", "journald"],
+            "enum": ["file", "journald", "docker"],
             "description": "Collector type."
           },
           "path": {
@@ -46,6 +103,15 @@
           "unit": {
             "type": "string",
             "description": "Systemd unit name. Required when kind is 'journald'."
+          },
+          "container": {
+            "type": "string",
+            "description": "Container name, short ID, or full ID. Required when kind is 'docker'."
+          },
+          "parser": {
+            "type": "string",
+            "enum": ["nginx", "ssh", "caddy", "traefik", "apache", "apache-error"],
+            "description": "Forces parser selection by prefixing the source ID. Consumed by 'file' (source override) and 'docker' collectors; ignored by 'journald'."
           }
         }
       }
@@ -53,7 +119,7 @@
     "enforce": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Local enforcement backend settings.",
+      "description": "Local and edge enforcement backend settings.",
       "properties": {
         "nftables": {
           "type": "object",
@@ -61,6 +127,10 @@
           "description": "nftables enforcer settings.",
           "required": ["table", "set"],
           "properties": {
+            "socket": {
+              "type": "string",
+              "description": "Enforcer helper unix socket path. Default /run/ezyshield-enforcer/enforcer.sock."
+            },
             "table": {
               "type": "string",
               "description": "nftables table name (e.g. 'inet ezyshield')."
@@ -70,36 +140,201 @@
               "description": "nftables set name (e.g. 'blocked')."
             }
           }
+        },
+        "cloudflare": {
+          "description": "Cloudflare edge enforcement: one account (mapping) or several (sequence of mappings).",
+          "oneOf": [
+            {"$ref": "#/$defs/cloudflareAccount"},
+            {
+              "type": "array",
+              "minItems": 1,
+              "items": {"$ref": "#/$defs/cloudflareAccount"}
+            }
+          ]
         }
       }
     },
     "ai": {
       "type": "object",
       "additionalProperties": false,
-      "description": "AI provider settings. Disabled by default.",
-      "required": ["provider"],
+      "description": "AI provider settings. Disabled by default. Use the single-provider form (provider + api_key) or the failover form (providers array); providers takes precedence when both are present.",
       "properties": {
         "provider": {
           "type": "string",
-          "enum": ["anthropic", "ollama"],
-          "description": "AI provider name."
+          "enum": ["anthropic", "openai", "ollama"],
+          "description": "AI provider name (single-provider form)."
         },
-        "api_key": {
+        "model": {
           "type": "string",
-          "pattern": "^(env:[A-Z_][A-Z0-9_]*)?$",
-          "description": "API key reference. Must be 'env:VARNAME' — inline secrets are forbidden."
+          "description": "Model name override."
+        },
+        "api_key": {"$ref": "#/$defs/secretRef"},
+        "endpoint": {
+          "type": "string",
+          "description": "Base URL for the 'ollama' provider only (default http://localhost:11434). The 'anthropic' and 'openai' providers ignore it and always call their official APIs."
         },
         "ambiguous_band": {
           "type": "array",
           "items": {"type": "integer", "minimum": 0, "maximum": 100},
           "minItems": 2,
           "maxItems": 2,
-          "description": "Score range [low, high] sent to AI; outside this range the rule engine decides."
+          "description": "Score range [low, high] sent to AI; outside this range the rule engine decides. Omitted defaults to [30, 75]."
         },
         "token_budget_daily": {
           "type": "integer",
           "minimum": 1,
           "description": "Maximum tokens to spend per calendar day."
+        },
+        "cache_ttl": {
+          "type": "string",
+          "description": "Verdict cache TTL as a Go duration string (e.g. '1h'). Entries are keyed by behavior signature, not IP."
+        },
+        "providers": {
+          "type": "array",
+          "description": "Multi-provider failover list; per-entry fields override the parent values when non-zero.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "enum": ["anthropic", "openai", "ollama"],
+                "description": "Provider name."
+              },
+              "priority": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Failover order; lower tries first."
+              },
+              "model": {"type": "string"},
+              "api_key": {"$ref": "#/$defs/secretRef"},
+              "endpoint": {"type": "string"},
+              "token_budget_daily": {"type": "integer", "minimum": 1}
+            }
+          }
+        }
+      }
+    },
+    "notify": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Notification channels. All credential fields use env:VARNAME references.",
+      "properties": {
+        "rate_limit_per_minute": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum notifications per channel per minute. Defaults to 5 when omitted or zero."
+        },
+        "dedup_window_sec": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Suppress repeat notifications for the same IP+reason within this window. Defaults to 600 seconds."
+        },
+        "telegram": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["bot_token", "chat_ids"],
+          "properties": {
+            "bot_token": {"$ref": "#/$defs/secretRef"},
+            "chat_ids": {
+              "type": "array",
+              "minItems": 1,
+              "items": {"type": "string"},
+              "description": "Chat IDs to notify."
+            },
+            "severity": {"$ref": "#/$defs/severityList"}
+          }
+        },
+        "email": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["from", "to", "host", "port", "password"],
+          "properties": {
+            "from": {"type": "string"},
+            "to": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+            "host": {"type": "string"},
+            "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+            "username": {"type": "string"},
+            "password": {"$ref": "#/$defs/secretRef"},
+            "tls": {
+              "type": "string",
+              "enum": ["starttls", "tls", "none"],
+              "description": "Connection mode: 'starttls' (default, port 587), 'tls' (implicit TLS, port 465), or 'none' (plaintext, not recommended)."
+            },
+            "severity": {"$ref": "#/$defs/severityList"}
+          }
+        },
+        "slack": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["webhook_url"],
+          "properties": {
+            "webhook_url": {"$ref": "#/$defs/secretRef"},
+            "channel": {
+              "type": "string",
+              "description": "Overrides the default channel configured in the Slack app (e.g. '#security')."
+            },
+            "severity": {"$ref": "#/$defs/severityList"}
+          }
+        },
+        "discord": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["webhook_url"],
+          "properties": {
+            "webhook_url": {"$ref": "#/$defs/secretRef"},
+            "severity": {"$ref": "#/$defs/severityList"}
+          }
+        },
+        "webhook": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["url"],
+          "properties": {
+            "url": {"$ref": "#/$defs/secretRef"},
+            "headers": {
+              "type": "object",
+              "additionalProperties": {"type": "string"},
+              "description": "Headers sent on every request. Values are sent verbatim unless the entire value is an env: reference, which is resolved."
+            },
+            "severity": {"$ref": "#/$defs/severityList"}
+          }
+        }
+      }
+    },
+    "enrich": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "GeoIP/ASN enrichment via MaxMind MMDB databases.",
+      "properties": {
+        "db_path": {
+          "type": "string",
+          "description": "Filesystem path to GeoLite2-Country.mmdb."
+        },
+        "asn_path": {
+          "type": "string",
+          "description": "Filesystem path to GeoLite2-ASN.mmdb."
+        },
+        "auto_update": {
+          "type": "boolean",
+          "description": "Weekly download of fresh MMDB files from MaxMind. Requires license_key."
+        },
+        "license_key": {"$ref": "#/$defs/secretRef"}
+      }
+    },
+    "dashboard": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Localhost-only web UI. Both fields optional; safe defaults are 127.0.0.1:9090 and <data_dir>/dashboard.db.",
+      "properties": {
+        "addr": {
+          "type": "string",
+          "description": "host:port to bind. Must resolve to a loopback address (127.0.0.1, ::1, or 'localhost') — no 0.0.0.0 escape hatch."
+        },
+        "auth_db_path": {
+          "type": "string",
+          "description": "SQLite file storing the admin password hash. Defaults to <data_dir>/dashboard.db."
         }
       }
     }

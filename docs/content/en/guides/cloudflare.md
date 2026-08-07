@@ -6,13 +6,13 @@ order: 1
 
 # Cloudflare Edge Enforcement
 
-This guide walks you through setting up EzyShield to block malicious IPs at the Cloudflare edge using the **Lists mode** (recommended for most deployments).
+Block malicious IPs at the Cloudflare edge. This guide uses **Lists mode**, recommended for most deployments.
 
 ## Modes Overview
 
 EzyShield supports two Cloudflare enforcement modes:
 
-| Feature | Lists (Recommended) | Rulesets (Legacy) |
+| Feature | Lists | Rulesets |
 |---------|------------------|-------------------|
 | **API calls per ban** | 1 (account-level) | 1 per zone |
 | **IP capacity** | 10,000 | ~200 per rule |
@@ -21,7 +21,11 @@ EzyShield supports two Cloudflare enforcement modes:
 | **Free plan** | ✅ (1 list, 10k items) | ✅ |
 | **Least privilege** | ❌ (needs account-level token) | ✅ (zone-level token) |
 
-**Lists mode** is recommended unless you need per-zone control or cannot use account-level tokens.
+Both modes are fully supported — pick per deployment (and, in multi-account
+setups, per account). **Lists** suits most multi-zone deployments; **rulesets**
+suits per-zone control, least-privilege zone tokens, or accounts whose
+custom-list quota is already taken. Running one account in lists mode and
+another in rulesets mode is a perfectly normal setup.
 
 ## Lists Mode Setup
 
@@ -34,6 +38,9 @@ EzyShield supports two Cloudflare enforcement modes:
    - **Account → Account Filter Lists → Edit** (required for managing the IP list)
    - For each zone you want to auto-manage WAF rules:
      - **Zone → Firewall Services → Edit** (optional; required if using `zone_ids`)
+   - **Zone → Zone → Read** (optional; required only for the wizard's
+     "cover **all** zones" answer, which enumerates the account's zones) —
+     see the [Cloudflare permissions reference](https://developers.cloudflare.com/fundamentals/api/reference/permissions/)
 5. Set restrictions as needed (IP allowlist, TTL, etc.)
 6. Copy the token immediately — you won't see it again
 
@@ -53,7 +60,7 @@ EzyShield supports two Cloudflare enforcement modes:
 Save the API token as an environment variable:
 
 ```bash
-export EZYSHIELD_CF_TOKEN="your_api_token_here"
+export CLOUDFLARE_API_TOKEN="your_api_token_here"
 ```
 
 Add to `config.yaml`:
@@ -61,7 +68,7 @@ Add to `config.yaml`:
 ```yaml
 enforce:
   cloudflare:
-    api_token: env:EZYSHIELD_CF_TOKEN
+    api_token: env:CLOUDFLARE_API_TOKEN
     mode: lists
     account_id: your_account_id_32_hex_chars
     # Optional: auto-manage WAF rules per zone
@@ -82,15 +89,31 @@ Run the diagnostic command:
 ezyshield test enforcer cloudflare
 ```
 
-This command will:
-- Verify the API token has correct permissions
-- Test connectivity to Cloudflare
-- List accessible zones
-- Show the list status (created, item count, etc.)
+It verifies the token's permissions, tests connectivity to Cloudflare, lists the zones you can reach, and shows the list status (existence, item count).
+
+### Zone coverage in the wizard
+
+Both wizard entry points (`init` and `config enforcer cloudflare`) ask, in
+lists mode, **which zones the block rule should cover**:
+
+- **`all`** — the wizard enumerates every zone the token can read on the
+  account (paginated) and persists that snapshot into `zone_ids`; the config
+  stays explicit, and re-running the wizard picks up domains added later.
+  Needs **Zone → Zone → Read**; without it the wizard degrades gracefully to
+  the manual path and names the missing scope.
+- **Explicit zone IDs** — exactly those zones, nothing enumerated.
+- **ENTER** — manual setup (the wizard prints the rule to paste per zone).
+
+For `all`/explicit, the wizard immediately creates-or-verifies the WAF
+Custom Rule in each target zone (idempotent with the enforcer's own rule
+management — re-running never duplicates) and prints a per-zone report:
+`configured` / `already present` / `FAILED (HTTP xxx: reason)`, with manual
+instructions for any failed zone. Partial failure never aborts: the config
+is still saved and the daemon retries failed zones on every sync.
 
 ### Step 5: (Optional) Manual WAF Rule Setup
 
-**If you did NOT configure `zone_ids`** in step 3, you must create the WAF Custom Rule manually for each zone:
+**If you did NOT configure `zone_ids`** in step 3 (or answered ENTER in the wizard), you must create the WAF Custom Rule manually for each zone:
 
 1. Go to **Domain → Security → WAF → Custom rules**
 2. Click **Create Rule**
@@ -104,23 +127,23 @@ This command will:
 
 If you configured `zone_ids`, this step is **automatic** — rules are created on first Sync.
 
-## Rulesets Mode Setup (Legacy)
+## Rulesets Mode Setup
 
-For deployments that need per-zone control or cannot use account-level tokens:
+For deployments that want per-zone control or cannot use account-level tokens:
 
 ### Step 1: Create Zone-Level API Token
 
 1. Go to **Zone → API Tokens** (in the zone dashboard)
 2. Create a token with:
    - **Zone → Firewall → Edit** on each zone
-3. Save the token as `EZYSHIELD_CF_TOKEN`
+3. Save the token as `CLOUDFLARE_API_TOKEN`
 
 ### Step 2: Configure EzyShield
 
 ```yaml
 enforce:
   cloudflare:
-    api_token: env:EZYSHIELD_CF_TOKEN
+    api_token: env:CLOUDFLARE_API_TOKEN
     mode: rulesets
     zone_ids:
       - zone_1
@@ -194,25 +217,43 @@ If you hit the 10k-item free-plan limit, you have two options:
 
 ## Multi-Account Setup
 
-To manage multiple Cloudflare accounts from a single EzyShield daemon:
+Agencies and freelancers often manage sites spread across separate Cloudflare
+accounts, each with its own API token. A single EzyShield daemon handles them
+all: every ban is applied to every configured account, and a failure on one
+account never blocks the others.
+
+The wizards set this up for you — both `ezyshield init` (CDN step) and
+`ezyshield config enforcer cloudflare` ask **"Add another Cloudflare
+account?"** after each account. Each account gets its own name, mode (lists
+or rulesets — mixing is fine), validated token, and its own env var in
+`.env` (`CLOUDFLARE_API_TOKEN` for a single unnamed account,
+`CLOUDFLARE_API_TOKEN_<NAME>` for named ones). Re-running
+`config enforcer cloudflare` lets you pick an existing account to
+reconfigure or add another.
+
+The resulting config:
 
 ```yaml
 enforce:
   cloudflare:
     # Account 1
     - name: client_a
-      api_token: env:EZYSHIELD_CF_TOKEN_A
+      api_token: env:CLOUDFLARE_API_TOKEN_CLIENT_A
       mode: lists
       account_id: account_a_id
       zone_ids: [zone_a1, zone_a2]
-    # Account 2
+    # Account 2 — a different mode per account is fine
     - name: client_b
-      api_token: env:EZYSHIELD_CF_TOKEN_B
-      mode: lists
-      account_id: account_b_id
+      api_token: env:CLOUDFLARE_API_TOKEN_CLIENT_B
+      mode: rulesets
+      zone_ids: [zone_b1]
 ```
 
-Each account gets independent list management. Logs will show `enforce/cloudflare[client_a]` and `enforce/cloudflare[client_b]` for clarity.
+With more than one account, every entry needs a unique `name` (the wizard
+enforces this, and offers to name a pre-existing unnamed entry). Each account
+gets independent list/rule management and per-account status in
+`test enforcer cloudflare` and `doctor`. Logs show
+`cloudflare[client_a]` and `cloudflare[client_b]` as the enforcer name for clarity.
 
 ## Rate Limiting
 
@@ -236,12 +277,7 @@ After configuration, validate your setup with:
 ezyshield test enforcer cloudflare --config-dir /etc/ezyshield/
 ```
 
-This command will:
-- Verify the API token is valid and active
-- Check account and zone access
-- Validate Cloudflare permissions for your token
-- Report what works and what's missing
-- Provide clear fix suggestions
+It confirms the token is valid and active, checks account and zone access, validates the token's Cloudflare permissions, and reports what works, what's missing, and how to fix each gap.
 
 **Example output (lists mode with zone_ids):**
 
@@ -250,9 +286,9 @@ Cloudflare enforcer (mode: lists): pass
 ────────────────────────────────────
 ✓ Token validity: Token ID: abc...def, status: active
 ✓ Account access: Account ID: 0123456789abcdef
-✓ List access (read): List "ezyshield_blocked" found (147 items, ID: lstxxxxx)
-✓ Zone WAF access: Zone example.com (zone_id: aaa111) — WAF rule access OK
-✗ Zone WAF access: Zone shop.example.org (zone_id: ccc333) — 403 Forbidden
+✓ List access (read): List "ezyshield_blocked" found (ID: lstxxxxx, 147 items)
+✓ Zone WAF access: Zone aaa111 — WAF rule access OK (2 custom rule(s) in use)
+✗ Zone WAF access: Zone ccc333 — 403 Forbidden
   └─ Ensure token has Zone:Firewall Services:Edit on this zone
 
 Result: 4/5 checks passed, 1 failed
@@ -264,6 +300,6 @@ Result: 4/5 checks passed, 1 failed
 
 ## See Also
 
-- ADR-0002: Cloudflare Enforcement Strategy (see ezy-shield repo `docs/internal/adr/`)
+- ADR-0002: Cloudflare edge enforcement — IP Access Rules → Rulesets → Lists (see ezy-shield repo `docs/internal/adr/`)
 - [Cloudflare API Docs: Custom IP Lists](https://developers.cloudflare.com/api/operations/lists-list-lists)
 - [Cloudflare Dashboard](https://dash.cloudflare.com)

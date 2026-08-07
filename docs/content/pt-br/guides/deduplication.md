@@ -84,13 +84,29 @@ O EzyShield usa um modelo de detecção em duas camadas para capturar tanto atac
 
 ### Ajustando Limiares
 
-Para customizar os limiares, aponte `rules_path` no config.yaml para o seu próprio arquivo de regras (comece a partir do `/etc/ezyshield/rules.yaml.example` distribuído) e ajuste os campos `window` e `threshold` — as regras embutidas fazem parte do binário, então editar arquivos do repositório não tem efeito em um daemon instalado:
+Para customizar os limiares, sobrescreva a regra embutida com um drop-in em
+`/etc/ezyshield/rules.d/` — um arquivo `*.yaml` com uma chave `rules:` no topo e
+uma entrada cujo `name` casa com o da embutida. Um drop-in de mesmo nome
+**substitui a regra inteira** (os campos não são mesclados), então você precisa
+copiar todos os campos da embutida e mudar `window`/`threshold`; uma entrada
+parcial falha na validação e, como um drop-in inválido falha fechando, o daemon
+se recusa a subir. As regras embutidas fazem parte do binário, então editar
+arquivos do repositório não tem efeito em um daemon instalado. Veja
+[Customizando Regras de Detecção](rules-customization.md) para o mecanismo
+completo:
 
 ```yaml
-- name: http_wp_probe_sustained
-  window: 3600s        # 1 hora
-  threshold: 10        # ajuste para seu ambiente
-  score: 75
+# /etc/ezyshield/rules.d/50-wp-probe.yaml
+rules:
+  - name: http_wp_probe_sustained   # mesmo nome da embutida => substitui
+    description: "Sustained wp-login attempts (low & slow bruteforce)"
+    kinds: [http_request]
+    field: path
+    contains: wp-login
+    window: 3600s                   # 1 hora
+    threshold: 10                   # ajuste para seu ambiente
+    score: 75
+    category: bruteforce
 ```
 
 **Diretrizes**:

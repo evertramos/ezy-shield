@@ -1,0 +1,215 @@
+package decision_test
+
+// Tests for AuthorizeManualBan (issue #211): manual bans pass the exact
+// guard set automatic decisions get — allowlist wins (overlap in either
+// direction), SSH-peer anti-lockout (daemon env + forwarded peers), and the
+// shared ban rate limit. None of the guards is overridable.
+
+import (
+	"context"
+	"errors"
+	"net/netip"
+	"testing"
+
+	"github.com/evertramos/ezy-shield/internal/config"
+	"github.com/evertramos/ezy-shield/internal/decision"
+)
+
+func hostPrefix(ip string) netip.Prefix {
+	a := netip.MustParseAddr(ip)
+	return netip.PrefixFrom(a, a.BitLen())
+}
+
+func TestAuthorizeManualBan_AllowlistWins(t *testing.T) {
+	pol := armedPolicy()
+	pol.Allowlist = []string{"203.0.113.10", "198.51.100.64/27"}
+	pol.AdminCIDRs = []string{"192.0.2.0/28"}
+	eng := mustEngine(t, pol, newMock(nil))
+
+	cases := []struct {
+		name   string
+		target netip.Prefix
+	}{
+		{"exact allowlisted IP", hostPrefix("203.0.113.10")},
+		{"IP inside allowlisted CIDR", hostPrefix("198.51.100.77")},
+		{"CIDR containing an allowlisted IP", netip.MustParsePrefix("203.0.113.0/24")},
+		{"CIDR containing an allowlisted CIDR", netip.MustParsePrefix("198.51.100.0/24")},
+		{"IP inside admin_cidrs", hostPrefix("192.0.2.5")},
+		{"CIDR overlapping admin_cidrs", netip.MustParsePrefix("192.0.2.0/24")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := eng.AuthorizeManualBan(context.Background(), tc.target)
+			if !errors.Is(err, decision.ErrManualBanAllowlisted) {
+				t.Errorf("err = %v, want ErrManualBanAllowlisted", err)
+			}
+		})
+	}
+}
+
+func TestAuthorizeManualBan_DaemonSSHPeerRefused(t *testing.T) {
+	// Engine built with no SSH_CLIENT; the peer appears afterwards — the
+	// guard must re-derive it per call (sessions started after the daemon).
+	eng := mustEngine(t, armedPolicy(), newMock(nil))
+	t.Setenv("SSH_CLIENT", "203.0.113.50 51000 22")
+
+	err := eng.AuthorizeManualBan(context.Background(), hostPrefix("203.0.113.50"))
+	if !errors.Is(err, decision.ErrManualBanSSHPeer) {
+		t.Errorf("banning the env-derived SSH peer: err = %v, want ErrManualBanSSHPeer", err)
+	}
+	// A CIDR covering the peer is just as much a lockout.
+	err = eng.AuthorizeManualBan(context.Background(), netip.MustParsePrefix("203.0.113.0/24"))
+	if !errors.Is(err, decision.ErrManualBanSSHPeer) {
+		t.Errorf("banning a CIDR covering the SSH peer: err = %v, want ErrManualBanSSHPeer", err)
+	}
+}
+
+func TestAuthorizeManualBan_ForwardedPeerRefused(t *testing.T) {
+	t.Parallel()
+	eng := mustEngine(t, armedPolicy(), newMock(nil))
+	operator := netip.MustParseAddr("198.51.100.9")
+
+	err := eng.AuthorizeManualBan(context.Background(), hostPrefix("198.51.100.9"), operator)
+	if !errors.Is(err, decision.ErrManualBanSSHPeer) {
+		t.Errorf("banning the CLI-forwarded peer: err = %v, want ErrManualBanSSHPeer", err)
+	}
+	// Invalid (zero) forwarded peers are ignored, not matched.
+	if err := eng.AuthorizeManualBan(context.Background(), hostPrefix("192.0.2.7"), netip.Addr{}); err != nil {
+		t.Errorf("zero-value peer must be ignored: %v", err)
+	}
+}
+
+func TestAuthorizeManualBan_RateLimitSharedAndOrdered(t *testing.T) {
+	t.Parallel()
+	pol := armedPolicy()
+	pol.MaxBansPerMinute = 2
+	pol.Allowlist = []string{"203.0.113.10"}
+	eng := mustEngine(t, pol, newMock(nil))
+	ctx := context.Background()
+
+	// Refused-by-allowlist attempts must NOT consume the rate budget: the
+	// guard order is allowlist → anti-lockout → rate limit.
+	for i := 0; i < 5; i++ {
+		if err := eng.AuthorizeManualBan(ctx, hostPrefix("203.0.113.10")); !errors.Is(err, decision.ErrManualBanAllowlisted) {
+			t.Fatalf("attempt %d: err = %v, want allowlist refusal", i, err)
+		}
+	}
+
+	// Two admitted bans fit the cap; the third trips it.
+	if err := eng.AuthorizeManualBan(ctx, hostPrefix("192.0.2.1")); err != nil {
+		t.Fatalf("first admitted ban: %v", err)
+	}
+	if err := eng.AuthorizeManualBan(ctx, hostPrefix("192.0.2.2")); err != nil {
+		t.Fatalf("second admitted ban: %v", err)
+	}
+	if err := eng.AuthorizeManualBan(ctx, hostPrefix("192.0.2.3")); !errors.Is(err, decision.ErrRateLimited) {
+		t.Errorf("third ban: err = %v, want ErrRateLimited (manual bans share the cap)", err)
+	}
+}
+
+func TestAuthorizeManualBan_ValidBanPasses(t *testing.T) {
+	t.Parallel()
+	pol := armedPolicy()
+	pol.Allowlist = []string{"198.51.100.0/24"}
+	eng := mustEngine(t, pol, newMock(nil))
+
+	if err := eng.AuthorizeManualBan(context.Background(), hostPrefix("192.0.2.200")); err != nil {
+		t.Errorf("legitimate manual ban refused: %v", err)
+	}
+	if err := eng.AuthorizeManualBan(context.Background(), netip.MustParsePrefix("192.0.2.0/29")); err != nil {
+		t.Errorf("legitimate CIDR manual ban refused: %v", err)
+	}
+}
+
+// ── IPv4-mapped IPv6 forms (issue #314) ─────────────────────────────────────
+// Operators on dual-stack hosts copy "::ffff:a.b.c.d" spellings straight from
+// logs into `ezyshield ban`, and the CLI's forwarded peer comes from an
+// SSH_CLIENT that sshd reports in mapped form. netip treats mapped and plain
+// as distinct, so every guard must normalize both sides.
+func TestAuthorizeManualBan_MappedForms(t *testing.T) {
+	pol := armedPolicy()
+	pol.Allowlist = []string{"203.0.113.10"}
+	eng := mustEngine(t, pol, newMock(nil))
+	eng.SetSSHPeerProbe(func() []netip.Addr { return nil })
+
+	cases := []struct {
+		name    string
+		target  netip.Prefix
+		peers   []netip.Addr
+		wantErr error
+	}{
+		{
+			"mapped host prefix of allowlisted IP",
+			hostPrefix("::ffff:203.0.113.10"), nil,
+			decision.ErrManualBanAllowlisted,
+		},
+		{
+			"mapped CIDR overlapping allowlisted IP",
+			netip.MustParsePrefix("::ffff:203.0.113.0/120"), nil,
+			decision.ErrManualBanAllowlisted,
+		},
+		{
+			"mapped forwarded peer inside plain target",
+			netip.MustParsePrefix("198.51.100.0/24"),
+			[]netip.Addr{netip.MustParseAddr("::ffff:198.51.100.9")},
+			decision.ErrManualBanSSHPeer,
+		},
+		{
+			"plain forwarded peer inside mapped target",
+			hostPrefix("::ffff:198.51.100.9"),
+			[]netip.Addr{netip.MustParseAddr("198.51.100.9")},
+			decision.ErrManualBanSSHPeer,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := eng.AuthorizeManualBan(context.Background(), tc.target, tc.peers...)
+			if !errors.Is(err, tc.wantErr) {
+				t.Errorf("err = %v, want %v (mapped form bypassed the guard — issue #314)", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestAuthorizeManualBan_MappedSuperPrefixRefused — Strix finding on PR #364:
+// a mapped super-prefix like ::ffff:0.0.0.0/95 has no IPv4 equivalent, stays
+// in the IPv6 family, and netip's Overlaps/Contains can never match it
+// against the normalized IPv4 allowlist and peers — so every guard would
+// silently pass. The engine must refuse the target outright.
+func TestAuthorizeManualBan_MappedSuperPrefixRefused(t *testing.T) {
+	pol := armedPolicy()
+	pol.Allowlist = []string{"203.0.113.10"}
+	eng := mustEngine(t, pol, newMock(nil))
+	eng.SetSSHPeerProbe(func() []netip.Addr { return nil })
+
+	err := eng.AuthorizeManualBan(context.Background(),
+		netip.MustParsePrefix("::ffff:0.0.0.0/95"),
+		netip.MustParseAddr("198.51.100.9"))
+	if err == nil {
+		t.Fatal("mapped super-prefix was authorized — the allowlist/SSH-peer guards cannot see it (PR #364 review)")
+	}
+}
+
+// TestNew_RejectsUnmappableMappedConfigEntries — Copilot finding on PR #364:
+// post-#314 the engine compares unmapped addresses, so a mapped config entry
+// broader than /96 would silently protect nothing. Engine construction must
+// fail loud so the operator fixes the spelling instead of trusting a dead
+// allowlist entry.
+func TestNew_RejectsUnmappableMappedConfigEntries(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(p *config.Policy)
+	}{
+		{"allowlist entry", func(p *config.Policy) { p.Allowlist = []string{"::ffff:0.0.0.0/95"} }},
+		{"admin_cidrs entry", func(p *config.Policy) { p.AdminCIDRs = []string{"::ffff:0.0.0.0/95"} }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pol := armedPolicy()
+			tc.mutate(pol)
+			if _, err := decision.New(pol, newMock(nil)); err == nil {
+				t.Error("New accepted an unmappable IPv4-mapped config entry — it would protect nothing (PR #364 review)")
+			}
+		})
+	}
+}

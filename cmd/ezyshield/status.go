@@ -39,12 +39,22 @@ func newStatusCmd() *cobra.Command {
 
 // StatusOutput is the stable schema for --json output.
 type StatusOutput struct {
-	Daemon       string         `json:"daemon"`
-	Enforcer     string         `json:"enforcer"`
-	Mode         string         `json:"mode,omitempty"`
-	Uptime       string         `json:"uptime,omitempty"`
-	Version      string         `json:"version,omitempty"`
-	ActiveBans   int            `json:"active_bans"`
+	Daemon   string `json:"daemon"`
+	Enforcer string `json:"enforcer"`
+	Mode     string `json:"mode,omitempty"`
+	Uptime   string `json:"uptime,omitempty"`
+	Version  string `json:"version,omitempty"`
+	// EnforcementState is the honest enforcement health (issue #174):
+	// ACTIVE / DRY-RUN / DEGRADED / DISABLED — a stable --json field.
+	EnforcementState  string `json:"enforcement_state,omitempty"`
+	EnforcementDetail string `json:"enforcement_detail,omitempty"`
+	ActiveBans        int    `json:"active_bans"`
+	// SimulatedBans counts dry-run simulated bans (ADR-0009 §5): IPs that
+	// would be banned right now if the daemon were armed. Never enforced.
+	SimulatedBans int `json:"simulated_bans,omitempty"`
+	// ArmedUntil is the RFC3339 auto-revert deadline when an arm window is
+	// active (issue #228).
+	ArmedUntil   string         `json:"armed_until,omitempty"`
 	BansByStrike map[string]int `json:"bans_by_strike,omitempty"`
 	Message      string         `json:"message,omitempty"`
 }
@@ -69,6 +79,10 @@ func runStatus(cmd *cobra.Command, socketPath, enforcerSocketPath string) error 
 	out.Uptime = sd.Uptime
 	out.Version = sd.Version
 	out.ActiveBans = sd.ActiveBans
+	out.SimulatedBans = sd.SimulatedBans
+	out.ArmedUntil = sd.ArmedUntil
+	out.EnforcementState = sd.EnforcementState
+	out.EnforcementDetail = sd.EnforcementDetail
 	if sd.Armed {
 		out.Mode = "enforce"
 	} else {
@@ -141,10 +155,19 @@ func printStatusText(cmd *cobra.Command, out StatusOutput) error {
 		}
 		return nil
 	}
-	fmt.Fprintf(w, "mode:      %s\n", out.Mode)       //nolint:errcheck
+	fmt.Fprintf(w, "mode:      %s\n", out.Mode) //nolint:errcheck
+	if out.EnforcementState != "" {
+		fmt.Fprintf(w, "enforcement: %s\n", enforcementBanner(out.EnforcementState, out.EnforcementDetail)) //nolint:errcheck
+	}
+	if out.ArmedUntil != "" {
+		fmt.Fprintf(w, "auto-revert: %s (confirm with 'ezyshield arm --keep')\n", out.ArmedUntil) //nolint:errcheck
+	}
 	fmt.Fprintf(w, "uptime:    %s\n", out.Uptime)     //nolint:errcheck
 	fmt.Fprintf(w, "version:   %s\n", out.Version)    //nolint:errcheck
 	fmt.Fprintf(w, "bans:      %d\n", out.ActiveBans) //nolint:errcheck
+	if out.SimulatedBans > 0 {
+		fmt.Fprintf(w, "simulated: %d (dry-run — would be banned if armed)\n", out.SimulatedBans) //nolint:errcheck
+	}
 	if len(out.BansByStrike) > 0 {
 		keys := make([]string, 0, len(out.BansByStrike))
 		for k := range out.BansByStrike {
@@ -165,4 +188,26 @@ func printStatusText(cmd *cobra.Command, out StatusOutput) error {
 		}
 	}
 	return nil
+}
+
+// enforcementBanner renders the enforcement state loudly for the text
+// status output (issue #174). DEGRADED and DISABLED-while-detecting are the
+// states an operator must never miss, so they carry an explicit warning.
+func enforcementBanner(state, detail string) string {
+	switch state {
+	case "ACTIVE":
+		return "ACTIVE — bans are enforced"
+	case "DRY-RUN":
+		return "DRY-RUN — NOTHING is enforced (observe only); 'ezyshield arm' to enforce"
+	case "DEGRADED":
+		msg := "⚠ DEGRADED — the enforcer is FAILING; bans may NOT be applied"
+		if detail != "" {
+			msg += " (" + detail + ")"
+		}
+		return msg
+	case "DISABLED":
+		return "DISABLED — no enforcer configured; detection only, nothing is blocked"
+	default:
+		return state
+	}
 }

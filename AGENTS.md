@@ -30,7 +30,7 @@ print correctly.
 
 ## Go Conventions
 
-- Go ≥ 1.22, modules; `gofmt` + `golangci-lint` must pass (CI enforces)
+- Go ≥ 1.26 (matches `go.mod`), modules; `gofmt` + `golangci-lint` must pass (CI enforces)
 - Errors: wrap with `fmt.Errorf("context: %w", err)`; no `panic` outside `main`
 - Use `netip.Addr`/`netip.Prefix`, never string IPs internally
 - Context first arg everywhere; honor cancellation in all loops
@@ -68,11 +68,12 @@ addressed. "Looks fine" is not a review — cite file:line, why, and the fix.
 | Gate | What it guards |
 |------|---------------|
 | `FuzzSSHParser` / `FuzzNginxParser` | Parser panic-safety on hostile bytes; run with `-fuzztime=10s` in CI, longer locally |
+| `FuzzSIEMFormatters` | SIEM formatter output can never carry a raw newline or unescaped delimiter, however hostile the event fields (§1 SECURITY-REVIEW) |
 | `govulncheck ./...` | Known CVEs in module graph |
 | `gosec` (via golangci-lint) | Static security linting |
 | `internal/decision/antilockout_test.go` | SSH peer / allowlist / CDN range can never be banned (§2 SECURITY-REVIEW) |
 | `internal/ai/prompt_injection_test.go` | Hostile log content excluded from AI payload; off-schema responses fall back to rules; policy clamps (§5 SECURITY-REVIEW) |
-| `internal/config/secret_leak_test.go` + `internal/ai/secret_leak_test.go` | Tokens never appear in errors, logs, or request bodies (§4 SECURITY-REVIEW) |
+| `internal/config/secret_leak_test.go` + `internal/ai/secret_leak_test.go` + `internal/notify/secret_leak_test.go` | Tokens never appear in errors, logs, or request bodies; notifier transport errors never echo the secret-bearing URL (§4 SECURITY-REVIEW) |
 | `ip-hygiene-gate` (`scripts/ip-hygiene-gate.sh`) | Hard Rule 8: IP literals added to tests/`fixtures/`/`configs/` must be RFC 5737/3849 documentation ranges; `internal/cdndetect/` (real CDN range data) is exempt. Usernames/key fingerprints have no reserved range — still review-only |
 
 Adding a new parser → add a `FuzzXxxParser` with seeds: malformed, oversized (>4 KB), binary, ANSI, CRLF injection.

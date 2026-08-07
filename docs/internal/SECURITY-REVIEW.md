@@ -56,6 +56,12 @@ Rules; this is the verification side.)
 
 - [ ] Allowlist is checked **first** and is **unbypassable** — no code path bans
       an allowlisted IP/CIDR. Test asserts it.
+- [ ] IPv4-mapped IPv6 spellings (`::ffff:a.b.c.d`) are normalized (`Unmap`)
+      before every allowlist / SSH-peer / suppression comparison and before
+      store or enforcer writes — dual-stack listeners log IPv4 clients in the
+      mapped form and `netip` treats the two spellings as distinct addresses
+      (issue #314). Any new comparison or key on a `netip.Addr`/`Prefix` must
+      state which side guarantees canonical form.
 - [ ] Anti-lockout re-derives the active SSH peer + admin CIDRs **before every
       ban write**, not just at startup.
 - [ ] CDN/edge ranges and RFC1918/loopback get the documented guardrail (warn +
@@ -129,6 +135,13 @@ bans. This is a direct injection channel.
 - [ ] The model's verdict is **advisory** and re-validated against policy
       server-side (see §2). A verdict saying "allowlist 6.6.6.6" or "ban
       1.2.3.0/8" is clamped/dropped, not executed.
+- [ ] The verdict's **target IP** is bound to the analyzed batch inside each
+      provider (`boundToBatch`, #312) **and re-validated at the daemon
+      chokepoint** (`bindVerdictsToIP` in `maybeConsultAI`, #402): a fresh or
+      cached verdict naming an off-request IP is dropped before it reaches the
+      decision engine or the verdict cache. Allowlist-clamped (Score-0)
+      verdicts are never cached (`Cache.Set`), so a clamp can't be replayed
+      onto other IPs sharing the behavior signature.
 - [ ] No secrets, internal IPs, or allowlist contents are sent in the prompt
       beyond what's strictly needed; minimize + redact (also saves tokens).
 - [ ] Token-budget breaker can't be tripped by an attacker to disable AI cheaply

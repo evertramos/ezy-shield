@@ -198,24 +198,36 @@ enforce:
 
 func TestLoadConfig_NFTablesMissingTable(t *testing.T) {
 	t.Parallel()
-	yaml := `
-enforce:
-  nftables:
-    set: blocked
-`
-	_, err := LoadConfigReader(strings.NewReader(yaml), "test")
-	wantErr(t, err, "'table' is required")
+	// table/set are optional since issue #268 — the enforcer defaults apply.
+	// Partial and empty forms must all load, including the documented
+	// minimal `nftables: {}`.
+	for _, yaml := range []string{
+		"enforce:\n  nftables:\n    set: blocked\n",
+		"enforce:\n  nftables:\n    table: inet ezyshield\n",
+		"enforce:\n  nftables: {}\n",
+	} {
+		if _, err := LoadConfigReader(strings.NewReader(yaml), "test"); err != nil {
+			t.Errorf("optional table/set must load, got error for %q: %v", yaml, err)
+		}
+	}
 }
 
-func TestLoadConfig_NFTablesMissingSet(t *testing.T) {
+func TestLoadConfig_NFTablesInvalidNames(t *testing.T) {
 	t.Parallel()
-	yaml := `
-enforce:
-  nftables:
-    table: inet ezyshield
-`
-	_, err := LoadConfigReader(strings.NewReader(yaml), "test")
-	wantErr(t, err, "'set' is required")
+	cases := []struct {
+		name, yaml, wantErr string
+	}{
+		{"non-inet family", "enforce:\n  nftables:\n    table: ip mytable\n", "family must be 'inet'"},
+		{"nft syntax in table", "enforce:\n  nftables:\n    table: \"x; flush ruleset\"\n", "must be '<name>' or 'inet <name>'"},
+		{"bad chars in set", "enforce:\n  nftables:\n    set: \"bad-name!\"\n", "letters, digits and underscore"},
+		{"reserved allow set", "enforce:\n  nftables:\n    set: allowed\n", "reserved allowlist sets"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := LoadConfigReader(strings.NewReader(tc.yaml), "test")
+			wantErr(t, err, tc.wantErr)
+		})
+	}
 }
 
 // ---- Cloudflare enforcer config --------------------------------------------
@@ -1078,5 +1090,102 @@ func TestDuration_MarshalYAML_RoundTrip(t *testing.T) {
 		if out.Strikes[i].TTL != in.Strikes[i].TTL {
 			t.Errorf("strikes[%d].TTL = %v, want %v", i, out.Strikes[i].TTL, in.Strikes[i].TTL)
 		}
+	}
+}
+
+// ── issue #324: Validate() gaps ──────────────────────────────────────────────
+
+// TestValidate_TelegramRequiresBotToken reproduces issue #324: the daemon
+// unconditionally resolves notify.telegram.bot_token at startup, so a config
+// without it must fail `config validate`, not daemon boot.
+func TestValidate_TelegramRequiresBotToken(t *testing.T) {
+	t.Parallel()
+	yaml := `
+notify:
+  telegram:
+    chat_ids: ["42"]
+`
+	if _, err := LoadConfigReader(strings.NewReader(yaml), "test"); err == nil {
+		t.Fatal("telegram without bot_token must fail validation")
+	}
+}
+
+// TestValidate_EmailRequiresPassword mirrors the same startup contract for
+// notify.email.password.
+func TestValidate_EmailRequiresPassword(t *testing.T) {
+	t.Parallel()
+	yaml := `
+notify:
+  email:
+    from: shield@example.com
+    to: ["admin@example.com"]
+    host: smtp.example.com
+    port: 587
+`
+	if _, err := LoadConfigReader(strings.NewReader(yaml), "test"); err == nil {
+		t.Fatal("email without password must fail validation")
+	}
+}
+
+// TestValidate_AmbiguousBandDefaulted: an omitted band with a configured
+// provider gets DefaultAmbiguousBand — previously it loaded as [0, 0] and the
+// daemon silently never consulted the provider (issue #324).
+func TestValidate_AmbiguousBandDefaulted(t *testing.T) {
+	t.Parallel()
+	yaml := `
+ai:
+  provider: anthropic
+  api_key: "env:MY_SECRET"
+`
+	cfg := mustLoadConfig(t, yaml)
+	if cfg.AI.AmbiguousBand != DefaultAmbiguousBand {
+		t.Errorf("AmbiguousBand = %v, want default %v", cfg.AI.AmbiguousBand, DefaultAmbiguousBand)
+	}
+}
+
+// TestValidate_AmbiguousBandRejectsDegenerate: explicit reversed or
+// out-of-range bands are operator mistakes and fail closed.
+func TestValidate_AmbiguousBandRejectsDegenerate(t *testing.T) {
+	t.Parallel()
+	for _, band := range []string{"[75, 30]", "[-5, 50]", "[10, 101]", "[40, 40]"} {
+		band := band
+		t.Run(band, func(t *testing.T) {
+			t.Parallel()
+			yaml := fmt.Sprintf("ai:\n  provider: anthropic\n  api_key: \"env:MY_SECRET\"\n  ambiguous_band: %s\n", band)
+			if _, err := LoadConfigReader(strings.NewReader(yaml), "test"); err == nil {
+				t.Fatalf("band %s must fail validation", band)
+			}
+		})
+	}
+}
+
+// TestValidate_DashboardAddrLoopbackOnly: `config validate` must reject a
+// non-loopback dashboard addr instead of blessing a config the dashboard
+// refuses at boot (Hard Rule 2).
+func TestValidate_DashboardAddrLoopbackOnly(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		addr string
+		ok   bool
+	}{
+		{"127.0.0.1:9090", true},
+		{"localhost:9090", true},
+		{"[::1]:9090", true},
+		{"0.0.0.0:9090", false},
+		{"192.0.2.10:9090", false},
+		{"9090", false},
+	} {
+		tc := tc
+		t.Run(tc.addr, func(t *testing.T) {
+			t.Parallel()
+			yaml := fmt.Sprintf("dashboard:\n  addr: %q\n", tc.addr)
+			_, err := LoadConfigReader(strings.NewReader(yaml), "test")
+			if tc.ok && err != nil {
+				t.Fatalf("addr %q should validate, got: %v", tc.addr, err)
+			}
+			if !tc.ok && err == nil {
+				t.Fatalf("addr %q must fail validation", tc.addr)
+			}
+		})
 	}
 }

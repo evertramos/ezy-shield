@@ -14,16 +14,26 @@ Referência completa de `/etc/ezyshield/config.yaml` — fontes de log, backends
 
 | Campo | Tipo | Padrão | Descrição |
 |-------|------|--------|-----------|
-| `data_dir` | string | `/var/lib/ezyshield` | Diretório de estado; o banco SQLite fica em `<data_dir>/ezyshield.db` |
-| `socket_path` | string | `/run/ezyshield/ezyshield.sock` | Socket de controle do daemon (unix socket — nunca há listener TCP para controle) |
-| `rules_path` | string | — | Caminho opcional para um `rules.yaml` customizado (padrão: as rules embutidas no binário) |
+| `data_dir` | string | `/var/lib/ezyshield` | **Obrigatório** (`config validate` rejeita valor vazio). Diretório de estado usado pelo comando **`dashboard`** — seu banco de auth é `<data_dir>/dashboard.db`. **Não** define o caminho do banco SQLite do daemon: isso é a flag `run --db` (default `/var/lib/ezyshield/ezyshield.db`). |
+| `socket_path` | string | `/run/ezyshield/ezyshield.sock` | Caminho do socket de controle ao qual o **`dashboard`** se conecta (unix socket — nunca há listener TCP para controle). **Não** define o socket do daemon: o daemon usa a flag `run --socket` (default `/run/ezyshield/ezyshield.sock`), então um valor customizado precisa casar com `run --socket`, ou o dashboard aponta para um socket que o daemon nunca cria. |
+| `rules_dir` | string | `/etc/ezyshield/rules.d` | Customizações de regras via drop-in: todo `*.yaml` aqui faz merge sobre as rules embutidas por `name` e sobrevive a updates (veja o [guia de regras](../guides/rules-customization.md)) |
+| `rules_path` | string | — | **Deprecated.** Substitui as rules embutidas por inteiro (sem merge; `rules.d` ignorado) — congela a instalação fora do tuning de regras do upstream |
 | `log.level` | string | `info` | `debug` \| `info` \| `warn` \| `error` |
-| `collectors` | lista | `[]` | Fontes de log a acompanhar (veja abaixo) |
+| `collectors` | lista | `[]` | Fontes de log a acompanhar (veja abaixo). Uma lista vazia é válida — o `config validate` emite um aviso e o daemon simplesmente não acompanha nada. |
 | `enforce` | objeto | — | Backends de enforcement (opcional — sem ele, as decisões ficam só no log) |
 | `notify` | objeto | — | Canais de notificação (opcional) |
 | `ai` | objeto | — | Provedor de IA para tráfego ambíguo (opcional) |
 | `enrich` | objeto | — | Enriquecimento GeoIP/ASN (opcional) |
 | `dashboard` | objeto | — | Endereço de bind e banco de auth do dashboard (opcional) |
+
+> **O daemon ignora `data_dir` e `socket_path`; o comando `dashboard` os
+> consome** (e `data_dir` é adicionalmente exigido por `config validate`).
+> O daemon (`ezyshield run`) obtém o caminho do banco e o socket de controle das
+> suas próprias flags `--db` e `--socket` (defaults `/var/lib/ezyshield/ezyshield.db`
+> e `/run/ezyshield/ezyshield.sock`) e não lê essas duas chaves. Defini-las no
+> `config.yaml` move o banco de auth do dashboard e o alvo de conexão dele, não
+> os arquivos do daemon — então mantenha `socket_path` alinhado com `run --socket`.
+> Veja a [referência de CLI](cli.md) para as flags de `run` e `dashboard`.
 
 ## collectors
 
@@ -48,7 +58,7 @@ collectors:
 | `path` | para `file` | arquivo a acompanhar |
 | `unit` | para `journald` | unit systemd a acompanhar |
 | `container` | para `docker` | nome do container, ID curto ou ID completo |
-| `parser` | não | força um parser: `nginx` \| `ssh` \| `apache` \| `apache-error` \| `traefik` \| `caddy` (padrão: roteado automaticamente a partir da fonte) |
+| `parser` | não | força um parser: `nginx` \| `ssh` \| `apache` \| `apache-error` \| `traefik` \| `caddy` (padrão: roteado automaticamente a partir da fonte). **Honrado apenas para coletores `file` e `docker`** — o `journald` o ignora e sempre roteia o parser a partir da unidade. |
 
 ### Coletor SSH (nome do unit varia por distro)
 
@@ -77,9 +87,7 @@ o ISO-8601 moderno (`2026-07-13T22:57:35+00:00`).
 
 ```yaml
 enforce:
-  nftables:
-    table: ezyshield             # padrão
-    set: banned                  # padrão
+  nftables: {}                   # enforcement local ligado; os padrões bastam
 
   cloudflare:
     api_token: env:CF_API_TOKEN  # segredos são referências env:, nunca inline
@@ -94,9 +102,21 @@ enforce:
 
 | Campo | Padrão | Descrição |
 |-------|--------|-----------|
-| `table` | `ezyshield` | tabela nftables (todas as regras do EzyShield vivem dentro dela) |
-| `set` | `banned` | set que guarda os endereços banidos |
+| `table` | `inet ezyshield` | tabela nftables (todas as regras do EzyShield vivem dentro dela). `<nome>` ou `inet <nome>`; a família `inet` é a única suportada (layout dual-stack v4+v6). Nomes: letras, dígitos, underscore |
+| `set` | `blocked` | set que guarda os endereços IPv4 banidos; o gêmeo IPv6 é derivado automaticamente como `<set>6` (padrão `blocked6`). `allowed`/`allowed6` são reservados para os sets de allowlist |
 | `socket` | `/run/ezyshield-enforcer/enforcer.sock` | socket do helper privilegiado do enforcer |
+
+Os dois são opcionais e genuinamente respeitados: o daemon os repassa ao
+enforcer privilegiado, que os revalida de forma independente antes de
+escrever qualquer regra. Duas notas operacionais para nomes customizados:
+
+- O enforcer precisa suportá-los (mesma versão do daemon). Contra um
+  `ezyshield-enforcer` mais antigo, o daemon se recusa a aplicar com um erro
+  claro em vez de usar os padrões silenciosamente.
+- O enforcer aplica um conjunto de nomes por execução. Depois de mudar
+  `table`/`set`, reinicie os dois serviços (`sudo systemctl restart
+  ezyshield-enforcer ezyshield`); uma tabela antiga deixada por uma renomeação
+  pode ser removida com `nft delete table inet <nome-antigo>`.
 
 ### cloudflare
 
@@ -148,7 +168,9 @@ notify:
 
 Campos compartilhados: `rate_limit_per_minute` (padrão 5) e `dedup_window_sec` (padrão 600) protegem contra tempestades de notificação. Todo canal aceita uma lista `severity` opcional (`info` \| `warn` \| `critical`).
 
-> Campos do tipo segredo (`bot_token`, `password`, `webhook_url`, o `url` do webhook) só aceitam referências `env:VARNAME` — valores inline são rejeitados no carregamento. Os **valores** dos headers do webhook são enviados literalmente, a menos que o valor inteiro seja uma referência `env:`, que é resolvida.
+> Campos do tipo segredo (`bot_token`, `password`, `webhook_url`, o `url` do webhook) só aceitam referências `env:VARNAME` — valores inline são rejeitados no carregamento. Eles também são **obrigatórios** no seu canal: um bloco `telegram` sem `bot_token`, um `email` sem `password`, ou um `slack`/`discord`/`webhook` sem sua URL falha na validação (o daemon os resolve na inicialização). Os **valores** dos headers do webhook são enviados literalmente, a menos que o valor inteiro seja uma referência `env:`, que é resolvida.
+
+> O `tls: starttls` do email **falha fechado**: se o servidor SMTP não anunciar STARTTLS (ou um proxy que remove capacidades o esconder), o envio dá erro em vez de silenciosamente cair para texto puro. Defina `tls: none` explicitamente se realmente pretende enviar sem criptografia.
 
 ## ai
 
@@ -158,7 +180,7 @@ Opcional — sem o bloco `ai`, o rule engine determinístico cuida de tudo.
 # Provedor único
 ai:
   provider: anthropic            # anthropic | openai | ollama
-  model: claude-3-5-haiku-latest
+  model: claude-haiku-4-5-20251001
   api_key: env:ANTHROPIC_API_KEY
   ambiguous_band: [30, 75]       # scores nesta faixa consultam a IA
   token_budget_daily: 50000      # teto diário rígido; além dele o rule engine assume
@@ -171,7 +193,7 @@ ai:
   providers:
     - name: anthropic
       priority: 1
-      model: claude-3-5-haiku-latest
+      model: claude-haiku-4-5-20251001
       api_key: env:ANTHROPIC_API_KEY
     - name: ollama
       priority: 2
@@ -184,10 +206,10 @@ ai:
 | `provider` | `anthropic` \| `openai` \| `ollama` (forma de provedor único) |
 | `model` | nome do modelo |
 | `api_key` | referência `env:VARNAME` (nunca inline) |
-| `endpoint` | URL base — usada pelo ollama (padrão `http://localhost:11434`) e por endpoints compatíveis com OpenAI |
-| `ambiguous_band` | `[low, high]` — apenas scores dentro da faixa consultam a IA |
+| `endpoint` | URL base apenas para o provedor **`ollama`** (padrão `http://localhost:11434`). Os provedores `anthropic` e `openai` a ignoram e sempre chamam suas APIs oficiais (`https://api.anthropic.com`, `https://api.openai.com`) — não há override de endpoint compatível com OpenAI. Mesmo comportamento nas formas de provedor único e de failover `providers`. |
+| `ambiguous_band` | `[low, high]` — apenas scores dentro da faixa consultam a IA. Omitida (ou `[0, 0]`) assume `[30, 75]`; qualquer outra faixa com `low >= high` ou valores fora de 0–100 é rejeitada no carregamento |
 | `token_budget_daily` | teto diário de tokens; quando esgotado, as decisões voltam para as rules |
-| `cache_ttl` | duração do cache de vereditos |
+| `cache_ttl` | duração do cache de vereditos. As entradas são indexadas pela assinatura de comportamento (contagem de kinds + janela), não pelo IP — padrões de ataque idênticos de IPs diferentes reutilizam um veredito; num hit o veredito em cache é redirecionado para o IP em avaliação |
 | `providers` | lista de failover multi-provedor (`name`, `priority`, `model`, `api_key`, `endpoint`, `token_budget_daily`); tem precedência sobre os campos de provedor único |
 
 O veredito da IA é sempre consultivo: validado por schema, limitado pela policy e nunca capaz de banir um IP da allowlist.

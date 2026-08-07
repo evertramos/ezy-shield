@@ -4,8 +4,13 @@
 //
 // Safety invariants (AGENTS.md Hard Rule §1):
 //   - Allowlist always wins: checked before any other logic, unbypassable.
-//   - Anti-lockout: active SSH peer (SSH_CLIENT) is re-derived before every ban.
-//   - Dry-run default: Op="dry_ban", no store writes, until policy.Armed=true.
+//   - Anti-lockout: active SSH peers are re-derived before every ban, from
+//     SSH_CLIENT (interactive) and /proc/net/tcp{,6} (systemd — issue #175).
+//   - Dry-run default: Op="dry_ban", nothing is ever enforced, until
+//     policy.Armed=true. Dry-run mirrors armed semantics (ADR-0009 §5):
+//     strikes and simulated bans ARE recorded so escalation, suppression,
+//     and the rate-limit cap behave exactly as production would — but a
+//     simulated ban never reaches an enforcer.
 //   - Max-bans-per-minute cap: breach returns ErrRateLimited, never silently drops.
 package decision
 
@@ -31,11 +36,11 @@ var ErrRateLimited = errors.New("decision: global ban rate limit exceeded")
 // Store is the persistence interface required by Engine.
 // The concrete *store.DB satisfies this interface.
 type Store interface {
-	// GetBanInfo returns when ip's active ban was applied and at which strike.
-	// found is false when ip has no active ban. The engine calls this before
-	// GetStrikeCount to suppress redundant strike/enforcer writes for
-	// already-banned IPs.
-	GetBanInfo(ctx context.Context, ip netip.Addr) (bannedAt time.Time, strike int, found bool, err error)
+	// GetBanInfo returns when ip's active ban was applied, at which strike,
+	// and whether it is a simulated dry-run ban (ADR-0009 §5). found is false
+	// when ip has no active ban. The engine calls this before GetStrikeCount
+	// to suppress redundant strike/enforcer writes for already-banned IPs.
+	GetBanInfo(ctx context.Context, ip netip.Addr) (bannedAt time.Time, strike int, dryRun bool, found bool, err error)
 	// RecordSuppressed increments ip's per-ban suppression counters and
 	// returns the updated totals plus whether ban_ineffective already fired
 	// for this ban. Zero counts when ip has no active ban row (expiry race).
@@ -74,6 +79,15 @@ type Engine struct {
 	mu          sync.Mutex
 	bansInWin   int
 	windowStart time.Time
+
+	// sshPeers caches kernel-derived SSH peers (/proc/net/tcp{,6}) for the
+	// anti-lockout checks — the detection path that works under systemd,
+	// where SSH_CLIENT does not exist (issue #175).
+	sshPeers sshPeerCache
+
+	// diag is the optional delivery sink for enforcement-anomaly signals
+	// (ADR-0009 §4, issue #146); nil = log-only.
+	diag Diagnostics
 }
 
 // New creates an Engine from policy and a store.
@@ -115,7 +129,13 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 			best = v
 		}
 	}
-	ip := best.IP
+	// Normalize the IPv4-mapped IPv6 form ("::ffff:a.b.c.d") that dual-stack
+	// listeners log for IPv4 clients and parsers deliver verbatim: netip
+	// treats it as distinct from the plain form, so without Unmap a mapped
+	// verdict bypasses the allowlist/SSH-peer checks below, splits store rows
+	// across two spellings of the same offender, and hands the enforcer a v6
+	// literal its IPv4 set can never match on the wire (issue #314).
+	ip := best.IP.Unmap()
 
 	// ── Safety invariant §1: allowlist checked FIRST, always wins ─────────────
 	if e.isAllowlisted(ip) {
@@ -127,14 +147,19 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 		return act, nil
 	}
 
-	// ── Safety invariant §1: anti-lockout — re-derive SSH peer before every ban ─
-	if peer := sshClientIP(); peer.IsValid() && peer == ip {
-		slog.WarnContext(ctx, "decision: anti-lockout — refusing to ban active SSH peer", "ip", ip)
-		act := sdk.Action{IP: ip, Op: "record", Reason: "anti-lockout: active SSH peer", Verdicts: verdicts}
-		if err := e.store.Audit(ctx, act); err != nil {
-			slog.ErrorContext(ctx, "decision: audit anti-lockout", "ip", ip, "err", err)
+	// ── Safety invariant §1: anti-lockout — re-derive SSH peers before every ban ─
+	// Peers come from SSH_CLIENT (interactive contexts) AND from the kernel's
+	// established-connection table (/proc/net/tcp{,6}) — the source that
+	// exists under systemd, where the env var does not (issue #175).
+	for _, peer := range e.activeSSHPeers() {
+		if peer == ip {
+			slog.WarnContext(ctx, "decision: anti-lockout — refusing to ban active SSH peer", "ip", ip)
+			act := sdk.Action{IP: ip, Op: "record", Reason: "anti-lockout: active SSH peer", Verdicts: verdicts}
+			if err := e.store.Audit(ctx, act); err != nil {
+				slog.ErrorContext(ctx, "decision: audit anti-lockout", "ip", ip, "err", err)
+			}
+			return act, nil
 		}
-		return act, nil
 	}
 
 	score := best.Score
@@ -164,23 +189,36 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 	// as "active" in observability. bans_active remains the enforcer source
 	// of truth; the Sync loop handles expiry races.
 	//
-	// Dry-run is handled further below — we still skip the store check in
-	// dry-run mode because RecordStrike is also skipped there. The guard runs
-	// only when armed=true to preserve the current dry-run semantics unchanged.
-	if e.policy.Armed {
-		bannedAt, banStrike, banned, err := e.store.GetBanInfo(ctx, ip)
-		if err != nil {
+	// The guard runs in BOTH modes (ADR-0009 §5: dry-run mirrors armed), with
+	// one asymmetry: an ARMED engine ignores simulated (dry-run) bans. Nothing
+	// is enforced for a simulated ban, so suppressing a real offense on its
+	// account would leave the attacker unblocked; falling through lets the
+	// strike path record a real ban, overwriting the simulated row.
+	{
+		bannedAt, banStrike, dryBan, banned, err := e.store.GetBanInfo(ctx, ip)
+		switch {
+		case err != nil:
 			// Non-fatal: log and fall through to the normal strike path rather
 			// than silently suppressing a verdict on a DB error.
 			slog.ErrorContext(ctx, "decision: GetBanInfo failed — falling through to strike path",
 				"ip", ip, "err", err)
-		} else if banned {
-			// Suppression path: IP is actively banned.
+		case banned && e.policy.IsArmed() && dryBan:
+			// Leftover simulated ban from before arming — fall through.
+			slog.InfoContext(ctx, "decision: ignoring simulated dry-run ban while armed",
+				"ip", ip, "strike", banStrike)
+		case banned:
+			// Suppression path: IP is actively banned (really, or simulated
+			// while in dry-run — the mirror that keeps escalation honest).
+			reason := "active ban in bans_active"
+			if dryBan {
+				reason = "active simulated ban (dry-run)"
+			}
 			slog.InfoContext(ctx, "decision: already_banned — suppressing strike/enforcer",
-				"ip", ip)
-			act := sdk.Action{IP: ip, Op: "already_banned", Reason: "active ban in bans_active", Verdicts: verdicts}
+				"ip", ip, "dry_run", dryBan)
+			act := sdk.Action{IP: ip, Op: "already_banned", Reason: reason, Verdicts: verdicts}
 
-			// Track suppressed events for ban_ineffective (ADR-0009)
+			// Track suppressed events; ban_ineffective firing is armed-only
+			// (gated inside — ADR-0009 §5).
 			e.trackSuppressedEvent(ctx, ip, bannedAt, banStrike)
 
 			if err := e.store.BumpLastSeen(ctx, ip); err != nil {
@@ -204,7 +242,7 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 	ttl := e.policy.Strikes[idx].TTL.AsDuration()
 
 	op := "ban"
-	if !e.policy.Armed {
+	if !e.policy.IsArmed() {
 		op = "dry_ban"
 	}
 
@@ -217,14 +255,22 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 		Verdicts: verdicts,
 	}
 
-	// ── Safety invariant §1: dry-run must enforce nothing and write nothing ────
+	// ── Safety invariant §1: dry-run must enforce nothing ─────────────────────
+	// It DOES record (ADR-0009 §5): the strike, the simulated ban row
+	// (dry_run=1), and the audit entry are written below through the same
+	// RecordStrike path as armed mode, so dry-run shows exactly the
+	// escalation production would apply. Enforcement is excluded twice over:
+	// the daemon dispatches enforcer calls only for Op=="ban", and every
+	// enforcer sync skips dry_run rows.
 	if op == "dry_ban" {
-		slog.InfoContext(ctx, "decision: dry_ban (armed=false)",
-			"ip", ip, "would_strike", nextStrike, "would_ttl", ttl)
-		return act, nil
+		slog.InfoContext(ctx, "decision: dry_ban (armed=false) — recording simulated ban",
+			"ip", ip, "strike", nextStrike, "ttl", ttl)
 	}
 
-	// ── Safety invariant §1: rate limit enforced before every real ban ─────────
+	// ── Safety invariant §1: rate limit enforced before every ban ─────────────
+	// Applies to dry_ban too — the cap is part of the semantics dry-run must
+	// mirror: an operator observing dry-run should see the pause production
+	// would take (and it bounds store writes during a runaway either way).
 	// Exception (ADR-0009 §3, amended): an escalation is exempt only when the
 	// previous ban ended within escalation_exempt_window — re-blocking an IP
 	// that was blocked until moments ago adds no new-lockout exposure. A strike
@@ -252,6 +298,9 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 		} else if hadIneff {
 			slog.WarnContext(ctx, "decision: ban_ineffective_permanent — promoting to permanent an IP that had ineffective bans",
 				"ip", ip, "strike", nextStrike)
+			if e.diag != nil {
+				e.diag.BanIneffectivePermanent(ctx, ip, nextStrike)
+			}
 		}
 	}
 
@@ -333,6 +382,13 @@ func (e *Engine) trackSuppressedEvent(ctx context.Context, ip netip.Addr, banned
 		slog.ErrorContext(ctx, "decision: RecordSuppressed failed", "ip", ip, "err", err)
 		return
 	}
+	// ADR-0009 §5: ban_ineffective is armed-only. During a simulated ban
+	// traffic is EXPECTED (nothing blocks it), not an enforcement anomaly.
+	// Counters above are still recorded so dry-run observability shows what
+	// a real ban would have suppressed.
+	if !e.policy.IsArmed() {
+		return
+	}
 	if !afterGrace || fired || afterCount < e.policy.BanIneffectiveMinEvents {
 		return
 	}
@@ -372,6 +428,21 @@ func (e *Engine) trackSuppressedEvent(ctx context.Context, ip netip.Addr, banned
 		"total_suppressed", total,
 		"grace_seconds", int(grace.Seconds()),
 	)
+	// Delivery beyond the log (ADR-0009 §4, issue #146): stream event +
+	// deduplicated notification, injected by the daemon. Same fire-once
+	// guarantee as the WARN — this branch is only reached by the caller
+	// that won the MarkBanIneffective compare-and-set.
+	if e.diag != nil {
+		e.diag.BanIneffective(ctx, BanIneffectiveDiag{
+			IP:               ip,
+			Strike:           banStrike,
+			LadderLen:        ladderLen,
+			NextRungs:        nextRungs,
+			EventsAfterGrace: afterCount,
+			TotalSuppressed:  total,
+			GraceSeconds:     int(grace.Seconds()),
+		})
+	}
 }
 
 // buildAllowlist parses policy.Allowlist, policy.AdminCIDRs, and the SSH peer
@@ -392,6 +463,10 @@ func buildAllowlist(policy *config.Policy) ([]netip.Prefix, error) {
 		if err != nil {
 			return nil, fmt.Errorf("decision: admin_cidrs entry %q: %w", s, err)
 		}
+		p, err = NormalizePrefix(p)
+		if err != nil {
+			return nil, fmt.Errorf("decision: admin_cidrs entry %q: %w", s, err)
+		}
 		prefixes = append(prefixes, p)
 	}
 
@@ -404,20 +479,53 @@ func buildAllowlist(policy *config.Policy) ([]netip.Prefix, error) {
 }
 
 // parsePrefixOrAddr accepts a bare IP ("1.2.3.4") or a CIDR ("10.0.0.0/8")
-// and returns the equivalent netip.Prefix.
+// and returns the equivalent netip.Prefix. IPv4-mapped IPv6 forms are
+// normalized to IPv4 so they match the unmapped verdict IPs the engine
+// compares against; unmappable mapped prefixes are rejected (issue #314).
 func parsePrefixOrAddr(s string) (netip.Prefix, error) {
 	if p, err := netip.ParsePrefix(s); err == nil {
-		return p, nil
+		return NormalizePrefix(p)
 	}
 	a, err := netip.ParseAddr(s)
 	if err != nil {
 		return netip.Prefix{}, fmt.Errorf("invalid IP address or CIDR %q", s)
 	}
+	a = a.Unmap()
 	return netip.PrefixFrom(a, a.BitLen()), nil
 }
 
+// NormalizePrefix converts an IPv4-mapped IPv6 prefix ("::ffff:a.b.c.d/n",
+// n ≥ 96) to its IPv4 equivalent — operators on dual-stack hosts copy the
+// mapped spelling straight from logs into allowlist/admin_cidrs entries, and
+// the engine compares against unmapped addresses (issue #314). Non-mapped
+// prefixes pass through untouched.
+//
+// A mapped prefix broader than /96 has no IPv4 equivalent, and since the
+// engine's comparisons run on unmapped addresses it would match nothing —
+// an allowlist entry that protects nothing, or a manual-ban target no guard
+// can refuse (PR #364 review findings). Fail loud instead of leaving a
+// silent hole: reject it and tell the operator to spell the range plainly.
+//
+// Exported because the daemon's socket input boundary (parseSocketTarget)
+// canonicalizes operator-typed ban/unban/allow targets through the same
+// rules, so store keys, runtime-allowlist overlap checks, and enforcer
+// targets all carry one identity per address.
+func NormalizePrefix(p netip.Prefix) (netip.Prefix, error) {
+	if !p.Addr().Is4In6() {
+		return p, nil
+	}
+	if p.Bits() < 96 {
+		return netip.Prefix{}, fmt.Errorf(
+			"IPv4-mapped IPv6 prefix %s is broader than /96 and has no IPv4 equivalent; use plain IPv4 or IPv6 form", p)
+	}
+	return netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96), nil
+}
+
 // sshClientIP returns the client IP from the SSH_CLIENT environment variable.
-// OpenSSH sets SSH_CLIENT to "IP srcport dstport" for each session.
+// OpenSSH sets SSH_CLIENT to "IP srcport dstport" for each session; a
+// dual-stack sshd reports IPv4 clients in the mapped form, so the result is
+// unmapped to compare equal to the engine's normalized verdict IPs and the
+// kernel-derived peers (issue #314; sshpeers.go already unmaps its side).
 // Returns the zero Addr if SSH_CLIENT is unset or cannot be parsed.
 func sshClientIP() netip.Addr {
 	v := os.Getenv("SSH_CLIENT")
@@ -432,5 +540,5 @@ func sshClientIP() netip.Addr {
 	if err != nil {
 		return netip.Addr{}
 	}
-	return ip
+	return ip.Unmap()
 }

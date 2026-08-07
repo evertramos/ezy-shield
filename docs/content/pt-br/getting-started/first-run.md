@@ -6,27 +6,31 @@ order: 3
 
 # Sua Primeira Execução
 
-Após a instalação, você configurou o EzyShield com pelo menos uma fonte de log. Agora vamos executá-lo pela primeira vez e entender o que ele está fazendo.
+Você instalou o EzyShield e configurou pelo menos uma fonte de log. Hora da primeira execução.
 
 ## Passo 1: Comece em dry-run (padrão)
 
 Por padrão, o EzyShield roda em modo **dry-run** — analisa logs e toma decisões, mas nunca bloqueia nada. Isso é intencional: observe primeiro, arme depois.
 
+O dry-run espelha exatamente a semântica do modo armado: um `dry_ban` registra
+o strike e um **ban simulado** com o mesmo TTL que um ban real teria, e novos
+eventos daquele IP são suprimidos até o TTL simulado expirar — a escalada que
+você observa (strike 1 → 2 → 3 …) é exatamente a que a produção aplicaria.
+Nada é jamais aplicado no firewall: bans simulados nunca chegam ao enforcer, e
+o `ezyshield status` os reporta separados dos bans ativos.
+
 ```bash
 sudo ezyshield run
 ```
 
-Você verá uma saída como esta:
+O daemon registra linhas JSON estruturadas no stderr. Uma decisão em dry-run
+se parece com isto:
 
-```
-2026-07-08T10:15:23Z INFO starting pipeline
-2026-07-08T10:15:24Z INFO collector[journald]: started
-2026-07-08T10:15:24Z INFO collector[file]: tailing /var/log/nginx/access.log
-2026-07-08T10:15:30Z WARN decision: ssh brute-force attempt from 203.0.113.42 (strike 1, score 95)
-  verdict: dry_ban (would ban for 5 minutes)
+```json
+{"time":"2026-07-08T10:15:30Z","level":"INFO","msg":"decision: dry_ban (armed=false)","ip":"203.0.113.42","would_strike":1,"would_ttl":300000000000}
 ```
 
-Repare no veredito `dry_ban` — aquele IP teria sido bloqueado, mas em dry-run apenas fica registrado no log.
+Repare no veredito `dry_ban` — aquele IP teria sido bloqueado, mas em dry-run apenas fica registrado no log. `would_ttl` está em nanossegundos (codificação padrão de duração do slog); `300000000000` equivale a 5 minutos.
 
 ## Passo 2: Leia a saída do dry-run
 
@@ -35,6 +39,7 @@ Cada linha de veredito informa:
 - **O IP do atacante**: 203.0.113.42
 - **Contagem de strikes e score**: quantas vezes esse IP já atacou e o nível de confiança
 - **A ação**: `dry_ban` (o que aconteceria se estivesse armado) ou `allow` (bateu na allowlist)
+- Novos hits durante um ban simulado aparecem como `already_banned` — um episódio, um strike, exatamente como no modo armado
 
 Rode por 24 horas em dry-run e monitore:
 - Falsos positivos: IPs legítimos recebendo score alto
@@ -49,24 +54,55 @@ Veja o que teria sido bloqueado:
 ezyshield report | head -30
 ```
 
-`report` mostra o histórico de decisões por IP (strikes, scores, evidências) sem
-que nada seja de fato bloqueado.
+Sem um argumento de IP, `report` lista todos os ofensores registrados em uma
+tabela resumo (`IP`, `FIRST SEEN`, `LAST SEEN`, `STRIKES`, `BANNED`,
+`COUNTRY`, `ASN`) — nada é de fato bloqueado. Para o histórico completo de
+decisões por IP (strikes, scores, evidências), passe um IP:
+
+```bash
+ezyshield report 203.0.113.42
+```
 
 ## Passo 4: Arme
 
-Quando estiver confiante, edite `policy.yaml`:
-
-```yaml
-armed: true
-```
-
-Depois recarregue o daemon:
+Quando estiver confiante, arme com o comando dedicado — sem editar config,
+sem restart:
 
 ```bash
-sudo systemctl restart ezyshield
+sudo ezyshield arm
 ```
 
-O EzyShield agora bloqueia em tempo real: os bans vão para o nftables (local) e para o Cloudflare (borda), e as notificações são enviadas.
+O `arm` roda um pre-flight obrigatório antes de mudar qualquer coisa:
+saúde do enforcer, cobertura de `admin_cidrs`/allowlist, uma simulação de
+"eu baniria a mim mesmo?" com o IP da sua sessão SSH, e um resumo da
+atividade recente em dry-run. Checks reprovados recusam a transição
+(`--force` sobrepõe tudo, exceto o check de auto-ban — esse nunca é
+contornável).
+
+O jeito mais seguro de armar pela primeira vez é com janela de
+auto-reversão:
+
+```bash
+sudo ezyshield arm --for 1h
+```
+
+Pela próxima hora o EzyShield aplica bans de verdade. Se tudo estiver bem,
+torne permanente:
+
+```bash
+sudo ezyshield arm --keep
+```
+
+Se você não fizer nada — ou se tiver se trancado fora e não *puder* fazer
+nada — o daemon reverte sozinho para dry-run quando a janela expira e
+envia uma notificação. A reversão roda dentro do daemon, então dispara
+mesmo que a sua sessão SSH tenha caído.
+
+As duas transições são persistidas no `policy.yaml` e registradas no audit
+log; `sudo ezyshield disarm` volta para dry-run a qualquer momento.
+
+Armado, o EzyShield bloqueia em tempo real: os bans vão para o nftables
+(local) e para o Cloudflare (borda), e as notificações são enviadas.
 
 ## Passo 5: Monitore os bans ativos
 
@@ -111,9 +147,10 @@ tail -f /var/log/nginx/access.log  # Para Nginx
 R:
 
 ```bash
-sudo ezyshield ban 203.0.113.42         # Banir permanentemente
-sudo ezyshield unban 203.0.113.42       # Desbanir
-sudo ezyshield allow 198.51.100.0/24    # Adicionar um CIDR à allowlist
+sudo ezyshield ban 203.0.113.42          # Banir permanentemente
+sudo ezyshield ban 203.0.113.42 --ttl 0  # Também permanente (explícito)
+sudo ezyshield unban 203.0.113.42        # Desbanir
+sudo ezyshield allow 198.51.100.0/24     # Adicionar um CIDR à allowlist
 ```
 
 ## Próximos passos

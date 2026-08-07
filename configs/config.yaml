@@ -1,12 +1,18 @@
 # EzyShield main configuration — example/template
 # Secrets must never appear here. Use env: references or systemd LoadCredential=.
-# See docs/schemas/config/ for the full JSON schema (populated by issue #3).
+# See docs/internal/schemas/config/config.schema.json for the full JSON schema.
 
 # Directory for runtime state (SQLite, socket)
 data_dir: /var/lib/ezyshield
 
 # Control socket path (unix); CLI commands connect here
 socket_path: /run/ezyshield/ezyshield.sock
+
+# Detection rules are embedded in the binary and update with it. To tune or
+# add rules, drop *.yaml files in rules.d — they merge over the built-in
+# rules by `name` and survive updates (docs: guides/rules-customization).
+# rules_dir: /etc/ezyshield/rules.d      # default
+# rules_path: /etc/ezyshield/rules.yaml  # DEPRECATED: replaces ALL rules, disables rules.d
 
 # Structured logging
 log:
@@ -15,11 +21,15 @@ log:
 # Log collectors — add sources after running 'ezyshield init && ezyshield scan'
 collectors: []
 
-# Example (uncomment after nftables enforcer is set up — issue #9):
+# Example (uncomment after the nftables enforcer is set up):
 # enforce:
-#   nftables:
-#     table: inet ezyshield
-#     set:   blocked
+#   nftables: {}
+#   # table and set are optional; defaults are "inet ezyshield" / "blocked"
+#   # (IPv6 twin derives as "<set>6"). Custom names require an
+#   # ezyshield-enforcer of the same version.
+#   # nftables:
+#   #   table: inet mytable
+#   #   set:   myblocked
 #
 #   # Cloudflare edge enforcer — blocks IPs at the CF edge (issue #45, #88).
 #   # Two modes are supported; pick one.

@@ -8,8 +8,11 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"strings"
+	"sync"
 	"time"
 
+	"github.com/evertramos/ezy-shield/internal/nftnames"
 	"github.com/evertramos/ezy-shield/pkg/sdk"
 )
 
@@ -25,16 +28,56 @@ const DefaultSocketPath = "/run/ezyshield-enforcer/enforcer.sock"
 type NftablesEnforcer struct {
 	socketPath string
 	allowlist  []netip.Prefix
+
+	// table/set are the operator-configured nftables names (issue #268),
+	// already validated by nftnames.Resolve in New. Empty = helper defaults;
+	// in that case they are omitted from the wire entirely, which keeps the
+	// protocol byte-compatible with older helpers.
+	table string
+	set   string
+
+	// capsOnce gates the one-time capability probe that runs before the
+	// first RPC when non-default names are configured: an older helper
+	// would silently IGNORE the Table/Set fields and enforce into its
+	// default table — the exact required-but-ignored failure #268 removes —
+	// so custom names hard-require the helper to advertise support.
+	capsOnce sync.Once
+	capsErr  error
+}
+
+// Option configures a NftablesEnforcer.
+type Option func(*NftablesEnforcer)
+
+// WithNames sets the nftables table and set names from config. Values must
+// already have passed config validation (nftnames.Resolve); New re-resolves
+// them defensively and panics on programmer error (invalid names reaching
+// this point mean config validation was bypassed).
+func WithNames(table, set string) Option {
+	return func(e *NftablesEnforcer) {
+		if _, err := nftnames.Resolve(table, set); err != nil {
+			panic(fmt.Sprintf("enforce.WithNames: invalid names not caught by config validation: %v", err))
+		}
+		n, _ := nftnames.Resolve(table, set)
+		if n.IsDefault() {
+			return // defaults: keep fields empty, nothing goes on the wire
+		}
+		e.table = table
+		e.set = set
+	}
 }
 
 // New creates a NftablesEnforcer.
 // socketPath defaults to DefaultSocketPath when empty.
 // allowlist should mirror the policy engine's runtime allowlist.
-func New(socketPath string, allowlist []netip.Prefix) *NftablesEnforcer {
+func New(socketPath string, allowlist []netip.Prefix, opts ...Option) *NftablesEnforcer {
 	if socketPath == "" {
 		socketPath = DefaultSocketPath
 	}
-	return &NftablesEnforcer{socketPath: socketPath, allowlist: allowlist}
+	e := &NftablesEnforcer{socketPath: socketPath, allowlist: allowlist}
+	for _, o := range opts {
+		o(e)
+	}
+	return e
 }
 
 // Name implements sdk.Enforcer.
@@ -134,23 +177,12 @@ func (e *NftablesEnforcer) listIPs(ctx context.Context) ([]string, error) {
 }
 
 // listVerb is the shared implementation of the two list verbs ("list" for
-// blocked, "allow_list" for allowed).
+// blocked, "allow_list" for allowed). Routed through rpcResp so the request
+// carries the configured table/set names like every other verb (issue #268).
 func (e *NftablesEnforcer) listVerb(ctx context.Context, verb string) ([]string, error) {
-	conn, err := e.dial(ctx)
+	resp, err := e.rpcResp(ctx, Request{Verb: verb})
 	if err != nil {
 		return nil, err
-	}
-	defer conn.Close() //nolint:errcheck
-
-	if err := sendRequest(conn, Request{Verb: verb}); err != nil {
-		return nil, err
-	}
-	var resp Response
-	if err := json.NewDecoder(bufio.NewReader(conn)).Decode(&resp); err != nil {
-		return nil, fmt.Errorf("enforce/nftables: decode %s response: %w", verb, err)
-	}
-	if !resp.OK {
-		return nil, fmt.Errorf("enforce/nftables: %s: %s", verb, resp.Error)
 	}
 	return resp.IPs, nil
 }
@@ -228,6 +260,13 @@ func (e *NftablesEnforcer) rpc(ctx context.Context, req Request) error {
 // Non-OK responses return a wrapped error (matching rpc's contract).
 func (e *NftablesEnforcer) rpcResp(ctx context.Context, req Request) (Response, error) {
 	var resp Response
+	// Custom names ride on every request (the helper pins them on first
+	// use); default names stay off the wire for old-helper compatibility.
+	req.Table = e.table
+	req.Set = e.set
+	if err := e.ensureCustomNamesSupported(ctx); err != nil {
+		return resp, err
+	}
 	conn, err := e.dial(ctx)
 	if err != nil {
 		return resp, err
@@ -244,6 +283,49 @@ func (e *NftablesEnforcer) rpcResp(ctx context.Context, req Request) (Response, 
 		return resp, fmt.Errorf("enforce/nftables %s: %s", req.Verb, resp.Error)
 	}
 	return resp, nil
+}
+
+// ensureCustomNamesSupported probes the helper's capabilities exactly once
+// when non-default names are configured. A helper that predates the "caps"
+// verb answers with an unknown-verb error — with custom names configured
+// that is FATAL for every subsequent call: enforcing into the default table
+// while config names another would be a silent divergence (issue #268).
+func (e *NftablesEnforcer) ensureCustomNamesSupported(ctx context.Context) error {
+	if e.table == "" && e.set == "" {
+		return nil
+	}
+	e.capsOnce.Do(func() {
+		conn, err := e.dial(ctx)
+		if err != nil {
+			// Transient dial failure must not poison the sync.Once with a
+			// permanent verdict — leave capsErr nil and let the actual RPC
+			// fail with the dial error; the probe re-runs conceptually on
+			// the next process start. (A helper that is down is a different
+			// failure class than a helper that is too old.)
+			return
+		}
+		defer conn.Close() //nolint:errcheck
+		if err := sendRequest(conn, Request{Verb: "caps"}); err != nil {
+			return
+		}
+		var resp Response
+		if err := json.NewDecoder(bufio.NewReader(conn)).Decode(&resp); err != nil {
+			return
+		}
+		if !resp.OK {
+			e.capsErr = fmt.Errorf("enforce/nftables: custom table/set names configured (%q/%q) but the enforcer helper does not support them (%s) — update ezyshield-enforcer to the same version as ezyshield, or remove enforce.nftables.table/set to use the defaults",
+				e.table, e.set, resp.Error)
+			return
+		}
+		for _, f := range resp.Features {
+			if f == FeatureCustomNames {
+				return
+			}
+		}
+		e.capsErr = fmt.Errorf("enforce/nftables: custom table/set names configured (%q/%q) but the enforcer helper does not advertise %s support (features: %s) — update ezyshield-enforcer",
+			e.table, e.set, FeatureCustomNames, strings.Join(resp.Features, ","))
+	})
+	return e.capsErr
 }
 
 func (e *NftablesEnforcer) dial(ctx context.Context) (net.Conn, error) {

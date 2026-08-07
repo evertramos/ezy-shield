@@ -15,6 +15,7 @@ import (
 	"github.com/evertramos/ezy-shield/internal/collector"
 	"github.com/evertramos/ezy-shield/internal/config"
 	"github.com/evertramos/ezy-shield/internal/daemon"
+	"github.com/evertramos/ezy-shield/internal/decision"
 	"github.com/evertramos/ezy-shield/internal/enforce"
 	"github.com/evertramos/ezy-shield/internal/enrich"
 	"github.com/evertramos/ezy-shield/internal/notify"
@@ -128,7 +129,11 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 				"socket", sockPath, "err", err)
 		}
 		allowlist := parseAllowlist(policy)
-		enf = enforce.New(sockPath, allowlist)
+		// Table/set come from config (issue #268): empty means the enforcer
+		// defaults; non-default names are validated at config load and the
+		// helper is capability-probed before first use.
+		enf = enforce.New(sockPath, allowlist,
+			enforce.WithNames(cfg.Enforce.NFTables.Table, cfg.Enforce.NFTables.Set))
 	}
 
 	if cfg.Enforce != nil && len(cfg.Enforce.Cloudflare) > 0 {
@@ -158,6 +163,14 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 		default:
 			enf = enforce.NewMulti(all...)
 		}
+	}
+
+	if enf != nil {
+		// Authoritative allowlist/anti-lockout gate ahead of the enforcer
+		// fan-out (issue #230). Enforcer-internal checks remain belt-and-braces;
+		// this choke point is what guarantees the invariant for every enforcer,
+		// including future ones that forget their own guard.
+		enf = enforce.NewGate(enf, parseAllowlist(policy), decision.ProcSSHPeers)
 	}
 
 	var disp *notify.Dispatcher
@@ -259,6 +272,7 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 		Enricher:   enricher,
 		SocketPath: socketPath,
 		Version:    version,
+		PolicyPath: policyPath,
 	})
 	if err != nil {
 		return fmt.Errorf("run: create daemon: %w", err)
@@ -471,18 +485,32 @@ func mergeProviderCfg(base *config.AICfg, p config.ProviderCfg) *config.AICfg {
 }
 
 // parseAllowlist builds a []netip.Prefix from policy allowlist + admin_cidrs.
+// Entries are canonicalized (issue #365): bare IPs are unmapped and mapped
+// CIDRs become their plain-IPv4 form via decision.NormalizePrefix — the same
+// rules the decision layer applies to its own copy since #314/#364 — so a
+// mapped-form policy entry protects its range at the enforce layer too. An
+// entry NormalizePrefix rejects (mapped broader than /96) is kept as parsed:
+// dropping it would remove protection, and the decision layer already fails
+// loud on those.
 func parseAllowlist(policy *config.Policy) []netip.Prefix {
 	var prefixes []netip.Prefix
+	appendPrefix := func(p netip.Prefix) {
+		if norm, err := decision.NormalizePrefix(p); err == nil {
+			p = norm
+		}
+		prefixes = append(prefixes, p)
+	}
 	for _, s := range policy.Allowlist {
 		if p, err := netip.ParsePrefix(s); err == nil {
-			prefixes = append(prefixes, p)
+			appendPrefix(p)
 		} else if a, err := netip.ParseAddr(s); err == nil {
+			a = a.Unmap()
 			prefixes = append(prefixes, netip.PrefixFrom(a, a.BitLen()))
 		}
 	}
 	for _, s := range policy.AdminCIDRs {
 		if p, err := netip.ParsePrefix(s); err == nil {
-			prefixes = append(prefixes, p)
+			appendPrefix(p)
 		}
 	}
 	return prefixes

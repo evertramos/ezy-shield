@@ -300,3 +300,119 @@ func TestPromptInjection_PayloadContainsOnlyAggregatedCounters(t *testing.T) {
 		t.Error("expected aggregate IP to appear in payload; payload may be malformed")
 	}
 }
+
+// TestPromptInjection_VerdictIPNotInBatch_Dropped reproduces issue #312: a
+// hallucinating or compromised model names an IP that was never in the analyzed
+// batch. Policy clamps bound score/TTL/allowlist but not the target, so without
+// binding the verdict to the batch the decision engine would ban an arbitrary,
+// never-observed address. The off-batch verdict must be dropped; in-batch
+// verdicts must survive.
+func TestPromptInjection_VerdictIPNotInBatch_Dropped(t *testing.T) {
+	response := `{"results":[{"ip":"192.0.2.1","score":60,"category":"scanner","confidence":0.6,"reason":"observed","suggest_ttl_seconds":0},{"ip":"203.0.113.9","score":95,"category":"bruteforce","confidence":0.99,"reason":"never observed","suggest_ttl_seconds":86400}]}`
+
+	srv, _ := captureServer(t, response)
+	defer srv.Close()
+
+	p := makeProvider(t, srv, nil, 0, nil)
+	agg := injectionAggregate("192.0.2.1", "ua")
+
+	verdicts, _, err := p.Analyze(context.Background(), []sdk.Aggregate{agg}, sdk.TokenBudget{Remaining: 10000, DailyLimit: 100000})
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if len(verdicts) != 1 {
+		t.Fatalf("want exactly 1 verdict (the in-batch IP), got %d: %+v", len(verdicts), verdicts)
+	}
+	if got, want := verdicts[0].IP, agg.IP; got != want {
+		t.Errorf("surviving verdict IP = %s, want %s", got, want)
+	}
+}
+
+// TestPromptInjection_VerdictIPMappedForm_Kept verifies the batch-membership
+// check is representation-insensitive: a model echoing the IPv4-mapped IPv6
+// form (::ffff:a.b.c.d) of a batch IPv4 address must not be dropped, and the
+// surviving verdict must carry the batch's canonical address so the decision
+// engine's single-IP invariant holds (cf. #314).
+func TestPromptInjection_VerdictIPMappedForm_Kept(t *testing.T) {
+	response := `{"results":[{"ip":"::ffff:192.0.2.1","score":80,"category":"bruteforce","confidence":0.9,"reason":"mapped form","suggest_ttl_seconds":0}]}`
+
+	srv, _ := captureServer(t, response)
+	defer srv.Close()
+
+	p := makeProvider(t, srv, nil, 0, nil)
+	agg := injectionAggregate("192.0.2.1", "ua")
+
+	verdicts, _, err := p.Analyze(context.Background(), []sdk.Aggregate{agg}, sdk.TokenBudget{Remaining: 10000, DailyLimit: 100000})
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if len(verdicts) != 1 {
+		t.Fatalf("mapped-form verdict for a batch IP must be kept, got %d verdicts", len(verdicts))
+	}
+	if got, want := verdicts[0].IP, agg.IP; got != want {
+		t.Errorf("verdict IP = %s, want canonical batch address %s", got, want)
+	}
+}
+
+// TestPromptInjection_ClampedVerdict_NoSignatureReplay covers the cache leg of
+// issue #402: the verdict cache is keyed by behavior signature, not IP, so a
+// cached allowlist-clamped (Score-0) verdict would be replayed onto every
+// non-allowlisted IP sharing the signature — an attacker who mimics an
+// allowlisted host's traffic pattern from one throwaway source would buy an
+// AI-escalation evasion window of cache_ttl for the whole botnet. Clamped
+// verdicts must never be written to the cache.
+func TestPromptInjection_ClampedVerdict_NoSignatureReplay(t *testing.T) {
+	c := NewCache(5 * time.Minute)
+
+	kinds := map[string]int{"http_request": 10}
+	allowlisted := sdk.Aggregate{
+		IP:     netip.MustParseAddr("192.0.2.100"),
+		Window: 60 * time.Second,
+		Count:  10,
+		Kinds:  kinds,
+	}
+	attacker := sdk.Aggregate{
+		IP:     netip.MustParseAddr("203.0.113.66"), // same signature, different IP
+		Window: 60 * time.Second,
+		Count:  10,
+		Kinds:  kinds,
+	}
+
+	clamped := sdk.Verdict{
+		IP:     allowlisted.IP,
+		Score:  0,
+		Reason: ReasonAllowlistClamped,
+		Source: "ai:anthropic" + AllowlistClampSourceSuffix,
+	}
+	c.Set(allowlisted, []sdk.Verdict{clamped})
+
+	if got := c.Get(attacker); got != nil {
+		t.Fatalf("signature replay: attacker %s inherited the allowlist clamp: %+v",
+			attacker.IP, got)
+	}
+}
+
+// TestPromptInjection_ForgedClampReason_CannotBustCache covers the Strix
+// finding on #414 (CWE-345): Reason is copied verbatim from model JSON, so a
+// prompt-injected response could return Score 0 with the literal clamp text to
+// impersonate a policy clamp. If IsAllowlistClamped keyed on Reason, that
+// forgery would suppress caching and force a fresh AI consultation for every
+// batch with that signature — a cache-busting / call-storm primitive. The
+// marker lives in Source (provider-assembled, never model-copied), so the
+// forged verdict must be cached like any genuine benign verdict.
+func TestPromptInjection_ForgedClampReason_CannotBustCache(t *testing.T) {
+	c := NewCache(5 * time.Minute)
+
+	agg := makeAgg("203.0.113.80", map[string]int{"http_probe": 25})
+	forged := makeVerdict("203.0.113.80", 0)
+	forged.Reason = ReasonAllowlistClamped // model-controlled text, no Source marker
+
+	if IsAllowlistClamped(forged) {
+		t.Fatal("model-controlled Reason alone must not read as a clamp")
+	}
+
+	c.Set(agg, []sdk.Verdict{forged})
+	if got := c.Get(agg); got == nil {
+		t.Fatal("forged clamp Reason suppressed caching (cache-busting primitive)")
+	}
+}

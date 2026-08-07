@@ -12,11 +12,11 @@ daemon, dos banimentos ativos, entradas da allowlist, do audit trail
 recente e do timeline de strikes, mais controles em página para
 ban / unban / allow manuais.
 
-**Status: Fase 4 (final).** Autenticação, visões ao vivo, event log,
-timeline de strikes, updates ao vivo via WebSocket, forms de escrita
-protegidos por CSRF, throttle de login por conta e limite de sessões
-por usuário. Redação server-side e RBAC multi-usuário estão fora do
-escopo deste release.
+Ele oferece autenticação, visões ao vivo, event log, timeline de
+strikes, updates ao vivo via WebSocket, forms de escrita protegidos
+por CSRF, throttle de login por conta e limite de sessões por usuário.
+Redação server-side e RBAC multi-usuário estão fora do escopo deste
+release.
 
 ---
 
@@ -25,10 +25,10 @@ escopo deste release.
 O dashboard escuta **exclusivamente em endereços de loopback** —
 `127.0.0.1`, `::1` ou o literal `localhost`. Qualquer outro bind
 (`0.0.0.0`, interface pública, etc.) é recusado na inicialização,
-tanto em `internal/dashboard.New()` quanto em `Server.Run()`. Essa é
-uma regra dura do `AGENTS.md §2` e do
-`docs/internal/SECURITY-REVIEW.md §6`. O dashboard só é alcançável
-a partir do próprio host, e acesso remoto é, por design, uma
+tanto em `internal/dashboard.New()` quanto em `Server.Run()` — um
+invariante rígido, checado duas vezes para que um erro de config não
+consiga expô-lo. O dashboard só é alcançável a partir do próprio
+host, e acesso remoto é, por design, uma
 *preocupação do operador* — resolvida fora do daemon.
 
 Para acesso remoto, veja o guia dedicado:
@@ -67,8 +67,27 @@ primeira execução acontece no primeiríssimo `ezyshield dashboard`:
    ======================================================================
    ```
 
-A senha em claro nunca toca o disco. Se você perder a mensagem,
-apague o `dashboard.db` e reinicie — uma conta nova será gerada.
+Em um terminal interativo, a senha em claro nunca toca o disco. Se
+você perder a mensagem, apague o `dashboard.db` e reinicie — uma
+conta nova será gerada.
+
+**stderr não-interativo (systemd, Docker, cron).** Quando o stderr não
+é um terminal — o caso comum no caminho de instalação documentado — o
+banner acima não é impresso, porque seria capturado literalmente pelo
+journald ou pelo `docker logs`. Em vez disso, a senha em claro é
+gravada uma vez em `<data_dir>/dashboard.first-run-password` (modo
+`0600`), e apenas o caminho do arquivo é impresso no stderr:
+
+```
+EzyShield dashboard: admin account created (username: admin).
+stderr is not a terminal — the initial password was written to:
+  /var/lib/ezyshield/dashboard.first-run-password (mode 0600)
+Read it once and remove it:
+  sudo cat /var/lib/ezyshield/dashboard.first-run-password && sudo rm /var/lib/ezyshield/dashboard.first-run-password
+```
+
+Leia o arquivo uma vez e apague-o — ele não é removido
+automaticamente.
 
 ---
 
@@ -118,7 +137,7 @@ banner "Daemon offline" no lugar dos dados ao vivo.
 |--------|--------------------------|-------------|----------------------------------------------------------------|
 | GET    | `/login`                 | dispensada  | Formulário de login                                            |
 | POST   | `/login`                 | dispensada  | Submit do form; grava cookie de sessão no sucesso              |
-| POST   | `/logout`                | dispensada  | Limpa o cookie de sessão                                       |
+| POST   | `/logout`                | obrigatória | Protegido por CSRF como toda mutação; limpa o cookie de sessão |
 | GET    | `/`                      | obrigatória | Redireciona sessões autenticadas para `/dashboard`             |
 | GET    | `/dashboard`             | obrigatória | Overview: estado do daemon, modo, uptime, versão, contagem de bans ativos, distribuição por strike |
 | GET    | `/dashboard/bans`        | obrigatória | Tabela de bans ativos com botão de unban por linha + form de ban manual |
@@ -186,8 +205,8 @@ Envelope na rede (JSON, sempre frames de texto UTF-8):
 
 Quando um ciclo de poll traz mais de 10 eventos, o bus colapsa a
 rajada em um único `refresh` e o navegador recarrega a página. Esse
-limite mais a cadência de 3 s deixam a taxa por cliente bem abaixo do
-orçamento de 10 mensagens/segundo definido em `AGENTS.md §2`.
+limite mais a cadência de 3 s mantêm a taxa de mensagens por cliente
+baixa, sem uma rajada ilimitada de frames `audit` individuais.
 
 A reconexão fica com o helper `EzyLive` embutido no layout: back-off
 exponencial começando em 1 s e limitado a 30 s, com um "live dot"
@@ -268,9 +287,12 @@ Read-only — não tem forms.
 ### Gestão de sessão
 
 - O store limita a **3 sessões ativas por conta**. O quarto login
-  evita silenciosamente o slot mais antigo, então um cookie roubado
-  tem vida útil limitada e uma máquina compartilhada não acumula
-  sessões abandonadas.
+  remove o slot mais antigo, então um cookie roubado tem vida útil
+  limitada e uma máquina compartilhada não acumula sessões
+  abandonadas. A remoção é registrada em INFO com
+  `reason=cap_exceeded` para que um operador perceba atividade
+  inesperada; logout explícito e expiração por ociosidade não geram
+  log.
 - O limite é por usuário: a sessão da `alice` não é afetada quando
   o `bob` estoura o limite dele.
 - Qualquer request autenticado desliza a expiração para 30 minutos
@@ -281,8 +303,7 @@ Read-only — não tem forms.
 - Os handlers POST de ban / unban / allow parseiam o campo `ip` com
   `netip.ParsePrefix` (com fallback para `netip.ParseAddr` → /32 ou
   /128) *antes* de qualquer RPC — hostnames, strings gigantes e
-  caracteres inválidos são recusados na borda do dashboard
-  (`SECURITY-REVIEW.md §1`).
+  caracteres inválidos são recusados na borda do dashboard.
 - Reasons vindos do operador são prefixados com `dashboard:admin`
   para que o `audit_log` distinga escritas do dashboard dos verbos
   da CLI. Reason vazio produz o tag puro; reason preenchido produz

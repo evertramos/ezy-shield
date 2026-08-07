@@ -17,14 +17,25 @@ type SocketRequest struct {
 	// IP is the target for ban/unban/allow/report. ban/unban/allow accept
 	// either a bare address ("1.2.3.4") or a CIDR ("203.0.113.0/24"); a bare
 	// address is treated as a host prefix (/32 or /128). report accepts only
-	// a bare address; an empty IP selects the offender-listing mode.
+	// a bare address; an empty IP selects the offender-listing mode. events
+	// accepts an optional bare address that filters the audit history to that
+	// one IP (exact match); an empty IP returns all recent actions.
 	IP string `json:"ip,omitempty"`
 	// TTL is a Go duration string (e.g. "5m", "24h") for the ban verb.
 	// Zero or absent means the policy strike table decides.
 	TTL string `json:"ttl,omitempty"`
-	// For is a duration string (e.g. "24h", "7d") for the allow verb.
-	// Mutually exclusive with Until. Empty = permanent allow.
+	// For is a duration string (e.g. "24h", "7d") for the allow verb, and
+	// the auto-revert window for the arm verb. Mutually exclusive with
+	// Until. Empty = permanent allow / unconditional arm.
 	For string `json:"for,omitempty"`
+	// Force lets the arm verb proceed past failing pre-flight checks
+	// (except the self-ban check, which is never bypassable).
+	Force bool `json:"force,omitempty"`
+	// Peer is the operator's own client IP, derived by the CLI from
+	// SSH_CLIENT: the arm verb uses it for the self-ban pre-flight, the ban
+	// verb for the manual-ban anti-lockout guard (issue #211). Used only to
+	// make safety checks stricter; never stored.
+	Peer string `json:"peer,omitempty"`
 	// Until is an absolute time for the allow verb in ISO 8601 form
 	// ("2026-07-15" or "2026-07-15T18:00:00[Z]"). Mutually exclusive with For.
 	Until string `json:"until,omitempty"`
@@ -59,8 +70,23 @@ type StatusData struct {
 	Uptime string `json:"uptime"`
 	// Armed mirrors policy.Armed: true means bans are enforced, false = dry-run.
 	Armed bool `json:"armed"`
-	// ActiveBans is the count of IPs currently in bans_active.
+	// EnforcementState is the honest enforcement health (issue #174):
+	// ACTIVE / DRY-RUN / DEGRADED / DISABLED. Derived from real enforcer
+	// Ban/Sync outcomes, not config alone — status must never claim
+	// protection that is not real.
+	EnforcementState string `json:"enforcement_state"`
+	// EnforcementDetail carries the failure detail when DEGRADED.
+	EnforcementDetail string `json:"enforcement_detail,omitempty"`
+	// ActiveBans is the count of IPs currently in bans_active that are
+	// really enforced. Simulated dry-run bans are excluded — counting them
+	// as "active" would overstate protection.
 	ActiveBans int `json:"active_bans"`
+	// SimulatedBans is the count of dry-run simulated bans (ADR-0009 §5):
+	// IPs that WOULD be banned right now if the daemon were armed.
+	SimulatedBans int `json:"simulated_bans,omitempty"`
+	// ArmedUntil is the RFC3339 auto-revert deadline when an arm window is
+	// active (issue #228); empty otherwise.
+	ArmedUntil string `json:"armed_until,omitempty"`
 	// Version is the daemon binary version string.
 	Version string `json:"version"`
 	// AISpendToday is the estimated USD cost of AI provider calls today.
@@ -71,7 +97,9 @@ type StatusData struct {
 // BanEntry is one element in the array returned by the "list" verb.
 type BanEntry struct {
 	IP string `json:"ip"`
-	// TTL is "permanent" or a Go duration string for the remaining time.
+	// TTL is "permanent" (no expiry), a Go duration string for the
+	// remaining time, or — defensively — "expired" (issue #279; the store
+	// normally excludes expired rows before they reach this layer).
 	TTL    string `json:"ttl"`
 	Strike int    `json:"strike"`
 	Reason string `json:"reason"`
@@ -81,6 +109,9 @@ type BanEntry struct {
 	// ASN is the autonomous system number string (e.g. "AS12345"), or "" when
 	// enrichment is not configured.
 	ASN string `json:"asn,omitempty"`
+	// Simulated is true for dry-run bans (ADR-0009 §5): recorded for
+	// escalation/suppression while armed=false, never enforced.
+	Simulated bool `json:"simulated,omitempty"`
 }
 
 // EventEntry is one element in the array returned by the "events" verb.

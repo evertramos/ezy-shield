@@ -58,21 +58,37 @@ func runTestEnforce(cmd *cobra.Command, configDir, backend string) error {
 	}
 
 	if jsonOutput {
-		return writeJSON(cmd.OutOrStdout(), results)
+		if err := writeJSON(cmd.OutOrStdout(), results); err != nil {
+			return err
+		}
+		if resultsHaveFailure(results) {
+			return fmt.Errorf("one or more checks failed")
+		}
+		return nil
 	}
 
 	if err := printEnforceResults(cmd.OutOrStdout(), results); err != nil {
 		return err
 	}
 
-	// Check if any backend failed and return error for non-zero exit code
-	for _, result := range results.Backends {
-		if result.Status == "fail" {
-			return fmt.Errorf("one or more checks failed")
-		}
+	if resultsHaveFailure(results) {
+		return fmt.Errorf("one or more checks failed")
 	}
 
 	return nil
+}
+
+// resultsHaveFailure reports whether any backend ended in "fail" (a check
+// failed) or "error" (e.g. token resolution/verification blew up before
+// checks could even run) — both must produce a non-zero exit code per the
+// documented contract (docs/content/en/reference/cli.md, testcmd.go Long text).
+func resultsHaveFailure(results *testEnforceResults) bool {
+	for _, result := range results.Backends {
+		if result.Status == "fail" || result.Status == "error" {
+			return true
+		}
+	}
+	return false
 }
 
 type testEnforceResults struct {

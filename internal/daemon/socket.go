@@ -15,7 +15,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/evertramos/ezy-shield/internal/decision"
 	"github.com/evertramos/ezy-shield/internal/ownership"
+	"github.com/evertramos/ezy-shield/internal/store"
 	"github.com/evertramos/ezy-shield/pkg/sdk"
 )
 
@@ -179,14 +181,22 @@ func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
 		// Long-lived, read-only event stream; writes its own ack + events.
 		d.handleSubscribe(ctx, conn)
 		return
+	case "arm":
+		resp = d.handleArm(ctx, req)
+	case "arm_keep":
+		resp = d.handleArmKeep(ctx)
+	case "disarm":
+		resp = d.handleDisarm(ctx)
 	case "ban":
 		resp = d.handleBan(ctx, req)
 	case "unban":
 		resp = d.handleUnban(ctx, req)
 	case "allow":
 		resp = d.handleAllow(ctx, req)
+	case "unallow":
+		resp = d.handleUnallow(ctx, req)
 	default:
-		resp = SocketResponse{Error: fmt.Sprintf("unknown verb %q; valid: status list list_allow events subscribe report ban unban allow", req.Verb)}
+		resp = SocketResponse{Error: fmt.Sprintf("unknown verb %q; valid: status list list_allow events subscribe report arm arm_keep disarm ban unban allow unallow", req.Verb)}
 	}
 
 	writeResponse(conn, resp)
@@ -252,18 +262,34 @@ func (d *Daemon) handleSubscribe(ctx context.Context, conn net.Conn) {
 	}
 }
 
-// handleStatus returns daemon health and current ban count.
+// handleStatus returns daemon health and current ban count. Simulated
+// dry-run bans are reported separately from enforced ones — status must
+// never claim a simulated ban as active protection (ADR-0009 §5).
 func (d *Daemon) handleStatus(ctx context.Context) SocketResponse {
 	bans, err := d.store.ActiveBans(ctx)
 	if err != nil {
 		return SocketResponse{Error: fmt.Sprintf("active bans: %v", err)}
 	}
 
+	active, simulated := 0, 0
+	for _, b := range bans {
+		if b.Op == "dry_ban" {
+			simulated++
+		} else {
+			active++
+		}
+	}
+
+	enfState, enfDetail := d.enforcementState()
 	data := StatusData{
-		Uptime:     time.Since(d.startTime).Round(time.Second).String(),
-		Armed:      d.policy.Armed,
-		ActiveBans: len(bans),
-		Version:    d.version,
+		Uptime:            time.Since(d.startTime).Round(time.Second).String(),
+		Armed:             d.policy.IsArmed(),
+		EnforcementState:  string(enfState),
+		EnforcementDetail: enfDetail,
+		ActiveBans:        active,
+		SimulatedBans:     simulated,
+		ArmedUntil:        d.armedUntil(ctx),
+		Version:           d.version,
 	}
 	raw, _ := json.Marshal(data)
 	return SocketResponse{OK: true, Data: raw}
@@ -279,15 +305,25 @@ func (d *Daemon) handleList(ctx context.Context) SocketResponse {
 
 	entries := make([]BanEntry, 0, len(bans))
 	for _, b := range bans {
-		ttl := "permanent"
-		if b.TTL > 0 {
+		// "permanent" only for a genuine no-expiry ban. A remaining TTL of
+		// zero means expired — the store skips those, but render honestly if
+		// one ever slips through; never dress an expired ban as permanent
+		// (issue #279).
+		var ttl string
+		switch {
+		case b.Permanent:
+			ttl = "permanent"
+		case b.TTL > 0:
 			ttl = b.TTL.Round(time.Second).String()
+		default:
+			ttl = "expired"
 		}
 		e := BanEntry{
-			IP:     b.IP.String(),
-			TTL:    ttl,
-			Strike: b.Strike,
-			Reason: b.Reason,
+			IP:        b.IP.String(),
+			TTL:       ttl,
+			Strike:    b.Strike,
+			Reason:    b.Reason,
+			Simulated: b.Op == "dry_ban",
 		}
 		if d.enricher != nil {
 			enr := d.enricher.Lookup(b.IP)
@@ -300,8 +336,14 @@ func (d *Daemon) handleList(ctx context.Context) SocketResponse {
 	return SocketResponse{OK: true, Data: raw}
 }
 
-// handleBan manually bans an IP or CIDR, bypassing the rule engine.
-// The target is still checked against the allowlist in the enforcer.
+// handleBan manually bans an IP or CIDR. It bypasses the rule engine's
+// scoring, but NOT its safety guards: every manual ban passes the same
+// allowlist / anti-lockout / rate-limit gate as automatic decisions
+// (issue #211, decision.AuthorizeManualBan) plus the daemon's runtime
+// allowlist. Refusals are audited (op "ban_refused") and returned to the
+// CLI naming the guard that fired. There is no override — allowlist and
+// anti-lockout are hard rules, and the rate-limit knob is policy's
+// max_bans_per_minute.
 func (d *Daemon) handleBan(ctx context.Context, req SocketRequest) SocketResponse {
 	prefix, err := parseSocketTarget(req.IP)
 	if err != nil {
@@ -316,7 +358,24 @@ func (d *Daemon) handleBan(ctx context.Context, req SocketRequest) SocketRespons
 		}
 	}
 
-	if d.enforcer != nil && d.policy.Armed {
+	// ── Manual-ban guards (issue #211) ──────────────────────────────────
+	// Runtime allowlist (operator 'allow' entries) first — it lives in the
+	// daemon, outside the engine's static set.
+	if hit, entry := d.runtimeAllowlistOverlap(prefix); hit {
+		return d.refuseManualBan(ctx, prefix, ttl,
+			fmt.Sprintf("target %s overlaps runtime allowlist entry %s", prefix, entry))
+	}
+	// Engine guards: static allowlist/admin_cidrs, SSH-peer anti-lockout
+	// (daemon env + the CLI's own forwarded peer), shared ban rate limit.
+	var peers []netip.Addr
+	if p, perr := netip.ParseAddr(strings.TrimSpace(req.Peer)); perr == nil {
+		peers = append(peers, p)
+	}
+	if err := d.decEng.AuthorizeManualBan(ctx, prefix, peers...); err != nil {
+		return d.refuseManualBan(ctx, prefix, ttl, err.Error())
+	}
+
+	if d.enforcer != nil && d.policy.IsArmed() {
 		t := targetFromPrefix(prefix, ttl)
 		if err := d.enforcer.Ban(ctx, t); err != nil {
 			return SocketResponse{Error: fmt.Sprintf("enforcer ban: %v", err)}
@@ -324,7 +383,7 @@ func (d *Daemon) handleBan(ctx context.Context, req SocketRequest) SocketRespons
 	}
 
 	op := "ban"
-	if !d.policy.Armed {
+	if !d.policy.IsArmed() {
 		op = "dry_ban"
 	}
 
@@ -349,7 +408,7 @@ func (d *Daemon) handleBan(ctx context.Context, req SocketRequest) SocketRespons
 	// the audit-fallback ERROR-log branch already surfaces the failure, and a
 	// duplicate INFO there would falsely suggest the action was recorded.
 	stored := false
-	if prefix.Bits() == prefix.Addr().BitLen() && d.policy.Armed {
+	if prefix.Bits() == prefix.Addr().BitLen() && d.policy.IsArmed() {
 		if err := d.store.RecordManualBan(ctx, prefix.Addr(), ttl, reason); err != nil {
 			slog.ErrorContext(ctx, "daemon: record manual ban failed, falling back to audit-only",
 				"ip", prefix.Addr(), "err", err)
@@ -382,6 +441,19 @@ func (d *Daemon) handleBan(ctx context.Context, req SocketRequest) SocketRespons
 	d.publishActionEvent(op, prefixDisplay(prefix), 0, ttl, reason, "cli")
 
 	return SocketResponse{OK: true}
+}
+
+// refuseManualBan audits and reports a manual ban blocked by a safety
+// guard (issue #211). The refusal is recorded in the append-only audit_log
+// (op "ban_refused", reason names the guard) and published on the event
+// stream, then returned as a clear error to the CLI.
+func (d *Daemon) refuseManualBan(ctx context.Context, prefix netip.Prefix, ttl time.Duration, reason string) SocketResponse {
+	slog.WarnContext(ctx, "daemon: manual ban refused", "prefix", prefix, "reason", reason)
+	if err := d.store.AuditOp(ctx, "ban_refused", prefix, ttl, reason); err != nil {
+		slog.ErrorContext(ctx, "daemon: audit ban_refused", "prefix", prefix, "err", err)
+	}
+	d.publishActionEvent("ban_refused", prefixDisplay(prefix), 0, ttl, reason, "cli")
+	return SocketResponse{Error: "refusing manual ban: " + reason}
 }
 
 // handleUnban removes a single IP or every IP within a CIDR from the ban set
@@ -514,6 +586,68 @@ func (d *Daemon) handleAllow(ctx context.Context, req SocketRequest) SocketRespo
 	return SocketResponse{OK: true}
 }
 
+// handleUnallow removes prefix from the persistent runtime allowlist,
+// refreshes the daemon's in-memory allowlist, and drops the entry from the
+// enforcer's @allowed set (issue #330). This does not weaken Hard Rule 1 —
+// "allowlist always wins" applies to entries that exist; removal is the
+// explicit operator action the allow help text promises ("permanent until
+// explicitly removed"). Only store-owned runtime entries are removable:
+// config-file allowlist entries survive reloadAllowlist untouched.
+func (d *Daemon) handleUnallow(ctx context.Context, req SocketRequest) SocketResponse {
+	prefix, err := parseSocketTarget(req.IP)
+	if err != nil {
+		return SocketResponse{Error: err.Error()}
+	}
+	prefix = prefix.Masked()
+
+	removed, err := d.store.RemoveAllow(ctx, prefix)
+	if err != nil {
+		return SocketResponse{Error: fmt.Sprintf("store remove allow: %v", err)}
+	}
+	if removed == 0 {
+		return SocketResponse{Error: fmt.Sprintf("%s is not in the runtime allowlist (the target must match the stored entry exactly; config-file entries cannot be removed at runtime)", prefixDisplay(prefix))}
+	}
+
+	if err := d.store.AuditOp(ctx, "unallow", prefix, 0, req.Reason); err != nil {
+		slog.ErrorContext(ctx, "daemon: audit unallow", "prefix", prefix, "err", err)
+	}
+
+	if err := d.reloadAllowlist(ctx); err != nil {
+		slog.ErrorContext(ctx, "daemon: reload allowlist after remove", "err", err)
+	}
+
+	// Mirror of the handleAllow push, but as a full re-sync: recompute the
+	// exact static ∪ runtime union and push it via SyncAllowlist — the same
+	// primitive the startup path and the expiry sweep use. A targeted
+	// syncer.Unallow(prefix) guarded by an Overlaps check was wrong for the
+	// containment case (issue #404, review of PR #398): a static /32 inside a
+	// runtime-allowed /24 made the guard skip the removal, leaving the whole
+	// /24 in @allowed until restart. Re-syncing keeps every prefix the static
+	// policy (policy.Allowlist / admin_cidrs) still requires — anti-lockout,
+	// Hard Rule 1 — while dropping exactly what nothing requires any more.
+	// Failure is not fatal for the same reason as in handleAllow: a stale
+	// extra @allowed entry only over-protects until the next reconcile.
+	if err := d.syncEnforcerAllowlist(ctx); err != nil {
+		slog.ErrorContext(ctx, "daemon: enforcer allowlist re-sync after unallow failed",
+			"prefix", prefix, "err", err)
+	}
+
+	slog.InfoContext(ctx, "daemon: runtime allowlist updated",
+		"prefix", prefix, "removed", removed, "reason", req.Reason)
+
+	slog.InfoContext(ctx, "daemon: action",
+		"op", "unallow",
+		"ip", prefix.String(),
+		"ttl", time.Duration(0),
+		"reason", req.Reason,
+		"source", "cli",
+	)
+
+	d.publishActionEvent("unallow", prefixDisplay(prefix), 0, 0, req.Reason, "cli")
+
+	return SocketResponse{OK: true}
+}
+
 // handleEvents returns the last N audit_log rows in reverse chronological
 // order. It is read-only; the append-only invariant on audit_log is
 // unaffected. Limit defaults to 100 and is capped at 1000 by the store.
@@ -522,7 +656,23 @@ func (d *Daemon) handleEvents(ctx context.Context, req SocketRequest) SocketResp
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := d.store.ListAuditLog(ctx, limit)
+	var (
+		rows []store.AuditEntry
+		err  error
+	)
+	if req.IP != "" {
+		// --ip filter: exact-match a single address. AuditLogForIP matches the
+		// ip column literally, so only a bare address is meaningful here — rows
+		// recorded against a CIDR prefix target a range, not one host.
+		addr, perr := netip.ParseAddr(req.IP)
+		if perr != nil {
+			return SocketResponse{Error: fmt.Sprintf("events: invalid ip %q: expected a bare address", req.IP)}
+		}
+		addr = addr.Unmap()
+		rows, err = d.store.AuditLogForIP(ctx, addr, limit)
+	} else {
+		rows, err = d.store.ListAuditLog(ctx, limit)
+	}
 	if err != nil {
 		return SocketResponse{Error: fmt.Sprintf("list audit_log: %v", err)}
 	}
@@ -582,17 +732,27 @@ func formatExpires(t time.Time, now time.Time) string {
 
 // parseSocketTarget accepts a bare IP ("1.2.3.4") or a CIDR ("10.0.0.0/8")
 // and returns the equivalent netip.Prefix (single hosts become /32 or /128).
+//
+// IPv4-mapped IPv6 spellings ("::ffff:a.b.c.d") that operators copy from
+// dual-stack logs are canonicalized to plain IPv4 here, at the input
+// boundary, so every downstream consumer sees one identity per address:
+// the runtime-allowlist overlap check in handleBan (which runs before the
+// engine's guards and would otherwise miss the mapped spelling of a
+// protected IP), store keys, enforcer targets, and the matching
+// unban/allow spellings (issue #314, PR #364 review). Mapped super-prefixes
+// broader than /96 have no IPv4 equivalent and are rejected.
 func parseSocketTarget(s string) (netip.Prefix, error) {
 	if s == "" {
 		return netip.Prefix{}, fmt.Errorf("ip or cidr is required")
 	}
 	if p, err := netip.ParsePrefix(s); err == nil {
-		return p, nil
+		return decision.NormalizePrefix(p)
 	}
 	a, err := netip.ParseAddr(s)
 	if err != nil {
 		return netip.Prefix{}, fmt.Errorf("invalid ip or cidr %q", s)
 	}
+	a = a.Unmap()
 	return netip.PrefixFrom(a, a.BitLen()), nil
 }
 

@@ -6,17 +6,34 @@ package config
 import (
 	"fmt"
 	"io"
+	"net"
+	"net/netip"
 	"os"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/evertramos/ezy-shield/internal/nftnames"
 )
+
+// DefaultRulesDir is the drop-in overlay directory scanned for rule
+// customizations (*.yaml, lexical order) when rules_dir is not set in
+// config.yaml. See internal/rules.New for the layering semantics.
+const DefaultRulesDir = "/etc/ezyshield/rules.d"
 
 // Config holds the main runtime configuration loaded from config.yaml.
 // No secrets appear here; credential fields use SecretRef.
 type Config struct {
-	DataDir    string         `yaml:"data_dir"`
-	SocketPath string         `yaml:"socket_path"`
-	RulesPath  string         `yaml:"rules_path"`
+	DataDir    string `yaml:"data_dir"`
+	SocketPath string `yaml:"socket_path"`
+	// RulesPath is the DEPRECATED whole-file rule replacement: when set,
+	// the file replaces the embedded base entirely and rules.d drop-ins
+	// are ignored — the install stops receiving upstream rule tuning.
+	// Prefer RulesDir drop-ins.
+	RulesPath string `yaml:"rules_path"`
+	// RulesDir overrides the rules.d drop-in directory (default
+	// DefaultRulesDir). Drop-ins merge over the embedded base by rule
+	// name and survive binary updates.
+	RulesDir   string         `yaml:"rules_dir"`
 	Log        LogConfig      `yaml:"log"`
 	Collectors []CollectorCfg `yaml:"collectors"`
 	Enforce    *EnforceCfg    `yaml:"enforce"`
@@ -274,11 +291,32 @@ func LoadConfigReader(r io.Reader, name string) (*Config, error) {
 	if err := decodeStrict(r, name, &cfg); err != nil {
 		return nil, err
 	}
+	// Default the AI band before validation: [0, 0] (omitted — or explicit
+	// zeros, indistinguishable in YAML) becomes DefaultAmbiguousBand, the
+	// same zeros-are-defaulted convention the policy loader uses. Any other
+	// degenerate band is an explicit operator mistake and is rejected by
+	// validateAI (issue #324).
+	if cfg.AI != nil && cfg.AI.AmbiguousBand == [2]int{0, 0} {
+		cfg.AI.AmbiguousBand = DefaultAmbiguousBand
+	}
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validating %s: %w", name, err)
 	}
+	// Default the rules.d overlay dir here (not in the daemon) so directly
+	// constructed Configs in tests opt in explicitly, while every loaded
+	// production config gets the overlay. The legacy exclusive rules_path,
+	// when set, disables the overlay entirely inside rules.New.
+	if cfg.RulesDir == "" {
+		cfg.RulesDir = DefaultRulesDir
+	}
 	return &cfg, nil
 }
+
+// DefaultAmbiguousBand is applied when ai is configured but ambiguous_band is
+// omitted. It matches the value `ezyshield init` writes: scores in [30, 75]
+// consult the AI. Without a valid band the daemon silently never calls the
+// configured provider (issue #324).
+var DefaultAmbiguousBand = [2]int{30, 75}
 
 var validLogLevels = map[string]bool{
 	"debug": true, "info": true, "warn": true, "error": true,
@@ -325,6 +363,34 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("enrich: %w", err)
 		}
 	}
+	if c.Dashboard != nil && c.Dashboard.Addr != "" {
+		if err := validateLoopbackAddr(c.Dashboard.Addr); err != nil {
+			return fmt.Errorf("dashboard: %w", err)
+		}
+	}
+	return nil
+}
+
+// validateLoopbackAddr mirrors the dashboard's own startup check
+// (internal/dashboard checkLoopback, Hard Rule 2: dashboard = 127.0.0.1 only)
+// so `config validate` rejects a non-loopback addr instead of blessing a
+// config the dashboard will refuse at boot (issue #324). AuthDBPath needs no
+// static check — empty means the documented <data_dir>/dashboard.db default.
+func validateLoopbackAddr(addr string) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("addr %q: %w", addr, err)
+	}
+	if host == "localhost" {
+		return nil
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return fmt.Errorf("addr %q: host must be a loopback IP or \"localhost\"", addr)
+	}
+	if !ip.IsLoopback() {
+		return fmt.Errorf("addr %q: refusing non-loopback bind; dashboard is localhost-only", addr)
+	}
 	return nil
 }
 
@@ -359,6 +425,17 @@ func validateAI(ai *AICfg) error {
 		}
 		if p.Priority < 0 {
 			return fmt.Errorf("ai.providers[%d]: priority must be >= 0", i)
+		}
+	}
+	// With a provider configured, the band decides whether AI ever runs: the
+	// daemon consults AI only for scores inside [low, high] and treats
+	// low >= high as "disabled". An omitted or reversed band therefore
+	// silently turns the configured provider off (issue #324) — fail closed
+	// here instead.
+	if ai.Provider != "" || len(ai.Providers) > 0 {
+		lo, hi := ai.AmbiguousBand[0], ai.AmbiguousBand[1]
+		if lo < 0 || hi > 100 || lo >= hi {
+			return fmt.Errorf("ambiguous_band: want [low, high] with 0 <= low < high <= 100, got [%d, %d] — scores in this band consult the AI; an empty or reversed band silently disables the configured provider", lo, hi)
 		}
 	}
 	return nil
@@ -523,12 +600,13 @@ func validateCFListName(name string) error {
 	return nil
 }
 
+// validateNFTables format-checks the optional table/set names (issue #268).
+// Empty values are valid — the enforcer defaults to "inet ezyshield" /
+// "blocked". Non-empty values must pass the strict identifier rules in
+// internal/nftnames; the privileged helper re-validates independently.
 func validateNFTables(n NFTablesCfg) error {
-	if n.Table == "" {
-		return fmt.Errorf("'table' is required")
-	}
-	if n.Set == "" {
-		return fmt.Errorf("'set' is required")
+	if _, err := nftnames.Resolve(n.Table, n.Set); err != nil {
+		return err
 	}
 	return nil
 }
@@ -549,6 +627,11 @@ func validateNotify(n *NotifyCfg) error {
 		return fmt.Errorf("dedup_window_sec must be ≥ 0")
 	}
 	if t := n.Telegram; t != nil {
+		// The daemon unconditionally resolves the token at startup, so an
+		// unset ref must fail here, not at boot (issue #324).
+		if !t.BotToken.IsSet() {
+			return fmt.Errorf("telegram: 'bot_token' is required")
+		}
 		if len(t.ChatIDs) == 0 {
 			return fmt.Errorf("telegram: at least one chat_id is required")
 		}
@@ -573,6 +656,10 @@ func validateNotify(n *NotifyCfg) error {
 		}
 		if e.TLS != "" && !validTLSModes[e.TLS] {
 			return fmt.Errorf("email: tls %q is not one of starttls|tls|none", e.TLS)
+		}
+		// Same startup contract as the telegram token (issue #324).
+		if !e.Password.IsSet() {
+			return fmt.Errorf("email: 'password' is required")
 		}
 		for i, s := range e.Severity {
 			if !validSeverities[s] {

@@ -27,8 +27,10 @@ Coloque o EzyShield rodando no seu servidor em menos de 5 minutos.
 curl -sfL https://get.ezyshield.com | sudo sh
 ```
 
-Isso baixa os binários assinados mais recentes (`ezyshield` e `ezyshield-enforcer`),
-verifica checksums e instala em `/usr/local/bin/`.
+Isso baixa os binários mais recentes `ezyshield` e `ezyshield-enforcer`,
+verifica a assinatura cosign do checksum quando o `cosign` está instalado
+(caindo para uma verificação de checksum SHA-256 simples caso contrário),
+e os instala.
 
 Para instalar uma versão específica:
 
@@ -38,7 +40,7 @@ curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=v0.1.0 sh
 
 ### Build from source
 
-Requer **Go 1.24+**.
+Requer **Go 1.26+**.
 
 ```bash
 git clone https://github.com/evertramos/ezy-shield.git
@@ -71,7 +73,7 @@ Isso cria:
 
 - `/etc/ezyshield/config.yaml`
 - `/etc/ezyshield/policy.yaml`
-- `/etc/ezyshield/rules.yaml` (quando containers WordPress são detectados)
+- `/etc/ezyshield/rules.d/` (customizações de regras via drop-in; instalações WordPress também recebem um template de tuning comentado `10-wordpress.yaml`)
 - `/etc/ezyshield/.env` (chave de API do AI, modo 0600)
 - `/etc/systemd/system/ezyshield.service.d/env.conf` (drop-in systemd)
 - `/var/lib/ezyshield/` (dados de runtime, SQLite)
@@ -106,11 +108,13 @@ sudo ezyshield doctor
 Saída esperada:
 
 ```
-✓ config.yaml válido
-✓ policy.yaml válido
-✓ rules.yaml válido
-✓ nftables acessível
-✓ diretório de dados gravável
+[PASS] config.yaml: exists
+[PASS] config.yaml: parses
+[PASS] policy.yaml: exists
+[PASS] policy.yaml: parses
+[PASS] nft: binary present
+[PASS] journald: readable
+[PASS] enforcer: socket connectivity
 ```
 
 ---
@@ -144,9 +148,12 @@ enforce:
 ```
 
 O helper privilegiado (`ezyshield-enforcer`) lida com todas as escritas no
-firewall via unix socket. Se o socket não estiver disponível no startup, os
-bans ficam na fila no SQLite e são aplicados automaticamente quando o helper
-subir.
+firewall via unix socket. O daemon re-sincroniza o conjunto completo de bans
+para o enforcer sempre que o **daemon** reinicia, então os bans sobrevivem a
+reinícios do daemon. Reiniciar apenas o helper `ezyshield-enforcer` não
+dispara essa re-sincronização por si só — o conjunto de bans se atualiza no
+próximo ciclo periódico de expiração de bans, ou no próximo reinício do
+daemon.
 
 ### AI (opcional)
 
@@ -212,9 +219,13 @@ max_bans_per_minute: 30 # segurança: pausa enforcement se exceder
 
 ---
 
-## 6. Regras customizadas — rules.yaml
+## 6. Regras customizadas — drop-ins em rules.d
 
-Arquivo em `/etc/ezyshield/rules.yaml`. Define regras de detecção.
+As regras de detecção são embutidas no binário e atualizam com ele. Para
+ajustar ou adicionar regras, coloque um arquivo `*.yaml` em
+`/etc/ezyshield/rules.d/` — as entradas fazem merge sobre as regras
+embutidas por `name` e sobrevivem a updates. Guia completo:
+[Customizando Regras de Detecção](../guides/rules-customization.md).
 
 ### Estrutura de uma regra
 
@@ -243,6 +254,13 @@ rules:
 | `field`      | Campo do evento para filtro (opcional)   |
 | `value`      | Valor exato do campo (opcional)          |
 | `contains`   | Match de substring (opcional)            |
+| `contains_any` | Match de substring qualquer-um (opcional) |
+
+`field` e um matcher (`value`, `contains` ou `contains_any` — mutuamente
+exclusivos) só funcionam em par: uma regra que define um sem o outro é
+rejeitada no carregamento. Sem essa checagem de par, um matcher sozinho
+contaria todo evento dos kinds listados, e um `field` sozinho nunca
+dispararia.
 
 ### Exemplo: bloquear scanners de API
 
@@ -258,8 +276,10 @@ rules:
     category: scanner
 ```
 
-> **Nota**: O arquivo de regras customizadas substitui os padrões por completo.
-> Copie as regras built-in que deseja manter.
+> **Nota**: Um drop-in só toca as regras que ele nomeia — todo o resto
+> continua recebendo updates do binário. Um drop-in inválido impede o daemon
+> de iniciar (fail-closed). O `rules_path` legado (substituição do arquivo
+> inteiro) está deprecated.
 
 ---
 
@@ -317,7 +337,9 @@ sudo ezyshield test notifier email
 sudo ezyshield run
 ```
 
-Enquanto `armed: false`, o EzyShield opera em **dry-run**: processa tudo e
+Enquanto `armed: false`, o EzyShield opera em **dry-run**: processa tudo,
+registra strikes e bans simulados para que a escalada espelhe a produção
+exatamente (ADR-0009), e
 registra o que *seria* bloqueado, sem tocar no firewall.
 
 ### Como serviço (systemd)
@@ -334,4 +356,4 @@ sudo systemctl enable --now ezyshield
 3. ✅ `admin_cidrs` com seu IP SSH
 4. ✅ Notificações testadas com `test notifier`
 5. ✅ Rodou em dry-run, revisou os logs
-6. ⬜ Definir `armed: true` no `policy.yaml`
+6. ⬜ Rodar `sudo ezyshield arm --for 1h` (pre-flight + janela de auto-reversão), depois `sudo ezyshield arm --keep` quando estiver confiante

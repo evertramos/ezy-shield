@@ -75,3 +75,52 @@ func runAllow(cmd *cobra.Command, socketPath, target, forDur, until, reason stri
 	_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s added to allowlist%s\n", target, suffix)
 	return err
 }
+
+func newUnallowCmd() *cobra.Command {
+	var (
+		socketPath string
+		reason     string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "unallow <ip|cidr>",
+		Short: "Remove an IP or CIDR from the daemon's runtime allowlist",
+		Long: `Remove an entry previously added with "allow" from the daemon's
+persistent runtime allowlist.
+
+The target must match the stored entry exactly (the same IP or CIDR that was
+allowed). Entries from the static config allowlist cannot be removed at
+runtime — edit the config and restart the daemon instead.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validateTarget(args[0]); err != nil {
+				return err
+			}
+			return runUnallow(cmd, socketPath, args[0], reason)
+		},
+	}
+
+	cmd.Flags().StringVar(&socketPath, "socket", daemon.DefaultSocketPath,
+		"path to daemon control socket")
+	cmd.Flags().StringVar(&reason, "reason", "",
+		"free-text note, recorded in the audit log")
+
+	return cmd
+}
+
+func runUnallow(cmd *cobra.Command, socketPath, target, reason string) error {
+	resp, err := daemonRPC(context.Background(), socketPath,
+		daemon.SocketRequest{
+			Verb:   "unallow",
+			IP:     target,
+			Reason: reason,
+		})
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return writeJSON(cmd.OutOrStdout(), resp)
+	}
+	_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s removed from allowlist\n", target)
+	return err
+}

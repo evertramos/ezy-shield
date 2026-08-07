@@ -27,8 +27,10 @@ Get EzyShield running on your server in under 5 minutes.
 curl -sfL https://get.ezyshield.com | sudo sh
 ```
 
-This downloads the latest signed binaries (`ezyshield` and `ezyshield-enforcer`),
-verifies checksums, and installs them to `/usr/local/bin/`.
+This downloads the latest `ezyshield` and `ezyshield-enforcer` binaries,
+verifies their checksum's cosign signature when `cosign` is installed
+(falling back to a plain SHA-256 checksum check otherwise), and installs
+them.
 
 To install a specific version:
 
@@ -71,7 +73,7 @@ This creates:
 
 - `/etc/ezyshield/config.yaml`
 - `/etc/ezyshield/policy.yaml`
-- `/etc/ezyshield/rules.yaml` (when WordPress containers are detected)
+- `/etc/ezyshield/rules.d/` (drop-in rule customizations; WordPress installs also get a commented tuning template `10-wordpress.yaml`)
 - `/etc/ezyshield/.env` (AI API key, mode 0600)
 - `/etc/systemd/system/ezyshield.service.d/env.conf` (systemd drop-in)
 - `/var/lib/ezyshield/` (runtime data, SQLite)
@@ -109,9 +111,9 @@ Expected output:
 [PASS] config.yaml: parses
 [PASS] policy.yaml: exists
 [PASS] policy.yaml: parses
-[PASS] nft binary: present
+[PASS] nft: binary present
 [PASS] journald: readable
-[PASS] enforcer socket: reachable
+[PASS] enforcer: socket connectivity
 ```
 
 ---
@@ -145,8 +147,11 @@ enforce:
 ```
 
 The privileged helper (`ezyshield-enforcer`) handles all firewall writes via a
-unix socket. The daemon re-syncs the full ban set to the enforcer at startup,
-so blocks survive restarts of either process.
+unix socket. The daemon re-syncs the full ban set to the enforcer whenever the
+**daemon** restarts, so blocks survive daemon restarts. Restarting only the
+`ezyshield-enforcer` helper does not trigger that re-sync on its own — the ban
+set catches up on the next periodic ban-expiry tick, or the next daemon
+restart.
 
 ### AI (optional)
 
@@ -212,9 +217,12 @@ max_bans_per_minute: 30 # safety: pause enforcement if exceeded
 
 ---
 
-## 6. Custom rules — rules.yaml
+## 6. Custom rules — rules.d drop-ins
 
-File at `/etc/ezyshield/rules.yaml`. Defines detection rules.
+The detection rules are embedded in the binary and update with it. To tune
+or add rules, drop a `*.yaml` file in `/etc/ezyshield/rules.d/` — entries
+merge over the built-in rules by `name` and survive updates. Full guide:
+[Customizing Detection Rules](../guides/rules-customization.md).
 
 ### Rule structure
 
@@ -243,6 +251,12 @@ rules:
 | `field`      | Event field to filter (optional)         |
 | `value`      | Exact field value (optional)             |
 | `contains`   | Substring match (optional)               |
+| `contains_any` | Any-of substring match (optional)      |
+
+`field` and a matcher (`value`, `contains`, or `contains_any` — mutually
+exclusive) only work as a pair: a rule that sets one without the other is
+rejected at load time. Without the pairing check, a matcher alone would count
+every event of the listed kinds, and a `field` alone would never fire.
 
 ### Example: block API scanners
 
@@ -258,8 +272,10 @@ rules:
     category: scanner
 ```
 
-> **Note**: A custom rules file replaces the defaults entirely. Copy any
-> built-in rules you want to keep.
+> **Note**: A drop-in only touches the rules it names — everything else
+> keeps riding binary updates. An invalid drop-in stops the daemon from
+> starting (fail-closed). The legacy `rules_path` (whole-file replacement)
+> is deprecated.
 
 ---
 
@@ -317,8 +333,10 @@ sudo ezyshield test notifier email
 sudo ezyshield run
 ```
 
-While `armed: false`, EzyShield runs in **dry-run**: it processes everything and
-logs what *would* be blocked, without touching the firewall.
+While `armed: false`, EzyShield runs in **dry-run**: it processes everything,
+records strikes and simulated bans so escalation mirrors production exactly
+(ADR-0009), and logs what *would* be blocked — without ever touching the
+firewall.
 
 ### As a systemd service
 
@@ -334,4 +352,4 @@ sudo systemctl enable --now ezyshield
 3. ✅ `admin_cidrs` includes your SSH IP
 4. ✅ Notifications tested with `test notifier`
 5. ✅ Ran in dry-run, reviewed the logs
-6. ⬜ Set `armed: true` in `policy.yaml`
+6. ⬜ Run `sudo ezyshield arm --for 1h` (pre-flight + auto-revert window), then `sudo ezyshield arm --keep` once you're confident

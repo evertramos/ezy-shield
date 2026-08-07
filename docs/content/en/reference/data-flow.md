@@ -33,7 +33,7 @@ These only happen while the daemon runs, and only if you enabled the feature.
 | AI verdicts (Anthropic) | `api.anthropic.com` (fixed) | An aggregate scores in the ambiguous band — obvious cases never leave the rule engine | Per-IP summary only: attacker IP, time window, event counts by kind, and GeoIP/ASN metadata if configured. **Raw log lines are excluded by design** — no usernames, paths, or user agents. API key travels in the `x-api-key` header only | Omit the `ai:` section |
 | AI verdicts (OpenAI) | `api.openai.com` (fixed) | Same as above | Same payload shape; key in the `Authorization` header | Omit the `ai:` section |
 | AI verdicts (Ollama) | `http://localhost:11434` by default — leaves the machine only if you point `endpoint` at a remote host | Same as above | Same payload shape; no API key | Omit the `ai:` section |
-| Cloudflare edge enforcement | `api.cloudflare.com` | A real ban/unban while **armed**, plus periodic reconcile (`Sync`). In dry-run (`armed: false`) no enforcer call is made at all | The banned IP address and a fixed `ezyshield` comment tag. **No domains, no rule names, no log content.** Account ID in the URL, token in the header | Don't configure the `cloudflare` enforcer |
+| Cloudflare edge enforcement | `api.cloudflare.com` | A real ban/unban while **armed**, plus the periodic reconcile (`Sync`) at daemon startup and every 5 minutes. The reconcile runs **regardless of `armed`**, so even in dry-run (`armed: false`) the enforcer makes outbound calls (list discovery + membership reconcile); only the per-decision ban/unban push is withheld while disarmed | The banned IP address and a fixed `ezyshield` comment tag. **No domains, no rule names, no log content.** Account ID in the URL, token in the header | Don't configure the `cloudflare` enforcer |
 | GeoIP/ASN database updates | `download.maxmind.com` | Only when a MaxMind license key is configured: at startup if a database file is missing, then weekly | The license key and the edition name (`GeoLite2-Country` / `GeoLite2-ASN`) as request parameters — nothing about your server or traffic. **Lookups themselves are local** (`.mmdb` files on disk) | Don't configure a license key (skip `ezyshield config enrich maxmind`) |
 | Notifications — Telegram | `api.telegram.org` | A notifiable event (ban, critical error), per your `notify:` config, after dedup/rate limiting | Structured alert fields: severity, title, a short summary, and the triggering action (operation, IP, reason, TTL). Length-capped and escaped; **no raw log lines** | Omit the notifier |
 | Notifications — Slack / Discord / webhook | The webhook URL **you** configure | Same | Same fields as JSON | Omit the notifier |
@@ -62,6 +62,10 @@ These happen interactively, never from the daemon:
 - **`ezyshield config enforcer cloudflare` / `ezyshield test enforce
   cloudflare`** — token verification and connectivity checks against
   `api.cloudflare.com`.
+- **`ezyshield doctor`** — when a Cloudflare enforcer is configured, runs
+  read-only capability checks against `api.cloudflare.com` (token resolves and
+  is valid, the target list exists, WAF/rate-limit quota) with an 8-second
+  timeout. With no Cloudflare enforcer configured it makes no outbound call.
 
 ## What never leaves the machine
 
@@ -141,6 +145,7 @@ Every connection above maps to one implementation file:
 | `ezyshield update` | `internal/update/client.go`, `cmd/ezyshield/update.go` |
 | `init` public-IP lookup | `cmd/ezyshield/init.go` |
 | Cloudflare wizard/test calls | `cmd/ezyshield/init_cdn.go`, `cmd/ezyshield/testenforce.go` |
+| `ezyshield doctor` Cloudflare checks | `cmd/ezyshield/doctor.go` (`checkCloudflareEnforcers`) |
 | Local evidence extraction | `internal/daemon/evidence_ondemand.go` |
 
 A quick audit that the list is complete:

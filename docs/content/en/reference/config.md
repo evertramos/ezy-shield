@@ -14,16 +14,26 @@ Complete reference for `/etc/ezyshield/config.yaml` — log sources, enforcement
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `data_dir` | string | `/var/lib/ezyshield` | State directory; the SQLite database lives at `<data_dir>/ezyshield.db` |
-| `socket_path` | string | `/run/ezyshield/ezyshield.sock` | Daemon control socket (unix socket — there is never a TCP listener for control) |
-| `rules_path` | string | — | Optional path to a custom `rules.yaml` (defaults to the rules embedded in the binary) |
+| `data_dir` | string | `/var/lib/ezyshield` | **Required** (`config validate` rejects an empty value). State directory for the **`dashboard`** command — its auth database is `<data_dir>/dashboard.db`. It does **not** set the daemon's SQLite database path: that is the `run --db` flag (default `/var/lib/ezyshield/ezyshield.db`). |
+| `socket_path` | string | `/run/ezyshield/ezyshield.sock` | Control-socket path the **`dashboard`** connects to (unix socket — there is never a TCP listener for control). It does **not** set the daemon's socket: the daemon binds the `run --socket` flag (default `/run/ezyshield/ezyshield.sock`), so a custom value must match `run --socket` or the dashboard points at a socket the daemon never creates. |
+| `rules_dir` | string | `/etc/ezyshield/rules.d` | Drop-in rule customizations: every `*.yaml` here merges over the built-in rules by `name` and survives updates (see the [rules guide](../guides/rules-customization.md)) |
+| `rules_path` | string | — | **Deprecated.** Replaces the built-in rules entirely (no merge; `rules.d` ignored) — freezes the install out of upstream rule tuning |
 | `log.level` | string | `info` | `debug` \| `info` \| `warn` \| `error` |
-| `collectors` | list | `[]` | Log sources to tail (see below) |
+| `collectors` | list | `[]` | Log sources to tail (see below). An empty list is valid — `config validate` warns and the daemon simply tails nothing. |
 | `enforce` | object | — | Enforcement backends (optional — without it, decisions are log-only) |
 | `notify` | object | — | Notification channels (optional) |
 | `ai` | object | — | AI provider for ambiguous traffic (optional) |
 | `enrich` | object | — | GeoIP/ASN enrichment (optional) |
 | `dashboard` | object | — | Dashboard bind address and auth DB (optional) |
+
+> **The daemon ignores `data_dir` and `socket_path`; the `dashboard` command
+> consumes them** (and `data_dir` is additionally required by `config validate`).
+> The daemon (`ezyshield run`) takes its database path and control socket from
+> its own `--db` and `--socket` flags (defaults `/var/lib/ezyshield/ezyshield.db`
+> and `/run/ezyshield/ezyshield.sock`) and does not read these two keys. Setting
+> them in `config.yaml` moves the dashboard's auth DB and its connection target,
+> not the daemon's files — so keep `socket_path` in step with `run --socket`.
+> See the [CLI reference](cli.md) for the `run` and `dashboard` flags.
 
 ## collectors
 
@@ -48,15 +58,39 @@ collectors:
 | `path` | for `file` | file to tail |
 | `unit` | for `journald` | systemd unit to follow |
 | `container` | for `docker` | container name, short ID, or full ID |
-| `parser` | no | force a parser: `nginx` \| `ssh` \| `apache` \| `apache-error` \| `traefik` \| `caddy` (default: routed automatically from the source) |
+| `parser` | no | force a parser: `nginx` \| `ssh` \| `apache` \| `apache-error` \| `traefik` \| `caddy` (default: routed automatically from the source). **Honored only for `file` and `docker` collectors** — `journald` ignores it and always routes its parser from the unit. |
+
+### SSH collector (unit name varies by distro)
+
+The SSH systemd unit name **depends on the distro**: it's `ssh` on
+Debian/Ubuntu and `sshd` on RHEL/CentOS/Fedora/Rocky/Alma, Arch, and
+SUSE. Use whatever name `systemctl status <unit>` resolves on your
+host — an alias that `journalctl -u` doesn't recognize collects zero
+events.
+
+```yaml
+collectors:
+  - kind: journald
+    unit: ssh    # Debian/Ubuntu; use "sshd" on RHEL/CentOS/Arch/SUSE
+```
+
+To read SSH from a file instead of journald, point at your distro's
+auth log — `/var/log/auth.log` (Debian/Ubuntu) or `/var/log/secure`
+(RHEL family). Both timestamp formats are accepted: the legacy syslog
+format (`Jan  1 12:00:00`) and modern ISO-8601
+(`2026-07-13T22:57:35+00:00`).
+
+> **Configure only one SSH collector per host** — journald **or** the
+> file it feeds, never both. Reading both ingests every event twice,
+> which double-counts toward detection thresholds. (An already-banned
+> IP is never banned again, so this never causes duplicate bans, only
+> earlier detection.)
 
 ## enforce
 
 ```yaml
 enforce:
-  nftables:
-    table: ezyshield             # default
-    set: banned                  # default
+  nftables: {}                   # local enforcement on; defaults are fine
 
   cloudflare:
     api_token: env:CF_API_TOKEN  # secrets are env: references, never inline
@@ -71,9 +105,21 @@ enforce:
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `table` | `ezyshield` | nftables table (all EzyShield rules live inside it) |
-| `set` | `banned` | set holding banned addresses |
+| `table` | `inet ezyshield` | nftables table (all EzyShield rules live inside it). `<name>` or `inet <name>`; the `inet` family is the only one supported (dual-stack v4+v6 layout). Names: letters, digits, underscore |
+| `set` | `blocked` | set holding banned IPv4 addresses; the IPv6 twin is derived automatically as `<set>6` (default `blocked6`). `allowed`/`allowed6` are reserved for the allowlist sets |
 | `socket` | `/run/ezyshield-enforcer/enforcer.sock` | privileged enforcer helper socket |
+
+Both are optional and genuinely honored: the daemon passes them to the
+privileged enforcer, which re-validates them independently before any rule
+is written. Two operational notes for custom names:
+
+- The enforcer must support them (same version as the daemon). Against an
+  older `ezyshield-enforcer`, the daemon refuses to enforce with a clear
+  error instead of silently using the defaults.
+- The enforcer applies one name set per run. After changing `table`/`set`,
+  restart both services (`sudo systemctl restart ezyshield-enforcer
+  ezyshield`); a previous table left behind by a rename can be removed with
+  `nft delete table inet <old-name>`.
 
 ### cloudflare
 
@@ -125,7 +171,9 @@ notify:
 
 Shared fields: `rate_limit_per_minute` (default 5) and `dedup_window_sec` (default 600) protect against notification storms. Every channel accepts an optional `severity` list (`info` \| `warn` \| `critical`).
 
-> Secret-typed fields (`bot_token`, `password`, `webhook_url`, webhook `url`) only accept `env:VARNAME` references — inline values are rejected at load time. Webhook header **values** are sent verbatim unless the entire value is an `env:` reference, which is resolved.
+> Secret-typed fields (`bot_token`, `password`, `webhook_url`, webhook `url`) only accept `env:VARNAME` references — inline values are rejected at load time. They are also **required** for their channel: a `telegram` block without `bot_token`, an `email` block without `password`, or a `slack`/`discord`/`webhook` block without its URL fails validation (the daemon resolves them at startup). Webhook header **values** are sent verbatim unless the entire value is an `env:` reference, which is resolved.
+
+> Email `tls: starttls` **fails closed**: if the SMTP server does not advertise STARTTLS (or a capability-stripping proxy hides it), the send errors instead of silently downgrading to plaintext. Set `tls: none` explicitly if you really intend to send unencrypted.
 
 ## ai
 
@@ -135,7 +183,7 @@ Optional — with no `ai` block, the deterministic rule engine handles everythin
 # Single provider
 ai:
   provider: anthropic            # anthropic | openai | ollama
-  model: claude-3-5-haiku-latest
+  model: claude-haiku-4-5-20251001
   api_key: env:ANTHROPIC_API_KEY
   ambiguous_band: [30, 75]       # scores in this band consult the AI
   token_budget_daily: 50000      # hard daily cap; rule engine takes over beyond it
@@ -148,7 +196,7 @@ ai:
   providers:
     - name: anthropic
       priority: 1
-      model: claude-3-5-haiku-latest
+      model: claude-haiku-4-5-20251001
       api_key: env:ANTHROPIC_API_KEY
     - name: ollama
       priority: 2
@@ -161,10 +209,10 @@ ai:
 | `provider` | `anthropic` \| `openai` \| `ollama` (single-provider form) |
 | `model` | model name |
 | `api_key` | `env:VARNAME` reference (never inline) |
-| `endpoint` | base URL — used by ollama (default `http://localhost:11434`) and OpenAI-compatible endpoints |
-| `ambiguous_band` | `[low, high]` — only scores inside the band consult the AI |
+| `endpoint` | base URL for the **`ollama`** provider only (default `http://localhost:11434`). The `anthropic` and `openai` providers ignore it and always call their official APIs (`https://api.anthropic.com`, `https://api.openai.com`) — there is no OpenAI-compatible-endpoint override. Same in the single-provider and `providers` failover forms. |
+| `ambiguous_band` | `[low, high]` — only scores inside the band consult the AI. Omitted (or `[0, 0]`) defaults to `[30, 75]`; any other band with `low >= high` or values outside 0–100 is rejected at load |
 | `token_budget_daily` | daily token cap; when exhausted, decisions fall back to rules |
-| `cache_ttl` | verdict cache duration |
+| `cache_ttl` | verdict cache duration. Entries are keyed by behavior signature (event kind counts + window), not by IP, so identical attack patterns from different IPs reuse one verdict; on a hit the cached verdict is re-targeted to the IP being evaluated |
 | `providers` | multi-provider failover list (`name`, `priority`, `model`, `api_key`, `endpoint`, `token_budget_daily`); takes precedence over the single-provider fields |
 
 The AI verdict is always advisory: schema-validated, clamped by policy, and never able to ban an allowlisted IP.

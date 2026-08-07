@@ -199,8 +199,13 @@ func TestAntiLockout_UnprotectedIP_CanBeBanned(t *testing.T) {
 	}
 }
 
-// TestAntiLockout_DryRunNeverBans verifies that dry-run mode (Armed=false) never
-// calls RecordStrike for any IP, including ones that are NOT allowlisted.
+// TestAntiLockout_DryRunNeverBans verifies that dry-run mode (Armed=false)
+// never produces an enforceable action for any IP, including ones that are
+// NOT allowlisted. Since ADR-0009 §5 the store write itself is allowed —
+// dry-run records strikes and simulated bans — so the enforcement invariant
+// is carried by the Op: every action and every recorded row from a dry-run
+// engine MUST say "dry_ban", because the daemon dispatches enforcer calls
+// only for Op=="ban" and enforcer syncs skip dry_run rows.
 func TestAntiLockout_DryRunNeverBans(t *testing.T) {
 	pol := antiLockoutPolicy()
 	pol.Armed = false
@@ -216,8 +221,15 @@ func TestAntiLockout_DryRunNeverBans(t *testing.T) {
 	if act.Op != "dry_ban" {
 		t.Errorf("dry-run: got Op=%q, want dry_ban", act.Op)
 	}
-	if len(st.banned) > 0 {
-		t.Errorf("dry-run: RecordStrike called %d time(s) — enforcement invariant broken", len(st.banned))
+	for _, rec := range st.banned {
+		if rec.Op != "dry_ban" {
+			t.Errorf("dry-run: recorded Op=%q — enforcement invariant broken (only dry_ban rows may be written while armed=false)", rec.Op)
+		}
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if !st.banDry[target.String()] {
+		t.Error("dry-run: bans_active row not flagged dry_run — enforcer sync would enforce it")
 	}
 }
 
@@ -240,5 +252,151 @@ func TestAntiLockout_AllowlistAlwaysFirstRegardlessOfStrike(t *testing.T) {
 	}
 	if len(st.banned) > 0 {
 		t.Errorf("RecordStrike called despite allowlist — invariant broken at high strike count")
+	}
+}
+
+// ── IPv4-mapped IPv6 forms (issue #314) ─────────────────────────────────────
+// Go's netip treats "::ffff:a.b.c.d" as distinct from "a.b.c.d": prefix
+// Contains and == both fail across forms. Dual-stack sshd/nginx listeners log
+// the mapped form, and the parsers deliver it verbatim — so every protection
+// below must normalize (Unmap) or a mapped verdict bypasses the decision
+// layer entirely and records strikes/ban rows against a protected address.
+
+// TestAntiLockout_MappedVerdictIP_CannotBypassAllowlist: a mapped form of an
+// allowlisted / admin-CIDR address must be treated exactly like the plain form.
+func TestAntiLockout_MappedVerdictIP_CannotBypassAllowlist(t *testing.T) {
+	tests := []struct {
+		name string
+		ip   string
+	}{
+		{"mapped allowlisted admin IP", "::ffff:" + adminIP},
+		{"mapped IP inside admin/CDN CIDR", "::ffff:" + cloudflareSampleIP},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			target := netip.MustParseAddr(tc.ip)
+			st := newMock(nil)
+			eng := mustEngine(t, antiLockoutPolicy(), st)
+
+			act, err := eng.Decide(context.Background(), banVerdict(target))
+			if err != nil {
+				t.Fatalf("Decide: %v", err)
+			}
+			if act.Op != "record" {
+				t.Errorf("mapped form %s got Op=%q, want record (allowlist bypassed — issue #314)", tc.ip, act.Op)
+			}
+			if len(st.banned) > 0 {
+				t.Errorf("RecordStrike called %d time(s) for mapped form of protected IP", len(st.banned))
+			}
+		})
+	}
+}
+
+// TestAntiLockout_MappedVerdictIP_ActiveSSHPeer: kernel-derived peers are
+// already unmapped (sshpeers.go), so a mapped verdict IP must still hit the
+// peer equality check.
+func TestAntiLockout_MappedVerdictIP_ActiveSSHPeer(t *testing.T) {
+	t.Setenv("SSH_CLIENT", "")
+	pol := &config.Policy{
+		Armed: true, BanThreshold: 70, ObserveThreshold: 40,
+		MaxBansPerMinute: 30, Strikes: config.DefaultStrikes,
+	}
+	st := newMock(nil)
+	eng := mustEngine(t, pol, st)
+	eng.SetSSHPeerProbe(func() []netip.Addr {
+		return []netip.Addr{netip.MustParseAddr("203.0.113.50")}
+	})
+
+	act, err := eng.Decide(context.Background(), banVerdict(netip.MustParseAddr("::ffff:203.0.113.50")))
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if act.Op == "ban" || len(st.banned) > 0 {
+		t.Errorf("mapped form of active SSH peer got Op=%q (%d strikes recorded) — anti-lockout bypassed (issue #314)",
+			act.Op, len(st.banned))
+	}
+}
+
+// TestAntiLockout_MappedSSHClient_PlainVerdict: the reverse direction — a
+// dual-stack sshd exports SSH_CLIENT with the mapped form while the verdict
+// carries the plain IPv4. Both the startup allowlist entry (buildAllowlist)
+// and the per-call SSH_CLIENT peer check must normalize.
+func TestAntiLockout_MappedSSHClient_PlainVerdict(t *testing.T) {
+	t.Setenv("SSH_CLIENT", "::ffff:203.0.113.52 12345 22")
+	pol := &config.Policy{
+		Armed: true, BanThreshold: 70, ObserveThreshold: 40,
+		MaxBansPerMinute: 30, Strikes: config.DefaultStrikes,
+	}
+	st := newMock(nil)
+	eng := mustEngine(t, pol, st)
+	eng.SetSSHPeerProbe(func() []netip.Addr { return nil }) // isolate the SSH_CLIENT path
+
+	act, err := eng.Decide(context.Background(), banVerdict(netip.MustParseAddr("203.0.113.52")))
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if act.Op == "ban" || len(st.banned) > 0 {
+		t.Errorf("plain verdict for mapped SSH_CLIENT peer got Op=%q (%d strikes recorded) — issue #314",
+			act.Op, len(st.banned))
+	}
+}
+
+// TestAntiLockout_MappedAllowlistConfigEntries: operators on dual-stack hosts
+// may copy the mapped form straight from a log into policy allowlist entries;
+// both bare-IP and CIDR entries must protect the plain form.
+func TestAntiLockout_MappedAllowlistConfigEntries(t *testing.T) {
+	tests := []struct {
+		name  string
+		entry string
+		ip    string
+	}{
+		{"mapped bare IP entry", "::ffff:203.0.113.77", "203.0.113.77"},
+		{"mapped CIDR entry", "::ffff:203.0.113.0/120", "203.0.113.9"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pol := &config.Policy{
+				Armed: true, BanThreshold: 70, ObserveThreshold: 40,
+				MaxBansPerMinute: 30, Strikes: config.DefaultStrikes,
+				Allowlist: []string{tc.entry},
+			}
+			st := newMock(nil)
+			eng := mustEngine(t, pol, st)
+
+			act, err := eng.Decide(context.Background(), banVerdict(netip.MustParseAddr(tc.ip)))
+			if err != nil {
+				t.Fatalf("Decide: %v", err)
+			}
+			if act.Op != "record" || len(st.banned) > 0 {
+				t.Errorf("allowlist entry %q did not protect %s: Op=%q, %d strikes (issue #314)",
+					tc.entry, tc.ip, act.Op, len(st.banned))
+			}
+		})
+	}
+}
+
+// TestDecide_MappedVerdictIP_NormalizedInAction: an UNPROTECTED mapped IP must
+// still be banned (normalization closes the bypass without opening a pass) and
+// the Action must carry the unmapped form — store rows then key the canonical
+// address (no split offender identity) and the enforcer receives an IPv4 the
+// v4 set can actually match on the wire.
+func TestDecide_MappedVerdictIP_NormalizedInAction(t *testing.T) {
+	target := netip.MustParseAddr("::ffff:" + outsiderIP)
+	st := newMock(nil)
+	eng := mustEngine(t, antiLockoutPolicy(), st)
+
+	act, err := eng.Decide(context.Background(), banVerdict(target))
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	wantIP := netip.MustParseAddr(outsiderIP)
+	if act.Op != "ban" {
+		t.Errorf("mapped unprotected IP got Op=%q, want ban", act.Op)
+	}
+	if act.IP != wantIP {
+		t.Errorf("Action.IP = %v, want unmapped %v", act.IP, wantIP)
+	}
+	if len(st.banned) != 1 || st.banned[0].IP != wantIP {
+		t.Errorf("RecordStrike actions = %+v, want exactly one keyed by %v", st.banned, wantIP)
 	}
 }

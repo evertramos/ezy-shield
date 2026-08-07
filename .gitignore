@@ -38,6 +38,7 @@ coverage.out
 .ezy
 .claude/
 CLAUDE.md
+.kiro
 
 # stray root-level build artifacts (Makefile writes to bin/, but ad-hoc go build lands here)
 /ezyshield

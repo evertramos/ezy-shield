@@ -122,8 +122,8 @@ O EzyShield inclui uma terceira camada de detecção para caminhos RCE e exploit
 
 **Objetivo**: Detecção imediata de caminhos de exploit conhecidos.
 
-**Limiar**: 1 (uma única requisição dispara)  
-**Score**: 95 (ultrapassa a faixa ambígua; regras sempre vencem)  
+**Limiar**: 1 (uma única requisição dispara)
+**Score**: 95 (ultrapassa a faixa ambígua; regras sempre vencem)
 **Categoria**: `exploit_probe`
 
 **Caminhos detectados**: `phpunit`, `.git`, `.aws`, endpoints actuator, shells de plugins WordPress, estado Terraform, etc. (Sondagens de `.env` são cobertas pela regra separada `http_env_probe`.)

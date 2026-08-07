@@ -94,6 +94,7 @@ func runDoctor(cmd *cobra.Command, configDir, dbPath, socketPath string, jsonOut
 		checkDockerSocket(),
 		checkEnvFile(filepath.Join(configDir, envFileName)),
 	}
+<<<<<<< HEAD
 	checks = append(checks, checkAllowlistBreadth(configDir)...)
 	checks = append(checks, checkCloudflareEnforcers(configDir)...)
 	// issue #240: PATH/systemd shadowing between a script install and a
@@ -104,6 +105,9 @@ func runDoctor(cmd *cobra.Command, configDir, dbPath, socketPath string, jsonOut
 	checks = append(checks, checkBanIneffective(dbPath))
 	// issue #174: honest enforcement state from the running daemon.
 	checks = append(checks, checkEnforcementState(socketPath))
+=======
+	checks = append(checks, checkCloudflareEnforcers(configDir)...)
+>>>>>>> main
 
 	summary := DoctorSummary{Total: len(checks)}
 	for _, c := range checks {

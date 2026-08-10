@@ -887,7 +887,8 @@ func renderGeneratedConfig(state *wizardState) ([]byte, error) {
 		if state.aiKeyEnvVar != "" {
 			fmt.Fprintf(&b, "  api_key: env:%s\n", state.aiKeyEnvVar)
 		}
-		b.WriteString("  ambiguous_band: [30, 75]\n")
+		fmt.Fprintf(&b, "  ambiguous_band: [%d, %d]\n",
+			config.DefaultAmbiguousBand[0], config.DefaultAmbiguousBand[1])
 		b.WriteString("  token_budget_daily: 100000\n")
 	}
 

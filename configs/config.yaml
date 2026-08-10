@@ -58,7 +58,11 @@ collectors: []
 # AI analysis (issue #12) — disabled by default
 # ai:
 #   provider: anthropic
-#   ambiguous_band: [30, 75]
+#   ambiguous_band: [30, 69]         # only scores in this band consult the AI;
+#                                    # keep the upper bound BELOW policy ban_threshold —
+#                                    # scores >= the threshold already decide a ban on
+#                                    # rules alone and are never sent to the AI (issue #419)
+#   cache_ttl: 15m                   # verdict cache (default 15m when omitted or 0)
 #   token_budget_daily: 500000
 
 # Notifications — configure channels and test with 'ezyshield test-notify <channel>'

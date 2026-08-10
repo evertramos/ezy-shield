@@ -4,10 +4,12 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,6 +30,7 @@ type Updater struct {
 	licenseKey  string // resolved value — never logged
 	countryPath string
 	asnPath     string
+	baseURL     string // download endpoint; overridable in tests, never secret
 }
 
 // NewUpdater creates an Updater. licenseKey must be the resolved secret value
@@ -38,6 +41,7 @@ func NewUpdater(e *Enricher, licenseKey, countryPath, asnPath string) *Updater {
 		licenseKey:  licenseKey,
 		countryPath: countryPath,
 		asnPath:     asnPath,
+		baseURL:     mmdbBaseURL,
 	}
 }
 
@@ -82,10 +86,12 @@ func (u *Updater) downloadEdition(ctx context.Context, edition, destPath string)
 	dlCtx, cancel := context.WithTimeout(ctx, downloadTimeout)
 	defer cancel()
 
-	// Build URL with proper encoding so the license key never leaks in error messages.
-	req, err := http.NewRequestWithContext(dlCtx, http.MethodGet, mmdbBaseURL, nil)
+	// Build the request from the (non-secret) base URL, then attach the license
+	// key as a query parameter. redactURLErr guards every error path because a
+	// *url.Error embeds the full request URL, license_key included.
+	req, err := http.NewRequestWithContext(dlCtx, http.MethodGet, u.baseURL, nil)
 	if err != nil {
-		return fmt.Errorf("build request: %w", err)
+		return fmt.Errorf("build request: %w", redactURLErr(err))
 	}
 	q := req.URL.Query()
 	q.Set("edition_id", edition)
@@ -95,8 +101,10 @@ func (u *Updater) downloadEdition(ctx context.Context, edition, destPath string)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		// Wrap without including the URL so the key is not in the error string.
-		return fmt.Errorf("HTTP GET: %w", err)
+		// http.Client.Do returns *url.Error whose Error() embeds the full URL
+		// (net/http strips only userinfo passwords, never the query) — redact
+		// it so the license key can never reach an error string or the journal.
+		return fmt.Errorf("HTTP GET: %w", redactURLErr(err))
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
@@ -105,6 +113,33 @@ func (u *Updater) downloadEdition(ctx context.Context, edition, destPath string)
 	}
 
 	return extractMMDB(resp.Body, destPath)
+}
+
+// redactURLErr strips the request URL from an HTTP transport error before it is
+// wrapped, logged, or shown to an operator (Hard Rule 3, SECURITY-REVIEW §4,
+// issue #294). It mirrors internal/notify.redactTransportErr (issues #319/#389).
+//
+// http.Client.Do (and http.NewRequestWithContext on a parse failure) returns a
+// *url.Error whose Error() embeds the full request URL. The MaxMind download URL
+// carries the account license key in its license_key query parameter, and
+// net/http redacts only userinfo passwords — never the query — so the raw error
+// must never propagate.
+//
+// The MaxMind host (download.maxmind.com) is a fixed, public, non-secret
+// constant, so scheme+host are kept to aid debugging while the path and query
+// (the only secret-bearing parts) collapse to "/[redacted]". The underlying
+// transport cause (ue.Err: dial / TLS / timeout) never contains the query and
+// is preserved via %w for diagnosis and errors.Is matching.
+func redactURLErr(err error) error {
+	var ue *url.Error
+	if !errors.As(err, &ue) {
+		return err
+	}
+	redacted := "[redacted]"
+	if u, perr := url.Parse(ue.URL); perr == nil && u.Host != "" {
+		redacted = u.Scheme + "://" + u.Host + "/[redacted]"
+	}
+	return fmt.Errorf("%s %s: %w", ue.Op, redacted, ue.Err)
 }
 
 // extractMMDB reads a tar.gz stream and writes the first .mmdb entry to destPath

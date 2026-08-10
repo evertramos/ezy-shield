@@ -80,34 +80,46 @@ type sshPattern struct {
 // Only the first four (real auth attempts) map to the default-bannable kinds;
 // every other recognised line maps to kindProbe so broadening recognition never
 // inflates the built-in rule counts.
+//
+// SECURITY — IP attribution is pinned to the sshd-appended peer field (issue
+// #309). SSH usernames may contain spaces and are logged verbatim, so a client
+// can send a username like "root from <victim> port 22" to inject a second,
+// attacker-chosen "from <ip> port <n>" segment into the line. sshd ALWAYS writes
+// the true "from <rhost> port <port>" *after* the username, so the real peer is
+// invariably the LAST such segment. Every username group is therefore GREEDY
+// `(.+)` (never lazy, never `\S+`): the greedy quantifier forces the trailing
+// IP/port match to the rightmost occurrence — the sshd-provided one — so a
+// crafted username can never shift SourceIP onto a third party. See
+// TestSSHParser_UsernameCannotSpoofSourceIP. Do not change `(.+)` to `\S+` or a
+// lazy quantifier without re-reading #309: either reopens the spoof.
 var sshPatterns = []sshPattern{
 	// ---- Authentication attempts (default-bannable) ----
 	// "Failed password/none/... for invalid user X from IP port P" — must precede
 	// the valid-user variant below.
-	{re: regexp.MustCompile(`^Failed \S+ for invalid user (\S{1,64}) from ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindInvalidUser, subtype: "failed_invalid", userIdx: 1, ipIdx: 2, portIdx: 3},
+	{re: regexp.MustCompile(`^Failed \S+ for invalid user (.+) from ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindInvalidUser, subtype: "failed_invalid", userIdx: 1, ipIdx: 2, portIdx: 3},
 	// "Failed password/none/... for X from IP port P" (valid/known user).
-	{re: regexp.MustCompile(`^Failed \S+ for (\S{1,64}) from ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindFail, subtype: "failed_password", userIdx: 1, ipIdx: 2, portIdx: 3},
+	{re: regexp.MustCompile(`^Failed \S+ for (.+) from ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindFail, subtype: "failed_password", userIdx: 1, ipIdx: 2, portIdx: 3},
 	// "Invalid user X from IP port P".
-	{re: regexp.MustCompile(`^Invalid user (\S{1,64}) from ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindInvalidUser, subtype: "invalid_user", userIdx: 1, ipIdx: 2, portIdx: 3},
+	{re: regexp.MustCompile(`^Invalid user (.+) from ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindInvalidUser, subtype: "invalid_user", userIdx: 1, ipIdx: 2, portIdx: 3},
 	// "User X from IP not allowed because ..." (AllowUsers/DenyUsers). No port.
-	{re: regexp.MustCompile(`^User (\S{1,64}) from ([0-9a-fA-F.:]+) not allowed`), kind: kindInvalidUser, subtype: "not_allowed", userIdx: 1, ipIdx: 2, portIdx: 0},
+	{re: regexp.MustCompile(`^User (.+) from ([0-9a-fA-F.:]+) not allowed`), kind: kindInvalidUser, subtype: "not_allowed", userIdx: 1, ipIdx: 2, portIdx: 0},
 
 	// ---- Probe / corroboration (opt-in aggressive; not counted by default) ----
 	// "error: maximum authentication attempts exceeded for [invalid user] X from IP port P".
-	{re: regexp.MustCompile(`^error: maximum authentication attempts exceeded for invalid user (\S{1,64}) from ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "max_attempts", userIdx: 1, ipIdx: 2, portIdx: 3},
-	{re: regexp.MustCompile(`^error: maximum authentication attempts exceeded for (\S{1,64}) from ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "max_attempts", userIdx: 1, ipIdx: 2, portIdx: 3},
+	{re: regexp.MustCompile(`^error: maximum authentication attempts exceeded for invalid user (.+) from ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "max_attempts", userIdx: 1, ipIdx: 2, portIdx: 3},
+	{re: regexp.MustCompile(`^error: maximum authentication attempts exceeded for (.+) from ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "max_attempts", userIdx: 1, ipIdx: 2, portIdx: 3},
 	// "ssh_dispatch_run_fatal: Connection from invalid user X IP port P: ...".
-	{re: regexp.MustCompile(`^ssh_dispatch_run_fatal: Connection from invalid user (\S{1,64}) ([0-9a-fA-F.:]+) port (\d{1,5}):`), kind: kindProbe, subtype: "dispatch_fatal", userIdx: 1, ipIdx: 2, portIdx: 3},
+	{re: regexp.MustCompile(`^ssh_dispatch_run_fatal: Connection from invalid user (.+) ([0-9a-fA-F.:]+) port (\d{1,5}):`), kind: kindProbe, subtype: "dispatch_fatal", userIdx: 1, ipIdx: 2, portIdx: 3},
 	// Termination lines naming an invalid user — must precede the bare variants.
-	{re: regexp.MustCompile(`^Connection closed by invalid user (\S{1,64}) ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "conn_closed_invalid", userIdx: 1, ipIdx: 2, portIdx: 3},
-	{re: regexp.MustCompile(`^Connection reset by invalid user (\S{1,64}) ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "conn_reset_invalid", userIdx: 1, ipIdx: 2, portIdx: 3},
-	{re: regexp.MustCompile(`^Disconnected from invalid user (\S{1,64}) ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "disconnected_invalid", userIdx: 1, ipIdx: 2, portIdx: 3},
-	{re: regexp.MustCompile(`^Disconnecting invalid user (\S{1,64}) ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "disconnecting_invalid", userIdx: 1, ipIdx: 2, portIdx: 3},
+	{re: regexp.MustCompile(`^Connection closed by invalid user (.+) ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "conn_closed_invalid", userIdx: 1, ipIdx: 2, portIdx: 3},
+	{re: regexp.MustCompile(`^Connection reset by invalid user (.+) ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "conn_reset_invalid", userIdx: 1, ipIdx: 2, portIdx: 3},
+	{re: regexp.MustCompile(`^Disconnected from invalid user (.+) ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "disconnected_invalid", userIdx: 1, ipIdx: 2, portIdx: 3},
+	{re: regexp.MustCompile(`^Disconnecting invalid user (.+) ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "disconnecting_invalid", userIdx: 1, ipIdx: 2, portIdx: 3},
 	// Termination lines naming an authenticating (valid/allowed) user.
-	{re: regexp.MustCompile(`^Connection closed by authenticating user (\S{1,64}) ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "authenticating_closed", userIdx: 1, ipIdx: 2, portIdx: 3},
-	{re: regexp.MustCompile(`^Connection reset by authenticating user (\S{1,64}) ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "authenticating_reset", userIdx: 1, ipIdx: 2, portIdx: 3},
-	{re: regexp.MustCompile(`^Disconnected from authenticating user (\S{1,64}) ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "authenticating_disconnected", userIdx: 1, ipIdx: 2, portIdx: 3},
-	{re: regexp.MustCompile(`^Disconnecting authenticating user (\S{1,64}) ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "authenticating_disconnecting", userIdx: 1, ipIdx: 2, portIdx: 3},
+	{re: regexp.MustCompile(`^Connection closed by authenticating user (.+) ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "authenticating_closed", userIdx: 1, ipIdx: 2, portIdx: 3},
+	{re: regexp.MustCompile(`^Connection reset by authenticating user (.+) ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "authenticating_reset", userIdx: 1, ipIdx: 2, portIdx: 3},
+	{re: regexp.MustCompile(`^Disconnected from authenticating user (.+) ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "authenticating_disconnected", userIdx: 1, ipIdx: 2, portIdx: 3},
+	{re: regexp.MustCompile(`^Disconnecting authenticating user (.+) ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindProbe, subtype: "authenticating_disconnecting", userIdx: 1, ipIdx: 2, portIdx: 3},
 	// Bare termination lines (no username). These are AMBIGUOUS: a legitimately
 	// authenticated user's normal logout also emits "Received disconnect" /
 	// "Connection closed/reset by <ip>". Require the "[preauth]" tag so only
@@ -154,7 +166,7 @@ var sshPatterns = []sshPattern{
 	{re: regexp.MustCompile(`^PAM \d+ more authentication failures?;.*?rhost=([0-9a-fA-F.:]+)`), kind: kindProbe, subtype: "pam_more_fail", userIdx: 0, ipIdx: 1, portIdx: 0},
 
 	// ---- Success (telemetry only) ----
-	{re: regexp.MustCompile(`^Accepted \S+ for (\S{1,64}) from ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindAccept, subtype: "accepted", userIdx: 1, ipIdx: 2, portIdx: 3},
+	{re: regexp.MustCompile(`^Accepted \S+ for (.+) from ([0-9a-fA-F.:]+) port (\d{1,5})`), kind: kindAccept, subtype: "accepted", userIdx: 1, ipIdx: 2, portIdx: 3},
 }
 
 // SSHParser parses SSH authentication log lines from any distribution and
@@ -306,12 +318,22 @@ func (p *SSHParser) matchMessage(msg string, t time.Time, origin, pid string) (s
 	return sdk.Event{}, false
 }
 
-// capUsername truncates username to maxUsernameBytes.
+// capUsername truncates username to at most maxUsernameBytes bytes on a UTF-8
+// rune boundary. The username group is greedy `(.+)` (see sshPatterns, issue
+// #309), so a hostile client can push a long, multi-byte username; truncating on
+// a raw byte index could split a rune and emit invalid UTF-8 into Fields, which
+// would then flow to JSON/SQLite/the dashboard. Backing off to the last complete
+// rune keeps the stored value valid UTF-8. This is telemetry only — the value is
+// never used for IP attribution or ban decisions.
 func capUsername(username string) string {
-	if len(username) > maxUsernameBytes {
-		return username[:maxUsernameBytes]
+	if len(username) <= maxUsernameBytes {
+		return username
 	}
-	return username
+	cut := maxUsernameBytes
+	for cut > 0 && !utf8.RuneStart(username[cut]) {
+		cut--
+	}
+	return username[:cut]
 }
 
 // parseIP parses an IP address string, stripping optional brackets (IPv6).

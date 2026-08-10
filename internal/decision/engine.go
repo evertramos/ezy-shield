@@ -89,6 +89,21 @@ type Engine struct {
 	bansInWin   int
 	windowStart time.Time
 
+	// strikeLocks serialise the strike-writing critical section of Decide
+	// (the active-ban guard through RecordStrike) per IP. The guard and the
+	// GetStrikeCount→RecordStrike sequence are a check-then-act; with the
+	// deferred SSH re-check now calling Decide concurrently with the pipeline
+	// (issue #420), two evaluations of the same address could otherwise both
+	// pass the guard and each RecordStrike + return Op="ban" — two strike rows
+	// and a duplicate Enforcer.Ban (TOCTOU). Holding the per-IP lock across the
+	// section makes the loser observe the winner's ban row and suppress.
+	// Striped so unrelated IPs never contend; e.mu still guards only the global
+	// rate-limit window. Lock order is strikeLocks → e.mu (checkRateLimit takes
+	// e.mu inside the section); e.mu is never held while taking a strike lock,
+	// so there is no cycle. Decide performs no enforcer I/O (dispatch does,
+	// downstream), so no lock is ever held across Enforcer.Ban.
+	strikeLocks [strikeLockStripes]sync.Mutex
+
 	// sshPeers caches kernel-derived SSH peers (/proc/net/tcp{,6}) for the
 	// anti-lockout checks — the detection path that works under systemd,
 	// where SSH_CLIENT does not exist (issue #175).
@@ -190,6 +205,21 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 		}
 		return act, nil
 	}
+
+	// ── Per-IP serialisation of the check-then-act strike section ───────────
+	// Everything from the active-ban guard through RecordStrike is a
+	// check-then-act on this IP's ban row. The deferred SSH re-check (issue
+	// #420) calls Decide from its own goroutine, concurrently with the
+	// pipeline; without this lock a live pipeline event for the same IP landing
+	// inside the re-check's Decide window could let both pass the guard and each
+	// RecordStrike + return Op="ban" — two strike rows and a duplicate
+	// Enforcer.Ban. Holding the per-IP strike lock across the section forces the
+	// second caller to observe the first's ban row (GetBanInfo) and take the
+	// suppression path. The lock spans only store I/O; the enforcer is invoked
+	// later by dispatch, so no lock is held across Enforcer.Ban.
+	strikeLock := e.strikeLockFor(ip)
+	strikeLock.Lock()
+	defer strikeLock.Unlock()
 
 	// ── Active-ban guard (issues #28, #29, ADR-0009) ────────────────────────
 	// If the IP already has an active ban (temp or permanent), suppress the
@@ -332,6 +362,30 @@ func (e *Engine) isAllowlisted(ip netip.Addr) bool {
 		}
 	}
 	return false
+}
+
+// strikeLockStripes shards the per-IP strike lock. A power of two so the mask
+// distributes addresses with a cheap AND. 64 is ample: the only concurrent
+// Decide callers are the pipeline goroutine and the deferred SSH re-check
+// (issue #420), so real contention is at most two goroutines — the stripes
+// exist to keep those two from serialising on unrelated IPs, not for scale.
+const strikeLockStripes = 64
+
+// strikeLockFor returns the mutex serialising the strike-writing critical
+// section for ip. Same address always maps to the same stripe (deterministic
+// FNV-1a over the 16-byte form), so the active-ban guard → RecordStrike
+// check-then-act is atomic per IP; different addresses that happen to collide
+// only ever over-serialise, never under-serialise (safety is preserved either
+// way). ip is already Unmap()ed by Decide, so the v4 and v4-in-v6 spellings of
+// one client share a stripe.
+func (e *Engine) strikeLockFor(ip netip.Addr) *sync.Mutex {
+	b := ip.As16()
+	var h uint32 = 2166136261 // FNV-1a offset basis
+	for _, c := range b {
+		h ^= uint32(c)
+		h *= 16777619 // FNV-1a prime
+	}
+	return &e.strikeLocks[h&(strikeLockStripes-1)]
 }
 
 // checkRateLimit increments the ban counter for the current 1-minute window and

@@ -73,6 +73,23 @@ admin_cidrs:
 
 A broken rule or poisoned feed cannot ban the entire internet. The `max_bans_per_minute` cap (default 30) rejects excess bans with an explicit error — never silently, never by dropping the limit. Escalation bans re-blocking an IP whose previous ban ended within `escalation_exempt_window` (default 24h) are exempt from this cap, so a returning repeat offender is never let back in while the rate limit is saturated; first-time bans always count against the cap.
 
+## Detection resilience
+
+Detection is only useful if it keeps running. Each log source (a file tail, a
+`journalctl` reader, a Docker container stream) is watched by its own
+supervisor. If a collector hits a transient fault — a log file briefly missing
+at startup, a `logrotate` reopen that runs long, `journald` restarting and
+killing `journalctl` — the supervisor **restarts that collector automatically**
+with capped exponential backoff, so a routine operational hiccup can't silently
+disable detection on that source until the next daemon restart.
+
+The supervisor distinguishes a genuine fault from a clean shutdown: on
+`SIGTERM`/`SIGINT` (context cancellation) collectors stop and are **not**
+restarted, so shutdown never hot-loops. A collector that fails repeatedly
+raises a **critical notification** naming the source, so a permanently broken
+input surfaces to you instead of retrying in silence. The other log sources
+keep running throughout — one failing collector never takes down the pipeline.
+
 ## Secret handling
 
 No secrets appear in:

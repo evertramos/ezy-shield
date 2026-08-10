@@ -37,6 +37,26 @@ const (
 	// rawLinesBuf is the size of the inter-stage channel between collectors and
 	// the pipeline, providing back-pressure without blocking individual collectors.
 	rawLinesBuf = 4096
+
+	// Collector supervision defaults (issue #305). A collector goroutine that
+	// returns a runtime error is restarted with capped exponential backoff so a
+	// transient fault (logrotate reopen delay, journald restart, a briefly
+	// missing file) can't silently disable detection on that source until the
+	// next daemon restart. Context cancellation is treated as a clean shutdown
+	// and is never restarted.
+	defaultCollectorBackoffBase = 1 * time.Second
+	// defaultCollectorBackoffMax caps the restart delay so a permanently broken
+	// collector settles into a slow retry instead of hot-looping.
+	defaultCollectorBackoffMax = 30 * time.Second
+	// defaultCollectorStableRuntime is how long a single Run must survive before
+	// its next failure is treated as a fresh incident (backoff + failure counter
+	// reset). Without this a collector that runs healthily for hours then hits
+	// one error would inherit stale escalated backoff.
+	defaultCollectorStableRuntime = 60 * time.Second
+	// defaultCollectorFailureAlert is the number of consecutive failures after
+	// which a critical notification fires, so a permanently broken source
+	// surfaces to the operator instead of retrying silently forever.
+	defaultCollectorFailureAlert = 5
 )
 
 // daemonStore is the persistence interface required by the daemon.
@@ -179,6 +199,44 @@ type Daemon struct {
 	// actionsSink, when non-nil, receives every Action the pipeline produces.
 	// Used in tests to observe pipeline output without a running enforcer.
 	actionsSink chan<- sdk.Action
+
+	// Collector supervision tunables (issue #305). Zero means "use the package
+	// default"; only tests set these to keep restart timing fast.
+	collBackoffBase   time.Duration
+	collBackoffMax    time.Duration
+	collStableRuntime time.Duration
+	collFailureAlert  int
+}
+
+// collectorBackoffBase / collectorBackoffMax / collectorStableRuntime /
+// collectorFailureAlert return the effective supervision tunables, falling back
+// to the package defaults when unset (issue #305).
+func (d *Daemon) collectorBackoffBase() time.Duration {
+	if d.collBackoffBase > 0 {
+		return d.collBackoffBase
+	}
+	return defaultCollectorBackoffBase
+}
+
+func (d *Daemon) collectorBackoffMax() time.Duration {
+	if d.collBackoffMax > 0 {
+		return d.collBackoffMax
+	}
+	return defaultCollectorBackoffMax
+}
+
+func (d *Daemon) collectorStableRuntime() time.Duration {
+	if d.collStableRuntime > 0 {
+		return d.collStableRuntime
+	}
+	return defaultCollectorStableRuntime
+}
+
+func (d *Daemon) collectorFailureAlert() int {
+	if d.collFailureAlert > 0 {
+		return d.collFailureAlert
+	}
+	return defaultCollectorFailureAlert
 }
 
 // New constructs a Daemon from a Config, building the rule engine and decision
@@ -396,20 +454,104 @@ func (d *Daemon) Run(parentCtx context.Context) error {
 	return nil
 }
 
-// runCollector wraps a single collector run with panic recovery and re-notifies
-// on unexpected crash (watchdog role for per-collector goroutines).
+// runCollector supervises a single collector for the life of collCtx (issue
+// #305). A collector whose Run returns a runtime error — or panics — is
+// restarted with capped exponential backoff so a transient fault (a briefly
+// missing log file, a logrotate reopen that overruns filetail's short internal
+// retry, a journald restart killing journalctl) cannot silently disable
+// detection on that source until the daemon itself is restarted. It
+// distinguishes two exits that must NOT restart: context cancellation (clean
+// shutdown / SIGTERM drain) and a nil return (the source finished on its own,
+// e.g. a bounded file), both of which end supervision. Backoff and the
+// consecutive-failure counter reset once a Run has survived collectorStableRuntime,
+// so a long-healthy collector that later fails is treated as a fresh incident
+// rather than inheriting stale escalated backoff.
 func (d *Daemon) runCollector(ctx context.Context, c sdk.Collector, out chan<- sdk.RawLine) {
+	name := collectorName(c)
+	backoff := d.collectorBackoffBase()
+	consecutiveFailures := 0
+
+	for {
+		// Never start (or restart) after a shutdown signal.
+		if ctx.Err() != nil {
+			return
+		}
+
+		start := time.Now()
+		err := d.runCollectorOnce(ctx, c, out)
+		ran := time.Since(start)
+
+		// Clean shutdown: context cancelled. Do not restart.
+		if ctx.Err() != nil {
+			return
+		}
+
+		// A run that survived long enough is considered healthy; its next
+		// failure starts a fresh backoff/alert cycle.
+		if ran >= d.collectorStableRuntime() {
+			backoff = d.collectorBackoffBase()
+			consecutiveFailures = 0
+		}
+
+		// A nil return without cancellation means the source completed on its
+		// own (nothing left to tail). Restarting would hot-loop, so stop.
+		if err == nil {
+			slog.InfoContext(ctx, "daemon: collector exited cleanly", "collector", name)
+			return
+		}
+
+		consecutiveFailures++
+		slog.WarnContext(ctx, "daemon: collector error; restarting after backoff",
+			"collector", name,
+			"err", err,
+			"backoff", backoff,
+			"consecutive_failures", consecutiveFailures,
+		)
+
+		// Surface a permanently broken source instead of retrying silently.
+		if consecutiveFailures == d.collectorFailureAlert() {
+			d.notifyCritical(ctx, fmt.Sprintf(
+				"collector %q failed %d times in a row; detection on this source may be degraded",
+				name, consecutiveFailures))
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		backoff = min(backoff*2, d.collectorBackoffMax())
+	}
+}
+
+// runCollectorOnce runs a collector exactly once, converting a panic into an
+// error so the supervisor (runCollector) can restart it rather than letting the
+// panic unwind and kill the supervising goroutine.
+func (d *Daemon) runCollectorOnce(ctx context.Context, c sdk.Collector, out chan<- sdk.RawLine) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			stack := debug.Stack()
 			slog.ErrorContext(ctx, "daemon: collector panic recovered",
-				"panic", r, "stack", string(stack))
+				"collector", collectorName(c), "panic", r, "stack", string(stack))
 			d.notifyPanic(ctx, fmt.Sprintf("collector panic: %v", r))
+			err = fmt.Errorf("collector panic: %v", r)
 		}
 	}()
-	if err := c.Run(ctx, out); err != nil && ctx.Err() == nil {
-		slog.ErrorContext(ctx, "daemon: collector error", "err", err)
+	return c.Run(ctx, out)
+}
+
+// collectorName derives a stable, human-readable identity for logs and alerts.
+// Collectors may implement the optional Name() string method (the concrete
+// filetail/journald/docker collectors do); otherwise the Go type name is used.
+// It never returns attacker-controlled content beyond an operator-configured
+// path/unit/container name.
+func collectorName(c sdk.Collector) string {
+	if n, ok := c.(interface{ Name() string }); ok {
+		if s := n.Name(); s != "" {
+			return s
+		}
 	}
+	return fmt.Sprintf("%T", c)
 }
 
 // runPipeline reads raw lines, parses them into Events, feeds the aggregator,

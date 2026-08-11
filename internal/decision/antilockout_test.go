@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/evertramos/ezy-shield/internal/config"
+	"github.com/evertramos/ezy-shield/internal/decision"
 	"github.com/evertramos/ezy-shield/pkg/sdk"
 )
 
@@ -372,6 +373,116 @@ func TestAntiLockout_MappedAllowlistConfigEntries(t *testing.T) {
 					tc.entry, tc.ip, act.Op, len(st.banned))
 			}
 		})
+	}
+}
+
+// ── Fast-reconnect burst behind the SSH-peer shield (issue #420) ────────────
+// A bruteforcer that reconnects faster than the peer-cache TTL keeps an
+// ESTABLISHED connection visible at every evaluation, so every attempt in its
+// threshold window is refused by the anti-lockout — correctly. The fix is a
+// daemon-side deferred re-evaluation after the connection closes; these tests
+// pin down the engine-side contract that re-evaluation relies on. They ADD
+// cases — the refusal invariant above is untouched.
+
+// TestAntiLockout_SSHPeerRefusal_ReasonIsStableContract: the daemon keys the
+// deferred re-check on the exact refusal reason. If this constant drifts from
+// what Decide emits, the re-check silently never schedules and the #420 gap
+// reopens — so the coupling is pinned here.
+func TestAntiLockout_SSHPeerRefusal_ReasonIsStableContract(t *testing.T) {
+	t.Setenv("SSH_CLIENT", "")
+	peer := netip.MustParseAddr("198.51.100.20")
+	pol := &config.Policy{
+		Armed: true, BanThreshold: 70, ObserveThreshold: 40,
+		MaxBansPerMinute: 30, Strikes: config.DefaultStrikes,
+	}
+	st := newMock(nil)
+	eng := mustEngine(t, pol, st)
+	eng.SetSSHPeerProbe(func() []netip.Addr { return []netip.Addr{peer} })
+
+	act, err := eng.Decide(context.Background(), banVerdict(peer))
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if act.Op != "record" || act.Reason != decision.ReasonAntiLockoutSSHPeer {
+		t.Errorf("refusal = Op=%q Reason=%q, want Op=record Reason=%q",
+			act.Op, act.Reason, decision.ReasonAntiLockoutSSHPeer)
+	}
+	if len(st.banned) > 0 {
+		t.Errorf("RecordStrike called %d time(s) for active SSH peer", len(st.banned))
+	}
+}
+
+// TestAntiLockout_SSHPeerProtection_IsConnectionScoped: while the connection
+// is ESTABLISHED every evaluation refuses; once the kernel no longer reports
+// the peer, the very next evaluation of the same still-in-window evidence
+// bans. This is the engine-side foundation of the deferred re-check: the
+// shield protects a connection, not an address forever.
+func TestAntiLockout_SSHPeerProtection_IsConnectionScoped(t *testing.T) {
+	t.Setenv("SSH_CLIENT", "")
+	attacker := netip.MustParseAddr("198.51.100.21")
+	pol := &config.Policy{
+		Armed: true, BanThreshold: 70, ObserveThreshold: 40,
+		MaxBansPerMinute: 30, Strikes: config.DefaultStrikes,
+	}
+	st := newMock(nil)
+	eng := mustEngine(t, pol, st)
+
+	// Burst phase: every evaluation sees an ESTABLISHED connection.
+	eng.SetSSHPeerProbe(func() []netip.Addr { return []netip.Addr{attacker} })
+	for i := 0; i < 5; i++ {
+		act, err := eng.Decide(context.Background(), banVerdict(attacker))
+		if err != nil {
+			t.Fatalf("Decide (burst %d): %v", i, err)
+		}
+		if act.Op != "record" || act.Reason != decision.ReasonAntiLockoutSSHPeer {
+			t.Fatalf("burst evaluation %d: Op=%q Reason=%q, want anti-lockout refusal", i, act.Op, act.Reason)
+		}
+	}
+	if len(st.banned) > 0 {
+		t.Fatalf("RecordStrike called during burst — refusal invariant broken")
+	}
+
+	// Connection closed: the kernel reports no peer. SetSSHPeerProbe resets
+	// the TTL cache, standing in for the ≥2×TTL delay the daemon waits.
+	eng.SetSSHPeerProbe(func() []netip.Addr { return nil })
+	act, err := eng.Decide(context.Background(), banVerdict(attacker))
+	if err != nil {
+		t.Fatalf("Decide (post-close): %v", err)
+	}
+	if act.Op != "ban" {
+		t.Errorf("post-close re-evaluation: Op=%q, want ban (issue #420 gap)", act.Op)
+	}
+	if len(st.banned) != 1 {
+		t.Errorf("RecordStrike calls = %d, want exactly 1", len(st.banned))
+	}
+}
+
+// TestAntiLockout_SSHPeerStillConnected_RepeatedReevaluationNeverBans is the
+// operator scenario for the deferred re-check: however many times the same
+// evidence is re-evaluated, a peer the kernel still reports as ESTABLISHED is
+// never banned. The re-check must not weaken this by even one iteration.
+func TestAntiLockout_SSHPeerStillConnected_RepeatedReevaluationNeverBans(t *testing.T) {
+	t.Setenv("SSH_CLIENT", "")
+	operator := netip.MustParseAddr("198.51.100.22")
+	pol := &config.Policy{
+		Armed: true, BanThreshold: 70, ObserveThreshold: 40,
+		MaxBansPerMinute: 30, Strikes: config.DefaultStrikes,
+	}
+	st := newMock(nil)
+	eng := mustEngine(t, pol, st)
+	eng.SetSSHPeerProbe(func() []netip.Addr { return []netip.Addr{operator} })
+
+	for i := 0; i < 20; i++ {
+		act, err := eng.Decide(context.Background(), banVerdict(operator))
+		if err != nil {
+			t.Fatalf("Decide (re-eval %d): %v", i, err)
+		}
+		if act.Op == "ban" {
+			t.Fatalf("re-evaluation %d banned a still-connected SSH peer", i)
+		}
+	}
+	if len(st.banned) > 0 {
+		t.Errorf("RecordStrike called %d time(s) for still-connected peer", len(st.banned))
 	}
 }
 

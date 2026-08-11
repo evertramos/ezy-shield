@@ -57,6 +57,19 @@ ban and every reconcile before it can reach nftables or any edge platform.
 Even a backend with no allowlist logic of its own can never receive a
 protected address — including via a sync that would re-introduce it.
 
+**The live SSH re-check protects a *connection*, not an address forever.** A
+bruteforcer that reconnects faster than the peer table is re-read keeps an
+established connection visible at every evaluation, so each attempt in its
+threshold window is (correctly) refused. To close the gap where such a burst
+would otherwise never be banned, an IP whose ban was refused *solely* because
+of an active SSH connection is re-evaluated shortly after that connection
+closes — from its still-in-window event history, through the identical guards
+(allowlist, a fresh live SSH-peer probe, ban-rate limit). If the connection is
+still established at re-check time — a genuine operator session — the refusal
+simply repeats and nothing is banned. A ban can therefore only ever result
+from a full check that found no established SSH connection at that moment; the
+operator's session remains unbannable for as long as it is open.
+
 ## Allowlist supremacy
 
 The allowlist is checked FIRST, before any rule engine decision. An allowlisted IP cannot be banned by any rule, AI decision, or manual ban attempt.

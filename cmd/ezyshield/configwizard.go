@@ -441,7 +441,7 @@ func wizardAIProvider(provider string) componentWizard {
 		if cfg.AI == nil {
 			// Fresh ai: section — same tuning defaults the init wizard emits.
 			cfg.AI = &config.AICfg{
-				AmbiguousBand:    [2]int{30, 75},
+				AmbiguousBand:    config.DefaultAmbiguousBand,
 				TokenBudgetDaily: 100000,
 			}
 		}

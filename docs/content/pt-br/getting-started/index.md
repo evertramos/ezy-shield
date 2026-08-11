@@ -162,7 +162,7 @@ ai:
   provider: anthropic
   model: claude-haiku-4-5-20251001
   api_key: env:ANTHROPIC_API_KEY
-  ambiguous_band: [30, 75]
+  ambiguous_band: [30, 69]
   token_budget_daily: 500000
 ```
 

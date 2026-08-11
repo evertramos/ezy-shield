@@ -24,6 +24,9 @@ type JournaldCollector struct {
 	Cmd string
 }
 
+// Name returns a stable identity for supervision logs/alerts (issue #305).
+func (c *JournaldCollector) Name() string { return "journald:" + c.Unit }
+
 // Run starts reading log lines from the journald unit and writes them to out
 // until ctx is cancelled or the subprocess exits with an error.
 // Returns nil on clean shutdown (context cancelled), or a wrapped error.

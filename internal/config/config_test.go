@@ -1189,3 +1189,63 @@ func TestValidate_DashboardAddrLoopbackOnly(t *testing.T) {
 		})
 	}
 }
+
+// ── Issue #419: ambiguous band vs. ban threshold cross-check ───────────────
+
+// TestAIBandOverlapWarning covers the advisory cross-file check: a band whose
+// upper bound reaches the policy ban threshold warns (the daemon skips those
+// consults, so the configured band overstates what the AI sees), while a
+// non-overlapping band, a missing provider, or missing sections stay silent.
+func TestAIBandOverlapWarning(t *testing.T) {
+	t.Parallel()
+
+	pol := func(threshold int) *Policy { return &Policy{BanThreshold: threshold} }
+	aiCfg := func(lo, hi int) *Config {
+		return &Config{AI: &AICfg{Provider: "anthropic", AmbiguousBand: [2]int{lo, hi}}}
+	}
+
+	cases := []struct {
+		name     string
+		cfg      *Config
+		pol      *Policy
+		wantWarn bool
+	}{
+		{"hi above threshold warns", aiCfg(30, 75), pol(70), true},
+		{"hi equal to threshold warns", aiCfg(30, 70), pol(70), true},
+		{"hi below threshold is silent", aiCfg(30, 69), pol(70), false},
+		{"default band vs default threshold is silent",
+			&Config{AI: &AICfg{Provider: "anthropic", AmbiguousBand: DefaultAmbiguousBand}},
+			pol(DefaultBanThreshold), false},
+		{"no provider configured is silent",
+			&Config{AI: &AICfg{AmbiguousBand: [2]int{30, 75}}}, pol(70), false},
+		{"multi-provider form warns",
+			&Config{AI: &AICfg{
+				Providers:     []ProviderCfg{{Name: "anthropic"}},
+				AmbiguousBand: [2]int{30, 75},
+			}}, pol(70), true},
+		{"nil AI section is silent", &Config{}, pol(70), false},
+		{"nil config is silent", nil, pol(70), false},
+		{"nil policy is silent", aiCfg(30, 75), nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			msg := AIBandOverlapWarning(tc.cfg, tc.pol)
+			if got := msg != ""; got != tc.wantWarn {
+				t.Errorf("AIBandOverlapWarning = %q, wantWarn=%v", msg, tc.wantWarn)
+			}
+		})
+	}
+}
+
+// TestDefaultAmbiguousBand_DoesNotOverlapDefaultThreshold pins the shipped
+// defaults against regression: the default band's upper bound must stay below
+// the default ban threshold, or every default install would warn on startup
+// (and silently waste every consult in the overlap before issue #419's gate).
+func TestDefaultAmbiguousBand_DoesNotOverlapDefaultThreshold(t *testing.T) {
+	t.Parallel()
+	if DefaultAmbiguousBand[1] >= DefaultBanThreshold {
+		t.Errorf("DefaultAmbiguousBand = %v overlaps DefaultBanThreshold = %d",
+			DefaultAmbiguousBand, DefaultBanThreshold)
+	}
+}

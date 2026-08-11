@@ -127,7 +127,8 @@ func askAIKeySource(p *wPrinter, pr prompter, step *aiStep,
 
 // writeAIEnvFile merges keyEnvVar into <configDir>/.env preserving every
 // other line (e.g. CLOUDFLARE_API_TOKEN) — the post-install counterpart of
-// writeOrKeepEnvFile, which owns the whole file at init time. Semantics:
+// writeOrKeepEnvFile. Both merge line-by-line: since issue #299 the init-time
+// writer also does a read-modify-write and never truncates the file. Semantics:
 //
 //	token != ""                       → upsert KEY=token (rotation)
 //	token == "", existing real value  → keep the file untouched (§5)

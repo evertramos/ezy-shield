@@ -124,6 +124,13 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
 	slog.SetDefault(logger)
 
+	// Advisory cross-file check (issue #419): an ambiguous_band reaching into
+	// the ban_threshold misleads the operator — the daemon skips those
+	// consults regardless (see maybeConsultAI). Warn once at startup.
+	if msg := config.AIBandOverlapWarning(cfg, policy); msg != "" {
+		slog.Warn("run: " + msg)
+	}
+
 	parsers := defaultParsers(logger)
 
 	collectors := buildCollectors(cfg, logger)

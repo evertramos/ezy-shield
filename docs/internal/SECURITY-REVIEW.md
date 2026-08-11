@@ -48,6 +48,17 @@ attacker. Treat every parsed field as adversarial.
       (fuzz the parser — see §9).
 - [ ] Unicode/homoglyph tricks in usernames/paths don't bypass signature matching
       (normalize before matching, match on bytes where appropriate).
+- [ ] **IP attribution never derives from an attacker-controlled field.** The
+      SourceIP of an event must come only from the daemon/server-provided
+      connection field (sshd's trailing `from <rhost> port <port>`, a trusted
+      proxy header), never from a field the client chooses. SSH usernames may
+      contain spaces and are logged verbatim, so a crafted username can inject a
+      decoy `from <ip> port <n>` segment; because sshd always appends the real
+      peer *after* the username, the parser pins attribution to the **last**
+      such segment via a greedy username capture (`(.+)`, never `\S+`/lazy).
+      Regression: `internal/parser/ssh_test.go` `TestSSHParser_UsernameCannotSpoofSourceIP`
+      + `FuzzSSHParser` #309 seeds. A new parser with a client-controlled field
+      before the IP must apply the same last-occurrence anchoring (issue #309).
 
 ## 2. 🔴 Decision engine — the lock-out / false-ban surface
 

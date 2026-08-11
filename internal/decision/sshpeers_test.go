@@ -99,7 +99,7 @@ func TestSSHPeerCache_TTL(t *testing.T) {
 	if calls != 1 {
 		t.Errorf("probe calls = %d, want 1 (second get inside TTL)", calls)
 	}
-	c.fetched = time.Now().Add(-2 * sshPeerCacheTTL)
+	c.fetched = time.Now().Add(-2 * SSHPeerCacheTTL)
 	_ = c.get()
 	if calls != 2 {
 		t.Errorf("probe calls = %d, want 2 after TTL expiry", calls)

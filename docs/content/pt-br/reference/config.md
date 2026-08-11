@@ -182,9 +182,9 @@ ai:
   provider: anthropic            # anthropic | openai | ollama
   model: claude-haiku-4-5-20251001
   api_key: env:ANTHROPIC_API_KEY
-  ambiguous_band: [30, 75]       # scores nesta faixa consultam a IA
+  ambiguous_band: [30, 69]       # scores nesta faixa consultam a IA (mantenha high < ban_threshold)
   token_budget_daily: 50000      # teto diário rígido; além dele o rule engine assume
-  cache_ttl: 1h                  # cache de vereditos idênticos
+  cache_ttl: 15m                 # cache de vereditos idênticos (padrão 15m)
 ```
 
 ```yaml
@@ -207,9 +207,9 @@ ai:
 | `model` | nome do modelo |
 | `api_key` | referência `env:VARNAME` (nunca inline) |
 | `endpoint` | URL base apenas para o provedor **`ollama`** (padrão `http://localhost:11434`). Os provedores `anthropic` e `openai` a ignoram e sempre chamam suas APIs oficiais (`https://api.anthropic.com`, `https://api.openai.com`) — não há override de endpoint compatível com OpenAI. Mesmo comportamento nas formas de provedor único e de failover `providers`. |
-| `ambiguous_band` | `[low, high]` — apenas scores dentro da faixa consultam a IA. Omitida (ou `[0, 0]`) assume `[30, 75]`; qualquer outra faixa com `low >= high` ou valores fora de 0–100 é rejeitada no carregamento |
+| `ambiguous_band` | `[low, high]` — apenas scores dentro da faixa consultam a IA. Omitida (ou `[0, 0]`) assume `[30, 69]`; qualquer outra faixa com `low >= high` ou valores fora de 0–100 é rejeitada no carregamento. Mantenha `high` **abaixo** do `ban_threshold` da policy: um score no limiar ou acima já decidiu o ban só com as regras, então o daemon nunca consulta a IA para ele — uma faixa que invade o limiar apenas dispara um aviso no start e no `validate` |
 | `token_budget_daily` | teto diário de tokens; quando esgotado, as decisões voltam para as rules |
-| `cache_ttl` | duração do cache de vereditos. As entradas são indexadas pela assinatura de comportamento (contagem de kinds + janela), não pelo IP — padrões de ataque idênticos de IPs diferentes reutilizam um veredito; num hit o veredito em cache é redirecionado para o IP em avaliação |
+| `cache_ttl` | duração do cache de vereditos; omitido ou `0` significa o padrão de **15m** (o cache não pode ser desativado — é o segundo freio contra consultas repetidas para o mesmo comportamento). As entradas são indexadas pela assinatura de comportamento (contagem de kinds + janela), não pelo IP — padrões de ataque idênticos de IPs diferentes reutilizam um veredito; num hit o veredito em cache é redirecionado para o IP em avaliação. Vereditos clampados por allowlist nunca são cacheados |
 | `providers` | lista de failover multi-provedor (`name`, `priority`, `model`, `api_key`, `endpoint`, `token_budget_daily`); tem precedência sobre os campos de provedor único |
 
 O veredito da IA é sempre consultivo: validado por schema, limitado pela policy e nunca capaz de banir um IP da allowlist.

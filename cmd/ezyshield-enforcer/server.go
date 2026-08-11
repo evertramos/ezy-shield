@@ -37,6 +37,22 @@ type Server struct {
 	// name-switch path without a real nft binary on the host.
 	listFn func(ctx context.Context, n nftnames.Names) ([]string, error)
 
+	// mutateMu serializes every blocked-set MUTATION (add/del/flush) across
+	// its full span — the nft kernel exec AND the follow-up s.blocked cache
+	// write together, as one atomic unit (issue #418). Without it, the kernel
+	// write (which holds no lock) and the cache write (a brief s.mu section)
+	// are two separate steps, so a re-ban `add` and a stale post-expire `del`
+	// for the SAME address arriving on concurrent connections (pipeline Ban
+	// vs expiry-tick / probe Sync in the daemon) can have their kernel-effect
+	// order differ from their cache-effect order. That leaves kernel=absent /
+	// cache=present: `list` then reports the ban as enforced, Sync trusts
+	// `list` and never re-adds it, and the ban leaks until the helper
+	// restarts (the sustained ban_ineffective signature of #418/#383).
+	// mutateMu is the OUTER lock (held across the exec); s.mu stays the INNER
+	// lock guarding the map itself, so `list`/`switchNames` readers are never
+	// blocked for a whole nft exec, only for the brief map access.
+	mutateMu sync.Mutex
+
 	mu      sync.RWMutex
 	blocked map[string]bool // canonical IP/CIDR strings currently in nft set
 
@@ -192,6 +208,11 @@ func (s *Server) dispatch(ctx context.Context, req enforce.Request) enforce.Resp
 		return enforce.Response{OK: true, IPs: ips}
 
 	case "flush":
+		// Serialize the kernel flush + cache reset against concurrent add/del
+		// so no mutation's cache write can land after the flush cleared the
+		// map yet before its kernel effect (issue #418).
+		s.mutateMu.Lock()
+		defer s.mutateMu.Unlock()
 		if err := nftFlush(ctx, s.run, names); err != nil {
 			return enforce.Response{OK: false, Error: err.Error()}
 		}
@@ -204,12 +225,20 @@ func (s *Server) dispatch(ctx context.Context, req enforce.Request) enforce.Resp
 		if err := validateIP(req.IP); err != nil {
 			return enforce.Response{OK: false, Error: err.Error()}
 		}
+		// Hold mutateMu across BOTH the kernel add and the cache write so a
+		// concurrent del for the same IP cannot interleave between them and
+		// desync the cache from the kernel (issue #418). See the mutateMu
+		// field comment for the leak this prevents. Released before the ss
+		// teardown below, which touches neither the kernel set nor the cache.
+		s.mutateMu.Lock()
 		if err := nftAdd(ctx, s.run, names, req.IP, req.TTLSeconds); err != nil {
+			s.mutateMu.Unlock()
 			return enforce.Response{OK: false, Error: err.Error()}
 		}
 		s.mu.Lock()
 		s.blocked[req.IP] = true
 		s.mu.Unlock()
+		s.mutateMu.Unlock()
 		// Kill any TCP sessions already established from this peer (issue #30).
 		// Only for single addresses — `ss -K dst` does not accept CIDR, and
 		// per-address teardown for a /24 would fan out into thousands of no-op
@@ -225,6 +254,11 @@ func (s *Server) dispatch(ctx context.Context, req enforce.Request) enforce.Resp
 		if err := validateIP(req.IP); err != nil {
 			return enforce.Response{OK: false, Error: err.Error()}
 		}
+		// Serialize the kernel delete + cache write against a concurrent add
+		// for the same IP so the two mutations' kernel order and cache order
+		// can never diverge (issue #418).
+		s.mutateMu.Lock()
+		defer s.mutateMu.Unlock()
 		if err := nftDel(ctx, s.run, names, req.IP); err != nil {
 			// Typed signal: nft-native timeout (or an out-of-band flush) beat
 			// us to it. Desired end state (absent) is achieved — respond OK

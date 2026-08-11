@@ -37,6 +37,26 @@ const (
 	// rawLinesBuf is the size of the inter-stage channel between collectors and
 	// the pipeline, providing back-pressure without blocking individual collectors.
 	rawLinesBuf = 4096
+
+	// Collector supervision defaults (issue #305). A collector goroutine that
+	// returns a runtime error is restarted with capped exponential backoff so a
+	// transient fault (logrotate reopen delay, journald restart, a briefly
+	// missing file) can't silently disable detection on that source until the
+	// next daemon restart. Context cancellation is treated as a clean shutdown
+	// and is never restarted.
+	defaultCollectorBackoffBase = 1 * time.Second
+	// defaultCollectorBackoffMax caps the restart delay so a permanently broken
+	// collector settles into a slow retry instead of hot-looping.
+	defaultCollectorBackoffMax = 30 * time.Second
+	// defaultCollectorStableRuntime is how long a single Run must survive before
+	// its next failure is treated as a fresh incident (backoff + failure counter
+	// reset). Without this a collector that runs healthily for hours then hits
+	// one error would inherit stale escalated backoff.
+	defaultCollectorStableRuntime = 60 * time.Second
+	// defaultCollectorFailureAlert is the number of consecutive failures after
+	// which a critical notification fires, so a permanently broken source
+	// surfaces to the operator instead of retrying silently forever.
+	defaultCollectorFailureAlert = 5
 )
 
 // daemonStore is the persistence interface required by the daemon.
@@ -101,6 +121,11 @@ type Config struct {
 	// EnfProbeTick overrides the enforcement health-probe interval (tests
 	// only; 0 = default 5m). See runEnforceProbe (issue #174).
 	EnfProbeTick time.Duration
+	// SSHRecheckTick / SSHRecheckDelay override the deferred anti-lockout
+	// re-evaluation poll interval and refusal→re-check delay (tests only;
+	// 0 = defaults). See sshrecheck.go (issue #420).
+	SSHRecheckTick  time.Duration
+	SSHRecheckDelay time.Duration
 }
 
 // enricherFrom converts a *enrich.Enricher into the geoLookup interface, or
@@ -144,6 +169,13 @@ type Daemon struct {
 	armWindowTick time.Duration
 	// enfProbeTick is the enforcement health-probe interval (0 = default 5m).
 	enfProbeTick time.Duration
+	// sshRecheckTick / sshRecheckDelay tune the deferred anti-lockout
+	// re-evaluation (0 = defaults; see sshrecheck.go, issue #420).
+	sshRecheckTick  time.Duration
+	sshRecheckDelay time.Duration
+	// sshRecheck holds the per-IP deferred re-checks armed after SSH-peer
+	// anti-lockout refusals that suppressed a would-be ban (issue #420).
+	sshRecheck sshRecheckQueue
 	// ineffDedup deduplicates ban_ineffective notifications systemically
 	// (ADR-0009 §4, issue #146).
 	ineffDedup ineffDedup
@@ -179,6 +211,44 @@ type Daemon struct {
 	// actionsSink, when non-nil, receives every Action the pipeline produces.
 	// Used in tests to observe pipeline output without a running enforcer.
 	actionsSink chan<- sdk.Action
+
+	// Collector supervision tunables (issue #305). Zero means "use the package
+	// default"; only tests set these to keep restart timing fast.
+	collBackoffBase   time.Duration
+	collBackoffMax    time.Duration
+	collStableRuntime time.Duration
+	collFailureAlert  int
+}
+
+// collectorBackoffBase / collectorBackoffMax / collectorStableRuntime /
+// collectorFailureAlert return the effective supervision tunables, falling back
+// to the package defaults when unset (issue #305).
+func (d *Daemon) collectorBackoffBase() time.Duration {
+	if d.collBackoffBase > 0 {
+		return d.collBackoffBase
+	}
+	return defaultCollectorBackoffBase
+}
+
+func (d *Daemon) collectorBackoffMax() time.Duration {
+	if d.collBackoffMax > 0 {
+		return d.collBackoffMax
+	}
+	return defaultCollectorBackoffMax
+}
+
+func (d *Daemon) collectorStableRuntime() time.Duration {
+	if d.collStableRuntime > 0 {
+		return d.collStableRuntime
+	}
+	return defaultCollectorStableRuntime
+}
+
+func (d *Daemon) collectorFailureAlert() int {
+	if d.collFailureAlert > 0 {
+		return d.collFailureAlert
+	}
+	return defaultCollectorFailureAlert
 }
 
 // New constructs a Daemon from a Config, building the rule engine and decision
@@ -249,6 +319,8 @@ func New(dcfg Config) (*Daemon, error) {
 		policyPath:      dcfg.PolicyPath,
 		armWindowTick:   dcfg.ArmWindowTick,
 		enfProbeTick:    dcfg.EnfProbeTick,
+		sshRecheckTick:  dcfg.SSHRecheckTick,
+		sshRecheckDelay: dcfg.SSHRecheckDelay,
 	}
 
 	// Enforcement-anomaly delivery (ADR-0009 §4, issue #146): the engine
@@ -361,6 +433,10 @@ func (d *Daemon) Run(parentCtx context.Context) error {
 	// Keep the enforcement state fresh on quiet hosts (issue #174).
 	go d.runEnforceProbe(ctx)
 
+	// Re-evaluate IPs whose would-be ban was refused because of an
+	// ESTABLISHED SSH connection, once that connection is gone (issue #420).
+	go d.runSSHRecheck(ctx)
+
 	// Signal handling.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
@@ -396,20 +472,104 @@ func (d *Daemon) Run(parentCtx context.Context) error {
 	return nil
 }
 
-// runCollector wraps a single collector run with panic recovery and re-notifies
-// on unexpected crash (watchdog role for per-collector goroutines).
+// runCollector supervises a single collector for the life of collCtx (issue
+// #305). A collector whose Run returns a runtime error — or panics — is
+// restarted with capped exponential backoff so a transient fault (a briefly
+// missing log file, a logrotate reopen that overruns filetail's short internal
+// retry, a journald restart killing journalctl) cannot silently disable
+// detection on that source until the daemon itself is restarted. It
+// distinguishes two exits that must NOT restart: context cancellation (clean
+// shutdown / SIGTERM drain) and a nil return (the source finished on its own,
+// e.g. a bounded file), both of which end supervision. Backoff and the
+// consecutive-failure counter reset once a Run has survived collectorStableRuntime,
+// so a long-healthy collector that later fails is treated as a fresh incident
+// rather than inheriting stale escalated backoff.
 func (d *Daemon) runCollector(ctx context.Context, c sdk.Collector, out chan<- sdk.RawLine) {
+	name := collectorName(c)
+	backoff := d.collectorBackoffBase()
+	consecutiveFailures := 0
+
+	for {
+		// Never start (or restart) after a shutdown signal.
+		if ctx.Err() != nil {
+			return
+		}
+
+		start := time.Now()
+		err := d.runCollectorOnce(ctx, c, out)
+		ran := time.Since(start)
+
+		// Clean shutdown: context cancelled. Do not restart.
+		if ctx.Err() != nil {
+			return
+		}
+
+		// A run that survived long enough is considered healthy; its next
+		// failure starts a fresh backoff/alert cycle.
+		if ran >= d.collectorStableRuntime() {
+			backoff = d.collectorBackoffBase()
+			consecutiveFailures = 0
+		}
+
+		// A nil return without cancellation means the source completed on its
+		// own (nothing left to tail). Restarting would hot-loop, so stop.
+		if err == nil {
+			slog.InfoContext(ctx, "daemon: collector exited cleanly", "collector", name)
+			return
+		}
+
+		consecutiveFailures++
+		slog.WarnContext(ctx, "daemon: collector error; restarting after backoff",
+			"collector", name,
+			"err", err,
+			"backoff", backoff,
+			"consecutive_failures", consecutiveFailures,
+		)
+
+		// Surface a permanently broken source instead of retrying silently.
+		if consecutiveFailures == d.collectorFailureAlert() {
+			d.notifyCritical(ctx, fmt.Sprintf(
+				"collector %q failed %d times in a row; detection on this source may be degraded",
+				name, consecutiveFailures))
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		backoff = min(backoff*2, d.collectorBackoffMax())
+	}
+}
+
+// runCollectorOnce runs a collector exactly once, converting a panic into an
+// error so the supervisor (runCollector) can restart it rather than letting the
+// panic unwind and kill the supervising goroutine.
+func (d *Daemon) runCollectorOnce(ctx context.Context, c sdk.Collector, out chan<- sdk.RawLine) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			stack := debug.Stack()
 			slog.ErrorContext(ctx, "daemon: collector panic recovered",
-				"panic", r, "stack", string(stack))
+				"collector", collectorName(c), "panic", r, "stack", string(stack))
 			d.notifyPanic(ctx, fmt.Sprintf("collector panic: %v", r))
+			err = fmt.Errorf("collector panic: %v", r)
 		}
 	}()
-	if err := c.Run(ctx, out); err != nil && ctx.Err() == nil {
-		slog.ErrorContext(ctx, "daemon: collector error", "err", err)
+	return c.Run(ctx, out)
+}
+
+// collectorName derives a stable, human-readable identity for logs and alerts.
+// Collectors may implement the optional Name() string method (the concrete
+// filetail/journald/docker collectors do); otherwise the Go type name is used.
+// It never returns attacker-controlled content beyond an operator-configured
+// path/unit/container name.
+func collectorName(c sdk.Collector) string {
+	if n, ok := c.(interface{ Name() string }); ok {
+		if s := n.Name(); s != "" {
+			return s
+		}
 	}
+	return fmt.Sprintf("%T", c)
 }
 
 // runPipeline reads raw lines, parses them into Events, feeds the aggregator,
@@ -475,6 +635,12 @@ func (d *Daemon) processRaw(ctx context.Context, raw sdk.RawLine) {
 		}
 
 		d.dispatch(ctx, action)
+
+		// An SSH-peer anti-lockout refusal that suppressed a would-be ban is
+		// re-examined after the connection closes — a fast-reconnect burst
+		// otherwise ends with in-window evidence nobody ever looks at again
+		// (issue #420).
+		d.maybeScheduleSSHRecheck(ctx, action, verdicts)
 	}
 }
 
@@ -537,6 +703,36 @@ func (d *Daemon) maybeConsultAI(ctx context.Context, ip netip.Addr, verdicts []s
 		}
 	}
 	if highScore < d.aiLo || highScore > d.aiHi {
+		return verdicts
+	}
+
+	// ── Decided-outcome gates (issue #419) ──────────────────────────────────
+	// The decision engine takes the MAX score across verdicts (Decide), so a
+	// consult can only matter while the rules alone are still below the ban
+	// threshold. Once a rule has already decided "ban", an AI verdict is
+	// structurally unable to change the outcome — a lower AI score never
+	// reduces a rule ban. Skip the consult; the distinct log lines below let
+	// audits count the savings (61% of audited spend fell in these gates).
+	if highScore >= d.policy.BanThreshold {
+		slog.DebugContext(ctx, "daemon: ai consult skipped — rule score already decisive",
+			"ip", ip, "score", highScore, "ban_threshold", d.policy.BanThreshold)
+		return verdicts
+	}
+
+	// Likewise, an actively banned IP is a decided outcome: the engine's
+	// active-ban guard suppresses new strikes for the ban's duration, so a
+	// consult could only re-analyze traffic leaking past enforcement. Mirror
+	// the guard's one asymmetry (ADR-0009 §5): an ARMED engine ignores
+	// simulated (dry-run) bans — nothing is enforced for those, so the
+	// consult can still convert the episode into a real ban and proceeds.
+	// On a store error, fall through and consult (pre-#419 behavior): a
+	// wasted call is safer than silently muting the AI leg on a DB hiccup.
+	if _, _, dryBan, banned, err := d.store.GetBanInfo(ctx, ip.Unmap()); err != nil {
+		slog.WarnContext(ctx, "daemon: ai ban-state check failed; consulting anyway",
+			"ip", ip, "err", err)
+	} else if banned && (!dryBan || !d.policy.IsArmed()) {
+		slog.DebugContext(ctx, "daemon: ai consult skipped — IP already banned",
+			"ip", ip, "score", highScore, "dry_run", dryBan)
 		return verdicts
 	}
 

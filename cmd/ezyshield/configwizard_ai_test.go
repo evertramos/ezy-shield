@@ -57,7 +57,7 @@ func TestRunConfigComponent_AIHappyPath(t *testing.T) {
 				t.Fatalf("ai section wrong: %+v", cfg.AI)
 			}
 			// Fresh section carries the same tuning defaults init emits.
-			if cfg.AI.AmbiguousBand != [2]int{30, 75} || cfg.AI.TokenBudgetDaily != 100000 {
+			if cfg.AI.AmbiguousBand != config.DefaultAmbiguousBand || cfg.AI.TokenBudgetDaily != 100000 {
 				t.Errorf("fresh ai defaults wrong: %+v", cfg.AI)
 			}
 			raw, _ := os.ReadFile(cfgPath) //nolint:gosec // test path

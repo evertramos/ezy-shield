@@ -57,6 +57,9 @@ type DockerCollector struct {
 // defaultDockerSocketPath is the canonical Docker Engine API endpoint.
 const defaultDockerSocketPath = "/var/run/docker.sock"
 
+// Name returns a stable identity for supervision logs/alerts (issue #305).
+func (c *DockerCollector) Name() string { return "docker:" + c.Container }
+
 // Run starts the collector loop. It prefers the Docker Engine API; on
 // startup it checks whether the unix socket is reachable and, if so, streams
 // logs via GET /containers/<name>/logs (issue #93). When the socket is

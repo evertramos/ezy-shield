@@ -32,6 +32,8 @@ enforce:
       list_name: ezyshield_blocked
       zone_ids: [zone-fixture-1]
       action: block
+      debounce: 15s
+      expire_flush_interval: 3m
     - name: client_a
       api_token: env:EZYSHIELD_CF_TOKEN_A
       mode: rulesets

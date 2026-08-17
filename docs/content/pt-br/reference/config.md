@@ -129,8 +129,22 @@ escrever qualquer regra. Duas notas operacionais para nomes customizados:
 | `zone_ids` | com `mode: rulesets` | zonas às quais anexar as regras |
 | `action` | não | `block` (padrão), `challenge` ou `js_challenge` |
 | `name` | não | rótulo exibido na saída de status/test |
+| `debounce` | não | por quanto tempo mutações rápidas de ban/unban são agrupadas antes de um único push à API (duração Go, padrão `15s`) |
+| `expire_flush_interval` | não | cadência das **remoções** de itens em lote no modo `lists` (duração Go, padrão `3m`) — bans expirados e unbans acumulam e saem em uma única chamada de API por intervalo |
 
 Múltiplas contas Cloudflare são suportadas: `cloudflare` também aceita uma **lista** desses objetos. Veja o [guia da Cloudflare](../guides/cloudflare.md).
+
+Ajustar as duas cadências troca velocidade de propagação no edge por menos
+chamadas de API. Os padrões mantêm um servidor movimentado confortavelmente
+dentro do limite da Lists API da Cloudflare; aumente-os se o `ezyshield
+status` ainda reportar throttling (`ratelimited` no detalhe do enforcement) e
+diminua o `debounce` se um ban novo precisar chegar ao edge mais rápido. As
+remoções são deliberadamente o caminho lento: um IP expirado permanecer
+bloqueado no edge por até `expire_flush_interval` é fail-closed e inofensivo,
+enquanto um *ban* atrasado é exposição real — por isso bans seguem o
+`debounce` e apenas remoções esperam o intervalo de flush. O `ezyshield
+unban` manual também propaga ao edge na cadência do flush (o unban local no
+nftables é imediato).
 
 ## notify
 

@@ -22,6 +22,11 @@ const (
 	cfDefaultListName = "ezyshield_blocked"
 	cfListItemTag     = "ezyshield"
 	cfListBatchMax    = 1000 // Cloudflare bulk add/remove limit per request
+
+	// cfBulkOpPollMax bounds async bulk-operation polling; combined with
+	// cfBulkOpPollInterval and the limiter this is ~30s before giving up.
+	cfBulkOpPollMax      = 30
+	cfBulkOpPollInterval = time.Second
 )
 
 // listState tracks the desired IP set, the discovered list ID, and the IP→item
@@ -65,6 +70,17 @@ type CloudflareListsEnforcer struct {
 	debounceInterval time.Duration   // 0 = synchronous push (test mode)
 	svcCtx           context.Context // bounds background debounce flushes
 
+	// expireFlushInterval is the deferred-removal cadence (issue #445):
+	// 0 = removals ride every push inline (test/synchronous mode); >0 =
+	// removals batch on their own ticker so expire deletes stop hammering
+	// the Lists API throttle.
+	expireFlushInterval time.Duration
+	// retryDelays is the backoff schedule between throttled mutation
+	// attempts; empty = fail on the first throttle (test mode).
+	retryDelays []time.Duration
+	// opPollInterval is the async bulk-operation poll cadence.
+	opPollInterval time.Duration
+
 	state *listState
 }
 
@@ -88,21 +104,30 @@ func NewCloudflareListsEnforcer(ctx context.Context, cfg *config.CloudflareCfg, 
 	if action == "" {
 		action = "block"
 	}
-	return &CloudflareListsEnforcer{
-		client:           &http.Client{Timeout: 10 * time.Second},
-		token:            token,
-		instanceName:     cfg.Name,
-		accountID:        cfg.AccountID,
-		listName:         listName,
-		zoneIDs:          cfg.ZoneIDs,
-		action:           action,
-		baseURL:          cfBaseURL,
-		limiter:          newCFRateLimiter(cfMaxRPS),
-		allowlist:        allowlist,
-		debounceInterval: cfDebounceTime,
-		svcCtx:           ctx,
-		state:            newListState(),
-	}, nil
+	expireFlush := config.DefaultCFExpireFlushInterval
+	if cfg.ExpireFlushInterval > 0 {
+		expireFlush = cfg.ExpireFlushInterval.AsDuration()
+	}
+	e := &CloudflareListsEnforcer{
+		client:              &http.Client{Timeout: 10 * time.Second},
+		token:               token,
+		instanceName:        cfg.Name,
+		accountID:           cfg.AccountID,
+		listName:            listName,
+		zoneIDs:             cfg.ZoneIDs,
+		action:              action,
+		baseURL:             cfBaseURL,
+		limiter:             newCFRateLimiter(cfMaxRPS),
+		allowlist:           allowlist,
+		debounceInterval:    cfDebounceFromCfg(cfg),
+		expireFlushInterval: expireFlush,
+		retryDelays:         cfRetryDelays,
+		opPollInterval:      cfBulkOpPollInterval,
+		svcCtx:              ctx,
+		state:               newListState(),
+	}
+	go e.runRemovalFlusher()
+	return e, nil
 }
 
 // newCFListsEnforcerForTest builds a Lists enforcer pointed at a test base URL
@@ -129,8 +154,11 @@ func newCFListsEnforcerForTestWithZones(ctx context.Context, token, baseURL, acc
 		baseURL:          baseURL,
 		limiter:          newCFRateLimiter(1000), // effectively no throttle in tests
 		debounceInterval: 0,
-		svcCtx:           ctx,
-		state:            newListState(),
+		// expireFlushInterval 0 = removals stay inline; retryDelays empty =
+		// first throttle fails immediately. Tests opt in via export_test.go.
+		opPollInterval: time.Millisecond,
+		svcCtx:         ctx,
+		state:          newListState(),
 	}
 }
 
@@ -237,7 +265,9 @@ func (e *CloudflareListsEnforcer) scheduleFlush(ctx context.Context) error {
 		if e.svcCtx.Err() != nil {
 			return
 		}
-		flushCtx, cancel := context.WithTimeout(e.svcCtx, 30*time.Second)
+		// 90s leaves room for the full throttle backoff schedule
+		// (issue #445) on top of the requests themselves.
+		flushCtx, cancel := context.WithTimeout(e.svcCtx, 90*time.Second)
 		defer cancel()
 		if err := e.push(flushCtx); err != nil {
 			slog.Error("enforce/cloudflare-lists: debounced push failed", "err", err)
@@ -291,19 +321,10 @@ func (e *CloudflareListsEnforcer) push(ctx context.Context) error {
 	}
 
 	// Compute the diff: anything desired that we don't manage yet → add.
-	// Anything we manage but is no longer desired → remove.
 	var toAdd []string
 	for ip := range desiredCopy {
 		if _, ok := itemsCopy[ip]; !ok {
 			toAdd = append(toAdd, ip)
-		}
-	}
-	var toRemoveIPs []string
-	var toRemoveIDs []string
-	for ip, id := range itemsCopy {
-		if _, ok := desiredCopy[ip]; !ok {
-			toRemoveIPs = append(toRemoveIPs, ip)
-			toRemoveIDs = append(toRemoveIDs, id)
 		}
 	}
 	// Deterministic order so logs and tests are stable.
@@ -321,18 +342,86 @@ func (e *CloudflareListsEnforcer) push(ctx context.Context) error {
 		e.state.mu.Unlock()
 	}
 
-	if len(toRemoveIDs) > 0 {
-		if err := e.removeItems(ctx, listID, toRemoveIDs); err != nil {
-			return err
-		}
-		e.state.mu.Lock()
-		for _, ip := range toRemoveIPs {
-			delete(e.state.items, ip)
-		}
-		e.state.mu.Unlock()
+	// Removals ride the push inline only in synchronous mode
+	// (expireFlushInterval == 0); in production they are deferred to the
+	// removal flusher (issue #445) so expire deletes batch on their own
+	// cadence instead of hammering the Lists API throttle on every push.
+	if e.expireFlushInterval == 0 {
+		return e.removeStale(ctx, listID, desiredCopy, itemsCopy)
 	}
-
 	return nil
+}
+
+// removeStale deletes every managed item that is no longer desired, then
+// forgets the deleted IDs. Shared by the inline (synchronous) push path and
+// the deferred removal flusher.
+func (e *CloudflareListsEnforcer) removeStale(ctx context.Context, listID string, desired map[string]struct{}, items map[string]string) error {
+	var toRemoveIPs []string
+	var toRemoveIDs []string
+	for ip, id := range items {
+		if _, ok := desired[ip]; !ok {
+			toRemoveIPs = append(toRemoveIPs, ip)
+			toRemoveIDs = append(toRemoveIDs, id)
+		}
+	}
+	if len(toRemoveIDs) == 0 {
+		return nil
+	}
+	if err := e.removeItems(ctx, listID, toRemoveIDs); err != nil {
+		return err
+	}
+	e.state.mu.Lock()
+	for _, ip := range toRemoveIPs {
+		delete(e.state.items, ip)
+	}
+	e.state.mu.Unlock()
+	return nil
+}
+
+// flushRemovals batches every stale item into one delete pass. A no-op
+// before the first discovery — there is nothing to remove from a list that
+// has not been read yet.
+func (e *CloudflareListsEnforcer) flushRemovals(ctx context.Context) error {
+	e.state.mu.Lock()
+	discovered := e.state.discovered
+	listID := e.state.listID
+	desiredCopy := make(map[string]struct{}, len(e.state.desired))
+	for ip := range e.state.desired {
+		desiredCopy[ip] = struct{}{}
+	}
+	itemsCopy := make(map[string]string, len(e.state.items))
+	for ip, id := range e.state.items {
+		itemsCopy[ip] = id
+	}
+	e.state.mu.Unlock()
+	if !discovered || listID == "" {
+		return nil
+	}
+	return e.removeStale(ctx, listID, desiredCopy, itemsCopy)
+}
+
+// runRemovalFlusher owns the deferred-removal cadence (issue #445). Bound to
+// svcCtx; a failed flush is logged and retried on the next tick — failing to
+// remove an expired item over-blocks at the edge (fail-closed), it never
+// under-enforces.
+func (e *CloudflareListsEnforcer) runRemovalFlusher() {
+	if e.expireFlushInterval <= 0 {
+		return
+	}
+	t := time.NewTicker(e.expireFlushInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-e.svcCtx.Done():
+			return
+		case <-t.C:
+			ctx, cancel := context.WithTimeout(e.svcCtx, 90*time.Second)
+			if err := e.flushRemovals(ctx); err != nil {
+				slog.Error("enforce/cloudflare-lists: deferred removal flush failed", "err", err)
+			}
+			cancel()
+		}
+	}
 }
 
 // ── CF Lists API discovery ────────────────────────────────────────────────────
@@ -465,10 +554,101 @@ func (e *CloudflareListsEnforcer) createList(ctx context.Context) (string, error
 	return out.Result.ID, nil
 }
 
+// mutateWithRetry executes one JSON mutation against the Lists API with
+// throttle-aware retries (issue #445): HTTP 429 and the known throttle error
+// codes (10040, 971) back off — jittered, honoring Retry-After — and retry up
+// to len(e.retryDelays) extra attempts. Any other failure returns
+// immediately. When every attempt was throttled the returned error wraps
+// ErrCFThrottled so the daemon can treat the failure as transient.
+func (e *CloudflareListsEnforcer) mutateWithRetry(ctx context.Context, op, method, url string, body []byte, out cfMutationResp) error {
+	for attempt := 0; ; attempt++ {
+		if err := e.limiter.wait(ctx); err != nil {
+			return err
+		}
+		resp, err := e.doRequest(ctx, method, url, bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		status := resp.StatusCode
+		retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
+		out.reset()
+		decErr := json.NewDecoder(resp.Body).Decode(out)
+		_ = resp.Body.Close()
+		if decErr == nil && out.ok() {
+			return nil
+		}
+		// A throttled response may carry the JSON error envelope or (on a
+		// raw 429) no parseable body at all; both retry. Everything else
+		// fails now, exactly as before.
+		var apiErrs []cfAPIError
+		if decErr == nil {
+			apiErrs = out.apiErrors()
+		}
+		if !cfIsThrottle(status, apiErrs) {
+			if decErr != nil {
+				return fmt.Errorf("decode %s: %w", op, decErr)
+			}
+			return fmt.Errorf("cloudflare %s: %s", op, cfErrMsg(apiErrs))
+		}
+		detail := fmt.Sprintf("http %d", status)
+		if len(apiErrs) > 0 {
+			detail = cfErrMsg(apiErrs)
+		}
+		if attempt >= len(e.retryDelays) {
+			return fmt.Errorf("cloudflare %s: %s: %w", op, detail, ErrCFThrottled)
+		}
+		slog.WarnContext(ctx, "enforce/cloudflare-lists: throttled, backing off",
+			"op", op, "attempt", attempt+1, "max_attempts", len(e.retryDelays)+1)
+		if err := cfBackoffWait(ctx, e.retryDelays, attempt, retryAfter); err != nil {
+			return err
+		}
+	}
+}
+
+// waitBulkOperation polls an async Lists bulk operation until it completes,
+// so the next mutation never races a still-running one (issue #445 — the
+// back-to-back follow-up mutation is what invites the 971 throttle).
+func (e *CloudflareListsEnforcer) waitBulkOperation(ctx context.Context, opID string) error {
+	url := fmt.Sprintf("%s/accounts/%s/rules/lists/bulk_operations/%s", e.baseURL, e.accountID, opID)
+	for poll := 0; poll < cfBulkOpPollMax; poll++ {
+		if err := e.limiter.wait(ctx); err != nil {
+			return err
+		}
+		resp, err := e.doRequest(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return err
+		}
+		var out cfBulkOpResp
+		decErr := json.NewDecoder(resp.Body).Decode(&out)
+		_ = resp.Body.Close()
+		if decErr != nil {
+			return fmt.Errorf("decode bulk operation: %w", decErr)
+		}
+		if !out.Success {
+			return fmt.Errorf("cloudflare bulk operation: %s", cfErrMsg(out.Errors))
+		}
+		switch out.Result.Status {
+		case "completed", "":
+			// An empty status means the API answered without operation
+			// detail; treat as done instead of polling an unknown shape.
+			return nil
+		case "failed":
+			return fmt.Errorf("cloudflare bulk operation %s failed: %s", opID, out.Result.Error)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(e.opPollInterval):
+		}
+	}
+	return fmt.Errorf("cloudflare bulk operation %s: not completed after %d polls", opID, cfBulkOpPollMax)
+}
+
 // addItems performs one bulk POST per Cloudflare batch limit and returns
-// ip→itemID for the rows the API echoed back. When the API responds with an
-// operation_id but no item bodies, addItems re-reads the list once to recover
-// the IDs.
+// ip→itemID for the rows the API echoed back. Throttled attempts back off
+// and retry (issue #445); an async operation_id is polled to completion
+// before the next mutation. When the API responds with an operation_id but
+// no item bodies, addItems re-reads the list once to recover the IDs.
 func (e *CloudflareListsEnforcer) addItems(ctx context.Context, listID string, ips []string) (map[string]string, error) {
 	out := make(map[string]string, len(ips))
 	needRefresh := false
@@ -486,22 +666,15 @@ func (e *CloudflareListsEnforcer) addItems(ctx context.Context, listID string, i
 		if err != nil {
 			return nil, fmt.Errorf("marshal add items: %w", err)
 		}
-		if err := e.limiter.wait(ctx); err != nil {
-			return nil, err
-		}
 		url := fmt.Sprintf("%s/accounts/%s/rules/lists/%s/items", e.baseURL, e.accountID, listID)
-		resp, err := e.doRequest(ctx, http.MethodPost, url, bytes.NewReader(body))
-		if err != nil {
+		var ar cfListAddResp
+		if err := e.mutateWithRetry(ctx, "add items", http.MethodPost, url, body, &ar); err != nil {
 			return nil, err
 		}
-		var ar cfListAddResp
-		if err := json.NewDecoder(resp.Body).Decode(&ar); err != nil {
-			_ = resp.Body.Close()
-			return nil, fmt.Errorf("decode add items: %w", err)
-		}
-		_ = resp.Body.Close()
-		if !ar.Success {
-			return nil, fmt.Errorf("cloudflare add items: %s", cfErrMsg(ar.Errors))
+		if ar.Result.OperationID != "" {
+			if err := e.waitBulkOperation(ctx, ar.Result.OperationID); err != nil {
+				return nil, err
+			}
 		}
 		if len(ar.Result.Items) > 0 {
 			for _, it := range ar.Result.Items {
@@ -547,22 +720,15 @@ func (e *CloudflareListsEnforcer) removeItems(ctx context.Context, listID string
 		if err != nil {
 			return fmt.Errorf("marshal delete items: %w", err)
 		}
-		if err := e.limiter.wait(ctx); err != nil {
-			return err
-		}
 		url := fmt.Sprintf("%s/accounts/%s/rules/lists/%s/items", e.baseURL, e.accountID, listID)
-		resp, err := e.doRequest(ctx, http.MethodDelete, url, bytes.NewReader(body))
-		if err != nil {
+		var dr cfListDeleteResp
+		if err := e.mutateWithRetry(ctx, "delete items", http.MethodDelete, url, body, &dr); err != nil {
 			return err
 		}
-		var dr cfListDeleteResp
-		if err := json.NewDecoder(resp.Body).Decode(&dr); err != nil {
-			_ = resp.Body.Close()
-			return fmt.Errorf("decode delete items: %w", err)
-		}
-		_ = resp.Body.Close()
-		if !dr.Success {
-			return fmt.Errorf("cloudflare delete items: %s", cfErrMsg(dr.Errors))
+		if dr.Result.OperationID != "" {
+			if err := e.waitBulkOperation(ctx, dr.Result.OperationID); err != nil {
+				return err
+			}
 		}
 		slog.InfoContext(ctx, "enforce/cloudflare-lists: removed items",
 			"count", len(batch), "list_id", listID)
@@ -920,7 +1086,43 @@ type cfListDeleteReq struct {
 	Items []cfListDeleteItem `json:"items"`
 }
 
+// cfListDeleteResult carries the async operation handle a bulk delete may
+// return; polled to completion before the next mutation (issue #445).
+type cfListDeleteResult struct {
+	OperationID string `json:"operation_id"`
+}
+
 type cfListDeleteResp struct {
-	Success bool         `json:"success"`
-	Errors  []cfAPIError `json:"errors"`
+	Success bool               `json:"success"`
+	Errors  []cfAPIError       `json:"errors"`
+	Result  cfListDeleteResult `json:"result"`
+}
+
+// cfMutationResp lets mutateWithRetry check mutation outcomes generically and
+// re-decode into a clean value between throttled attempts.
+type cfMutationResp interface {
+	ok() bool
+	apiErrors() []cfAPIError
+	reset()
+}
+
+func (r *cfListAddResp) ok() bool                { return r.Success }
+func (r *cfListAddResp) apiErrors() []cfAPIError { return r.Errors }
+func (r *cfListAddResp) reset()                  { *r = cfListAddResp{} }
+
+func (r *cfListDeleteResp) ok() bool                { return r.Success }
+func (r *cfListDeleteResp) apiErrors() []cfAPIError { return r.Errors }
+func (r *cfListDeleteResp) reset()                  { *r = cfListDeleteResp{} }
+
+// cfBulkOpResult is the status body of GET .../rules/lists/bulk_operations/{id}.
+type cfBulkOpResult struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+	Error  string `json:"error"`
+}
+
+type cfBulkOpResp struct {
+	Success bool           `json:"success"`
+	Errors  []cfAPIError   `json:"errors"`
+	Result  cfBulkOpResult `json:"result"`
 }

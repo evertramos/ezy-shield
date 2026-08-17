@@ -258,7 +258,11 @@ por conta em `test enforcer cloudflare` e `doctor`. Os logs mostram
 
 ## Limitação de Taxa
 
-EzyShield aplica um limite de 4 requisições/segundo nas chamadas de API da Cloudflare para manter-se bem abaixo dos limites da API pública. Isto é gerenciado automaticamente e não requer configuração.
+EzyShield se mantém dentro dos limites da API da Cloudflare em três níveis, todos automáticos:
+
+- Um teto de 4 requisições/segundo no cliente para toda chamada de API, bem abaixo da cota pública de 1200 req/5 min.
+- Mutações são **agrupadas**: bans rápidos viram um único push por janela de `debounce` (padrão 15s), e remoções (bans expirados, unbans) acumulam e saem em uma única chamada em lote por `expire_flush_interval` (padrão 3m). Ambos são ajustáveis por entrada de conta — veja a [referência de configuração](../reference/config.md).
+- Quando a Lists API ainda responde com o próprio throttle (HTTP 429, ou códigos de erro `10040`/`971`), o EzyShield recua com jitter — respeitando `Retry-After` — e tenta de novo antes de reportar falha. Um throttle que persiste por vários ciclos de sync é o que acaba degradando o estado de enforcement; uma única chamada limitada não degrada mais.
 
 ## Considerações de Segurança
 

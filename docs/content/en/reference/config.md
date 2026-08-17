@@ -132,8 +132,21 @@ is written. Two operational notes for custom names:
 | `zone_ids` | when `mode: rulesets` | zones to attach rules to |
 | `action` | no | `block` (default), `challenge`, or `js_challenge` |
 | `name` | no | label shown in status/test output |
+| `debounce` | no | how long rapid ban/unban mutations are coalesced before one batched API push (Go duration, default `15s`) |
+| `expire_flush_interval` | no | cadence for batched item **removals** in `lists` mode (Go duration, default `3m`) — expired bans and unbans accumulate and go out in one API call per interval |
 
 Multiple Cloudflare accounts are supported: `cloudflare` also accepts a **list** of these objects. See the [Cloudflare guide](../guides/cloudflare.md).
+
+Tuning the two cadences trades edge-propagation speed for fewer API calls.
+The defaults keep a busy server comfortably inside Cloudflare's Lists API
+throttle; raise them if `ezyshield status` still reports throttling
+(`ratelimited` in the enforcement detail), lower `debounce` if a new ban must
+reach the edge faster. Removals are deliberately the slow path: an expired IP
+staying blocked at the edge for up to `expire_flush_interval` is fail-closed
+and harmless, while a delayed *ban* is real exposure — which is why bans ride
+`debounce` and only removals wait for the flush interval. Manual `ezyshield
+unban` also propagates to the edge on the flush cadence (the local nftables
+unban is immediate).
 
 ## notify
 

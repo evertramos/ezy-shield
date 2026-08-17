@@ -257,7 +257,11 @@ gets independent list/rule management and per-account status in
 
 ## Rate Limiting
 
-EzyShield enforces a 4 requests/second rate limit on Cloudflare API calls to stay well below the public API limits. This is automatically managed and requires no configuration.
+EzyShield keeps itself inside Cloudflare's API limits on three levels, all automatic:
+
+- A 4 requests/second client-side cap on every API call, well below the public 1200 req/5 min quota.
+- Mutations are **coalesced**: rapid bans batch into one push per `debounce` window (default 15s), and removals (expired bans, unbans) accumulate and go out in one batched call per `expire_flush_interval` (default 3m). Both are tunable per account entry — see the [config reference](../reference/config.md).
+- When the Lists API still answers with its own throttle (HTTP 429, or error codes `10040`/`971`), EzyShield backs off with jitter — honoring `Retry-After` — and retries before reporting a failure. A throttle that persists across several sync cycles is what eventually degrades the enforcement state; a single throttled call no longer does.
 
 ## Security Considerations
 

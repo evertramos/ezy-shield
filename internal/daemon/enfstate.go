@@ -39,13 +39,22 @@ const (
 	EnfDisabled EnforcementState = "DISABLED" // no enforcer configured
 )
 
+// enfThrottleFlipStreak is how many consecutive throttle-only failures it
+// takes before the state flips to DEGRADED (issue #445). An edge-API rate
+// limit self-heals in seconds and the enforcer already backs off and retries
+// internally, so a single throttled Sync is transient noise — flipping on it
+// produced DEGRADED/RECOVERED flapping and misleading "bans may NOT be
+// applied" banners in production. Real failures still flip immediately.
+const enfThrottleFlipStreak = 3
+
 // enfHealth tracks the last enforcer operation outcome. The derived state
 // combines this runtime health with the static facts (enforcer present,
 // armed) so a config-only reading can never overstate protection.
 type enfHealth struct {
-	mu       sync.Mutex
-	degraded bool   // last Ban/Sync failed
-	lastErr  string // the failure detail, for status/doctor/audit
+	mu             sync.Mutex
+	degraded       bool   // last Ban/Sync failed
+	lastErr        string // the failure detail, for status/doctor/audit
+	throttleStreak int    // consecutive throttle-only failures (issue #445)
 }
 
 // enforcementState derives the current state. hasEnforcer/armed are the
@@ -82,12 +91,30 @@ func (d *Daemon) recordEnforceResult(ctx context.Context, op string, err error) 
 	}
 	d.enfHealth.mu.Lock()
 	was := d.enfHealth.degraded
-	if err != nil {
-		d.enfHealth.degraded = true
-		d.enfHealth.lastErr = fmt.Sprintf("%s %s: %v", d.enforcer.Name(), op, err)
-	} else {
+	switch {
+	case err == nil:
 		d.enfHealth.degraded = false
 		d.enfHealth.lastErr = ""
+		d.enfHealth.throttleStreak = 0
+	case enforce.IsThrottleOnly(err):
+		// Transient edge-API throttle (issue #445): tolerate a short streak
+		// before declaring DEGRADED. Once degraded, a throttle keeps the
+		// state degraded (only success recovers it).
+		d.enfHealth.throttleStreak++
+		if d.enfHealth.degraded || d.enfHealth.throttleStreak >= enfThrottleFlipStreak {
+			d.enfHealth.degraded = true
+			d.enfHealth.lastErr = fmt.Sprintf("%s %s: %v", d.enforcer.Name(), op, err)
+		} else {
+			streak := d.enfHealth.throttleStreak
+			d.enfHealth.mu.Unlock()
+			slog.WarnContext(ctx, "daemon: enforcement throttled by edge API — transient, not yet DEGRADED",
+				"op", op, "streak", streak, "flip_at", enfThrottleFlipStreak)
+			return
+		}
+	default:
+		d.enfHealth.degraded = true
+		d.enfHealth.lastErr = fmt.Sprintf("%s %s: %v", d.enforcer.Name(), op, err)
+		d.enfHealth.throttleStreak = 0
 	}
 	now := d.enfHealth.degraded
 	detail := d.enfHealth.lastErr

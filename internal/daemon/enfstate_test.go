@@ -257,3 +257,92 @@ func TestEnforcementState_GateRefusalIsNotIllHealth(t *testing.T) {
 		t.Fatalf("after gate refusal: state = %s (%s), want ACTIVE (refusal is not enforcer ill-health)", s, detail)
 	}
 }
+
+// ── throttle-streak behaviour (issue #445) ───────────────────────────────────
+
+func TestEnforcementState_ThrottleOnlyNeedsStreak(t *testing.T) {
+	t.Parallel()
+	enf := &flakyEnforcer{failing: false}
+	d, db := newEnfStateDaemon(t, enf, true)
+	ctx := context.Background()
+	throttle := fmt.Errorf("cloudflare sync: %w", enforce.ErrCFThrottled)
+
+	// A short throttle streak is transient: state stays ACTIVE, no audit.
+	for i := 0; i < enfThrottleFlipStreak-1; i++ {
+		d.recordEnforceResult(ctx, "sync", throttle)
+		if s, _ := d.enforcementState(); s != EnfActive {
+			t.Fatalf("throttle %d/%d: state = %s, want ACTIVE", i+1, enfThrottleFlipStreak, s)
+		}
+	}
+
+	// The streak-completing throttle flips DEGRADED, with detail.
+	d.recordEnforceResult(ctx, "sync", throttle)
+	if s, detail := d.enforcementState(); s != EnfDegraded {
+		t.Fatalf("after %d throttles: state = %s, want DEGRADED", enfThrottleFlipStreak, s)
+	} else if detail == "" {
+		t.Error("DEGRADED state carries no detail")
+	}
+
+	// Success recovers and resets the streak: a fresh short streak stays ACTIVE.
+	d.recordEnforceResult(ctx, "sync", nil)
+	if s, _ := d.enforcementState(); s != EnfActive {
+		t.Fatalf("after recovery: state = %s, want ACTIVE", s)
+	}
+	for i := 0; i < enfThrottleFlipStreak-1; i++ {
+		d.recordEnforceResult(ctx, "sync", throttle)
+	}
+	if s, _ := d.enforcementState(); s != EnfActive {
+		t.Fatalf("streak not reset by success: state = %s, want ACTIVE", s)
+	}
+
+	// Exactly one degraded + one recovered transition was audited.
+	entries, err := db.ListAuditLog(ctx, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var degraded, recovered int
+	for _, e := range entries {
+		switch e.Op {
+		case "enforce_degraded":
+			degraded++
+		case "enforce_recovered":
+			recovered++
+		}
+	}
+	if degraded != 1 || recovered != 1 {
+		t.Errorf("audit transitions: degraded=%d recovered=%d, want 1 and 1", degraded, recovered)
+	}
+}
+
+func TestEnforcementState_MixedThrottleAndRealFailureFlipsImmediately(t *testing.T) {
+	t.Parallel()
+	enf := &flakyEnforcer{failing: false}
+	d, _ := newEnfStateDaemon(t, enf, true)
+	ctx := context.Background()
+
+	mixed := errors.Join(
+		fmt.Errorf("cloudflare: %w", enforce.ErrCFThrottled),
+		errors.New("nftables: enforcer socket gone"),
+	)
+	d.recordEnforceResult(ctx, "sync", mixed)
+	if s, _ := d.enforcementState(); s != EnfDegraded {
+		t.Fatalf("mixed throttle+real failure: state = %s, want DEGRADED immediately", s)
+	}
+}
+
+func TestEnforcementState_ThrottleWhileDegradedStaysDegraded(t *testing.T) {
+	t.Parallel()
+	enf := &flakyEnforcer{failing: false}
+	d, _ := newEnfStateDaemon(t, enf, true)
+	ctx := context.Background()
+
+	d.recordEnforceResult(ctx, "sync", errors.New("nftables: real failure"))
+	if s, _ := d.enforcementState(); s != EnfDegraded {
+		t.Fatalf("real failure: state = %s, want DEGRADED", s)
+	}
+	// A subsequent throttle must not sneak the state back to ACTIVE.
+	d.recordEnforceResult(ctx, "sync", fmt.Errorf("cloudflare: %w", enforce.ErrCFThrottled))
+	if s, _ := d.enforcementState(); s != EnfDegraded {
+		t.Fatalf("throttle while degraded: state = %s, want DEGRADED", s)
+	}
+}

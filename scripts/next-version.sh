@@ -64,17 +64,20 @@ case "$BUMP" in
     LATEST_RC="$(latest_rc)"
 
     if [ "$RC_BASE" = "auto" ]; then
+      NEW_TAG=""
       if [ -n "$LATEST_RC" ]; then
         RC_SERIES_BASE="${LATEST_RC%-rc.*}"
         # The series is open only while its base has no final tag.
         if [ -z "$(git tag -l "$RC_SERIES_BASE")" ]; then
           RC_NUM="${LATEST_RC##*-rc.}"
-          echo "${RC_SERIES_BASE}-rc.$((RC_NUM + 1))"
-          exit 0
+          NEW_TAG="${RC_SERIES_BASE}-rc.$((RC_NUM + 1))"
         fi
       fi
-      # No open series: an rc rehearses the next minor by default.
-      echo "$(bump_of "$LATEST" minor)-rc.1"
+      if [ -z "$NEW_TAG" ]; then
+        # No open series: an rc rehearses the next minor by default.
+        NEW_TAG="$(bump_of "$LATEST" minor)-rc.1"
+      fi
+      echo "$NEW_TAG"
     else
       TARGET="$(bump_of "$LATEST" "$RC_BASE")"
       if [ -n "$LATEST_RC" ] && [ "${LATEST_RC%-rc.*}" = "$TARGET" ]; then

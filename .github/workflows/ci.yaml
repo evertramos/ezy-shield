@@ -153,6 +153,9 @@ jobs:
       - name: Package lifecycle scripts (upgrade restarts, removal stops)
         id: pkglifecycle
         run: sh scripts/package-lifecycle-test.sh
+      - name: Release version arithmetic (RC series closes when base ships)
+        id: nextversion
+        run: bash scripts/next-version-test.sh
       - name: Validate example configs against JSON schemas
         id: schemas
         run: |

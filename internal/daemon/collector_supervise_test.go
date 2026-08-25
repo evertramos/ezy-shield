@@ -311,6 +311,44 @@ func TestRunCollector_PanicIsRecoveredAndRestarted(t *testing.T) {
 	}
 }
 
+// TestRunCollectorOnce_PanicAlertNamesTheCollector (issue #438): the panic
+// alert's Title must carry the panicking collector's identity — the notifier
+// dedups system notifications by severity+Title, so a constant Title made
+// panics from different collectors collapse into one suppressed alert and
+// hid which collector was panic-looping.
+func TestRunCollectorOnce_PanicAlertNamesTheCollector(t *testing.T) {
+	t.Parallel()
+
+	rec := &recordingNotifier{}
+	disp := notify.New([]sdk.Notifier{rec}, 0, time.Millisecond, nil)
+	d := &Daemon{notifier: disp}
+
+	sc := &scriptedCollector{
+		runFn: func(_ int, _ context.Context, _ chan<- sdk.RawLine) error {
+			panic("collector blew up")
+		},
+	}
+
+	if err := d.runCollectorOnce(context.Background(), sc, nil); err == nil {
+		t.Fatal("recovered panic must surface as an error to the supervisor")
+	}
+
+	msgs := rec.all()
+	if len(msgs) != 1 {
+		t.Fatalf("expected exactly 1 panic alert, got %d", len(msgs))
+	}
+	m := msgs[0]
+	if m.Severity != "critical" {
+		t.Fatalf("alert severity = %q, want critical", m.Severity)
+	}
+	if !strings.Contains(m.Title, "scripted-collector") {
+		t.Fatalf("panic alert Title must name the collector (it is the dedup key): %q", m.Title)
+	}
+	if !strings.Contains(m.Body, "collector blew up") {
+		t.Fatalf("panic alert body must carry the panic value: %q", m.Body)
+	}
+}
+
 // TestRunCollector_AlertsAfterConsecutiveFailures proves a permanently broken
 // collector surfaces to the operator via a critical notification rather than
 // retrying silently forever.

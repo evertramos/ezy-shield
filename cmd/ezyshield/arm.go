@@ -31,7 +31,7 @@ a "would I ban myself?" simulation for your own client IP, and a summary
 of recent dry-run activity. Failing checks refuse the transition; --force
 overrides everything except the self-ban check.
 
---for arms temporarily: unless you confirm with 'ezyshield arm --keep'
+--for arms temporarily: unless you confirm with '` + progName + ` arm --keep'
 before the window expires, the daemon reverts to dry-run by itself and
 notifies. The revert is daemon-side — it fires even if you lose this
 session.`,
@@ -132,10 +132,10 @@ func runArm(cmd *cobra.Command, socketPath, forWindow string, force bool) error 
 	w := cmd.OutOrStdout()
 	fmt.Fprintln(w) //nolint:errcheck
 	if data.RevertAt != "" {
-		fmt.Fprintf(w, "ARMED until %s — confirm with 'ezyshield arm --keep' to keep enforcement on,\n", data.RevertAt) //nolint:errcheck
-		fmt.Fprintln(w, "or do nothing and the daemon reverts to dry-run automatically.")                               //nolint:errcheck
+		fmt.Fprintf(w, "ARMED until %s — confirm with '%s arm --keep' to keep enforcement on,\n", data.RevertAt, progName) //nolint:errcheck
+		fmt.Fprintln(w, "or do nothing and the daemon reverts to dry-run automatically.")                                  //nolint:errcheck
 	} else {
-		fmt.Fprintln(w, "ARMED — enforcement is live. 'ezyshield disarm' returns to dry-run.") //nolint:errcheck
+		fmt.Fprintf(w, "ARMED — enforcement is live. '%s disarm' returns to dry-run.\n", progName) //nolint:errcheck
 	}
 	return nil
 }

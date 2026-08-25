@@ -28,7 +28,7 @@ func checkEnforcementState(socketPath string) CheckResult {
 	resp, err := daemon.Call(ctx, socketPath, daemon.SocketRequest{Verb: "status"})
 	if err != nil || resp == nil || len(resp.Data) == 0 {
 		return CheckResult{Name: name, Status: statusNA,
-			Hint: "daemon not reachable — start it with 'ezyshield run' (or systemctl start ezyshield)"}
+			Hint: "daemon not reachable — start it with '" + progName + " run' (or systemctl start ezyshield)"}
 	}
 	var sd daemon.StatusData
 	if err := json.Unmarshal(resp.Data, &sd); err != nil {
@@ -40,7 +40,7 @@ func checkEnforcementState(socketPath string) CheckResult {
 		return CheckResult{Name: name, Status: statusPass, Hint: "ACTIVE — bans are enforced"}
 	case string(daemon.EnfDryRun):
 		return CheckResult{Name: name, Status: statusWarn,
-			Hint: "DRY-RUN — detection is running but NOTHING is enforced; 'ezyshield arm' when ready"}
+			Hint: "DRY-RUN — detection is running but NOTHING is enforced; '" + progName + " arm' when ready"}
 	case string(daemon.EnfDegraded):
 		detail := sd.EnforcementDetail
 		if detail == "" {

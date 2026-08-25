@@ -95,6 +95,18 @@ func TestNginxParser_GoldenScanner(t *testing.T) {
 	)
 }
 
+// TestNginxParser_GoldenRCEProbe wires the fixture pair added for the
+// exploit-probe rules feature; it was committed without a loading test, so
+// its golden asserted nothing and could silently rot (issue #328).
+func TestNginxParser_GoldenRCEProbe(t *testing.T) {
+	runNginxGoldenTest(t,
+		"../../fixtures/nginx/rce_probe.log",
+		"../../fixtures/nginx/rce_probe.log.golden.json",
+		"file:/var/log/nginx/access.log",
+		parser.NginxConfig{},
+	)
+}
+
 // TestNginxParser_GoldenIPv6 tests IPv6 client addresses including bots.
 func TestNginxParser_GoldenIPv6(t *testing.T) {
 	runNginxGoldenTest(t,

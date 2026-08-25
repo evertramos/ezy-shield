@@ -763,7 +763,7 @@ ezyshield watch --kind ban,dry_ban
 **Export per-IP history with evidence to JSON:**
 
 ```bash
-ezyshield report --json > report.json
+ezyshield report 203.0.113.42 --json > report.json
 ```
 
 **Check if an IP is currently banned:**

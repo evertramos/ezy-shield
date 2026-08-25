@@ -660,7 +660,19 @@ func (d *Daemon) processRaw(ctx context.Context, raw sdk.RawLine) {
 		return
 	}
 
+	// Capture-at-detection evidence (ADR-0011, issue #127): attach ONE
+	// bounded copy of the originating line, shared by this line's events —
+	// capture in-pipeline covers every collector kind uniformly. Parsers
+	// never see Raw; sanitization stays at render time.
+	var rawCopy []byte
+	if len(raw.Line) > 0 {
+		n := min(len(raw.Line), sdk.EvidenceRawCap)
+		rawCopy = make([]byte, n)
+		copy(rawCopy, raw.Line[:n])
+	}
+
 	for _, ev := range events {
+		ev.Raw = rawCopy
 		d.agg.Add(ev)
 
 		verdicts := d.evaluateRules(ctx, ev.SourceIP)

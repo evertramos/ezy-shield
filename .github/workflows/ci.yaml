@@ -260,13 +260,34 @@ jobs:
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
       - name: Check for known vulnerabilities
         run: |
-          govulncheck ./... 2>&1 | tee /tmp/vulncheck.out || true
-          # Fail only if there are vulnerabilities with fixes available (meaning we should update)
-          if grep -q "Fixed in:" /tmp/vulncheck.out; then
-            # Check if ALL fixes are stdlib (Go version upgrade needed, not actionable now)
-            # Matches patterns like "Fixed in: go1.26.5" or "Fixed in: crypto/tls@go1.26.5"
+          # Issue #332: never swallow govulncheck's own exit status. Exit 3
+          # means "vulnerabilities found" (triaged below); any OTHER non-zero
+          # exit (package load failure, vulndb unreachable) is a broken scan
+          # and must fail the gate — a scan that didn't run is not a clean
+          # scan.
+          set +e
+          govulncheck ./... 2>&1 | tee /tmp/vulncheck.out
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then
+            echo "::error::govulncheck itself failed (exit $rc) — the scan did not run; see output above."
+            exit "$rc"
+          fi
+          if [ "$rc" -eq 3 ] && ! grep -q "Vulnerability #" /tmp/vulncheck.out; then
+            echo "::error::govulncheck exited 3 but reported no findings — treat as a broken scan."
+            exit 1
+          fi
+          # Findings triage: fail on any dependency vulnerability WITH a fix
+          # available; stdlib-only findings warn (toolchain bump is the fix).
+          # A finding WITHOUT any "Fixed in:" line still fails the gate when
+          # it is a dependency finding — an unfixed CVE is not a pass.
+          if grep -q "Vulnerability #" /tmp/vulncheck.out; then
             if grep "Fixed in:" /tmp/vulncheck.out | grep -qvE "(Fixed in: go[0-9]|@go[0-9])"; then
               echo "::error::Vulnerabilities with available fixes in dependencies. Run: go get -u && go mod tidy"
+              exit 1
+            fi
+            if ! grep -q "Fixed in:" /tmp/vulncheck.out; then
+              echo "::error::Vulnerabilities reported with no fix metadata — triage manually before merging."
               exit 1
             fi
             echo "::warning::All findings are in the Go stdlib and a fixed patch release exists — bump the toolchain directive in go.mod to the 'Fixed in' version above."

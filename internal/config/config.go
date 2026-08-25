@@ -549,6 +549,7 @@ var validParserNames = map[string]bool{
 	"traefik":      true,
 	"caddy":        true,
 	"postfix":      true,
+	"dovecot":      true,
 }
 
 // ValidParserNames returns the set of collector parser names accepted by config

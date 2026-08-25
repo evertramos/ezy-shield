@@ -182,8 +182,12 @@ type Daemon struct {
 	// enfHealth tracks enforcer Ban/Sync health for the honest
 	// enforcement-state reporting (issue #174).
 	enfHealth enfHealth
-	startTime time.Time
-	version   string
+	// collHealth tracks per-collector runtime health for the honest
+	// observation-state reporting in status (issue #456; see collhealth.go).
+	// Fed by the runCollector supervisor (issue #305).
+	collHealth collHealth
+	startTime  time.Time
+	version    string
 
 	// evidenceJournalctl and evidenceDockerSocket override the journalctl
 	// binary and Docker engine socket used by on-demand evidence extraction
@@ -505,10 +509,12 @@ func (d *Daemon) runCollector(ctx context.Context, c sdk.Collector, out chan<- s
 		}
 
 		// A run that survived long enough is considered healthy; its next
-		// failure starts a fresh backoff/alert cycle.
+		// failure starts a fresh backoff/alert cycle (and clears any
+		// degraded state it had in the status report, issue #456).
 		if ran >= d.collectorStableRuntime() {
 			backoff = d.collectorBackoffBase()
 			consecutiveFailures = 0
+			d.recordCollectorHealthy(ctx, name)
 		}
 
 		// A nil return without cancellation means the source completed on its
@@ -519,6 +525,7 @@ func (d *Daemon) runCollector(ctx context.Context, c sdk.Collector, out chan<- s
 		}
 
 		consecutiveFailures++
+		d.recordCollectorFailure(ctx, name, consecutiveFailures, err)
 		slog.WarnContext(ctx, "daemon: collector error; restarting after backoff",
 			"collector", name,
 			"err", err,

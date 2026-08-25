@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"os"
 	"sort"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -243,6 +244,17 @@ type CloudflareCfg struct {
 	ZoneIDs []string `yaml:"zone_ids"`
 	// Action is the rule mode: "block" (default), "challenge", or "js_challenge".
 	Action string `yaml:"action"`
+	// Debounce is how long rapid Ban/Unban mutations are coalesced before one
+	// batched API push. Omitted or 0 defaults to DefaultCFDebounce (15s).
+	// Larger values mean fewer Cloudflare API calls at the cost of slower
+	// edge propagation for new bans.
+	Debounce Duration `yaml:"debounce,omitempty"`
+	// ExpireFlushInterval is the cadence at which item removals (expired bans
+	// and unbans) are batched into a single API call in "lists" mode, instead
+	// of riding every push. Omitted or 0 defaults to
+	// DefaultCFExpireFlushInterval (3m). The trade-off is fail-closed: an
+	// expired IP can stay blocked at the edge for up to this long.
+	ExpireFlushInterval Duration `yaml:"expire_flush_interval,omitempty"`
 }
 
 // ProviderCfg describes one provider entry in a failover chain.
@@ -300,6 +312,21 @@ func LoadConfigReader(r io.Reader, name string) (*Config, error) {
 	if cfg.AI != nil && cfg.AI.AmbiguousBand == [2]int{0, 0} {
 		cfg.AI.AmbiguousBand = DefaultAmbiguousBand
 	}
+	// Default the Cloudflare mutation cadences before validation, following the
+	// same zeros-are-defaulted convention as the AI band: omitted and explicit
+	// zero are indistinguishable in YAML, and both mean "use the default"
+	// (issue #445). Defaulting here (not in the enforcer) makes the effective
+	// values visible in `ezyshield config show`.
+	if cfg.Enforce != nil {
+		for i := range cfg.Enforce.Cloudflare {
+			if cfg.Enforce.Cloudflare[i].Debounce == 0 {
+				cfg.Enforce.Cloudflare[i].Debounce = Duration(DefaultCFDebounce)
+			}
+			if cfg.Enforce.Cloudflare[i].ExpireFlushInterval == 0 {
+				cfg.Enforce.Cloudflare[i].ExpireFlushInterval = Duration(DefaultCFExpireFlushInterval)
+			}
+		}
+	}
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validating %s: %w", name, err)
 	}
@@ -323,6 +350,18 @@ func LoadConfigReader(r io.Reader, name string) (*Config, error) {
 // decision engine takes the max score), so consulting the AI for it is pure
 // token spend (issue #419) — see AIBandOverlapWarning.
 var DefaultAmbiguousBand = [2]int{30, DefaultBanThreshold - 1}
+
+// DefaultCFDebounce is the Cloudflare mutation-coalescing window applied when
+// enforce.cloudflare.debounce is omitted (issue #445). Rapid Ban/Unban calls
+// within this window collapse into one batched API push.
+const DefaultCFDebounce = 15 * time.Second
+
+// DefaultCFExpireFlushInterval is the cadence for batched Cloudflare list-item
+// removals (expired bans/unbans) applied when
+// enforce.cloudflare.expire_flush_interval is omitted (issue #445). Removals
+// are deferred to this ticker in "lists" mode so item-by-item expire deletes
+// stop hammering the Lists API rate limit.
+const DefaultCFExpireFlushInterval = 3 * time.Minute
 
 // AIBandOverlapWarning returns a human-readable advisory when the configured
 // AI ambiguous band overlaps the policy ban threshold, or "" when there is
@@ -588,6 +627,12 @@ func validateCFInstanceName(name string) error {
 func validateCloudflare(cf CloudflareCfg) error {
 	if !cf.APIToken.IsSet() {
 		return fmt.Errorf("'api_token' is required")
+	}
+	if cf.Debounce < 0 {
+		return fmt.Errorf("'debounce' must be positive, got %s", time.Duration(cf.Debounce))
+	}
+	if cf.ExpireFlushInterval < 0 {
+		return fmt.Errorf("'expire_flush_interval' must be positive, got %s", time.Duration(cf.ExpireFlushInterval))
 	}
 	mode := cf.Mode
 	if mode == "" {

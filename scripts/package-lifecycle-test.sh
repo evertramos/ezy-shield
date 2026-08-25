@@ -44,6 +44,12 @@ cat > "$STUB/install" <<'EOF'
 #!/bin/sh
 exit 0
 EOF
+# usermod: log group-membership changes (issue #454 — journal read access).
+cat > "$STUB/usermod" <<EOF
+#!/bin/sh
+echo "usermod \$*" >> "$LOG"
+exit 0
+EOF
 chmod +x "$STUB"/*
 
 run() { # run <script> [args...]
@@ -105,6 +111,27 @@ assert_not_logged "postinstall deb fresh" "systemctl enable"
 run postinstall.sh 1
 assert_not_logged "postinstall rpm fresh" "systemctl try-restart"
 assert_not_logged "postinstall rpm fresh" "systemctl start"
+
+# ── postinstall: journal group membership (issue #454) ───────────────────────
+# The journald collector runs as the service user; without systemd-journal
+# membership it can never read the journal. Every postinstall run must add it
+# (usermod -aG is idempotent), and on UPGRADE the usermod must come before
+# the try-restart — supplementary groups are resolved at process start.
+run postinstall.sh configure
+assert_logged "postinstall deb fresh journal group" "usermod -aG systemd-journal ezyshield"
+
+run postinstall.sh 1
+assert_logged "postinstall rpm fresh journal group" "usermod -aG systemd-journal ezyshield"
+
+run postinstall.sh configure 0.1.0
+assert_logged "postinstall deb upgrade journal group" "usermod -aG systemd-journal ezyshield"
+um_line=$(grep -n "usermod -aG systemd-journal" "$LOG" | head -n 1 | cut -d: -f1)
+tr_line=$(grep -n "systemctl try-restart" "$LOG" | head -n 1 | cut -d: -f1)
+if [ -z "$um_line" ] || [ -z "$tr_line" ] || [ "$um_line" -ge "$tr_line" ]; then
+	echo "FAIL [postinstall upgrade ordering]: usermod (line ${um_line:-none}) must run before try-restart (line ${tr_line:-none}), log was:" >&2
+	sed 's/^/    /' "$LOG" >&2 || true
+	fails=$((fails + 1))
+fi
 
 if [ "$fails" -gt 0 ]; then
 	echo "package-lifecycle-test: $fails assertion(s) failed" >&2

@@ -3,6 +3,7 @@ package enforce_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -47,6 +48,14 @@ type cfListsMock struct {
 	reqCount  atomic.Int32
 	// Test knobs
 	addReturnsAsync bool // true = POST items returns operation_id, no item bodies
+	throttleAdds    int  // next N POST items answer a throttle instead
+	throttleDeletes int  // next N DELETE items answer a throttle instead
+	throttleAs429   bool // throttle as raw HTTP 429 (non-JSON body) instead of JSON code 10040
+	failAddsCode    int  // when non-zero, next POST items fails with this (non-throttle) CF error code
+	opPendingPolls  int  // bulk-operation polls answering "pending" before "completed"
+	addCalls        int  // POST items requests observed (throttled ones included)
+	deleteCalls     int  // DELETE items requests observed (throttled ones included)
+	bulkOpPolls     int  // bulk-operation status requests observed
 }
 
 func newCFListsMock(accountID string) *cfListsMock {
@@ -88,6 +97,8 @@ func (m *cfListsMock) handler() http.Handler {
 			m.handlePostItems(w, r, parts[4])
 		case r.Method == http.MethodDelete && len(parts) == 6 && parts[5] == "items":
 			m.handleDeleteItems(w, r, parts[4])
+		case r.Method == http.MethodGet && len(parts) == 6 && parts[4] == "bulk_operations":
+			m.handleBulkOp(w, parts[5])
 		default:
 			http.NotFound(w, r)
 		}
@@ -196,6 +207,21 @@ func (m *cfListsMock) handlePostItems(w http.ResponseWriter, r *http.Request, li
 		return
 	}
 	m.mu.Lock()
+	m.addCalls++
+	if m.failAddsCode != 0 {
+		code := m.failAddsCode
+		m.failAddsCode = 0
+		m.mu.Unlock()
+		writeJSON(w, cfError(code, "invalid add payload"))
+		return
+	}
+	if m.throttleAdds > 0 {
+		m.throttleAdds--
+		as429 := m.throttleAs429
+		m.mu.Unlock()
+		m.writeThrottle(w, as429)
+		return
+	}
 	l, ok := m.lists[listID]
 	if !ok {
 		m.mu.Unlock()
@@ -217,6 +243,32 @@ func (m *cfListsMock) handlePostItems(w http.ResponseWriter, r *http.Request, li
 	writeJSON(w, cfSuccess(wire))
 }
 
+// writeThrottle answers like a rate-limited Cloudflare API: either the JSON
+// error envelope with code 10040, or a raw HTTP 429 with a non-JSON body.
+func (m *cfListsMock) writeThrottle(w http.ResponseWriter, as429 bool) {
+	if as429 {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte("rate limited"))
+		return
+	}
+	writeJSON(w, cfError(10040, "you have been ratelimited please wait and try again"))
+}
+
+func (m *cfListsMock) handleBulkOp(w http.ResponseWriter, opID string) {
+	m.mu.Lock()
+	m.bulkOpPolls++
+	pending := m.opPendingPolls > 0
+	if pending {
+		m.opPendingPolls--
+	}
+	m.mu.Unlock()
+	status := "completed"
+	if pending {
+		status = "pending"
+	}
+	writeJSON(w, cfSuccess(map[string]any{"id": opID, "status": status}))
+}
+
 type cfListsMockDeleteReq struct {
 	Items []struct {
 		ID string `json:"id"`
@@ -230,6 +282,14 @@ func (m *cfListsMock) handleDeleteItems(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	m.mu.Lock()
+	m.deleteCalls++
+	if m.throttleDeletes > 0 {
+		m.throttleDeletes--
+		as429 := m.throttleAs429
+		m.mu.Unlock()
+		m.writeThrottle(w, as429)
+		return
+	}
 	l, ok := m.lists[listID]
 	if !ok {
 		m.mu.Unlock()
@@ -244,6 +304,19 @@ func (m *cfListsMock) handleDeleteItems(w http.ResponseWriter, r *http.Request, 
 }
 
 // ── mock inspection helpers ───────────────────────────────────────────────────
+
+func (m *cfListsMock) counts() (addCalls, deleteCalls, bulkOpPolls int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.addCalls, m.deleteCalls, m.bulkOpPolls
+}
+
+func (m *cfListsMock) setThrottleAdds(n int, as429 bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.throttleAdds = n
+	m.throttleAs429 = as429
+}
 
 func (m *cfListsMock) listCount() int {
 	m.mu.Lock()
@@ -705,4 +778,187 @@ func TestCFListsSync_EmptyListSucceeds(t *testing.T) {
 	// Verify the list was discovered and is now empty
 	// (In a real scenario, the empty list would have num_items == 0)
 	// This test primarily verifies that fetchAllItems handles num_items == 0 correctly
+}
+
+// ── throttle / backoff tests (issue #445) ────────────────────────────────────
+
+func TestCFListsBan_ThrottledAdd_RetriesThenSucceeds(t *testing.T) {
+	mock, ts := newMockCFListsServer(t)
+	mock.setThrottleAdds(2, false) // two JSON 10040 answers, then success
+	e := enforce.NewCFListsEnforcerWithRetryDelays("tok", ts.URL, testCFAccount, testCFListName,
+		[]time.Duration{time.Millisecond, time.Millisecond, time.Millisecond})
+
+	if err := e.Ban(context.Background(), sdk.Target{IP: netip.MustParseAddr("192.0.2.10")}); err != nil {
+		t.Fatalf("Ban despite retryable throttle: %v", err)
+	}
+	if !mock.hasItem(testCFListName, "192.0.2.10") {
+		t.Error("item missing after throttle retries")
+	}
+	adds, _, _ := mock.counts()
+	if adds != 3 {
+		t.Errorf("add attempts = %d, want 3 (2 throttled + 1 success)", adds)
+	}
+}
+
+func TestCFListsBan_ThrottledAddRaw429_Retries(t *testing.T) {
+	mock, ts := newMockCFListsServer(t)
+	mock.setThrottleAdds(1, true) // raw HTTP 429 with a non-JSON body
+	e := enforce.NewCFListsEnforcerWithRetryDelays("tok", ts.URL, testCFAccount, testCFListName,
+		[]time.Duration{time.Millisecond})
+
+	if err := e.Ban(context.Background(), sdk.Target{IP: netip.MustParseAddr("192.0.2.11")}); err != nil {
+		t.Fatalf("Ban despite retryable 429: %v", err)
+	}
+	if !mock.hasItem(testCFListName, "192.0.2.11") {
+		t.Error("item missing after 429 retry")
+	}
+}
+
+func TestCFListsBan_ThrottleExhausted_WrapsErrCFThrottled(t *testing.T) {
+	mock, ts := newMockCFListsServer(t)
+	mock.setThrottleAdds(99, false) // throttle every attempt
+	e := enforce.NewCFListsEnforcerWithRetryDelays("tok", ts.URL, testCFAccount, testCFListName,
+		[]time.Duration{time.Millisecond}) // 2 attempts total
+
+	err := e.Ban(context.Background(), sdk.Target{IP: netip.MustParseAddr("192.0.2.12")})
+	if err == nil {
+		t.Fatal("Ban succeeded, want throttle-exhausted error")
+	}
+	if !errors.Is(err, enforce.ErrCFThrottled) {
+		t.Errorf("error does not wrap ErrCFThrottled: %v", err)
+	}
+	adds, _, _ := mock.counts()
+	if adds != 2 {
+		t.Errorf("add attempts = %d, want 2", adds)
+	}
+}
+
+func TestCFListsBan_NonThrottleError_NoRetry(t *testing.T) {
+	mock, ts := newMockCFListsServer(t)
+	mock.mu.Lock()
+	mock.failAddsCode = 1004 // real (non-throttle) API failure
+	mock.mu.Unlock()
+	e := enforce.NewCFListsEnforcerWithRetryDelays("tok", ts.URL, testCFAccount, testCFListName,
+		[]time.Duration{time.Millisecond, time.Millisecond})
+
+	err := e.Ban(context.Background(), sdk.Target{IP: netip.MustParseAddr("192.0.2.13")})
+	if err == nil {
+		t.Fatal("Ban succeeded, want real API failure")
+	}
+	if errors.Is(err, enforce.ErrCFThrottled) {
+		t.Errorf("real failure must not be classified as throttle: %v", err)
+	}
+	adds, _, _ := mock.counts()
+	if adds != 1 {
+		t.Errorf("add attempts = %d, want 1 (no retry on real failures)", adds)
+	}
+}
+
+func TestIsThrottleOnly(t *testing.T) {
+	throttle := fmt.Errorf("cloudflare add items: 10040: ratelimited: %w", enforce.ErrCFThrottled)
+	real := errors.New("nftables: enforcer socket gone")
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"plain throttle", throttle, true},
+		{"wrapped throttle", fmt.Errorf("cloudflare: %w", throttle), true},
+		{"real failure", real, false},
+		{"join all throttled", errors.Join(throttle, fmt.Errorf("cloudflare[b]: %w", enforce.ErrCFThrottled)), true},
+		{"join mixed", errors.Join(throttle, real), false},
+		{"wrapped mixed join", fmt.Errorf("sync: %w", errors.Join(throttle, real)), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := enforce.IsThrottleOnly(tc.err); got != tc.want {
+				t.Errorf("IsThrottleOnly(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// ── deferred removal flush tests (issue #445) ────────────────────────────────
+
+func TestCFListsDeferredRemovals_NotInlineThenBatchedInOneCall(t *testing.T) {
+	mock, ts := newMockCFListsServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	// A very long cadence: the ticker never fires during the test, so the
+	// flush moment is exercised deterministically via FlushRemovalsForTest.
+	e := enforce.NewCFListsEnforcerWithExpireFlush(ctx, "tok", ts.URL, testCFAccount, testCFListName, time.Hour)
+
+	for _, s := range []string{"192.0.2.20", "192.0.2.21"} {
+		if err := e.Ban(ctx, sdk.Target{IP: netip.MustParseAddr(s)}); err != nil {
+			t.Fatalf("pre-ban %s: %v", s, err)
+		}
+	}
+	// Drop one IP via Sync and the other via Unban: neither removal may go
+	// out inline in deferred mode.
+	if err := e.Sync(ctx, []sdk.Target{{IP: netip.MustParseAddr("192.0.2.21")}}); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if err := e.Unban(ctx, sdk.Target{IP: netip.MustParseAddr("192.0.2.21")}); err != nil {
+		t.Fatalf("Unban: %v", err)
+	}
+	if _, deletes, _ := mock.counts(); deletes != 0 {
+		t.Fatalf("delete calls before flush = %d, want 0 (removals deferred)", deletes)
+	}
+	if mock.itemCount(testCFListName) != 2 {
+		t.Fatalf("items before flush = %d, want 2", mock.itemCount(testCFListName))
+	}
+
+	if err := e.FlushRemovalsForTest(ctx); err != nil {
+		t.Fatalf("flushRemovals: %v", err)
+	}
+	if mock.itemCount(testCFListName) != 0 {
+		t.Errorf("items after flush = %d, want 0", mock.itemCount(testCFListName))
+	}
+	if _, deletes, _ := mock.counts(); deletes != 1 {
+		t.Errorf("delete calls after flush = %d, want 1 (both removals in one batch)", deletes)
+	}
+}
+
+func TestCFListsDeferredRemovals_TickerEventuallyFlushes(t *testing.T) {
+	mock, ts := newMockCFListsServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	e := enforce.NewCFListsEnforcerWithExpireFlush(ctx, "tok", ts.URL, testCFAccount, testCFListName, 30*time.Millisecond)
+
+	if err := e.Ban(ctx, sdk.Target{IP: netip.MustParseAddr("192.0.2.30")}); err != nil {
+		t.Fatalf("Ban: %v", err)
+	}
+	if err := e.Unban(ctx, sdk.Target{IP: netip.MustParseAddr("192.0.2.30")}); err != nil {
+		t.Fatalf("Unban: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if mock.itemCount(testCFListName) == 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("item still present after 2s; deferred flusher never removed it")
+}
+
+// ── async bulk-operation polling tests (issue #445) ──────────────────────────
+
+func TestCFListsBan_AsyncAdd_PollsOperationToCompletion(t *testing.T) {
+	mock, ts := newMockCFListsServer(t)
+	mock.mu.Lock()
+	mock.addReturnsAsync = true
+	mock.opPendingPolls = 2 // two "pending" answers before "completed"
+	mock.mu.Unlock()
+	e := enforce.NewCFListsEnforcerForTest("tok", ts.URL, testCFAccount, testCFListName)
+
+	if err := e.Ban(context.Background(), sdk.Target{IP: netip.MustParseAddr("192.0.2.40")}); err != nil {
+		t.Fatalf("Ban with async operation: %v", err)
+	}
+	if !mock.hasItem(testCFListName, "192.0.2.40") {
+		t.Error("item missing after async add")
+	}
+	if _, _, polls := mock.counts(); polls < 3 {
+		t.Errorf("bulk-operation polls = %d, want >= 3 (2 pending + 1 completed)", polls)
+	}
 }

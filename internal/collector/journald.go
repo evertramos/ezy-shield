@@ -4,10 +4,12 @@ package collector
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/evertramos/ezy-shield/pkg/sdk"
@@ -54,6 +56,12 @@ func (c *JournaldCollector) Run(ctx context.Context, out chan<- sdk.RawLine) err
 	if err != nil {
 		return fmt.Errorf("journald: stdout pipe: %w", err)
 	}
+	// Capture (bounded) stderr: journalctl exits 1 both for "cannot read"
+	// and for transient conditions, and without its stderr the supervisor
+	// could only report an opaque "exit status 1" (issue #456; the field
+	// case #454 was a permission denial invisible in the daemon's own logs).
+	var stderr boundedBuffer
+	cmd.Stderr = &stderr
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("journald: start journalctl: %w", err)
@@ -88,7 +96,43 @@ func (c *JournaldCollector) Run(ctx context.Context, out chan<- sdk.RawLine) err
 		return nil
 	}
 	if waitErr != nil {
-		return fmt.Errorf("journald: journalctl exited: %w", waitErr)
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			return fmt.Errorf("journald: journalctl exited: %w", waitErr)
+		}
+		// Permission denials are the one failure that never self-heals and
+		// has a precise fix — name it instead of an opaque exit status
+		// (issues #454/#456). Matching on journalctl's message is
+		// best-effort: an unmatched denial still surfaces the raw stderr.
+		if strings.Contains(msg, "insufficient permissions") {
+			return fmt.Errorf(
+				"journald: journalctl exited: %w: %s — the service user cannot read the journal; "+
+					"fix: usermod -aG systemd-journal ezyshield, then restart ezyshield", waitErr, msg)
+		}
+		return fmt.Errorf("journald: journalctl exited: %w: %s", waitErr, msg)
 	}
 	return nil
 }
+
+// boundedBuffer keeps the first stderrCap bytes written and drops the rest —
+// journalctl stderr is only used to label a failure, and an unbounded buffer
+// on a looping subprocess would be a memory leak.
+type boundedBuffer struct {
+	buf bytes.Buffer
+}
+
+// stderrCap bounds how much subprocess stderr is retained for error labels.
+const stderrCap = 2048
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	if remaining := stderrCap - b.buf.Len(); remaining > 0 {
+		if len(p) > remaining {
+			b.buf.Write(p[:remaining])
+		} else {
+			b.buf.Write(p)
+		}
+	}
+	return len(p), nil // always report full write — dropping is deliberate
+}
+
+func (b *boundedBuffer) String() string { return b.buf.String() }

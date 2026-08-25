@@ -281,11 +281,14 @@ func (d *Daemon) handleStatus(ctx context.Context) SocketResponse {
 	}
 
 	enfState, enfDetail := d.enforcementState()
+	collState, collDetail := d.collectorsState()
 	data := StatusData{
 		Uptime:            time.Since(d.startTime).Round(time.Second).String(),
 		Armed:             d.policy.IsArmed(),
 		EnforcementState:  string(enfState),
 		EnforcementDetail: enfDetail,
+		CollectorsState:   string(collState),
+		CollectorsDetail:  collDetail,
 		ActiveBans:        active,
 		SimulatedBans:     simulated,
 		ArmedUntil:        d.armedUntil(ctx),

@@ -1249,3 +1249,93 @@ func TestDefaultAmbiguousBand_DoesNotOverlapDefaultThreshold(t *testing.T) {
 			DefaultAmbiguousBand, DefaultBanThreshold)
 	}
 }
+
+// ── Cloudflare mutation-cadence knobs (issue #445) ───────────────────────────
+
+func TestLoadConfig_CloudflareCadenceDefaults(t *testing.T) {
+	src := `
+enforce:
+  cloudflare:
+    api_token: env:CF_TOKEN
+    account_id: acct1
+`
+	cfg, err := LoadConfigReader(strings.NewReader(src), "test.yaml")
+	if err != nil {
+		t.Fatalf("LoadConfigReader: %v", err)
+	}
+	cf := cfg.Enforce.Cloudflare[0]
+	if got := cf.Debounce.AsDuration(); got != DefaultCFDebounce {
+		t.Errorf("debounce default = %v, want %v", got, DefaultCFDebounce)
+	}
+	if got := cf.ExpireFlushInterval.AsDuration(); got != DefaultCFExpireFlushInterval {
+		t.Errorf("expire_flush_interval default = %v, want %v", got, DefaultCFExpireFlushInterval)
+	}
+}
+
+func TestLoadConfig_CloudflareCadenceExplicit(t *testing.T) {
+	src := `
+enforce:
+  cloudflare:
+    api_token: env:CF_TOKEN
+    account_id: acct1
+    debounce: 30s
+    expire_flush_interval: 10m
+`
+	cfg, err := LoadConfigReader(strings.NewReader(src), "test.yaml")
+	if err != nil {
+		t.Fatalf("LoadConfigReader: %v", err)
+	}
+	cf := cfg.Enforce.Cloudflare[0]
+	if got := cf.Debounce.AsDuration(); got != 30*time.Second {
+		t.Errorf("debounce = %v, want 30s", got)
+	}
+	if got := cf.ExpireFlushInterval.AsDuration(); got != 10*time.Minute {
+		t.Errorf("expire_flush_interval = %v, want 10m", got)
+	}
+}
+
+func TestLoadConfig_CloudflareCadenceZeroMeansDefault(t *testing.T) {
+	// YAML zero and omitted are indistinguishable; both take the default,
+	// same convention as the AI ambiguous band.
+	src := `
+enforce:
+  cloudflare:
+    api_token: env:CF_TOKEN
+    account_id: acct1
+    debounce: 0
+    expire_flush_interval: 0
+`
+	cfg, err := LoadConfigReader(strings.NewReader(src), "test.yaml")
+	if err != nil {
+		t.Fatalf("LoadConfigReader: %v", err)
+	}
+	cf := cfg.Enforce.Cloudflare[0]
+	if got := cf.Debounce.AsDuration(); got != DefaultCFDebounce {
+		t.Errorf("debounce = %v, want default %v", got, DefaultCFDebounce)
+	}
+	if got := cf.ExpireFlushInterval.AsDuration(); got != DefaultCFExpireFlushInterval {
+		t.Errorf("expire_flush_interval = %v, want default %v", got, DefaultCFExpireFlushInterval)
+	}
+}
+
+func TestLoadConfig_CloudflareCadenceNegativeRejected(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{"negative debounce", "debounce: -5s", "'debounce' must be positive"},
+		{"negative flush", "expire_flush_interval: -1m", "'expire_flush_interval' must be positive"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := "enforce:\n  cloudflare:\n    api_token: env:CF_TOKEN\n    account_id: acct1\n    " + tc.body + "\n"
+			_, err := LoadConfigReader(strings.NewReader(src), "test.yaml")
+			if err == nil {
+				t.Fatal("LoadConfigReader accepted a negative duration")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not mention %q", err, tc.want)
+			}
+		})
+	}
+}

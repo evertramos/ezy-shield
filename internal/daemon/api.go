@@ -77,6 +77,14 @@ type StatusData struct {
 	EnforcementState string `json:"enforcement_state"`
 	// EnforcementDetail carries the failure detail when DEGRADED.
 	EnforcementDetail string `json:"enforcement_detail,omitempty"`
+	// CollectorsState is the honest observation-path health (issue #456):
+	// OK / DEGRADED / NONE. DEGRADED means at least one collector is
+	// repeatedly failing to read its source — detections may be missed
+	// even while EnforcementState is ACTIVE.
+	CollectorsState string `json:"collectors_state,omitempty"`
+	// CollectorsDetail names the failing collector(s) when DEGRADED (or
+	// explains NONE).
+	CollectorsDetail string `json:"collectors_detail,omitempty"`
 	// ActiveBans is the count of IPs currently in bans_active that are
 	// really enforced. Simulated dry-run bans are excluded — counting them
 	// as "active" would overstate protection.

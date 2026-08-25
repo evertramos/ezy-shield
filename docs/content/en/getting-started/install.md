@@ -16,16 +16,11 @@ Native packages ship the binaries, systemd units, the `ezyshield` service
 user, and clean upgrades. Repository metadata is GPG-signed; stable releases
 live in the `stable` suite, release candidates in `testing`.
 
-> **Before v0.1.0 ships:** every published release is a release candidate,
-> so the snippets below use the `testing` suite — the one that works today.
-> Once v0.1.0 is out, replace `testing` with `stable` in both to track
-> stable releases only.
-
 **Debian / Ubuntu:**
 
 ```bash
 curl -fsSL https://packages.ezyshield.com/ezyshield.asc | sudo gpg --dearmor -o /usr/share/keyrings/ezyshield.gpg
-echo "deb [signed-by=/usr/share/keyrings/ezyshield.gpg] https://packages.ezyshield.com/apt testing main" | sudo tee /etc/apt/sources.list.d/ezyshield.list
+echo "deb [signed-by=/usr/share/keyrings/ezyshield.gpg] https://packages.ezyshield.com/apt stable main" | sudo tee /etc/apt/sources.list.d/ezyshield.list
 sudo apt update && sudo apt install ezyshield
 ```
 
@@ -35,7 +30,7 @@ sudo apt update && sudo apt install ezyshield
 sudo tee /etc/yum.repos.d/ezyshield.repo <<'EOF'
 [ezyshield]
 name=EzyShield
-baseurl=https://packages.ezyshield.com/rpm/testing/$basearch
+baseurl=https://packages.ezyshield.com/rpm/stable/$basearch
 enabled=1
 gpgcheck=0
 repo_gpgcheck=1
@@ -63,9 +58,22 @@ the published key on every release, so it cannot silently drift):
 gpg --show-keys /usr/share/keyrings/ezyshield.gpg
 ```
 
-To switch to the stable channel once v0.1.0 ships, replace `testing` with
-`stable` in either snippet. Packages do **not** enable or start any
-service — run `sudo ezyshield init` after installing.
+To follow release candidates instead, replace `stable` with `testing` in
+either snippet (the install script equivalent is
+`curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_SUITE=testing sh`).
+
+> **Installed before the stable suite became the default?** Installs made
+> while every release was still a release candidate configured the
+> `testing` suite. To move that host to stable, edit
+> `/etc/apt/sources.list.d/ezyshield.list` (or
+> `/etc/yum.repos.d/ezyshield.repo`), replace `testing` with `stable`, and
+> run `sudo apt update` / `sudo dnf clean metadata`. The stable package
+> installs on the next release whose version is higher than the RC you are
+> on (apt/dnf never downgrade on their own — use
+> `sudo apt install ezyshield=<version>` to move immediately).
+
+Packages do **not** enable or start any service — run `sudo ezyshield init`
+after installing.
 
 ---
 
@@ -184,11 +192,6 @@ package install, it prints the exact cleanup commands so the new package
 isn't silently shadowed — see
 [Migrating from the script install to packages](#migrating-from-the-script-install-to-packages)
 below.
-
-> **Before v0.1.0 ships:** when neither install method resolves a stable
-> release, the command above prints install instructions instead of
-> installing (see the `testing` package repo further up) — no flags needed
-> once v0.1.0 ships.
 
 ---
 
@@ -353,6 +356,7 @@ sudo rm -rf /etc/ezyshield
 | Variable | Purpose | Example |
 |----------|---------|---------|
 | `EZYSHIELD_METHOD` | `auto` (default), `packages`, or `binary` — force the install method instead of auto-detecting | `EZYSHIELD_METHOD=binary` |
+| `EZYSHIELD_SUITE` | Package repo suite: `stable` (default) or `testing` (release candidates). Package mode only | `EZYSHIELD_SUITE=testing` |
 | `EZYSHIELD_VERSION` | Install a specific release (must start with `v`). Binary mode only | `EZYSHIELD_VERSION=v0.1.0-rc.N` |
 | `EZYSHIELD_BASE_URL` | Install from a custom mirror (overrides version selection, forces binary mode). Requires `--local` + `EZYSHIELD_LOCAL_ACK=1` | `EZYSHIELD_BASE_URL=https://mirror.example.com/ezyshield/v0.1.0` |
 | `EZYSHIELD_DEV` | Set to `1` — same as the `--dev` flag (newest prerelease) | `EZYSHIELD_DEV=1` |

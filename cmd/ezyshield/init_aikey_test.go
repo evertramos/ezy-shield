@@ -375,6 +375,40 @@ func TestInit_KeySource_Option2_ValidName(t *testing.T) {
 	if strings.Contains(out, "should-not-be-called") {
 		t.Errorf("stdout leaks the fake token: %q", out)
 	}
+	// Issue #300: the external-key marker must survive into wizardState —
+	// dropping it made the wizard write MY_ANT_KEY=YOUR_API_KEY_HERE into
+	// .env, shadowing the real environment value via EnvironmentFile=
+	// precedence and silently disabling AI.
+	if !state.aiExternalKey {
+		t.Error("aiExternalKey = false after option-2 — the wizard would write a shadowing placeholder (issue #300)")
+	}
+	if shouldWriteAIEnv(state) {
+		t.Error("shouldWriteAIEnv = true for an option-2 external key — .env must not be touched (issue #300)")
+	}
+}
+
+// TestShouldWriteAIEnv pins the .env write decision (issue #300): only an
+// in-.env key (option 1 / placeholder path) triggers a write; external keys
+// and disabled/keyless providers never do.
+func TestShouldWriteAIEnv(t *testing.T) {
+	tests := []struct {
+		name  string
+		state wizardState
+		want  bool
+	}{
+		{"option-1 pasted key writes", wizardState{enableAI: true, aiKeyEnvVar: "ANTHROPIC_API_KEY", aiToken: "sk-test"}, true},
+		{"skipped paste still writes the placeholder", wizardState{enableAI: true, aiKeyEnvVar: "ANTHROPIC_API_KEY"}, true},
+		{"option-2 external key never writes", wizardState{enableAI: true, aiKeyEnvVar: "MY_VAULT_KEY", aiExternalKey: true}, false},
+		{"AI disabled never writes", wizardState{aiKeyEnvVar: "ANTHROPIC_API_KEY"}, false},
+		{"keyless provider (ollama) never writes", wizardState{enableAI: true}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldWriteAIEnv(&tt.state); got != tt.want {
+				t.Errorf("shouldWriteAIEnv = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }
 
 // TestInit_KeySource_Option2_RejectsSecretShape tests that the fallback path

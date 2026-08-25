@@ -134,3 +134,68 @@ func TestForEachLine_ReadErrorFlushesPartialAndSurfaces(t *testing.T) {
 		t.Errorf("lines = %+v, want done + flushed partial", got)
 	}
 }
+
+// TestLineAssembler covers the capped cross-chunk reassembly used by the
+// docker demux and filetail (issue #307).
+func TestLineAssembler(t *testing.T) {
+	t.Parallel()
+
+	t.Run("late newline after a capped flood does not glue lines", func(t *testing.T) {
+		t.Parallel()
+		a := newLineAssembler(8)
+		var got []string
+		emit := func(line []byte) bool {
+			got = append(got, string(line))
+			return false
+		}
+		a.feed([]byte("AAAAAAAAAA"), emit) // 10 bytes, no newline: buffered capped at 8
+		a.feed([]byte("BBBB"), emit)       // still past cap: dropped
+		a.feed([]byte("\nok\n"), emit)     // newline ends the flood; next line intact
+		if len(got) != 2 || got[0] != "AAAAAAAA" || got[1] != "ok" {
+			t.Fatalf("lines = %v, want capped flood then ok", got)
+		}
+	})
+
+	t.Run("buffer never exceeds the cap while fed newline-free chunks", func(t *testing.T) {
+		t.Parallel()
+		a := newLineAssembler(16)
+		for i := 0; i < 1000; i++ {
+			a.feed([]byte("XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"), func([]byte) bool { return false })
+		}
+		if len(a.line) > 16 {
+			t.Fatalf("assembler buffer grew to %d bytes despite cap 16", len(a.line))
+		}
+	})
+
+	t.Run("stop from emit propagates", func(t *testing.T) {
+		t.Parallel()
+		a := newLineAssembler(64)
+		calls := 0
+		stopped := a.feed([]byte("one\ntwo\n"), func([]byte) bool { calls++; return true })
+		if !stopped || calls != 1 {
+			t.Fatalf("stopped=%v calls=%d, want stop after first line", stopped, calls)
+		}
+	})
+
+	t.Run("discard drops a buffered partial line", func(t *testing.T) {
+		t.Parallel()
+		a := newLineAssembler(64)
+		a.feed([]byte("old-file-fragment"), func([]byte) bool { return false })
+		a.discard()
+		var got []string
+		a.feed([]byte("fresh\n"), func(line []byte) bool { got = append(got, string(line)); return false })
+		if len(got) != 1 || got[0] != "fresh" {
+			t.Fatalf("lines = %v, want only the fresh line", got)
+		}
+	})
+
+	t.Run("CRLF stripped", func(t *testing.T) {
+		t.Parallel()
+		a := newLineAssembler(64)
+		var got []string
+		a.feed([]byte("win\r\n"), func(line []byte) bool { got = append(got, string(line)); return false })
+		if len(got) != 1 || got[0] != "win" {
+			t.Fatalf("lines = %v, want CR-stripped line", got)
+		}
+	})
+}

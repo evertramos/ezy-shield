@@ -29,7 +29,9 @@ type SocketRequest struct {
 	// Until. Empty = permanent allow / unconditional arm.
 	For string `json:"for,omitempty"`
 	// Force lets the arm verb proceed past failing pre-flight checks
-	// (except the self-ban check, which is never bypassable).
+	// (except the self-ban check, which is never bypassable), and lets the
+	// ban verb bypass the CDN shared-range guard (issue #178) — never the
+	// allowlist, anti-lockout, or rate-limit guards.
 	Force bool `json:"force,omitempty"`
 	// Peer is the operator's own client IP, derived by the CLI from
 	// SSH_CLIENT: the arm verb uses it for the self-ban pre-flight, the ban
@@ -95,6 +97,11 @@ type StatusData struct {
 	// ArmedUntil is the RFC3339 auto-revert deadline when an arm window is
 	// active (issue #228); empty otherwise.
 	ArmedUntil string `json:"armed_until,omitempty"`
+	// CDNRangesState reports the shared-CDN-range ban guard's data health
+	// (issue #178): "ok", or "unavailable: <why>" when bans are proceeding
+	// WITHOUT the shared-range check (they are then marked
+	// [cdn-ranges-unverified] in the audit trail).
+	CDNRangesState string `json:"cdn_ranges_state,omitempty"`
 	// Version is the daemon binary version string.
 	Version string `json:"version"`
 	// AISpendToday is the estimated USD cost of AI provider calls today.

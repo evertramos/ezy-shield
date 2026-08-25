@@ -16,6 +16,7 @@ import (
 
 	"github.com/evertramos/ezy-shield/internal/aggregate"
 	"github.com/evertramos/ezy-shield/internal/ai"
+	"github.com/evertramos/ezy-shield/internal/cdndetect"
 	"github.com/evertramos/ezy-shield/internal/config"
 	"github.com/evertramos/ezy-shield/internal/decision"
 	"github.com/evertramos/ezy-shield/internal/enrich"
@@ -336,6 +337,12 @@ func New(dcfg Config) (*Daemon, error) {
 	// Enforcement-anomaly delivery (ADR-0009 §4, issue #146): the engine
 	// detects, the daemon delivers. Injected before any goroutine starts.
 	decEng.SetDiagnostics(d)
+
+	// Shared-CDN-range ban guard (issue #178): the embedded provider table
+	// backs both the automatic-path refusal and the manual-ban guard; its
+	// unavailable state is surfaced by doctor/status and marked in bans'
+	// audit reasons rather than silently skipping the check.
+	decEng.SetCDNRangeSource(cdndetect.SharedRanges)
 
 	if dcfg.Cfg != nil && dcfg.Cfg.AI != nil {
 		d.aiLo = dcfg.Cfg.AI.AmbiguousBand[0]

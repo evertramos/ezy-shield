@@ -8,7 +8,9 @@ package decision
 
 import (
 	"context"
+	"log/slog"
 	"net/netip"
+	"time"
 )
 
 // BanIneffectiveDiag is the derived ladder context of one ban_ineffective
@@ -44,6 +46,29 @@ type Diagnostics interface {
 	// an IP that had an ineffective ban before — the one case that must
 	// never pass silently (ADR-0009 §4).
 	BanIneffectivePermanent(ctx context.Context, ip netip.Addr, strike int)
+}
+
+// SetCDNRangeSource injects the shared-CDN-range supplier for the ban-path
+// guard (issue #178). Call before the engine starts deciding; nil leaves the
+// check disabled. The supplier's error return is the distinct "data
+// unavailable" state — see the cdnRanges field doc.
+func (e *Engine) SetCDNRangeSource(fn func() ([]netip.Prefix, error)) {
+	e.cdnRanges = fn
+}
+
+// warnCDNRangesUnavailable logs the unavailable-data WARN at most once per
+// cdnWarnInterval.
+func (e *Engine) warnCDNRangesUnavailable(ctx context.Context, err error) {
+	e.mu.Lock()
+	fire := time.Since(e.cdnWarnLast) > cdnWarnInterval
+	if fire {
+		e.cdnWarnLast = time.Now()
+	}
+	e.mu.Unlock()
+	if fire {
+		slog.WarnContext(ctx, "decision: CDN range data unavailable — bans proceed UNVERIFIED against shared CDN edges",
+			"err", err.Error())
+	}
 }
 
 // SetDiagnostics injects the delivery sink. Call before the engine starts

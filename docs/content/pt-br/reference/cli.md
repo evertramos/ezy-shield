@@ -350,12 +350,21 @@ sudo ezyshield ban 203.0.113.0/24
 |------|-----------|
 | `--ttl` | duração do banimento (`5m`, `24h`, `7d`); vazio = permanente |
 | `--for` | apelido de `--ttl`, alinhado com `allow --for` e `arm --for` |
+| `--force` | ignora a guarda de faixas CDN compartilhadas (nunca a allowlist/anti-lockout) — veja abaixo |
 | `--reason` | motivo em texto livre armazenado no log de auditoria |
 | `--socket` | override do caminho do socket de controle |
 
 Banimentos manuais contornam o motor de regras, **não** a allowlist — um IP na
 allowlist nunca pode ser banido, manualmente ou de qualquer outra forma
 (invariante de segurança: a allowlist sempre vence).
+
+Bans manuais também são verificados contra a tabela embutida de **faixas de
+borda compartilhadas de CDN** — bloquear um IP de borda compartilhado bloqueia
+o tráfego legítimo de todos atrás daquela CDN. Um alvo dentro de uma faixa
+conhecida é recusado, e quando a tabela está indisponível o ban é recusado por
+não ser verificável; `--force` sobrepõe apenas essas duas recusas (a tabela é
+um snapshot distribuído que pode ficar desatualizado), nunca a allowlist ou o
+anti-lockout.
 
 ## ezyshield unban
 
@@ -484,6 +493,11 @@ Verificações:
   pedaço grande do espaço de endereços do enforcement para sempre. Veja a
   seção de allowlist na [Referência de Policy](policy.md).
 - diagnóstico ban_ineffective: **FAIL** quando um ban ativo é marcado ineficaz (tráfego passando apesar do ban) — nomeia os IPs e aponta o remédio sistêmico (edge enforcement / real-IP parsing / saúde do enforcer); **WARN** quando nenhum ban está ineficaz no momento, mas algum offender foi marcado historicamente; **PASS** caso contrário. Consulta read-only ao banco em `--db`.
+- cdn range data: **FAIL** quando a tabela embutida de faixas CDN
+  compartilhadas (que sustenta a guarda anti-lockout do caminho de ban,
+  issue #178) falha ao carregar — os bans então prosseguem marcados com
+  `[cdn-ranges-unverified]` no audit log; **PASS** mostra a contagem de
+  faixas carregadas.
 - **Estado do enforcement** (issue #174) — a saúde real do caminho de
   enforcement, derivada dos resultados reais do enforcer, não só da config, e
   re-verificada por um probe de reconcile periódico (a cada 5 minutos) para

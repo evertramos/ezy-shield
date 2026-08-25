@@ -15,6 +15,7 @@ func newBanCmd() *cobra.Command {
 		ttl        string
 		forDur     string
 		reason     string
+		force      bool
 	)
 
 	cmd := &cobra.Command{
@@ -40,7 +41,7 @@ recorded in the audit log but no firewall rule is written.`,
 			if forDur != "" {
 				ttl = forDur
 			}
-			return runBan(cmd, socketPath, args[0], ttl, reason)
+			return runBan(cmd, socketPath, args[0], ttl, reason, force)
 		},
 	}
 
@@ -52,16 +53,18 @@ recorded in the audit log but no firewall rule is written.`,
 		"alias of --ttl, matching 'allow --for' and 'arm --for'")
 	cmd.Flags().StringVar(&reason, "reason", "",
 		"free-text note, shown in audit log")
+	cmd.Flags().BoolVar(&force, "force", false,
+		"bypass the shared-CDN-range guard (issue #178) — never the allowlist or anti-lockout guards")
 
 	return cmd
 }
 
-func runBan(cmd *cobra.Command, socketPath, target, ttl, reason string) error {
+func runBan(cmd *cobra.Command, socketPath, target, ttl, reason string, force bool) error {
 	resp, err := daemonRPC(cmd.Context(), socketPath,
 		// Peer forwards this session's SSH client IP so the daemon's
 		// manual-ban anti-lockout guard can protect it (issue #211) — the
 		// daemon has no SSH_CLIENT of its own under systemd.
-		daemon.SocketRequest{Verb: "ban", IP: target, TTL: ttl, Reason: reason, Peer: sshClientPeer()})
+		daemon.SocketRequest{Verb: "ban", IP: target, TTL: ttl, Reason: reason, Peer: sshClientPeer(), Force: force})
 	if err != nil {
 		return err
 	}

@@ -173,6 +173,13 @@ type wizardState struct {
 	aiProvider    string
 	aiModel       string
 	aiKeyEnvVar   string
+	// aiExternalKey is true when the operator chose key option 2 ("already
+	// in an env var — sops/vault/LoadCredential"): the key is managed
+	// OUTSIDE .env and the wizard must not write anything for it. Writing
+	// the placeholder would shadow the real value via EnvironmentFile=
+	// precedence (systemd.exec(5)) and silently disable AI (issue #300);
+	// the config-ai wizard already honors this contract (configwizard.go).
+	aiExternalKey bool
 	// aiToken holds the operator-typed API key between the prompt and the
 	// .env write. It's ONLY the empty string or the raw token — never used
 	// in any log/print/error path (issue #13 §6). Note the deliberate lack
@@ -198,8 +205,17 @@ func (s *wizardState) String() string {
 	if s.aiToken != "" {
 		tokenMark = "<redacted>"
 	}
-	return fmt.Sprintf("wizardState{enableAI=%v provider=%q model=%q keyEnvVar=%q token=%s armed=%v cdn=%s}",
-		s.enableAI, s.aiProvider, s.aiModel, s.aiKeyEnvVar, tokenMark, s.armed, s.cdn.String())
+	return fmt.Sprintf("wizardState{enableAI=%v provider=%q model=%q keyEnvVar=%q externalKey=%v token=%s armed=%v cdn=%s}",
+		s.enableAI, s.aiProvider, s.aiModel, s.aiKeyEnvVar, s.aiExternalKey, tokenMark, s.armed, s.cdn.String())
+}
+
+// shouldWriteAIEnv reports whether the wizard writes/keeps the AI key line
+// in .env. False for option-2 external keys: those are managed outside .env
+// (sops/vault/LoadCredential) and a placeholder line would SHADOW the real
+// environment value via EnvironmentFile= precedence, with SecretRef then
+// treating the placeholder as unset — AI silently disabled (issue #300).
+func shouldWriteAIEnv(state *wizardState) bool {
+	return state.enableAI && state.aiKeyEnvVar != "" && !state.aiExternalKey
 }
 
 type dockerContainer struct {
@@ -302,9 +318,14 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 	// AI env file: written whenever the provider expects a key (anthropic /
 	// openai) — even if the operator skipped the paste prompt, in which case
 	// we write the placeholder and print an instruction (issue #13 §5). We
-	// do NOT emit the token or a fingerprint of it here.
+	// do NOT emit the token or a fingerprint of it here. Option-2 external
+	// keys are the exception: managed outside .env, nothing is written
+	// (issue #300 — see shouldWriteAIEnv).
 	envTouched := false
-	if state.enableAI && state.aiKeyEnvVar != "" {
+	if state.enableAI && state.aiExternalKey {
+		p.println(st.ok("AI key managed externally in $" + state.aiKeyEnvVar + " — nothing written to " + envPath))
+	}
+	if shouldWriteAIEnv(state) {
 		wrote, kept, err := writeOrKeepEnvFile(envPath, state.aiKeyEnvVar, state.aiToken)
 		if err != nil {
 			return err
@@ -730,6 +751,7 @@ func askQuestions(out io.Writer, sc *bufio.Scanner, state *wizardState, yes bool
 		state.aiModel = step.model
 		state.aiKeyEnvVar = step.keyEnvVar
 		state.aiToken = step.token
+		state.aiExternalKey = step.externalKey
 	}
 
 	// Dry-run vs armed

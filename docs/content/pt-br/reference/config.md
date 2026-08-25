@@ -126,6 +126,8 @@ escrever qualquer regra. Duas notas operacionais para nomes customizados:
 | `mode` | não | `lists` (padrão — IP List no nível da conta + regras WAF) ou `rulesets` (regras por zona) |
 | `account_id` | com `mode: lists` | ID da conta Cloudflare |
 | `list_name` | não | nome da IP list (padrão `ezyshield_blocked`) |
+| `instance` | não | Identidade deste servidor quando vários servidores compartilham uma conta Cloudflare (o plano free permite uma única lista): cada daemon marca seus itens como `ezyshield:<instance>` e gerencia só os próprios — os bans de todos os servidores se somam em vez de se sobrescreverem. Padrão: hostname; deve casar com `[A-Za-z0-9._-]{1,32}` e permanecer estável entre restarts |
+| `adopt_legacy_items` | não | Ative em **exatamente um** servidor da conta para assumir os itens escritos por versões antigas (comentário `ezyshield` sem instância) e voltar a expirá-los. Remova quando esses itens acabarem |
 | `zone_ids` | com `mode: rulesets` | zonas às quais anexar as regras |
 | `action` | não | `block` (padrão), `challenge` ou `js_challenge` |
 | `name` | não | rótulo exibido na saída de status/test |

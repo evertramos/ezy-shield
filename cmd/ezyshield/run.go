@@ -306,7 +306,7 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 func buildCollectors(cfg *config.Config, logger *slog.Logger) []sdk.Collector {
 	if len(cfg.Collectors) == 0 {
 		logger.Warn("run: no collectors configured — no log source is being monitored, nothing will ever be detected; " +
-			"add collectors to config.yaml (see 'ezyshield doctor')")
+			"add collectors to config.yaml (see '" + progName + " doctor')")
 	}
 	var cols []sdk.Collector
 	for _, c := range cfg.Collectors {

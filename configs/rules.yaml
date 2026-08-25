@@ -160,3 +160,21 @@ rules:
     threshold: 10
     score: 80
     category: bruteforce
+
+  # ── Nextcloud (issue #192) ───────────────────────────────────────────────
+
+  - name: nextcloud_bruteforce
+    description: "Nextcloud login brute force"
+    kinds: [nextcloud_auth_fail]
+    window: 300s
+    threshold: 5
+    score: 85
+    category: bruteforce
+
+  - name: nextcloud_bruteforce_sustained
+    description: "Sustained Nextcloud brute force (low & slow)"
+    kinds: [nextcloud_auth_fail]
+    window: 3600s
+    threshold: 10
+    score: 80
+    category: bruteforce

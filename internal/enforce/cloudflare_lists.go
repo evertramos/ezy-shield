@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/netip"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -20,8 +21,26 @@ import (
 
 const (
 	cfDefaultListName = "ezyshield_blocked"
-	cfListItemTag     = "ezyshield"
-	cfListBatchMax    = 1000 // Cloudflare bulk add/remove limit per request
+	// cfListItemTag is the comment prefix identifying EzyShield-written list
+	// items. Since issue #486 items are namespaced per daemon instance —
+	// "ezyshield:<instance>" — so several servers sharing one account (the
+	// free plan allows a single list) each reconcile ONLY their own subset
+	// instead of clobbering each other's bans on every Sync. Items with a
+	// bare pre-#486 tag are "legacy": untouched unless adopt_legacy_items
+	// is set on exactly one instance.
+	cfListItemTag  = "ezyshield"
+	cfListBatchMax = 1000 // Cloudflare bulk add/remove limit per request
+
+	// cfListItemsPerPage is the page size requested when reading list items.
+	// The API maximum is 500 — and its DEFAULT is 25, which silently capped
+	// fetchAllItems at maxPages×25 = 1,250 items: real lists past that size
+	// failed every Sync with "pagination exceeded 50 pages" and flipped
+	// enforcement DEGRADED (issue #491, ovh1 field report).
+	cfListItemsPerPage = 500
+
+	// cfListCapWarnThreshold triggers a WARN when the shared list approaches
+	// the free-plan cap (10 000 items across every instance sharing it).
+	cfListCapWarnThreshold = 9000
 
 	// cfBulkOpPollMax bounds async bulk-operation polling; combined with
 	// cfBulkOpPollInterval and the limiter this is ~30s before giving up.
@@ -30,20 +49,29 @@ const (
 )
 
 // listState tracks the desired IP set, the discovered list ID, and the IP→item
-// mapping for ezyshield-managed items. The mu guards every field including timer.
+// mapping for the items THIS instance owns. The mu guards every field
+// including timer.
 type listState struct {
 	mu         sync.Mutex
 	discovered bool                // true after the first list discovery
 	listID     string              // empty until discovered/created
-	items      map[string]string   // ip → list item ID (ezyshield-managed only)
+	items      map[string]string   // ip → list item ID (owned by this instance only)
 	desired    map[string]struct{} // current desired IP set
-	timer      *time.Timer
+	// foreign holds IPs present in the list under someone else's ownership
+	// (another EzyShield instance, a manual entry, or an add that hit the
+	// API's duplicate refusal — issue #486). They are already blocked at the
+	// edge, so pushes skip re-adding them; the set is cleared on every
+	// removal-flush tick so an IP whose foreign owner expired it while we
+	// still want it is re-added within one flush interval.
+	foreign map[string]struct{}
+	timer   *time.Timer
 }
 
 func newListState() *listState {
 	return &listState{
 		items:   make(map[string]string),
 		desired: make(map[string]struct{}),
+		foreign: make(map[string]struct{}),
 	}
 }
 
@@ -52,14 +80,20 @@ func newListState() *listState {
 // per list propagates to all zones that reference the list. When zone_ids is
 // set, WAF Custom Rules are automatically managed in each zone.
 //
-// Only items whose comment starts with cfListItemTag are considered managed —
-// items added manually outside ezyshield are left untouched on Sync/Unban.
+// Ownership is per instance (issue #486): this daemon reconciles ONLY items
+// carrying its own "ezyshield:<instance>" comment tag. Items written by
+// other EzyShield instances sharing the account, legacy bare-"ezyshield"
+// items (unless adopt_legacy_items), and manual entries are all left
+// untouched on Sync/Unban — several servers can share the free plan's
+// single list additively.
 //
 // The API token is resolved once at construction time and never logged.
 type CloudflareListsEnforcer struct {
 	client           *http.Client
 	token            string // never logged or surfaced in errors
 	instanceName     string // operator label for multi-account deployments; "" when single
+	ownTag           string // "ezyshield:<instance>" — this daemon's item-comment namespace (issue #486)
+	adoptLegacy      bool   // adopt pre-#486 bare-"ezyshield" items (exactly ONE instance may set this)
 	accountID        string
 	listName         string
 	zoneIDs          []string // optional; when set, WAF rules are auto-managed per zone
@@ -112,6 +146,8 @@ func NewCloudflareListsEnforcer(ctx context.Context, cfg *config.CloudflareCfg, 
 		client:              &http.Client{Timeout: 10 * time.Second},
 		token:               token,
 		instanceName:        cfg.Name,
+		ownTag:              cfOwnTag(cfg.Instance),
+		adoptLegacy:         cfg.AdoptLegacyItems,
 		accountID:           cfg.AccountID,
 		listName:            listName,
 		zoneIDs:             cfg.ZoneIDs,
@@ -147,6 +183,7 @@ func newCFListsEnforcerForTestWithZones(ctx context.Context, token, baseURL, acc
 	return &CloudflareListsEnforcer{
 		client:           &http.Client{Timeout: 5 * time.Second},
 		token:            token,
+		ownTag:           cfOwnTag("test-instance"), // deterministic across CI hosts
 		accountID:        accountID,
 		listName:         listName,
 		zoneIDs:          zoneIDs,
@@ -292,10 +329,14 @@ func (e *CloudflareListsEnforcer) push(ctx context.Context) error {
 	for ip, id := range e.state.items {
 		itemsCopy[ip] = id
 	}
+	foreignCopy := make(map[string]struct{}, len(e.state.foreign))
+	for ip := range e.state.foreign {
+		foreignCopy[ip] = struct{}{}
+	}
 	e.state.mu.Unlock()
 
 	if needsDiscover {
-		newID, newItems, err := e.discoverList(ctx)
+		newID, newItems, present, err := e.discoverList(ctx)
 		if err != nil {
 			return err
 		}
@@ -307,25 +348,45 @@ func (e *CloudflareListsEnforcer) push(ctx context.Context) error {
 			}
 			newID = id
 			newItems = make(map[string]string)
+			present = make(map[string]struct{})
 		}
 		e.state.mu.Lock()
 		e.state.discovered = true
 		e.state.listID = newID
 		e.state.items = newItems
+		// Everything present but not ours is foreign: another instance's
+		// item, a legacy item, or a manual entry (issue #486).
+		e.state.foreign = make(map[string]struct{})
+		for ip := range present {
+			if _, mine := newItems[ip]; !mine {
+				e.state.foreign[ip] = struct{}{}
+			}
+		}
 		listID = newID
 		itemsCopy = make(map[string]string, len(newItems))
 		for ip, id := range newItems {
 			itemsCopy[ip] = id
 		}
+		foreignCopy = make(map[string]struct{}, len(e.state.foreign))
+		for ip := range e.state.foreign {
+			foreignCopy[ip] = struct{}{}
+		}
 		e.state.mu.Unlock()
 	}
 
-	// Compute the diff: anything desired that we don't manage yet → add.
+	// Compute the diff: anything desired that we don't own yet → add. IPs
+	// already present under someone else's ownership are skipped — they are
+	// blocked at the edge already, and the list API refuses duplicates
+	// (issue #486).
 	var toAdd []string
 	for ip := range desiredCopy {
-		if _, ok := itemsCopy[ip]; !ok {
-			toAdd = append(toAdd, ip)
+		if _, mine := itemsCopy[ip]; mine {
+			continue
 		}
+		if _, theirs := foreignCopy[ip]; theirs {
+			continue
+		}
+		toAdd = append(toAdd, ip)
 	}
 	// Deterministic order so logs and tests are stable.
 	sort.Strings(toAdd)
@@ -333,7 +394,16 @@ func (e *CloudflareListsEnforcer) push(ctx context.Context) error {
 	if len(toAdd) > 0 {
 		added, err := e.addItems(ctx, listID, toAdd)
 		if err != nil {
-			return err
+			if !isCFDuplicateErr(err) {
+				return err
+			}
+			// Another instance added one of these IPs between our discovery
+			// and this push. Re-read the list to learn what is now present,
+			// mark those IPs foreign, and retry the remainder once.
+			var retryErr error
+			if added, retryErr = e.retryAddSkippingPresent(ctx, listID, toAdd); retryErr != nil {
+				return retryErr
+			}
 		}
 		e.state.mu.Lock()
 		for ip, id := range added {
@@ -350,6 +420,43 @@ func (e *CloudflareListsEnforcer) push(ctx context.Context) error {
 		return e.removeStale(ctx, listID, desiredCopy, itemsCopy)
 	}
 	return nil
+}
+
+// isCFDuplicateErr recognizes the Lists API refusing an add because the IP
+// already exists in the list (added concurrently by another instance —
+// issue #486). Matching on the message is best-effort; a miss just surfaces
+// the original error.
+func isCFDuplicateErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "duplicate")
+}
+
+// retryAddSkippingPresent handles a duplicate-refused add: re-reads the
+// list, marks every already-present requested IP as foreign (blocked at the
+// edge under someone else's ownership), and retries the add once for the
+// IPs genuinely absent. Returns the ip→itemID map for rows this instance
+// now owns.
+func (e *CloudflareListsEnforcer) retryAddSkippingPresent(ctx context.Context, listID string, want []string) (map[string]string, error) {
+	_, present, err := e.fetchAllItems(ctx, listID, 1)
+	if err != nil {
+		return nil, fmt.Errorf("duplicate-add refresh: %w", err)
+	}
+	var remaining []string
+	e.state.mu.Lock()
+	for _, ip := range want {
+		if _, ok := present[ip]; ok {
+			e.state.foreign[ip] = struct{}{}
+			continue
+		}
+		remaining = append(remaining, ip)
+	}
+	e.state.mu.Unlock()
+	if len(remaining) == 0 {
+		return map[string]string{}, nil
+	}
+	return e.addItems(ctx, listID, remaining)
 }
 
 // removeStale deletes every managed item that is no longer desired, then
@@ -383,6 +490,11 @@ func (e *CloudflareListsEnforcer) removeStale(ctx context.Context, listID string
 // has not been read yet.
 func (e *CloudflareListsEnforcer) flushRemovals(ctx context.Context) error {
 	e.state.mu.Lock()
+	// Reset the foreign cache each flush tick (issue #486): if another
+	// instance expired an IP we still want, the next push re-verifies and
+	// re-adds it — bounded staleness of one flush interval, fail-closed in
+	// the meantime (the IP was merely blocked longer, never unblocked early).
+	e.state.foreign = make(map[string]struct{})
 	discovered := e.state.discovered
 	listID := e.state.listID
 	desiredCopy := make(map[string]struct{}, len(e.state.desired))
@@ -427,24 +539,24 @@ func (e *CloudflareListsEnforcer) runRemovalFlusher() {
 // ── CF Lists API discovery ────────────────────────────────────────────────────
 
 // discoverList finds the configured list by name in the account and returns
-// (listID, ezyshield-managed items, nil). When the list is missing, returns
-// ("", nil, nil) so the caller can create it.
-func (e *CloudflareListsEnforcer) discoverList(ctx context.Context) (string, map[string]string, error) {
+// (listID, items owned by this instance, every IP present, nil). When the
+// list is missing, returns ("", nil, nil, nil) so the caller can create it.
+func (e *CloudflareListsEnforcer) discoverList(ctx context.Context) (string, map[string]string, map[string]struct{}, error) {
 	if err := e.limiter.wait(ctx); err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	url := fmt.Sprintf("%s/accounts/%s/rules/lists", e.baseURL, e.accountID)
 	resp, err := e.doRequest(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	defer resp.Body.Close() //nolint:errcheck
 	var ls cfListListsResp
 	if err := json.NewDecoder(resp.Body).Decode(&ls); err != nil {
-		return "", nil, fmt.Errorf("decode list lists: %w", err)
+		return "", nil, nil, fmt.Errorf("decode list lists: %w", err)
 	}
 	if !ls.Success {
-		return "", nil, fmt.Errorf("cloudflare list lists: %s", cfErrMsg(ls.Errors))
+		return "", nil, nil, fmt.Errorf("cloudflare list lists: %s", cfErrMsg(ls.Errors))
 	}
 	var listID string
 	var numItems int
@@ -456,67 +568,80 @@ func (e *CloudflareListsEnforcer) discoverList(ctx context.Context) (string, map
 		}
 	}
 	if listID == "" {
-		return "", nil, nil
+		return "", nil, nil, nil
 	}
-	items, err := e.fetchAllItems(ctx, listID, numItems)
+	if numItems >= cfListCapWarnThreshold {
+		// The list is shared by every instance on the account (issue #486);
+		// the free plan caps it at 10 000 items total.
+		slog.WarnContext(ctx, "enforce/cloudflare-lists: list is approaching the shared item cap",
+			"list", e.listName, "items", numItems, "cap", 10000)
+	}
+	items, present, err := e.fetchAllItems(ctx, listID, numItems)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
-	return listID, items, nil
+	return listID, items, present, nil
 }
 
-// fetchAllItems pages through every item in the list and returns the
-// ezyshield-managed subset (comment starts with cfListItemTag). The page count
-// is bounded to defend against a misbehaving API that returns an unmoving
-// cursor — the free-plan cap is 10 000 items, so 50 pages of 1 000 is plenty.
-// When numItems is 0 (empty list), returns early to avoid Cloudflare API error 10027.
-func (e *CloudflareListsEnforcer) fetchAllItems(ctx context.Context, listID string, numItems int) (map[string]string, error) {
+// fetchAllItems pages through every item in the list and returns this
+// instance's owned subset (ip → item ID) plus the set of EVERY IP present
+// in the list regardless of owner — pushes use the latter to avoid re-adding
+// an IP another instance already blocks (issue #486). The page count is
+// bounded to defend against a misbehaving API that returns an unmoving
+// cursor — at cfListItemsPerPage=500, 50 pages cover 25 000 items, well past
+// the 10 000-item free-plan cap.
+// When numItems is 0 (empty list), returns early to avoid Cloudflare API
+// error 10027 (per_page on an empty list).
+func (e *CloudflareListsEnforcer) fetchAllItems(ctx context.Context, listID string, numItems int) (map[string]string, map[string]struct{}, error) {
 	const maxPages = 50
-	managed := make(map[string]string)
+	owned := make(map[string]string)
+	present := make(map[string]struct{})
 
 	// Early return for empty lists: Cloudflare returns error 10027 when per_page is set on empty lists
 	if numItems == 0 {
-		return managed, nil
+		return owned, present, nil
 	}
 
 	cursor := ""
 	for page := 0; page < maxPages; page++ {
 		if err := e.limiter.wait(ctx); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		url := fmt.Sprintf("%s/accounts/%s/rules/lists/%s/items",
-			e.baseURL, e.accountID, listID)
+		url := fmt.Sprintf("%s/accounts/%s/rules/lists/%s/items?per_page=%d",
+			e.baseURL, e.accountID, listID, cfListItemsPerPage)
 		if cursor != "" {
-			url += "?cursor=" + cursor
+			url += "&cursor=" + cursor
 		}
 		resp, err := e.doRequest(ctx, http.MethodGet, url, nil)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		var pg cfListItemsResp
 		if err := json.NewDecoder(resp.Body).Decode(&pg); err != nil {
 			_ = resp.Body.Close()
-			return nil, fmt.Errorf("decode list items: %w", err)
+			return nil, nil, fmt.Errorf("decode list items: %w", err)
 		}
 		_ = resp.Body.Close()
 		if !pg.Success {
-			return nil, fmt.Errorf("cloudflare list items: %s", cfErrMsg(pg.Errors))
+			return nil, nil, fmt.Errorf("cloudflare list items: %s", cfErrMsg(pg.Errors))
 		}
 		for _, it := range pg.Result {
-			if !isManagedListItem(it.Comment) {
+			if it.IP == "" {
 				continue
 			}
-			if it.IP != "" {
-				managed[it.IP] = it.ID
+			present[it.IP] = struct{}{}
+			if e.ownsItem(it.Comment) {
+				owned[it.IP] = it.ID
 			}
 		}
 		next := pg.ResultInfo.Cursors.After
 		if next == "" || next == cursor {
-			return managed, nil
+			return owned, present, nil
 		}
 		cursor = next
 	}
-	return nil, fmt.Errorf("cloudflare list items: pagination exceeded %d pages", maxPages)
+	return nil, nil, fmt.Errorf("cloudflare list items: pagination exceeded %d pages at %d items/page (unmoving cursor?)",
+		maxPages, cfListItemsPerPage)
 }
 
 // ── CF Lists API mutators ────────────────────────────────────────────────────
@@ -660,7 +785,7 @@ func (e *CloudflareListsEnforcer) addItems(ctx context.Context, listID string, i
 		batch := ips[start:end]
 		payload := make([]cfListItemReq, len(batch))
 		for i, ip := range batch {
-			payload[i] = cfListItemReq{IP: ip, Comment: cfListItemTag}
+			payload[i] = cfListItemReq{IP: ip, Comment: e.ownTag}
 		}
 		body, err := json.Marshal(payload)
 		if err != nil {
@@ -691,7 +816,7 @@ func (e *CloudflareListsEnforcer) addItems(ctx context.Context, listID string, i
 	if needRefresh {
 		// The async path returned only an operation_id; re-page to recover IDs.
 		// Pass numItems=1 as a safe default since we know items exist (we just added them).
-		all, err := e.fetchAllItems(ctx, listID, 1)
+		all, _, err := e.fetchAllItems(ctx, listID, 1)
 		if err != nil {
 			return nil, fmt.Errorf("post-add refresh: %w", err)
 		}
@@ -974,16 +1099,54 @@ func (e *CloudflareListsEnforcer) isAllowlisted(t sdk.Target) bool {
 	return false
 }
 
-// isManagedListItem returns true when the item's comment marks it as written by
-// ezyshield. A bare "ezyshield" comment matches, as does any comment starting
-// with "ezyshield" (so we can extend the tag in the future without breaking
-// older deployments).
-func isManagedListItem(comment string) bool {
-	const tag = cfListItemTag
-	if len(comment) < len(tag) {
-		return false
+// cfOwnTag builds this daemon's item-comment namespace (issue #486):
+// "ezyshield:<instance>". instance comes from config; empty falls back to
+// the hostname, sanitized to [A-Za-z0-9._-] and capped at 32 bytes, with
+// "default" as the last resort — the tag must be stable across restarts or
+// the daemon would orphan its own items.
+func cfOwnTag(instance string) string {
+	if instance == "" {
+		if hn, err := os.Hostname(); err == nil {
+			instance = hn
+		}
 	}
-	return comment[:len(tag)] == tag
+	var b strings.Builder
+	for _, r := range instance {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		}
+	}
+	s := b.String()
+	if len(s) > 32 {
+		s = s[:32]
+	}
+	if s == "" {
+		s = "default"
+	}
+	return cfListItemTag + ":" + s
+}
+
+// ownsItem reports whether this instance owns (and therefore reconciles and
+// expires) a list item with the given comment. Items owned by OTHER
+// EzyShield instances are treated exactly like manual items: untouched
+// (issue #486 — several servers sharing one account used to clobber each
+// other's bans because every instance claimed every "ezyshield" item).
+func (e *CloudflareListsEnforcer) ownsItem(comment string) bool {
+	if comment == e.ownTag {
+		return true
+	}
+	return e.adoptLegacy && isLegacyManagedItem(comment)
+}
+
+// isLegacyManagedItem matches the pre-#486 tag shape: an "ezyshield" prefix
+// with no ":<instance>" namespace. Ownerless by default (they would never
+// expire otherwise the wrong daemon could delete them); exactly one
+// instance may adopt them via adopt_legacy_items to drain them.
+func isLegacyManagedItem(comment string) bool {
+	return strings.HasPrefix(comment, cfListItemTag) &&
+		!strings.HasPrefix(comment, cfListItemTag+":")
 }
 
 // ── Cloudflare Lists API wire types ──────────────────────────────────────────

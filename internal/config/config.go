@@ -240,6 +240,22 @@ type CloudflareCfg struct {
 	// Defaults to "ezyshield_blocked"; auto-created when missing.
 	// Must match [A-Za-z0-9_]+ (Cloudflare constraint) and be 1..50 characters.
 	ListName string `yaml:"list_name"`
+	// Instance identifies THIS daemon among several EzyShield servers
+	// sharing one Cloudflare account (the free plan allows a single list —
+	// issue #486). Each daemon tags its list items "ezyshield:<instance>"
+	// and reconciles/expires only its own subset, so servers never remove
+	// each other's bans. Defaults to the hostname; set explicitly when
+	// hostnames may collide or change. Must match [A-Za-z0-9._-]{1,32} and
+	// stay stable across restarts (a changed value orphans this daemon's
+	// previous items).
+	Instance string `yaml:"instance,omitempty"`
+	// AdoptLegacyItems lets exactly ONE instance take ownership of list
+	// items written before per-instance tagging (bare "ezyshield" comment),
+	// so they gain TTL expiry again and drain naturally. Enabling it on
+	// more than one server sharing the account reintroduces the clobbering
+	// this field exists to migrate away from — set it on a single server,
+	// remove it once the legacy items are gone.
+	AdoptLegacyItems bool `yaml:"adopt_legacy_items,omitempty"`
 	// ZoneIDs is the list of zones to manage; required when Mode=="rulesets".
 	ZoneIDs []string `yaml:"zone_ids"`
 	// Action is the rule mode: "block" (default), "challenge", or "js_challenge".
@@ -651,6 +667,11 @@ func validateCloudflare(cf CloudflareCfg) error {
 				return fmt.Errorf("'list_name': %w", err)
 			}
 		}
+		if cf.Instance != "" {
+			if err := validateCFInstance(cf.Instance); err != nil {
+				return fmt.Errorf("'instance': %w", err)
+			}
+		}
 		// zone_ids are optional in lists mode; when set, WAF rules are auto-managed per zone
 		for i, z := range cf.ZoneIDs {
 			if z == "" {
@@ -669,6 +690,26 @@ func validateCloudflare(cf CloudflareCfg) error {
 	}
 	if cf.Action != "" && !validCFActions[cf.Action] {
 		return fmt.Errorf("'action' must be block|challenge|js_challenge, got %q", cf.Action)
+	}
+	return nil
+}
+
+// validateCFInstance rejects per-daemon instance identifiers that would
+// produce an unusable list-item tag (issue #486): the value becomes part of
+// every item's comment and must be short and shell/log-safe.
+func validateCFInstance(instance string) error {
+	if len(instance) == 0 || len(instance) > 32 {
+		return fmt.Errorf("length must be 1..32, got %d", len(instance))
+	}
+	for _, r := range instance {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '.', r == '_', r == '-':
+		default:
+			return fmt.Errorf("must match [A-Za-z0-9._-]+, got %q", instance)
+		}
 	}
 	return nil
 }

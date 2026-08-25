@@ -36,6 +36,15 @@
           "type": "string",
           "description": "Cloudflare account ID; required when mode is 'lists'."
         },
+        "instance": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,32}$",
+          "description": "Identity of THIS daemon among several servers sharing one Cloudflare account/list: items are tagged 'ezyshield:<instance>' and each daemon reconciles only its own subset. Defaults to the hostname; must stay stable across restarts."
+        },
+        "adopt_legacy_items": {
+          "type": "boolean",
+          "description": "Adopt list items written before per-instance tagging (bare 'ezyshield' comment) so they expire again. Set on exactly ONE server sharing the account, and remove once legacy items drain."
+        },
         "list_name": {
           "type": "string",
           "pattern": "^[A-Za-z0-9_]{1,50}$",

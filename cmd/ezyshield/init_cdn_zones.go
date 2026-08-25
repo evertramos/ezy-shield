@@ -54,25 +54,50 @@ type cfZoneCoverage struct {
 }
 
 // promptCFZoneCoverage asks which zones the WAF block rule should cover in
-// lists mode. ENTER keeps the manual-instructions path. Returns ok=false on
-// an invalid explicit ID (fails this account, same as the rulesets prompt).
-func promptCFZoneCoverage(p *wPrinter, pr prompter) (cfZoneCoverage, bool) {
-	raw := strings.TrimSpace(pr.ask(
-		"Zones the block rule should cover ('all', comma-separated zone IDs, or ENTER for manual setup)", ""))
-	if raw == "" {
-		return cfZoneCoverage{}, true
-	}
-	if strings.EqualFold(raw, "all") {
-		return cfZoneCoverage{all: true}, true
-	}
-	ids := splitAndTrim(raw)
-	for _, z := range ids {
-		if !cfHexIDRe.MatchString(z) {
-			p.printf("  zone_id %q is not 32 hex chars; skipping this account.\n", z)
-			return cfZoneCoverage{}, false
+// lists mode. ENTER keeps the manual-instructions path.
+//
+// Issue #489 (field report): the prompt text displays 'all' in quotes, so
+// operators type the quotes too — answers are normalized (surrounding
+// quotes stripped, 'all' matched case-insensitively). An invalid answer
+// re-prompts instead of discarding the whole freshly-validated account;
+// after cfZonePromptAttempts it degrades to the manual path — the account
+// config is fully valid without zone_ids, and the manual instructions (or
+// a later 'config enforcer cloudflare' run) cover the zones.
+func promptCFZoneCoverage(p *wPrinter, pr prompter) cfZoneCoverage {
+	const cfZonePromptAttempts = 3
+	for attempt := 0; attempt < cfZonePromptAttempts; attempt++ {
+		raw := stripSurroundingQuotes(pr.ask(
+			"Zones the block rule should cover ('all', comma-separated zone IDs, or ENTER for manual setup)", ""))
+		if raw == "" {
+			return cfZoneCoverage{}
+		}
+		if strings.EqualFold(raw, "all") {
+			return cfZoneCoverage{all: true}
+		}
+		ids := splitAndTrim(raw)
+		valid := len(ids) > 0
+		for i := range ids {
+			ids[i] = stripSurroundingQuotes(ids[i])
+			if !cfHexIDRe.MatchString(ids[i]) {
+				p.printf("  zone_id %q is not 32 hex chars — answer 'all', valid zone IDs, or ENTER for manual setup.\n", ids[i])
+				valid = false
+				break
+			}
+		}
+		if valid {
+			return cfZoneCoverage{ids: ids}
 		}
 	}
-	return cfZoneCoverage{ids: ids}, true
+	p.println("  Too many invalid answers — keeping manual zone setup (see the instructions below;")
+	p.printf("  you can wire zones later with 'sudo %s config enforcer cloudflare').\n", progName)
+	return cfZoneCoverage{}
+}
+
+// stripSurroundingQuotes removes stray single/double quotes (and spaces)
+// wrapped around an interactive answer — prompts that display quoted
+// literals like 'all' get answered with the quotes included (issue #489).
+func stripSurroundingQuotes(s string) string {
+	return strings.TrimSpace(strings.Trim(strings.TrimSpace(s), `'"`))
 }
 
 // cfZone is one zone in the rollout target set. Name is empty for explicit

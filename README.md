@@ -132,7 +132,7 @@ still escalates today.
 - **Local enforcement** — nftables, via a privilege-separated enforcer helper
 - **Edge enforcement** — push IP bans to a Cloudflare list
 - **SSH, Nginx, Apache, Caddy & Traefik parsers** with fuzz-tested, panic-safe parsing of hostile input
-- **Deterministic rule engine** — thresholds + scanner signatures; works with zero AI configured
+- **Deterministic rule engine** — thresholds + scanner signatures; works with zero AI configured; detection quality is measured by a [reproducible benchmark](docs/content/en/reference/benchmark.md) on a labeled corpus (currently 6/6 attacks detected, 0 false positives), regression-guarded in CI
 - **AI-assisted decisions (optional)** — Anthropic, any OpenAI-compatible endpoint, or local Ollama, with provider failover, a token budget, and verdict caching
 - **Prompt-injection defense** — log lines are treated as data, never instructions; AI output is schema-validated and clamped by policy (it can only suggest within limits)
 - **Anti-lockout** — active SSH peer + admin CIDRs auto-allowlisted before any rule write; allowlist always wins

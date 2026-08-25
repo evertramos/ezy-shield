@@ -354,14 +354,14 @@ func TestRecordUsage_and_TodayUsage(t *testing.T) {
 		InputTokens:  200,
 		OutputTokens: 50,
 		CostUSD:      0.00026,
-	}); err != nil {
+	}, ""); err != nil {
 		t.Fatalf("RecordUsage: %v", err)
 	}
 	if err := db.RecordUsage(ctx, "anthropic", sdk.Usage{
 		InputTokens:  100,
 		OutputTokens: 25,
 		CostUSD:      0.00018,
-	}); err != nil {
+	}, ""); err != nil {
 		t.Fatalf("RecordUsage second: %v", err)
 	}
 
@@ -377,7 +377,7 @@ func TestRecordUsage_and_TodayUsage(t *testing.T) {
 	}
 
 	// A different provider must not be included in the sum.
-	if err := db.RecordUsage(ctx, "ollama", sdk.Usage{InputTokens: 9999}); err != nil {
+	if err := db.RecordUsage(ctx, "ollama", sdk.Usage{InputTokens: 9999}, ""); err != nil {
 		t.Fatalf("RecordUsage ollama: %v", err)
 	}
 	u, err = db.TodayUsage(ctx, "anthropic")

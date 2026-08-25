@@ -911,11 +911,18 @@ func (s *DB) UnbanPrefix(ctx context.Context, prefix netip.Prefix) (int, error) 
 
 // RecordUsage inserts a row into ai_usage for a single AI provider call.
 // cost_usd is derived by the caller from token counts and provider pricing.
-func (s *DB) RecordUsage(ctx context.Context, provider string, usage sdk.Usage) error {
+// ip is the canonical form of the analyzed IP (issue #422 — per-IP cost
+// attribution); empty stores NULL so calls without a subject stay queryable
+// apart from attributed ones.
+func (s *DB) RecordUsage(ctx context.Context, provider string, usage sdk.Usage, ip string) error {
+	var ipVal any
+	if ip != "" {
+		ipVal = ip
+	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO ai_usage (called_at, provider, input_tokens, output_tokens, cost_usd)
-		VALUES (?, ?, ?, ?, ?)
-	`, nowRFC3339(), provider, usage.InputTokens, usage.OutputTokens, usage.CostUSD)
+		INSERT INTO ai_usage (called_at, provider, input_tokens, output_tokens, cost_usd, ip)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, nowRFC3339(), provider, usage.InputTokens, usage.OutputTokens, usage.CostUSD, ipVal)
 	if err != nil {
 		return fmt.Errorf("store: RecordUsage: %w", err)
 	}

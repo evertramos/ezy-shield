@@ -2,6 +2,7 @@ package ai
 
 import (
 	"context"
+	"net/netip"
 	"sync"
 	"testing"
 	"time"
@@ -16,7 +17,7 @@ type trackingBudgetStore struct {
 	usage map[string]sdk.Usage
 }
 
-func (t *trackingBudgetStore) RecordUsage(_ context.Context, provider string, u sdk.Usage) error {
+func (t *trackingBudgetStore) RecordUsage(_ context.Context, provider string, u sdk.Usage, _ string) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.usage == nil {
@@ -41,7 +42,7 @@ type stubBudgetStore struct {
 	today    sdk.Usage // returned by TodayUsage
 }
 
-func (s *stubBudgetStore) RecordUsage(_ context.Context, _ string, u sdk.Usage) error {
+func (s *stubBudgetStore) RecordUsage(_ context.Context, _ string, u sdk.Usage, _ string) error {
 	s.recorded = append(s.recorded, u)
 	s.today.InputTokens += u.InputTokens
 	s.today.OutputTokens += u.OutputTokens
@@ -66,7 +67,7 @@ func TestBudget_ConsumeAndRemaining(t *testing.T) {
 		t.Errorf("want remaining=1000, got %d", budget.Remaining)
 	}
 
-	exceeded, err := b.Consume(ctx, sdk.Usage{InputTokens: 300, OutputTokens: 100})
+	exceeded, err := b.Consume(ctx, sdk.Usage{InputTokens: 300, OutputTokens: 100}, netip.Addr{})
 	if err != nil {
 		t.Fatalf("Consume: %v", err)
 	}
@@ -87,7 +88,7 @@ func TestBudget_Exceeded(t *testing.T) {
 	ctx := context.Background()
 
 	// First consumption: 400 tokens (under limit).
-	exceeded, err := b.Consume(ctx, sdk.Usage{InputTokens: 400})
+	exceeded, err := b.Consume(ctx, sdk.Usage{InputTokens: 400}, netip.Addr{})
 	if err != nil {
 		t.Fatalf("Consume: %v", err)
 	}
@@ -96,7 +97,7 @@ func TestBudget_Exceeded(t *testing.T) {
 	}
 
 	// Second consumption: pushes over 500 → exceeded=true for the first time.
-	exceeded, err = b.Consume(ctx, sdk.Usage{InputTokens: 200})
+	exceeded, err = b.Consume(ctx, sdk.Usage{InputTokens: 200}, netip.Addr{})
 	if err != nil {
 		t.Fatalf("Consume: %v", err)
 	}
@@ -105,7 +106,7 @@ func TestBudget_Exceeded(t *testing.T) {
 	}
 
 	// Third call: still exceeded but notification already sent → exceeded=false.
-	exceeded, err = b.Consume(ctx, sdk.Usage{InputTokens: 1})
+	exceeded, err = b.Consume(ctx, sdk.Usage{InputTokens: 1}, netip.Addr{})
 	if err != nil {
 		t.Fatalf("Consume: %v", err)
 	}
@@ -125,8 +126,8 @@ func TestBudget_NotificationRollsOverAtMidnight(t *testing.T) {
 	b.nowFn = func() time.Time { return day }
 	ctx := context.Background()
 
-	_, _ = b.Consume(ctx, sdk.Usage{InputTokens: 200}) // exceeds
-	exceeded, _ := b.Consume(ctx, sdk.Usage{InputTokens: 1})
+	_, _ = b.Consume(ctx, sdk.Usage{InputTokens: 200}, netip.Addr{}) // exceeds
+	exceeded, _ := b.Consume(ctx, sdk.Usage{InputTokens: 1}, netip.Addr{})
 	if exceeded {
 		t.Error("notification should not fire twice within one day")
 	}
@@ -135,7 +136,7 @@ func TestBudget_NotificationRollsOverAtMidnight(t *testing.T) {
 	day = day.Add(2 * time.Hour) // 2026-08-26 01:00 UTC
 	store.today = sdk.Usage{}
 
-	exceeded, _ = b.Consume(ctx, sdk.Usage{InputTokens: 200})
+	exceeded, _ = b.Consume(ctx, sdk.Usage{InputTokens: 200}, netip.Addr{})
 	if !exceeded {
 		t.Error("a breach on the NEXT day must notify again without any reset call")
 	}
@@ -155,7 +156,7 @@ func TestBudget_DisabledWhenZero(t *testing.T) {
 		t.Errorf("disabled budget should have DailyLimit=0, got %d", budget.DailyLimit)
 	}
 
-	exceeded, err := b.Consume(ctx, sdk.Usage{InputTokens: 9999999})
+	exceeded, err := b.Consume(ctx, sdk.Usage{InputTokens: 9999999}, netip.Addr{})
 	if err != nil {
 		t.Fatalf("Consume: %v", err)
 	}
@@ -171,8 +172,8 @@ func TestBudget_UsageRecorded(t *testing.T) {
 	ctx := context.Background()
 
 	u := sdk.Usage{InputTokens: 123, OutputTokens: 45, CostUSD: 0.001}
-	_, _ = b.Consume(ctx, u)
-	_, _ = b.Consume(ctx, u)
+	_, _ = b.Consume(ctx, u, netip.Addr{})
+	_, _ = b.Consume(ctx, u, netip.Addr{})
 
 	if len(store.recorded) != 2 {
 		t.Errorf("expected 2 recorded usage entries, got %d", len(store.recorded))
@@ -187,7 +188,7 @@ func TestBudget_SharedKeySharesBucket(t *testing.T) {
 	b2 := NewBudget("openai", 500, store)
 	ctx := context.Background()
 
-	_, _ = b1.Consume(ctx, sdk.Usage{InputTokens: 400})
+	_, _ = b1.Consume(ctx, sdk.Usage{InputTokens: 400}, netip.Addr{})
 
 	budget, err := b2.Current(ctx)
 	if err != nil {
@@ -207,7 +208,7 @@ func TestBudget_UniqueKeysIsolate(t *testing.T) {
 	b2 := NewBudget("openai-1", 500, store)
 	ctx := context.Background()
 
-	_, _ = b1.Consume(ctx, sdk.Usage{InputTokens: 400})
+	_, _ = b1.Consume(ctx, sdk.Usage{InputTokens: 400}, netip.Addr{})
 
 	budget, err := b2.Current(ctx)
 	if err != nil {

@@ -824,7 +824,7 @@ func (d *Daemon) maybeConsultAI(ctx context.Context, ip netip.Addr, verdicts []s
 		"cost_usd", usage.CostUSD,
 	)
 
-	if budgetExceeded, err := d.aiBudget.Consume(ctx, usage); err != nil {
+	if budgetExceeded, err := d.aiBudget.Consume(ctx, usage, ip); err != nil {
 		slog.WarnContext(ctx, "daemon: ai budget consume failed", "err", err)
 	} else if budgetExceeded {
 		slog.WarnContext(ctx, "daemon: AI daily token budget now exhausted")

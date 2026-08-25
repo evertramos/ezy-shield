@@ -85,6 +85,8 @@ type daemonStore interface {
 	StrikesForIP(ctx context.Context, ip netip.Addr, limit int) ([]store.StrikeRecord, error)
 	AuditLogForIP(ctx context.Context, ip netip.Addr, limit int) ([]store.AuditEntry, error)
 	ListOffenders(ctx context.Context, permanentOnly bool, limit int) ([]store.OffenderSummary, error)
+	// Panic button (issue #176) — see internal/store/disableall.go.
+	UnbanAll(ctx context.Context, reason string) (int, error)
 }
 
 // geoLookup is the minimal interface consumed from *enrich.Enricher.

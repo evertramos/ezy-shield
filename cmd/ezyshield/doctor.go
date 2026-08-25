@@ -106,6 +106,17 @@ func runDoctor(cmd *cobra.Command, configDir, dbPath, socketPath string, jsonOut
 	// package install. New function + this single registration line only --
 	// see doctor_shadow.go.
 	checks = append(checks, checkInstallShadowing(os.Getenv("PATH"))...)
+	// issue #213: the systemd units still carry the hardening enforcement
+	// depends on (AF_NETLINK, RuntimeDirectory), plus a functional netlink
+	// probe through the running helper. Read-only; see doctor_units.go.
+	// cmd.Context() is nil when the command was built but not Executed
+	// (tests call runDoctor directly).
+	doctorCtx := cmd.Context()
+	if doctorCtx == nil {
+		doctorCtx = context.Background()
+	}
+	checks = append(checks, checkUnitHardening(doctorCtx)...)
+	checks = append(checks, checkEnforcerNetlinkProbe(enforcerSockPath))
 	// issue #146: fired ban_ineffective diagnostics (read-only DB query).
 	checks = append(checks, checkBanIneffective(dbPath))
 	// issue #174: honest enforcement state from the running daemon.

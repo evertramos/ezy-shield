@@ -83,9 +83,18 @@ jobs:
           git push origin "${{ steps.bump.outputs.new_tag }}"
 
   release:
+    # !cancelled() is load-bearing (issue #355): GitHub auto-skips a job
+    # whose `needs` were skipped unless its `if` contains a status check
+    # function. `tag` is dispatch-only, so on a `push: tags` event it is
+    # skipped — and without the status function this job was skipped too,
+    # making the documented tag-push release path dead code (every release
+    # ever cut came from workflow_dispatch). The actor guard keeps the
+    # bot-pushed tag from the dispatch path from triggering a second run.
     if: |
-      (github.event_name == 'workflow_dispatch' && needs.tag.result == 'success') ||
-      (github.event_name == 'push' && github.actor != 'github-actions[bot]')
+      !cancelled() && (
+        (github.event_name == 'workflow_dispatch' && needs.tag.result == 'success') ||
+        (github.event_name == 'push' && github.actor != 'github-actions[bot]')
+      )
     needs: [tag]
     runs-on: ubuntu-latest
     # id-token: write is the OIDC grant cosign keyless signing needs

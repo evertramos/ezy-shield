@@ -230,6 +230,15 @@ ai:
 
 O veredito da IA é sempre consultivo: validado por schema, limitado pela policy e nunca capaz de banir um IP da allowlist.
 
+Cada chamada de IA é registrada na tabela `ai_usage` com o IP analisado, então a atribuição de custo vira uma única consulta — os maiores gastadores (um IP drenando o orçamento é, por si só, sintoma de vazamento):
+
+```bash
+sudo sqlite3 /var/lib/ezyshield/ezyshield.db \
+  "SELECT ip, COUNT(*) calls, ROUND(SUM(cost_usd), 4) usd
+   FROM ai_usage WHERE ip IS NOT NULL
+   GROUP BY ip ORDER BY usd DESC LIMIT 10;"
+```
+
 ## enrich (GeoIP/ASN)
 
 Enriquecimento GeoIP/ASN — habilita `block_countries` / `block_asns` no policy e as colunas de país/ASN em `list` e `report`. Opcional: sem a seção `enrich:` o daemon roda normalmente com enriquecimento vazio (sem país/ASN em lugar nenhum, e essas chaves de policy nunca casam).

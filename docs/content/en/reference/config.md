@@ -232,6 +232,15 @@ ai:
 
 The AI verdict is always advisory: schema-validated, clamped by policy, and never able to ban an allowlisted IP.
 
+Every AI call is recorded in the `ai_usage` table with the analyzed IP, so cost attribution is a single query — the top spenders (an IP draining the budget is itself a leakage symptom):
+
+```bash
+sudo sqlite3 /var/lib/ezyshield/ezyshield.db \
+  "SELECT ip, COUNT(*) calls, ROUND(SUM(cost_usd), 4) usd
+   FROM ai_usage WHERE ip IS NOT NULL
+   GROUP BY ip ORDER BY usd DESC LIMIT 10;"
+```
+
 ## enrich
 
 GeoIP/ASN enrichment — enables `block_countries` / `block_asns` in policy and the country/ASN columns in `list` and `report`. Optional: without an `enrich:` section the daemon runs normally with empty enrichment (no country/ASN anywhere, and those policy keys never match).

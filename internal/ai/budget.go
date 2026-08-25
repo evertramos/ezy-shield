@@ -3,6 +3,7 @@ package ai
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"sync"
 
 	"github.com/evertramos/ezy-shield/pkg/sdk"
@@ -11,7 +12,10 @@ import (
 // BudgetStore is the persistence interface for AI token usage tracking.
 // It is satisfied by *store.DB.
 type BudgetStore interface {
-	RecordUsage(ctx context.Context, provider string, usage sdk.Usage) error
+	// RecordUsage persists one AI call's token/cost usage. ip is the
+	// canonical form of the analyzed IP for per-IP cost attribution
+	// (issue #422); empty means no subject IP.
+	RecordUsage(ctx context.Context, provider string, usage sdk.Usage, ip string) error
 	TodayUsage(ctx context.Context, provider string) (sdk.Usage, error)
 }
 
@@ -70,11 +74,17 @@ func (b *Budget) Exceeded(ctx context.Context) (bool, error) {
 	return budget.DailyLimit > 0 && budget.Remaining == 0, nil
 }
 
-// Consume records usage in the store.
+// Consume records usage in the store, attributed to the analyzed IP
+// (issue #422 — per-IP cost attribution; an invalid Addr records NULL).
 // It returns exceeded=true the first time the daily budget is breached in
 // the current day so the caller can emit exactly one critical notification.
-func (b *Budget) Consume(ctx context.Context, usage sdk.Usage) (exceeded bool, err error) {
-	if err := b.store.RecordUsage(ctx, b.provider, usage); err != nil {
+func (b *Budget) Consume(ctx context.Context, usage sdk.Usage, ip netip.Addr) (exceeded bool, err error) {
+	ipStr := ""
+	if ip.IsValid() {
+		// Canonical form (cf. #314): unmap 4-in-6 so one IP is one key.
+		ipStr = ip.Unmap().String()
+	}
+	if err := b.store.RecordUsage(ctx, b.provider, usage, ipStr); err != nil {
 		return false, fmt.Errorf("budget: record usage: %w", err)
 	}
 

@@ -18,6 +18,7 @@ import (
 	"github.com/evertramos/ezy-shield/internal/cdndetect"
 	"github.com/evertramos/ezy-shield/internal/config"
 	"github.com/evertramos/ezy-shield/internal/decision"
+	"github.com/evertramos/ezy-shield/internal/enforce"
 	"github.com/evertramos/ezy-shield/internal/enrich"
 	"github.com/evertramos/ezy-shield/internal/notify"
 	"github.com/evertramos/ezy-shield/internal/rules"
@@ -1081,6 +1082,22 @@ func (d *Daemon) syncEnforcer(ctx context.Context) error {
 	// signal that flips DEGRADED→ACTIVE on recovery (and ACTIVE→DEGRADED if
 	// the firewall backend went away between bans).
 	d.recordEnforceResult(ctx, "sync", err)
+
+	// Reconcile-repair audit (issue #214): a mid-write interruption (crash,
+	// OOM-kill, external flush) surfaces as drift the next reconcile has to
+	// repair — record it in the append-only audit_log so the incident is
+	// traceable, not just a transient WARN. The boot reconcile is exempt:
+	// re-adding every persisted ban after a restart is expected recovery.
+	if err == nil {
+		if rep, ok := d.enforcer.(enforce.SyncRepairReporter); ok {
+			if a, r, first := rep.LastSyncRepairs(); (a > 0 || r > 0) && !first {
+				reason := fmt.Sprintf("reconcile repaired store↔kernel drift: re-added %d, removed %d", a, r)
+				if aerr := d.store.AuditSystem(ctx, "enforce_reconcile", reason); aerr != nil {
+					slog.ErrorContext(ctx, "daemon: audit enforce_reconcile", "err", aerr)
+				}
+			}
+		}
+	}
 	return err
 }
 

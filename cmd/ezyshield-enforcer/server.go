@@ -287,15 +287,44 @@ func (s *Server) dispatch(ctx context.Context, req enforce.Request) enforce.Resp
 		// window between del and add is held under mutateMu and is strictly
 		// safer than a ban running on the wrong, shorter timer.
 		s.mu.RLock()
-		_, present := s.blocked[req.IP]
+		oldDeadline, present := s.blocked[req.IP]
 		s.mu.RUnlock()
+		deleted := false
 		if present {
 			if err := nftDel(ctx, s.run, names, req.IP); err != nil && !errors.Is(err, errElementAbsent) {
 				s.mutateMu.Unlock()
 				return enforce.Response{OK: false, Error: err.Error()}
 			}
+			deleted = true
 		}
 		if err := nftAdd(ctx, s.run, names, req.IP, req.TTLSeconds); err != nil {
+			// Watchdog for the interrupted replace (issue #214): the delete
+			// half landed but the add failed — without recovery the kernel
+			// would silently hold LESS than either the old or the new state.
+			// Best-effort rollback: restore the previous element with its
+			// remaining lifetime; if even that fails, make the cache agree
+			// with the (empty) kernel so the daemon's next reconcile re-adds
+			// from the store instead of trusting a ghost.
+			if deleted {
+				restoreTTL := int64(0) // zero deadline = permanent
+				if !oldDeadline.IsZero() {
+					rem := time.Until(oldDeadline)
+					if rem < time.Second {
+						rem = time.Second
+					}
+					restoreTTL = int64(rem / time.Second)
+				}
+				if rerr := nftAdd(ctx, s.run, names, req.IP, restoreTTL); rerr != nil {
+					s.mu.Lock()
+					delete(s.blocked, req.IP)
+					s.mu.Unlock()
+					slog.ErrorContext(ctx, "enforcer: replace interrupted and rollback failed — element dropped; daemon reconcile will re-add from the store",
+						"ip", req.IP, "add_err", err.Error(), "rollback_err", rerr.Error())
+				} else {
+					slog.WarnContext(ctx, "enforcer: replace interrupted — previous element restored with its remaining lifetime",
+						"ip", req.IP, "add_err", err.Error())
+				}
+			}
 			s.mutateMu.Unlock()
 			return enforce.Response{OK: false, Error: err.Error()}
 		}

@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -21,7 +22,6 @@ const (
 	anthropicEndpoint = "https://api.anthropic.com/v1/messages"
 	anthropicVersion  = "2023-06-01"
 	defaultModel      = "claude-haiku-4-5-20251001"
-	maxRetries        = 1
 	maxTokens         = 1024
 	// Haiku 4.5 pricing in USD per token.
 	costPerInputToken  = 8e-7 // $0.80 / 1M input tokens
@@ -96,24 +96,21 @@ func (p *AnthropicProvider) Analyze(
 
 	prompt := buildPrompt(payload, budget)
 
-	var (
-		verdicts []sdk.Verdict
-		usage    sdk.Usage
-		callErr  error
-	)
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		verdicts, usage, callErr = p.callOnce(ctx, prompt)
-		if callErr == nil {
-			break
-		}
-		slog.WarnContext(ctx, "ai: anthropic attempt failed",
-			"attempt", attempt+1, "err", callErr)
-	}
+	// Shared bounded-backoff retry loop (issue #313): 429s now back off
+	// (capped Retry-After) instead of retrying immediately, and usage is
+	// accumulated across attempts.
+	verdicts, usage, callErr := analyzeWithRetry(ctx, "anthropic",
+		func(ctx context.Context) ([]sdk.Verdict, sdk.Usage, error) {
+			return p.callOnce(ctx, prompt)
+		})
 
 	if callErr != nil {
+		if errors.Is(callErr, context.Canceled) || errors.Is(callErr, context.DeadlineExceeded) {
+			return nil, usage, callErr
+		}
 		if p.fallback != nil {
 			slog.WarnContext(ctx, "ai: anthropic falling back to rules engine",
-				"attempts", maxRetries+1, "err", callErr)
+				"attempts", aiMaxRetries+1, "err", callErr)
 			return p.fallback(batch), usage, nil
 		}
 		return nil, usage, fmt.Errorf("ai: anthropic: %w", callErr)
@@ -239,6 +236,11 @@ func (p *AnthropicProvider) callOnce(ctx context.Context, prompt string) ([]sdk.
 	}
 	defer resp.Body.Close() //nolint:errcheck // read-only close
 
+	if resp.StatusCode == http.StatusTooManyRequests {
+		// 429 gets the typed signal so the shared loop honors (capped)
+		// Retry-After instead of hammering the API (issue #313).
+		return nil, sdk.Usage{}, newRateLimitError("anthropic", resp.Header.Get("Retry-After"))
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, sdk.Usage{}, fmt.Errorf("anthropic API returned status %d", resp.StatusCode)
 	}

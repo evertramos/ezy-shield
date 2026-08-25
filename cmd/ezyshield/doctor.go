@@ -55,6 +55,8 @@ func newDoctorCmd() *cobra.Command {
   - file permissions -- config files are not world-readable
   - nft binary -- nftables is installed
   - journald -- journalctl is present and accessible
+  - collectors -- at least one log source is configured (zero means nothing
+    is ever detected)
   - install shadowing -- a previous script install (scripts/get.sh) isn't
     silently shadowing a package install via PATH or systemd unit precedence
 
@@ -94,6 +96,8 @@ func runDoctor(cmd *cobra.Command, configDir, dbPath, socketPath string, jsonOut
 		checkDockerSocket(),
 		checkEnvFile(filepath.Join(configDir, envFileName)),
 	}
+	// issue #386: zero configured collectors means nothing is observed.
+	checks = append(checks, checkCollectorsConfigured(filepath.Join(configDir, "config.yaml")))
 	checks = append(checks, checkAllowlistBreadth(configDir)...)
 	checks = append(checks, checkCloudflareEnforcers(configDir)...)
 	// issue #240: PATH/systemd shadowing between a script install and a
@@ -185,6 +189,30 @@ func checkFileParses(path, label string) CheckResult {
 		}
 	}
 	return CheckResult{Name: label + ": parses", Status: statusPass}
+}
+
+// checkCollectorsConfigured warns when the config declares no collectors:
+// the daemon runs "healthy" while ingesting no log source at all, so
+// nothing is ever detected (issue #386; config validate deliberately allows
+// the empty list since issue #339). N/A when the config is absent or does
+// not load — the file-exists/parses checks above already cover those.
+func checkCollectorsConfigured(configPath string) CheckResult {
+	const name = "collectors: configured"
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		return CheckResult{Name: name, Status: statusNA,
+			Hint: "config not loadable -- see the config.yaml checks above"}
+	}
+	if len(cfg.Collectors) == 0 {
+		return CheckResult{
+			Name:   name,
+			Status: statusWarn,
+			Hint: "no collectors configured -- no log source is monitored and nothing will ever be detected; " +
+				"add a collectors: section to " + configPath,
+		}
+	}
+	return CheckResult{Name: name, Status: statusPass,
+		Hint: fmt.Sprintf("%d collector(s) configured", len(cfg.Collectors))}
 }
 
 // checkFilePerms returns PASS when path is not world-readable (perm <= 0640).

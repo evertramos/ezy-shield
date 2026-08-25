@@ -289,7 +289,15 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 }
 
 // buildCollectors creates sdk.Collector instances from the config slice.
+// An empty result is legal (config validate treats it as a warning since
+// issue #339) but must be LOUD: an armed daemon with zero collectors
+// ingests nothing and protects nothing, while status/systemd look healthy
+// (issue #386; status additionally reports collectors_state NONE, #456).
 func buildCollectors(cfg *config.Config, logger *slog.Logger) []sdk.Collector {
+	if len(cfg.Collectors) == 0 {
+		logger.Warn("run: no collectors configured — no log source is being monitored, nothing will ever be detected; " +
+			"add collectors to config.yaml (see 'ezyshield doctor')")
+	}
 	var cols []sdk.Collector
 	for _, c := range cfg.Collectors {
 		switch c.Kind {

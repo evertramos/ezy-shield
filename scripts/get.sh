@@ -55,6 +55,10 @@
 #   EZYSHIELD_PACKAGES_BASE_URL Override the package repo base (default
 #                               https://packages.ezyshield.com). For private
 #                               mirrors and testing only.
+#   EZYSHIELD_SUITE             Package repo suite: 'stable' (default) or
+#                               'testing' (release candidates). Package mode
+#                               only — the binary paths select versions via
+#                               GitHub Releases instead (--dev for RCs).
 #   EZYSHIELD_METHOD            'auto' (default), 'packages', or 'binary'.
 #                               'binary' skips package-manager detection
 #                               entirely and always installs raw binaries.
@@ -92,6 +96,19 @@ KEYRING_PATH="${ROOT}/usr/share/keyrings/ezyshield.gpg"
 APT_SOURCE_PATH="${ROOT}/etc/apt/sources.list.d/ezyshield.list"
 YUM_REPO_PATH="${ROOT}/etc/yum.repos.d/ezyshield.repo"
 PACKAGES_BASE_URL="${EZYSHIELD_PACKAGES_BASE_URL:-https://packages.ezyshield.com}"
+
+# Package repo suite. The publishing pipeline (publish-repos.yaml) puts
+# stable tags in 'stable' and rc/alpha/beta tags in 'testing'; the default
+# install must only ever deliver stable (issue #448 — the old hardcoded
+# 'testing' suite shipped an RC to fresh installs once v0.1.0 was out).
+SUITE="${EZYSHIELD_SUITE:-stable}"
+case "$SUITE" in
+  stable | testing) ;;
+  *)
+    echo "Error: EZYSHIELD_SUITE must be 'stable' or 'testing' (got: $SUITE)"
+    exit 1
+    ;;
+esac
 
 # Exact, fixed lists — every rm/systemctl action below iterates these known
 # names, never a glob built from a variable or parsed output (issue #240
@@ -305,9 +322,9 @@ packages_repo_reachable() {
 }
 
 # install_via_packages sets up the apt/dnf repo (matching the documented
-# manual steps in docs/content/en/getting-started/install.md, 'testing'
-# suite pre-v0.1.0) and installs the ezyshield package. Returns non-zero on
-# any failure so the caller can fall back to the binary install.
+# manual steps in docs/content/en/getting-started/install.md; suite from
+# $SUITE, default 'stable') and installs the ezyshield package. Returns
+# non-zero on any failure so the caller can fall back to the binary install.
 install_via_packages() {
   pkg_mgr="$1"
   echo "Package manager detected (${pkg_mgr}) -- setting up the EzyShield repository..."
@@ -319,7 +336,7 @@ install_via_packages() {
         echo "Warning: failed to import the EzyShield signing key." >&2
         return 1
       fi
-      echo "deb [signed-by=${KEYRING_PATH}] ${PACKAGES_BASE_URL}/apt testing main" >"$APT_SOURCE_PATH"
+      echo "deb [signed-by=${KEYRING_PATH}] ${PACKAGES_BASE_URL}/apt ${SUITE} main" >"$APT_SOURCE_PATH"
       apt-get update -qq && apt-get install -y ezyshield
       ;;
     dnf | yum)
@@ -327,7 +344,7 @@ install_via_packages() {
       cat >"$YUM_REPO_PATH" <<EOF
 [ezyshield]
 name=EzyShield
-baseurl=${PACKAGES_BASE_URL}/rpm/testing/\$basearch
+baseurl=${PACKAGES_BASE_URL}/rpm/${SUITE}/\$basearch
 enabled=1
 gpgcheck=0
 repo_gpgcheck=1
@@ -457,11 +474,12 @@ if [ -n "${EZYSHIELD_BASE_URL:-}" ]; then
   : # custom mirror always wins -- air-gapped, binary mode
 elif [ "$DEV_MODE" = "1" ]; then
   # --dev pins the newest GitHub prerelease — binary mode by design. The
-  # package-channel equivalent is the 'testing' suite, which apt/dnf hosts
-  # already get by default pre-v0.1.0.
+  # package-channel equivalent is the 'testing' suite, opted into with
+  # EZYSHIELD_SUITE=testing (the default package install tracks 'stable').
   if [ -n "$PKG_MGR" ]; then
     echo "Note: --dev installs the newest prerelease binaries from GitHub Releases."
-    echo "      The package-repo equivalent is the 'testing' suite -- see the install docs."
+    echo "      The package-repo equivalent is the 'testing' suite:"
+    echo "      curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_SUITE=testing sh"
     echo ""
   fi
 elif [ "$METHOD" = "binary" ]; then

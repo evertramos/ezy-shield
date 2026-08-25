@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -481,23 +482,36 @@ func checkAPIAccess(ctx context.Context, token, url string) error {
 	return nil
 }
 
+// printEnforceResults renders one section per backend, in sorted-key order —
+// map iteration order is random, and combined with the early returns below it
+// made `test enforcer all` drop whole backends from the output depending on
+// which entry the map yielded first (issue #303).
 func printEnforceResults(w io.Writer, results *testEnforceResults) error {
-	for _, result := range results.Backends {
+	names := make([]string, 0, len(results.Backends))
+	for name := range results.Backends {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		result := results.Backends[name]
 		mode := ""
 		if result.Mode != "" {
 			mode = fmt.Sprintf(" (mode: %s)", result.Mode)
 		}
-		_, _ = fmt.Fprintf(w, "\nCloudflare enforcer%s: %s\n", mode, result.Status)
+		_, _ = fmt.Fprintf(w, "\n%s%s: %s\n", backendLabel(name), mode, result.Status)
 		_, _ = fmt.Fprintf(w, "%s\n", repeatStr("─", 40))
 
+		// Message/Notes end THIS backend's section, not the whole report — a
+		// `return` here is how the nftables "not yet implemented" note used to
+		// swallow the Cloudflare results (issue #303).
 		if result.Message != "" {
 			_, _ = fmt.Fprintf(w, "✗ Error: %s\n", result.Message)
-			return nil
+			continue
 		}
 
 		if result.Notes != "" {
 			_, _ = fmt.Fprintf(w, "%s\n", result.Notes)
-			return nil
+			continue
 		}
 
 		for _, check := range result.Checks {
@@ -520,6 +534,21 @@ func printEnforceResults(w io.Writer, results *testEnforceResults) error {
 		}
 	}
 	return nil
+}
+
+// backendLabel names a backend's report section. The nftables entry used to
+// print under the hardcoded "Cloudflare enforcer" header (issue #303);
+// Cloudflare accounts carry their config name so multi-account output stays
+// distinguishable (the single-account default keeps the historical header).
+func backendLabel(name string) string {
+	switch name {
+	case "nftables":
+		return "nftables enforcer"
+	case "default":
+		return "Cloudflare enforcer"
+	default:
+		return fmt.Sprintf("Cloudflare enforcer %q", name)
+	}
 }
 
 func repeatStr(s string, count int) string {

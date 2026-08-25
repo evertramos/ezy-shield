@@ -17,6 +17,7 @@ build:
 	$(GOFLAGS) $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(BINARY_DIR)/ezyshield-enforcer ./cmd/ezyshield-enforcer
 
 lint:
+	@command -v gofmt >/dev/null 2>&1 || { echo "gofmt not found on PATH — install Go (the guard would silently pass otherwise, issue #361)"; exit 1; }
 	@out=$$(gofmt -l .); if [ -n "$$out" ]; then echo "gofmt needed on:"; echo "$$out"; exit 1; fi
 	$(GO) vet ./...
 	golangci-lint run ./...

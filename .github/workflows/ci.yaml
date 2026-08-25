@@ -34,6 +34,7 @@ jobs:
       - name: gofmt
         id: gofmt
         run: |
+          command -v gofmt >/dev/null || { echo "gofmt not found on PATH"; exit 1; }
           out=$(gofmt -l .)
           if [ -n "$out" ]; then echo "gofmt needed on:"; echo "$out"; exit 1; fi
       - name: go vet
@@ -227,6 +228,11 @@ jobs:
         run: |
           set -o pipefail
           go test -fuzz=FuzzSIEMFormatters -fuzztime=10s ./internal/siem/ | tee fuzz-siem.txt
+      - name: Fuzz scan proc-listener parser (10s)
+        id: fscan
+        run: |
+          set -o pipefail
+          go test -fuzz=FuzzParseProcNetTCP -fuzztime=10s ./internal/scan/ | tee fuzz-scan.txt
       - name: Job summary
         if: always()
         run: |
@@ -244,6 +250,7 @@ jobs:
             echo "| FuzzApacheErrorParser | $(execs fuzz-apache-error.txt) | ${{ steps.fapacheerr.outcome }} |"
             echo "| FuzzProcTCPPeers | $(execs fuzz-proc.txt) | ${{ steps.fproc.outcome }} |"
             echo "| FuzzSIEMFormatters | $(execs fuzz-siem.txt) | ${{ steps.fsiem.outcome }} |"
+            echo "| FuzzParseProcNetTCP | $(execs fuzz-scan.txt) | ${{ steps.fscan.outcome }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   govulncheck:

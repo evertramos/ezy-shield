@@ -214,7 +214,7 @@ func TestTestKindHelp_ListsRegistryNames(t *testing.T) {
 	if err != nil {
 		t.Fatalf("help failed: %v", err)
 	}
-	if !strings.Contains(out, "Available names: all, email, telegram") {
+	if !strings.Contains(out, "Available names: all, discord, email, slack, telegram, webhook") {
 		t.Errorf("notifier help missing derived name list:\n%s", out)
 	}
 }

@@ -209,6 +209,12 @@ type NFTablesCfg struct {
 	Set    string `yaml:"set"`
 }
 
+// DefaultCFListName is the Cloudflare Custom IP List EzyShield manages when
+// list_name is unset. Single source of truth: the enforcer, doctor, test
+// wizard, and init prompt all derive from here (issue #356 — the literal used
+// to be re-declared at each site and could drift silently).
+const DefaultCFListName = "ezyshield_blocked"
+
 // CloudflareCfg holds Cloudflare edge enforcer settings.
 // APIToken must be an "env:VARNAME" reference; inline values are rejected.
 //
@@ -237,7 +243,7 @@ type CloudflareCfg struct {
 	// AccountID is the Cloudflare account ID; required when Mode=="lists".
 	AccountID string `yaml:"account_id"`
 	// ListName is the Custom IP List name used by Mode=="lists".
-	// Defaults to "ezyshield_blocked"; auto-created when missing.
+	// Defaults to DefaultCFListName; auto-created when missing.
 	// Must match [A-Za-z0-9_]+ (Cloudflare constraint) and be 1..50 characters.
 	ListName string `yaml:"list_name"`
 	// Instance identifies THIS daemon among several EzyShield servers

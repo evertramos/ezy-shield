@@ -595,7 +595,7 @@ func checkOneCloudflare(ctx context.Context, client cfClient, base, configDir st
 	case "lists":
 		listName := eff.ListName
 		if listName == "" {
-			listName = "ezyshield_blocked"
+			listName = config.DefaultCFListName
 		}
 		info, err := cfFindList(ctx, client, base, eff.AccountID, listName, token)
 		switch {

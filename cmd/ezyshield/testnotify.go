@@ -18,9 +18,9 @@ import (
 // `test-notify` alias); the cobra wiring lives in testcmd.go.
 func runTestNotify(cmd *cobra.Command, configDir, channel string) error {
 	switch channel {
-	case "telegram", "email", "all":
+	case "telegram", "email", "slack", "discord", "webhook", "all":
 	default:
-		return fmt.Errorf("unknown channel %q: must be telegram, email, or all", channel)
+		return fmt.Errorf("unknown channel %q: must be telegram, email, slack, discord, webhook, or all", channel)
 	}
 
 	cfgPath := filepath.Join(configDir, "config.yaml")
@@ -45,6 +45,30 @@ func runTestNotify(cmd *cobra.Command, configDir, channel string) error {
 
 	if (channel == "email" || channel == "all") && cfg.Notify.Email != nil {
 		if err := sendTestEmail(ctx, cmd, cfg.Notify.Email, testMsg); err != nil {
+			return err
+		}
+		sent++
+	}
+
+	// slack/discord/webhook were configurable (config notifier wizard, daemon)
+	// but never testable, and `test notifier all` silently omitted them
+	// (issue #356).
+	if (channel == "slack" || channel == "all") && cfg.Notify.Slack != nil {
+		if err := sendTestSlack(ctx, cmd, cfg.Notify.Slack, testMsg); err != nil {
+			return err
+		}
+		sent++
+	}
+
+	if (channel == "discord" || channel == "all") && cfg.Notify.Discord != nil {
+		if err := sendTestDiscord(ctx, cmd, cfg.Notify.Discord, testMsg); err != nil {
+			return err
+		}
+		sent++
+	}
+
+	if (channel == "webhook" || channel == "all") && cfg.Notify.Webhook != nil {
+		if err := sendTestWebhook(ctx, cmd, cfg.Notify.Webhook, testMsg); err != nil {
 			return err
 		}
 		sent++
@@ -91,6 +115,51 @@ func sendTestEmail(ctx context.Context, cmd *cobra.Command, ecfg *config.EmailCf
 		return fmt.Errorf("email: %w", err)
 	}
 	if _, err := fmt.Fprintln(cmd.OutOrStdout(), "email: OK"); err != nil {
+		return fmt.Errorf("writing output: %w", err)
+	}
+	return nil
+}
+
+func sendTestSlack(ctx context.Context, cmd *cobra.Command, scfg *config.SlackCfg, msg sdk.Notification) error {
+	url, err := scfg.WebhookURL.Resolve()
+	if err != nil {
+		return fmt.Errorf("slack: resolving webhook_url: %w", err)
+	}
+	n := notify.NewSlack(url, scfg.Channel)
+	if err := n.Send(ctx, msg); err != nil {
+		return fmt.Errorf("slack: %w", err)
+	}
+	if _, err := fmt.Fprintln(cmd.OutOrStdout(), "slack: OK"); err != nil {
+		return fmt.Errorf("writing output: %w", err)
+	}
+	return nil
+}
+
+func sendTestDiscord(ctx context.Context, cmd *cobra.Command, dcfg *config.DiscordCfg, msg sdk.Notification) error {
+	url, err := dcfg.WebhookURL.Resolve()
+	if err != nil {
+		return fmt.Errorf("discord: resolving webhook_url: %w", err)
+	}
+	n := notify.NewDiscord(url)
+	if err := n.Send(ctx, msg); err != nil {
+		return fmt.Errorf("discord: %w", err)
+	}
+	if _, err := fmt.Fprintln(cmd.OutOrStdout(), "discord: OK"); err != nil {
+		return fmt.Errorf("writing output: %w", err)
+	}
+	return nil
+}
+
+func sendTestWebhook(ctx context.Context, cmd *cobra.Command, wcfg *config.WebhookCfg, msg sdk.Notification) error {
+	url, err := wcfg.URL.Resolve()
+	if err != nil {
+		return fmt.Errorf("webhook: resolving url: %w", err)
+	}
+	n := notify.NewWebhook(url, wcfg.Headers)
+	if err := n.Send(ctx, msg); err != nil {
+		return fmt.Errorf("webhook: %w", err)
+	}
+	if _, err := fmt.Fprintln(cmd.OutOrStdout(), "webhook: OK"); err != nil {
 		return fmt.Errorf("writing output: %w", err)
 	}
 	return nil

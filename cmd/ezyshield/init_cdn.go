@@ -657,7 +657,7 @@ func promptOneCFAccount(
 			return nil, false
 		}
 		cfg.AccountID = accountID
-		listName := pr.ask("Custom IP List name", "ezyshield_blocked")
+		listName := pr.ask("Custom IP List name", config.DefaultCFListName)
 		listName = strings.TrimSpace(listName)
 		if !cfListNameRe.MatchString(listName) {
 			p.printf("  list_name must match [A-Za-z0-9_]+; got %q; skipping this account.\n", listName)

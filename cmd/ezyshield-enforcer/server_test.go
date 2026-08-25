@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/evertramos/ezy-shield/internal/enforce"
 	"github.com/evertramos/ezy-shield/internal/nftnames"
@@ -165,7 +166,7 @@ func TestDispatch_Add_ValidIPv4(t *testing.T) {
 	// in-memory state updated
 	srv.mu.RLock()
 	defer srv.mu.RUnlock()
-	if !srv.blocked["1.2.3.4"] {
+	if _, ok := srv.blocked["1.2.3.4"]; !ok {
 		t.Error("1.2.3.4 not in in-memory blocked set after add")
 	}
 
@@ -235,7 +236,7 @@ func TestDispatch_Del_Valid(t *testing.T) {
 
 	// Pre-populate in-memory state.
 	srv.mu.Lock()
-	srv.blocked["1.2.3.4"] = true
+	srv.blocked["1.2.3.4"] = time.Time{}
 	srv.mu.Unlock()
 
 	resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "del", IP: "1.2.3.4"})
@@ -245,7 +246,7 @@ func TestDispatch_Del_Valid(t *testing.T) {
 
 	srv.mu.RLock()
 	defer srv.mu.RUnlock()
-	if srv.blocked["1.2.3.4"] {
+	if _, ok := srv.blocked["1.2.3.4"]; ok {
 		t.Error("1.2.3.4 still in blocked set after del")
 	}
 }
@@ -255,8 +256,8 @@ func TestDispatch_List_ReturnsMemoryState(t *testing.T) {
 	srv := startTestServer(t, mock)
 
 	srv.mu.Lock()
-	srv.blocked["1.1.1.1"] = true
-	srv.blocked["2.2.2.2"] = true
+	srv.blocked["1.1.1.1"] = time.Time{}
+	srv.blocked["2.2.2.2"] = time.Time{}
 	srv.mu.Unlock()
 
 	resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "list"})
@@ -274,8 +275,8 @@ func TestDispatch_Flush_ClearsState(t *testing.T) {
 	srv := startTestServer(t, mock)
 
 	srv.mu.Lock()
-	srv.blocked["1.1.1.1"] = true
-	srv.blocked["2.2.2.2"] = true
+	srv.blocked["1.1.1.1"] = time.Time{}
+	srv.blocked["2.2.2.2"] = time.Time{}
 	srv.mu.Unlock()
 
 	resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "flush"})
@@ -455,14 +456,17 @@ func TestParseSetElements(t *testing.T) {
     }
 }`)
 	got := parseSetElements(out)
-	sort.Strings(got)
-	want := []string{"1.2.3.4", "5.6.7.8"}
+	sort.Slice(got, func(i, j int) bool { return got[i].ip < got[j].ip })
+	want := []setElem{
+		{ip: "1.2.3.4", ttl: 4*time.Minute + 55*time.Second}, // remaining `expires` wins over `timeout`
+		{ip: "5.6.7.8", ttl: 0},                              // no annotation → permanent
+	}
 	if len(got) != len(want) {
 		t.Fatalf("expected %v, got %v", want, got)
 	}
 	for i := range want {
 		if got[i] != want[i] {
-			t.Errorf("[%d] expected %s, got %s", i, want[i], got[i])
+			t.Errorf("[%d] expected %+v, got %+v", i, want[i], got[i])
 		}
 	}
 }
@@ -571,7 +575,7 @@ func TestDispatch_Del_AlreadyAbsent_TypedCode(t *testing.T) {
 	srv.runSs = func(_ context.Context, _ []string) error { return nil }
 	// Pre-populate the in-memory cache to prove the already-absent branch
 	// still evicts the entry (otherwise Sync would keep retrying every tick).
-	srv.blocked["1.2.3.4"] = true
+	srv.blocked["1.2.3.4"] = time.Time{}
 
 	lc := &net.ListenConfig{}
 	ln, err := lc.Listen(context.Background(), "unix", sockPath)
@@ -594,7 +598,7 @@ func TestDispatch_Del_AlreadyAbsent_TypedCode(t *testing.T) {
 		t.Errorf("Error must be empty for already-absent success (nft stderr must not leak to client), got: %q", resp.Error)
 	}
 	srv.mu.RLock()
-	still := srv.blocked["1.2.3.4"]
+	_, still := srv.blocked["1.2.3.4"]
 	srv.mu.RUnlock()
 	if still {
 		t.Error("in-memory blocked cache still contains 1.2.3.4 after already-absent del")
@@ -689,7 +693,7 @@ func TestIntegration_BanUnban(t *testing.T) {
 	// This test is intentionally guarded: it only runs as root with nft present.
 	ctx := context.Background()
 	srv := newServer("", realNftRunner)
-	srv.blocked = make(map[string]bool)
+	srv.blocked = make(map[string]time.Time)
 
 	// init: create the table/set/chain
 	if err := srv.init(ctx); err != nil {
@@ -862,8 +866,8 @@ func defaultNames() nftnames.Names {
 func TestDispatch_CustomNames_SwitchAndPin(t *testing.T) {
 	mock := &mockNftCalls{}
 	srv := startTestServer(t, mock)
-	srv.listFn = func(_ context.Context, _ nftnames.Names) ([]string, error) {
-		return []string{"198.51.100.7"}, nil // pre-existing entry in the custom table
+	srv.listFn = func(_ context.Context, _ nftnames.Names) ([]setElem, error) {
+		return []setElem{{ip: "198.51.100.7"}}, nil // pre-existing entry in the custom table
 	}
 
 	resp := doRPC(t, srv.sockPath(), enforce.Request{

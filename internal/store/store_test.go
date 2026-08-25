@@ -41,20 +41,10 @@ func action(ip netip.Addr, strike int, ttl time.Duration) sdk.Action {
 	}
 }
 
-// TestMigrations verifies schema_migrations is populated after Open.
-func TestMigrations(t *testing.T) {
-	db := openTestDB(t)
-	// A second Open on the same file must not re-apply migrations.
-	path := filepath.Join(t.TempDir(), "idempotent.db")
-	for range 2 {
-		d, err := store.Open(context.Background(), path)
-		if err != nil {
-			t.Fatalf("Open (idempotent): %v", err)
-		}
-		_ = d.Close()
-	}
-	_ = db
-}
+// Migration integrity (schema_migrations contents, idempotent re-Open, and
+// the populated-DB upgrade path) is covered by migrations_test.go
+// (issue #329) — the placeholder TestMigrations that asserted nothing was
+// removed with it.
 
 // TestRecordStrike_and_GetStrikeCount covers the core strike path.
 func TestRecordStrike_and_GetStrikeCount(t *testing.T) {

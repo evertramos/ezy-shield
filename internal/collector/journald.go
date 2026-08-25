@@ -3,7 +3,6 @@
 package collector
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -68,11 +67,18 @@ func (c *JournaldCollector) Run(ctx context.Context, out chan<- sdk.RawLine) err
 	}
 
 	source := "journald:" + c.Unit
-	sc := bufio.NewScanner(stdout)
-
-	for sc.Scan() {
-		line := sc.Bytes()
-		// Copy the bytes because the scanner reuses its buffer.
+	// forEachLine (not bufio.Scanner) so a hostile oversized line is
+	// truncated and drained instead of permanently ending collection
+	// (issue #306): Scanner stops at its token cap, and with journalctl -f
+	// still running the goroutine then wedged forever in cmd.Wait.
+	readErr := forEachLine(stdout, maxStreamLineBytes, func(line []byte, truncated bool) {
+		if truncated {
+			// Content is untrusted — log only the fact and the cap, never
+			// the line itself.
+			logger.Warn("journald: oversized log line truncated",
+				slog.Int("cap_bytes", maxStreamLineBytes), slog.String("unit", c.Unit))
+		}
+		// Copy the bytes because the reader reuses its buffer.
 		lineCopy := make([]byte, len(line))
 		copy(lineCopy, line)
 
@@ -81,11 +87,13 @@ func (c *JournaldCollector) Run(ctx context.Context, out chan<- sdk.RawLine) err
 			Line:   lineCopy,
 			At:     time.Now(),
 		}
-	}
-
-	// sc.Err() is nil if context was cancelled (process was killed by CommandContext).
-	if err := sc.Err(); err != nil {
-		logger.Debug("journald: scanner error", slog.String("err", err.Error()), slog.String("unit", c.Unit))
+	})
+	if readErr != nil && ctx.Err() == nil {
+		logger.Warn("journald: read error", slog.String("err", readErr.Error()), slog.String("unit", c.Unit))
+		// A read error while the follow-mode journalctl is still running
+		// would leave Wait blocking forever (the second half of issue
+		// #306) — kill it so Wait returns and the supervisor can restart us.
+		_ = cmd.Process.Kill()
 	}
 
 	waitErr := cmd.Wait()

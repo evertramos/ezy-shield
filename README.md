@@ -82,34 +82,39 @@ EzyShield as the brain and keep fail2ban for enforcement.
 
 ## How it works
 
-```
-logs (SSH, Nginx, Apache, Caddy, Traefik)
-        │
-        ▼
-   [ Collector ]   ── tail file / journald
-        │
-        ▼
-    [ Parser ]     ── structured event (IP, method, status, ...)
-        │
-        ▼
-   [ Enricher ]    ── GeoIP / ASN / reputation
-        │
-        ▼
-  [ Rule Engine ]  ── offline scoring (always runs)
-        │
-        ├──(ambiguous only)──▶ [ AI Analyzer ] ── Anthropic / OpenAI-compatible / Ollama
-        │
-        ▼
- [ Decision Engine ] ── strikes + TTL escalation + policy
-        │
-        ├──▶ [ Enforcer ] ── nftables (local) / Cloudflare (edge)
-        └──▶ [ Notifier ] ── Telegram / Email / Slack / Discord / webhook
+```mermaid
+flowchart TD
+    L["logs: SSH · Nginx · Apache · Caddy · Traefik"] --> C["Collector (file tail / journald / docker)"]
+    C --> P["Parser → structured event"]
+    P --> A["Aggregator (per-IP windows)"]
+    A --> R["Rule engine — offline scoring, always runs"]
+    R -->|ambiguous only| AI["AI analyzer (optional)"]
+    AI --> D
+    R --> D["Decision engine — strikes + TTL escalation"]
+    D --> G1{{"allowlist always wins"}}
+    G1 --> G2{{"anti-lockout: SSH peer / CDN range"}}
+    G2 --> G3{{"dry-run by default"}}
+    G3 --> G4{{"ban rate limit"}}
+    G4 --> E["Enforcer — nftables (local) + Cloudflare (edge)"]
+    G4 --> N["Notifier — Telegram / Email / Slack / Discord / webhook"]
+
+    style G1 fill:#f9e79f,stroke:#b7950b
+    style G2 fill:#f9e79f,stroke:#b7950b
+    style G3 fill:#f9e79f,stroke:#b7950b
+    style G4 fill:#f9e79f,stroke:#b7950b
 ```
 
-The whole path from parser to decision is side-effect-free and tested against
-fixture logs. Firewall changes only happen through a small privilege-separated
-helper (`ezyshield-enforcer`) that holds `CAP_NET_ADMIN` and accepts a fixed,
+The yellow diamonds are the safety gates every would-be ban must pass — no
+rule, AI verdict, or feed can skip them. The whole path from parser to
+decision is side-effect-free and tested against fixture logs. Firewall
+changes only happen through a small privilege-separated helper
+(`ezyshield-enforcer`) that holds `CAP_NET_ADMIN` and accepts a fixed,
 minimal verb set — the main daemon can never run arbitrary firewall commands.
+
+Want the narrated version? [Anatomy of a Ban](docs/content/en/guides/anatomy-of-a-ban.md)
+walks one SSH brute force through every stage, in dry-run and armed; the
+[troubleshooting guide](docs/content/en/guides/troubleshooting.md) covers the
+common "why is nothing detected / why is nothing blocked" questions.
 
 ### Strike escalation (configurable)
 

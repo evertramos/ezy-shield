@@ -349,6 +349,7 @@ sudo ezyshield ban 203.0.113.0/24
 | Flag | Descrição |
 |------|-----------|
 | `--ttl` | duração do banimento (`5m`, `24h`, `7d`); vazio = permanente |
+| `--for` | apelido de `--ttl`, alinhado com `allow --for` e `arm --for` |
 | `--reason` | motivo em texto livre armazenado no log de auditoria |
 | `--socket` | override do caminho do socket de controle |
 
@@ -736,7 +737,7 @@ sudo ezyshield test notifier telegram
 sudo ezyshield test notifier all
 ```
 
-Nomes disponíveis: `all`, `email`, `telegram`.
+Nomes disponíveis: `all`, `discord`, `email`, `slack`, `telegram`, `webhook`.
 
 Código de saída diferente de zero em caso de falha.
 

@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	cfDefaultListName = "ezyshield_blocked"
+	cfDefaultListName = config.DefaultCFListName
 	// cfListItemTag is the comment prefix identifying EzyShield-written list
 	// items. Since issue #486 items are namespaced per daemon instance —
 	// "ezyshield:<instance>" — so several servers sharing one account (the

@@ -30,6 +30,9 @@ var componentTests = map[string]map[string]componentTest{
 	"notifier": {
 		"telegram": runTestNotify,
 		"email":    runTestNotify,
+		"slack":    runTestNotify,
+		"discord":  runTestNotify,
+		"webhook":  runTestNotify,
 		"all":      runTestNotify,
 	},
 }

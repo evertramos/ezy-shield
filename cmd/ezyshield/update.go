@@ -158,9 +158,13 @@ func resolveUpdateSource(envURL string) (apiBase, repo string) {
 	}
 	u, err := url.Parse(envURL)
 	if err != nil || u.Scheme != "https" {
-		// Fall back silently to defaults rather than failing — the caller will
-		// see "Checking..." against the public repo. We intentionally don't
-		// surface the bad value (might contain a token).
+		// Fall back to the public defaults, but LOUDLY: an operator pinned to
+		// a private mirror must not be silently switched to the public update
+		// source by a typo (issue #356). The bad value itself is never echoed
+		// (it might contain a token) — only the variable name.
+		fmt.Fprintf(os.Stderr,
+			"warning: %s is set but is not a valid https:// URL — ignoring it and using the public update source\n",
+			envUpdateURL)
 		return update.DefaultAPIBaseURL, update.DefaultRepo
 	}
 	// Strip any trailing slash; the client builds /repos/... onto this.
@@ -307,10 +311,12 @@ func runUpdate(ctx context.Context, opts updateOptions) error {
 		out.println("done")
 		out.printf("Verifying checksum... OK\n")
 
-		// Make executable before verify step. File is temporary and will be deleted
-		// or installed atomically; 0755 is needed for execution (gossec G302 is a false
-		// positive here since the file is ephemeral and in /tmp with restrictive perms).
-		if err := os.Chmod(tmp, 0755); err != nil { //nolint:gosec // G302: temporary binary in /tmp
+		// Make executable before the verify step. DownloadVerified creates the
+		// temp file BESIDE the install path (same filesystem, so the final
+		// rename is atomic) — not in /tmp. 0755 matches the permissions the
+		// installed binary will carry; the file is checksum-verified and
+		// either renamed into place or deleted.
+		if err := os.Chmod(tmp, 0755); err != nil { //nolint:gosec // G302: 0755 is the target install mode for an executable
 			return fmt.Errorf("chmod temp binary %s: %w", spec.Name, err)
 		}
 

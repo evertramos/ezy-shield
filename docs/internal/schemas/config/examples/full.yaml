@@ -58,6 +58,7 @@ ai:
 notify:
   rate_limit_per_minute: 5
   dedup_window_sec: 600
+  notify_only_window_sec: 3600
   telegram:
     bot_token: env:EZYSHIELD_TELEGRAM_TOKEN
     chat_ids: ["42"]

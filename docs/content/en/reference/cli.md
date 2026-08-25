@@ -454,6 +454,7 @@ sudo ezyshield doctor
 |------|---------|-------------|
 | `--config-dir` | `/etc/ezyshield` | configuration directory to check |
 | `--db` | `/var/lib/ezyshield/ezyshield.db` | database for the read-only ban_ineffective check |
+| `--socket` | `/run/ezyshield/ezyshield.sock` | daemon control socket (queried for the live enforcement state) |
 
 Checks:
 - config.yaml / policy.yaml exist, parse, and have safe permissions/ownership

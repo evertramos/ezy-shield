@@ -358,6 +358,36 @@
           "description": "SQLite file storing the admin password hash. Defaults to <data_dir>/dashboard.db."
         }
       }
+    },
+    "retention": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Data-retention pruning (issue #184). OPT-IN: without this section nothing is ever pruned. Durations use Go syntax plus a day unit ('30d', '365d', '2160h'); 'never' or '0' disables that table. Active bans and the allowlist are never touched.",
+      "properties": {
+        "strikes": {
+          "type": "string",
+          "pattern": "^([0-9]+d|[0-9]+(ns|us|µs|ms|s|m|h)([0-9]+(ns|us|µs|ms|s|m|h))*|never|0)$",
+          "description": "Window for strike history (default 730d, floor 180d). The newest strike of an IP with an active ban is never deleted; fully-aged offenders reset escalation."
+        },
+        "audit": {
+          "type": "string",
+          "pattern": "^([0-9]+d|[0-9]+(ns|us|µs|ms|s|m|h)([0-9]+(ns|us|µs|ms|s|m|h))*|never|0)$",
+          "description": "Window for the audit journal (default 365d, floor 90d). Deletion additionally requires audit_export_not_required: true."
+        },
+        "ai_usage": {
+          "type": "string",
+          "pattern": "^([0-9]+d|[0-9]+(ns|us|µs|ms|s|m|h)([0-9]+(ns|us|µs|ms|s|m|h))*|never|0)$",
+          "description": "Window for AI cost-accounting rows (default 90d, floor 7d)."
+        },
+        "i_understand_the_risks": {
+          "type": "boolean",
+          "description": "Allow windows below the per-table safety floors. A 24h absolute minimum still applies."
+        },
+        "audit_export_not_required": {
+          "type": "boolean",
+          "description": "Acknowledge that audit_log rows will be deleted with no export archiving them. Audit pruning refuses to run while false."
+        }
+      }
     }
   }
 }

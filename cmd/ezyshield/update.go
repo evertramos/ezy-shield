@@ -175,7 +175,7 @@ func runUpdate(ctx context.Context, opts updateOptions) error {
 	out := &errWriter{w: opts.out}
 
 	if opts.goos != "linux" {
-		return fmt.Errorf("ezyshield self-update only supports Linux (got: %s)", opts.goos)
+		return fmt.Errorf("%s self-update only supports Linux (got: %s)", progName, opts.goos)
 	}
 	if opts.arch != "amd64" && opts.arch != "arm64" {
 		return fmt.Errorf("unsupported architecture: %s (supported: amd64, arm64)", opts.arch)

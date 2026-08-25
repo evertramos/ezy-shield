@@ -183,6 +183,73 @@ func TestStatus_DaemonRunning_EnforcerRunning(t *testing.T) {
 	if !strings.Contains(out, "strike 2:") {
 		t.Errorf("expected strike 2 bucket in output, got: %s", out)
 	}
+	// Healthy observation path stays quiet — no collectors line (issue #456).
+	if strings.Contains(out, "collectors:") {
+		t.Errorf("collectors line printed for a healthy/absent state, got: %s", out)
+	}
+}
+
+// TestStatus_CollectorsDegraded verifies the issue #456 surfacing: a daemon
+// whose collector cannot read its source must say so in the text status,
+// loudly, next to the enforcement banner — ACTIVE enforcement with blind
+// collectors was the #454 field failure.
+func TestStatus_CollectorsDegraded(t *testing.T) {
+	dir := t.TempDir()
+	sd := daemon.StatusData{
+		Uptime:           "1h",
+		Armed:            true,
+		Version:          "v0.9.0",
+		EnforcementState: "ACTIVE",
+		CollectorsState:  "DEGRADED",
+		CollectorsDetail: "journald:ssh is not reading (5 consecutive failures: insufficient permissions)",
+	}
+	daemonSock := mockDaemonServer(t, dir, makeStatusResp(sd), makeListResp(nil))
+	enforcerSock := mockEnforcerServer(t, dir)
+
+	out, _ := runStatusCmd(t, daemonSock, enforcerSock)
+	for _, want := range []string{
+		"collectors:  ⚠ DEGRADED",
+		"journald:ssh is not reading",
+		"run 'ezyshield doctor'",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in output, got: %s", want, out)
+		}
+	}
+}
+
+func TestCollectorsBanner(t *testing.T) {
+	tests := []struct {
+		name   string
+		state  string
+		detail string
+		want   []string // substrings; empty want means "banner must be empty"
+	}{
+		{"empty state is quiet", "", "", nil},
+		{"OK is quiet", "OK", "", nil},
+		{"DEGRADED warns with detail and remediation", "DEGRADED",
+			"journald:ssh is not reading (5 consecutive failures)",
+			[]string{"⚠ DEGRADED", "journald:ssh", "ezyshield doctor"}},
+		{"NONE explains that nothing is observed", "NONE",
+			"no collectors configured — nothing is being observed",
+			[]string{"NONE", "nothing is being observed"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := collectorsBanner(tt.state, tt.detail)
+			if len(tt.want) == 0 {
+				if got != "" {
+					t.Fatalf("banner = %q, want empty", got)
+				}
+				return
+			}
+			for _, w := range tt.want {
+				if !strings.Contains(got, w) {
+					t.Errorf("banner = %q, missing %q", got, w)
+				}
+			}
+		})
+	}
 }
 
 func TestStatus_DaemonStopped(t *testing.T) {

@@ -48,7 +48,13 @@ type StatusOutput struct {
 	// ACTIVE / DRY-RUN / DEGRADED / DISABLED — a stable --json field.
 	EnforcementState  string `json:"enforcement_state,omitempty"`
 	EnforcementDetail string `json:"enforcement_detail,omitempty"`
-	ActiveBans        int    `json:"active_bans"`
+	// CollectorsState is the honest observation-path health (issue #456):
+	// OK / DEGRADED / NONE — a stable --json field. DEGRADED means at least
+	// one collector cannot read its source; detections may be missed even
+	// while enforcement is ACTIVE.
+	CollectorsState  string `json:"collectors_state,omitempty"`
+	CollectorsDetail string `json:"collectors_detail,omitempty"`
+	ActiveBans       int    `json:"active_bans"`
 	// SimulatedBans counts dry-run simulated bans (ADR-0009 §5): IPs that
 	// would be banned right now if the daemon were armed. Never enforced.
 	SimulatedBans int `json:"simulated_bans,omitempty"`
@@ -83,6 +89,8 @@ func runStatus(cmd *cobra.Command, socketPath, enforcerSocketPath string) error 
 	out.ArmedUntil = sd.ArmedUntil
 	out.EnforcementState = sd.EnforcementState
 	out.EnforcementDetail = sd.EnforcementDetail
+	out.CollectorsState = sd.CollectorsState
+	out.CollectorsDetail = sd.CollectorsDetail
 	if sd.Armed {
 		out.Mode = "enforce"
 	} else {
@@ -159,6 +167,9 @@ func printStatusText(cmd *cobra.Command, out StatusOutput) error {
 	if out.EnforcementState != "" {
 		fmt.Fprintf(w, "enforcement: %s\n", enforcementBanner(out.EnforcementState, out.EnforcementDetail)) //nolint:errcheck
 	}
+	if banner := collectorsBanner(out.CollectorsState, out.CollectorsDetail); banner != "" {
+		fmt.Fprintf(w, "collectors:  %s\n", banner) //nolint:errcheck
+	}
 	if out.ArmedUntil != "" {
 		fmt.Fprintf(w, "auto-revert: %s (confirm with 'ezyshield arm --keep')\n", out.ArmedUntil) //nolint:errcheck
 	}
@@ -188,6 +199,28 @@ func printStatusText(cmd *cobra.Command, out StatusOutput) error {
 		}
 	}
 	return nil
+}
+
+// collectorsBanner renders the observation-path state for the text status
+// output (issue #456). OK is quiet (no line at all — the healthy path adds
+// no noise); DEGRADED and NONE must be impossible to miss: an armed daemon
+// whose collectors read nothing is protection theater, the exact failure
+// the field report caught (#454).
+func collectorsBanner(state, detail string) string {
+	switch state {
+	case "", "OK":
+		return ""
+	case "DEGRADED":
+		msg := "⚠ DEGRADED — a collector is NOT reading its source; detections may be missed"
+		if detail != "" {
+			msg += " (" + detail + ")"
+		}
+		return msg + "; run 'ezyshield doctor'"
+	case "NONE":
+		return "NONE — " + detail
+	default:
+		return state
+	}
 }
 
 // enforcementBanner renders the enforcement state loudly for the text

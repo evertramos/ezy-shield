@@ -178,16 +178,66 @@ func TestRunCDNStep_Lists_ZoneEnumerationFails(t *testing.T) {
 
 // TestRunCDNStep_Lists_ZoneCoverageInvalidID: a malformed explicit zone ID
 // fails this account (same policy as the rulesets zone prompt).
+// TestRunCDNStep_Lists_ZoneCoverageInvalidID (issue #489 semantics): a
+// malformed zone answer no longer discards the freshly-validated account —
+// the prompt re-prompts (the exhausted script answers ENTER) and the setup
+// completes on the manual-zones path.
 func TestRunCDNStep_Lists_ZoneCoverageInvalidID(t *testing.T) {
 	t.Parallel()
 	httpc := &httpFake{byPath: zcBaseStubs()}
 
 	step, out := zcRunLists(t, httpc, "not-a-zone")
 
-	if step.cfEnabled || len(step.cfAccounts) != 0 {
-		t.Fatalf("account must fail on malformed zone id; out=%q", out)
-	}
 	if !strings.Contains(out, `zone_id "not-a-zone" is not 32 hex chars`) {
 		t.Errorf("missing validation message; out=%q", out)
+	}
+	if !step.cfEnabled || len(step.cfAccounts) != 1 {
+		t.Fatalf("account must SURVIVE a malformed zone answer (manual fallback, issue #489); out=%q", out)
+	}
+	if len(step.cfAccounts[0].cfg.ZoneIDs) != 0 {
+		t.Errorf("manual fallback must not persist zone_ids, got %v", step.cfAccounts[0].cfg.ZoneIDs)
+	}
+}
+
+// TestPromptCFZoneCoverage pins the issue #489 input normalization: the
+// prompt's own text displays 'all' quoted, so quoted answers must work.
+func TestPromptCFZoneCoverage(t *testing.T) {
+	t.Parallel()
+	zone := zcZone1
+
+	tests := []struct {
+		name    string
+		answers []string
+		wantAll bool
+		wantIDs []string
+	}{
+		{"bare all", []string{"all"}, true, nil},
+		{"quoted all — the exact field input", []string{"'all'"}, true, nil},
+		{"double-quoted uppercase", []string{`"ALL"`}, true, nil},
+		{"quoted zone id", []string{"'" + zone + "'"}, false, []string{zone}},
+		{"invalid then valid re-prompt", []string{"not-a-zone", "all"}, true, nil},
+		{"three invalid answers fall back to manual", []string{"x", "y", "z"}, false, nil},
+		{"enter keeps manual", []string{""}, false, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pr := &scriptedPrompter{strings: tt.answers}
+			var cov cfZoneCoverage
+			_ = captureStep(t, func(p *wPrinter) {
+				cov = promptCFZoneCoverage(p, pr)
+			})
+			if cov.all != tt.wantAll {
+				t.Errorf("all = %v, want %v", cov.all, tt.wantAll)
+			}
+			if len(cov.ids) != len(tt.wantIDs) {
+				t.Fatalf("ids = %v, want %v", cov.ids, tt.wantIDs)
+			}
+			for i := range tt.wantIDs {
+				if cov.ids[i] != tt.wantIDs[i] {
+					t.Errorf("ids = %v, want %v", cov.ids, tt.wantIDs)
+				}
+			}
+		})
 	}
 }

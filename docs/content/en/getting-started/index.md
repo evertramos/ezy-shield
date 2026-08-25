@@ -63,7 +63,8 @@ ezyshield version
 ### `ezyshield init`
 
 Runs the interactive setup wizard: detects the environment, writes config files,
-installs systemd units, and starts EzyShield in dry-run mode.
+installs systemd units (only when the OS package doesn't already provide them
+in `/usr/lib/systemd/system/`), and starts EzyShield in dry-run mode.
 
 ```bash
 sudo ezyshield init
@@ -75,8 +76,10 @@ This creates:
 - `/etc/ezyshield/policy.yaml`
 - `/etc/ezyshield/rules.d/` (drop-in rule customizations; WordPress installs also get a commented tuning template `10-wordpress.yaml`)
 - `/etc/ezyshield/.env` (AI API key, mode 0600)
-- `/etc/systemd/system/ezyshield.service.d/env.conf` (systemd drop-in)
 - `/var/lib/ezyshield/` (runtime data, SQLite)
+- `/etc/systemd/system/ezyshield.service` and `ezyshield-enforcer.service` —
+  **source/script installs only**: on a package install the packaged units are
+  used and nothing is written to `/etc/systemd/system/`
 
 > **Tip:** If config files already exist, `ezyshield init` exits immediately
 > listing the conflicting paths. Remove them and re-run to regenerate.

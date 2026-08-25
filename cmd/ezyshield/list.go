@@ -167,13 +167,19 @@ func runList(cmd *cobra.Command, socketPath string, byCountry, byASN bool) error
 		return err
 	}
 
-	if jsonOutput {
-		return writeJSON(cmd.OutOrStdout(), resp)
-	}
-
 	var entries []daemon.BanEntry
 	if err := json.Unmarshal(resp.Data, &entries); err != nil {
 		return fmt.Errorf("parse list response: %w", err)
+	}
+
+	// Bare array, matching --audit and the documented jq recipes — the raw
+	// SocketResponse envelope ({"ok":true,"data":[...]}) leaked here and
+	// broke `list --json | jq '.[]'` (issue #301).
+	if jsonOutput {
+		if entries == nil {
+			entries = []daemon.BanEntry{} // `[]`, never `null` — jq '.[]' safe
+		}
+		return writeJSON(cmd.OutOrStdout(), entries)
 	}
 
 	if len(entries) == 0 {
@@ -198,13 +204,17 @@ func runListAllow(cmd *cobra.Command, socketPath string) error {
 		return err
 	}
 
-	if jsonOutput {
-		return writeJSON(cmd.OutOrStdout(), resp)
-	}
-
 	var entries []daemon.AllowEntry
 	if err := json.Unmarshal(resp.Data, &entries); err != nil {
 		return fmt.Errorf("parse list_allow response: %w", err)
+	}
+
+	// Bare array — same envelope fix as runList (issue #301).
+	if jsonOutput {
+		if entries == nil {
+			entries = []daemon.AllowEntry{} // `[]`, never `null`
+		}
+		return writeJSON(cmd.OutOrStdout(), entries)
 	}
 
 	if len(entries) == 0 {

@@ -539,7 +539,10 @@ func (s *DB) Unban(ctx context.Context, ip netip.Addr) error {
 // row. Unlike RecordStrike it does NOT create a strikes record — a manual ban
 // isn't a rule-engine event and shouldn't inflate the offender's strike count.
 // ttl == 0 means permanent (expires_at NULL). reason is stored as-is.
-func (s *DB) RecordManualBan(ctx context.Context, ip netip.Addr, ttl time.Duration, reason string) error {
+// dryRun marks the row as a simulated ban (ADR-0009 §5): a manual ban issued
+// while disarmed must be as visible in `list`/status as a pipeline dry_ban —
+// audit-only recording made it invisible (issue #358).
+func (s *DB) RecordManualBan(ctx context.Context, ip netip.Addr, ttl time.Duration, reason string, dryRun bool) error {
 	// A negative ttl is almost certainly caller error (parseExtendedDuration
 	// happily returns negatives for "-1h"). Silently storing it as a
 	// permanent ban — which the `if ttl > 0` branch below would do — is a
@@ -563,25 +566,33 @@ func (s *DB) RecordManualBan(ctx context.Context, ip netip.Addr, ttl time.Durati
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	op := "ban"
+	dry := 0
+	if dryRun {
+		op = "dry_ban"
+		dry = 1
+	}
+
 	// A new ban resets the suppression counters (see RecordStrike).
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO bans_active (ip, banned_at, expires_at, strike_num, reason)
-		VALUES (?, ?, ?, 1, ?)
+		INSERT INTO bans_active (ip, banned_at, expires_at, strike_num, reason, dry_run)
+		VALUES (?, ?, ?, 1, ?, ?)
 		ON CONFLICT(ip) DO UPDATE SET
 			banned_at              = excluded.banned_at,
 			expires_at             = excluded.expires_at,
 			reason                 = excluded.reason,
+			dry_run                = excluded.dry_run,
 			suppressed_total       = 0,
 			suppressed_after_grace = 0,
 			ineffective_fired      = 0
-	`, ipStr, now, expiresAt, reason); err != nil {
+	`, ipStr, now, expiresAt, reason, dry); err != nil {
 		return fmt.Errorf("store: upsert manual ban: %w", err)
 	}
 
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO audit_log (recorded_at, op, ip, ttl_seconds, strike_num, reason)
 		VALUES (?, ?, ?, ?, 1, ?)
-	`, now, "ban", ipStr, ttlSec, reason); err != nil {
+	`, now, op, ipStr, ttlSec, reason); err != nil {
 		return fmt.Errorf("store: insert audit for manual ban: %w", err)
 	}
 

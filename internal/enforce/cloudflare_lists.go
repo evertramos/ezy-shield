@@ -1087,16 +1087,7 @@ func (e *CloudflareListsEnforcer) doRequest(ctx context.Context, method, url str
 }
 
 func (e *CloudflareListsEnforcer) isAllowlisted(t sdk.Target) bool {
-	addr, ok := targetAddr(t)
-	if !ok {
-		return false
-	}
-	for _, p := range e.allowlist {
-		if p.Contains(addr) {
-			return true
-		}
-	}
-	return false
+	return targetOverlapsAllowlist(t, e.allowlist)
 }
 
 // cfOwnTag builds this daemon's item-comment namespace (issue #486):

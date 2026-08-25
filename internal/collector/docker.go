@@ -218,25 +218,36 @@ func (c *DockerCollector) tailJSONFile(ctx context.Context, logPath, source stri
 		done <- tail.Run(tailCtx, inner)
 	}()
 
+	// Every send races ctx cancellation: after the pipeline stops reading,
+	// a plain blocking send would wedge this goroutine forever and the
+	// daemon's rawLines-closing goroutine would never finish (issue #358).
+	send := func(rawLine sdk.RawLine) bool {
+		line := unwrapDockerJSONLine(rawLine.Line)
+		select {
+		case out <- sdk.RawLine{
+			Source: source,
+			Line:   []byte(strings.TrimRight(line, "\n")),
+			At:     rawLine.At,
+		}:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+
 	for {
 		select {
 		case rawLine := <-inner:
-			line := unwrapDockerJSONLine(rawLine.Line)
-			out <- sdk.RawLine{
-				Source: source,
-				Line:   []byte(strings.TrimRight(line, "\n")),
-				At:     rawLine.At,
+			if !send(rawLine) {
+				return nil
 			}
 		case err := <-done:
 			// Drain any buffered lines before returning.
 			for {
 				select {
 				case rawLine := <-inner:
-					line := unwrapDockerJSONLine(rawLine.Line)
-					out <- sdk.RawLine{
-						Source: source,
-						Line:   []byte(strings.TrimRight(line, "\n")),
-						At:     rawLine.At,
+					if !send(rawLine) {
+						return err
 					}
 				default:
 					return err
@@ -291,10 +302,16 @@ func (c *DockerCollector) tailJournald(ctx context.Context, source string, out c
 		}
 		cp := make([]byte, len(line))
 		copy(cp, line)
-		out <- sdk.RawLine{
+		// Send races cancellation (issue #358): once ctx is done the line
+		// is dropped — the pipeline is gone and journalctl is about to be
+		// killed; blocking here would wedge the goroutine forever.
+		select {
+		case out <- sdk.RawLine{
 			Source: source,
 			Line:   cp,
 			At:     time.Now(),
+		}:
+		case <-ctx.Done():
 		}
 	})
 	if readErr != nil && ctx.Err() == nil {

@@ -82,10 +82,16 @@ func (c *JournaldCollector) Run(ctx context.Context, out chan<- sdk.RawLine) err
 		lineCopy := make([]byte, len(line))
 		copy(lineCopy, line)
 
-		out <- sdk.RawLine{
+		// Send races cancellation (issue #358): once ctx is done the line
+		// is dropped — the pipeline is gone and journalctl is about to be
+		// killed; blocking here would wedge the goroutine forever.
+		select {
+		case out <- sdk.RawLine{
 			Source: source,
 			Line:   lineCopy,
 			At:     time.Now(),
+		}:
+		case <-ctx.Done():
 		}
 	})
 	if readErr != nil && ctx.Err() == nil {

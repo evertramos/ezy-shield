@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite" // register "sqlite" driver
@@ -29,7 +30,15 @@ var migrationFS embed.FS
 // allows multiple simultaneous readers while a single writer serialises writes.
 type DB struct {
 	db *sql.DB
+	// keepAlive/keepAliveDB pin a named shared-cache in-memory database for
+	// the store's lifetime (nil for file-backed stores) — see Open, issue #474.
+	keepAlive   *sql.Conn
+	keepAliveDB *sql.DB
 }
+
+// memDBSeq names each in-memory database uniquely so two Open(":memory:")
+// stores never share state through the shared cache.
+var memDBSeq atomic.Uint64
 
 // Open opens (or creates) the SQLite database at path, enables WAL mode, and
 // applies any pending migrations. Call Close when done.
@@ -42,9 +51,43 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	// mattn-style parameters (_journal=..., _busy_timeout=...) are silently
 	// ignored by modernc and left the store on delete-journal with no busy
 	// retry (issue #321). TestOpen_AppliesPragmas pins the effective values.
-	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)" //nolint:gosec // path is the admin-controlled database location from config
+	const pragmas = "_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)"
+	dsn := "file:" + path + "?" + pragmas //nolint:gosec // path is the admin-controlled database location from config
+
+	// In-memory databases need special handling: database/sql DISCARDS a
+	// connection whose in-flight query was interrupted (context
+	// cancellation), and with a plain ":memory:" DSN the replacement
+	// connection is a brand-new EMPTY database — schema and data silently
+	// vanish mid-run ("no such table" on the next query, issue #474; only
+	// tests use :memory:, which is why it surfaced as test flakiness). A
+	// *named* shared-cache memory database survives as long as any
+	// connection holds it open, so a dedicated keep-alive connection pins it
+	// for the store's lifetime; the name is process-unique so two
+	// Open(":memory:") stores never share state.
+	var keepAlive *sql.Conn
+	var keepAliveDB *sql.DB
+	if path == ":memory:" {
+		name := fmt.Sprintf("ezyshield-memdb-%d", memDBSeq.Add(1))
+		dsn = "file:" + name + "?mode=memory&cache=shared&" + pragmas
+		kdb, err := sql.Open("sqlite", dsn)
+		if err != nil {
+			return nil, fmt.Errorf("store: open keep-alive %s: %w", path, err)
+		}
+		kdb.SetMaxOpenConns(1)
+		kc, err := kdb.Conn(ctx)
+		if err != nil {
+			_ = kdb.Close()
+			return nil, fmt.Errorf("store: pin keep-alive conn: %w", err)
+		}
+		keepAlive, keepAliveDB = kc, kdb
+	}
+
 	sqlDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
+		if keepAlive != nil {
+			_ = keepAlive.Close()
+			_ = keepAliveDB.Close()
+		}
 		return nil, fmt.Errorf("store: open %s: %w", path, err)
 	}
 
@@ -54,10 +97,14 @@ func Open(ctx context.Context, path string) (*DB, error) {
 
 	if err := sqlDB.PingContext(ctx); err != nil {
 		_ = sqlDB.Close()
+		if keepAlive != nil {
+			_ = keepAlive.Close()
+			_ = keepAliveDB.Close()
+		}
 		return nil, fmt.Errorf("store: ping: %w", err)
 	}
 
-	s := &DB{db: sqlDB}
+	s := &DB{db: sqlDB, keepAlive: keepAlive, keepAliveDB: keepAliveDB}
 	if err := s.migrate(ctx); err != nil {
 		_ = sqlDB.Close()
 		return nil, fmt.Errorf("store: migrate: %w", err)
@@ -68,7 +115,14 @@ func Open(ctx context.Context, path string) (*DB, error) {
 
 // Close releases the underlying database connection.
 func (s *DB) Close() error {
-	return s.db.Close()
+	err := s.db.Close()
+	// Release the in-memory keep-alive last: it is what holds the shared
+	// memory database alive while the main pool shuts down.
+	if s.keepAlive != nil {
+		_ = s.keepAlive.Close()
+		_ = s.keepAliveDB.Close()
+	}
+	return err
 }
 
 // migrate bootstraps schema_migrations and applies every pending *.sql file

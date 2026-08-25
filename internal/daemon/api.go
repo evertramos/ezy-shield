@@ -12,7 +12,9 @@ import "encoding/json"
 // are logged to the append-only audit_log.
 type SocketRequest struct {
 	// Verb selects the operation: "status", "list", "list_allow", "events",
-	// "subscribe", "report", "ban", "unban", "allow".
+	// "subscribe", "report", "ban", "unban", "allow", "unallow", "arm",
+	// "arm_keep", "disarm" — the complete set handleConn dispatches
+	// (issue #357: the arm family and "unallow" were missing here).
 	Verb string `json:"verb"`
 	// IP is the target for ban/unban/allow/report. ban/unban/allow accept
 	// either a bare address ("1.2.3.4") or a CIDR ("203.0.113.0/24"); a bare
@@ -104,8 +106,10 @@ type StatusData struct {
 	CDNRangesState string `json:"cdn_ranges_state,omitempty"`
 	// Version is the daemon binary version string.
 	Version string `json:"version"`
-	// AISpendToday is the estimated USD cost of AI provider calls today.
-	// Zero when the AI provider is not configured.
+	// AISpendToday is RESERVED: no daemon code populates it yet, so it is
+	// always 0 and omitted — even with AI configured (issue #357; wiring it
+	// needs a cross-provider cost sum from ai_usage). Kept in the contract
+	// so the field name is already stable when it lands.
 	AISpendToday float64 `json:"ai_spend_today_usd,omitempty"`
 }
 

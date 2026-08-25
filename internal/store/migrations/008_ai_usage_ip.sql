@@ -1,0 +1,15 @@
+-- 008: per-IP AI cost attribution (issue #422).
+--
+-- ai_usage recorded calls, tokens, and cost — but not WHICH IP was being
+-- analyzed, so cost attribution required manually joining journal lines
+-- ("daemon: ai analyzed") against the DB (the 2026-08-06 audit's finding of
+-- 61% of spend going to already-banned IPs was produced exactly that way,
+-- feeding issue #419). Nullable: rows
+-- written before this migration, and any call without a subject IP, stay
+-- NULL. No backfill.
+--
+-- Top spenders become one query:
+--   SELECT ip, COUNT(*) calls, SUM(cost_usd) usd
+--   FROM ai_usage WHERE ip IS NOT NULL
+--   GROUP BY ip ORDER BY usd DESC LIMIT 10;
+ALTER TABLE ai_usage ADD COLUMN ip TEXT;

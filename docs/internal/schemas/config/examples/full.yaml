@@ -46,7 +46,7 @@ ai:
   api_key: env:EZYSHIELD_AI_KEY
   ambiguous_band: [30, 69]
   token_budget_daily: 200000
-  cache_ttl: 1h
+  cache_ttl: 15m
   providers:
     - name: anthropic
       priority: 0
@@ -58,6 +58,7 @@ ai:
 notify:
   rate_limit_per_minute: 5
   dedup_window_sec: 600
+  notify_only_window_sec: 3600
   telegram:
     bot_token: env:EZYSHIELD_TELEGRAM_TOKEN
     chat_ids: ["42"]

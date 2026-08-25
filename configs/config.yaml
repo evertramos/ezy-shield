@@ -34,7 +34,7 @@ collectors: []
 #   # Cloudflare edge enforcer — blocks IPs at the CF edge (issue #45, #88).
 #   # Two modes are supported; pick one.
 #   # cloudflare:
-#     # api_token: env:EZYSHIELD_CF_TOKEN  # must be "env:VARNAME"; inline values rejected
+#     # api_token: env:CLOUDFLARE_API_TOKEN  # must be "env:VARNAME"; inline values rejected
 #     # action: block                      # block | challenge | js_challenge (default: block)
 #     # debounce: 15s                      # coalesce rapid ban/unban mutations into one
 #     #                                    # batched API push per window (default: 15s)
@@ -69,14 +69,14 @@ collectors: []
 #   cache_ttl: 15m                   # verdict cache (default 15m when omitted or 0)
 #   token_budget_daily: 500000
 
-# Notifications — configure channels and test with 'ezyshield test-notify <channel>'
+# Notifications — configure channels and test with 'ezyshield test notifier <channel>'
 # Secrets must use env: references; inline values are rejected at load time.
 # notify:
 #   rate_limit_per_minute: 5   # max notifications per channel per minute (default 5)
 #   dedup_window_sec: 600      # suppress repeat IP+reason pairs for 10 min (default 600)
 #
 #   telegram:
-#     bot_token: env:EZYSHIELD_TELEGRAM_BOT_TOKEN
+#     bot_token: env:TELEGRAM_BOT_TOKEN
 #     chat_ids:
 #       - "-1001234567890"     # channel or group chat ID (use @username or numeric ID)
 #     severity: []             # empty = all severities; or: [warn, critical]
@@ -88,6 +88,6 @@ collectors: []
 #     host: smtp.example.com
 #     port: 587                # 587 = STARTTLS (default), 465 = implicit TLS
 #     username: ezyshield@example.com
-#     password: env:EZYSHIELD_SMTP_PASSWORD
+#     password: env:SMTP_PASSWORD
 #     tls: starttls            # starttls | tls | none
 #     severity: []             # empty = all severities; or: [critical]

@@ -79,8 +79,9 @@ your account is set up with a forced command.
   change the first number: `-L 9091:127.0.0.1:9090` maps
   `http://localhost:9091` to the server-side 9090.
 - The tunnel gives you exactly what a local session gives — no
-  extra multi-user story, no team access controls, one login at a
-  time. That's fine for the current single-admin scope.
+  extra multi-user story, no team access controls; live sessions are
+  capped at 3 concurrent per account (see the dashboard reference).
+  That is fine for the current single-admin scope.
 
 ## Option 2: Cloudflare Tunnel (persistent, no open ports)
 

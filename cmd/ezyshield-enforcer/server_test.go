@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/evertramos/ezy-shield/internal/enforce"
 	"github.com/evertramos/ezy-shield/internal/nftnames"
@@ -124,7 +125,7 @@ func TestDispatch_Add_InvalidIP_Rejected(t *testing.T) {
 	srv := startTestServer(t, mock)
 
 	cases := []string{
-		"", "not-an-ip", "300.1.2.3", "1.2.3.4; flush table inet filter",
+		"", "not-an-ip", "300.1.2.3", "192.0.2.4; flush table inet filter",
 		"../etc/passwd", "::ffff::1",
 	}
 	for _, ip := range cases {
@@ -157,7 +158,7 @@ func TestDispatch_Add_ValidIPv4(t *testing.T) {
 	mock := &mockNftCalls{}
 	srv := startTestServer(t, mock)
 
-	resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "add", IP: "1.2.3.4", TTLSeconds: 300})
+	resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "add", IP: "192.0.2.4", TTLSeconds: 300})
 	if !resp.OK {
 		t.Fatalf("add failed: %s", resp.Error)
 	}
@@ -165,8 +166,8 @@ func TestDispatch_Add_ValidIPv4(t *testing.T) {
 	// in-memory state updated
 	srv.mu.RLock()
 	defer srv.mu.RUnlock()
-	if !srv.blocked["1.2.3.4"] {
-		t.Error("1.2.3.4 not in in-memory blocked set after add")
+	if _, ok := srv.blocked["192.0.2.4"]; !ok {
+		t.Error("192.0.2.4 not in in-memory blocked set after add")
 	}
 
 	// nft script contained the right element
@@ -174,7 +175,7 @@ func TestDispatch_Add_ValidIPv4(t *testing.T) {
 		t.Fatal("expected nft script to be executed")
 	}
 	last := mock.scripts[len(mock.scripts)-1]
-	if !strings.Contains(last, "1.2.3.4") {
+	if !strings.Contains(last, "192.0.2.4") {
 		t.Errorf("nft script missing IP: %s", last)
 	}
 	if !strings.Contains(last, "timeout 300s") {
@@ -235,18 +236,18 @@ func TestDispatch_Del_Valid(t *testing.T) {
 
 	// Pre-populate in-memory state.
 	srv.mu.Lock()
-	srv.blocked["1.2.3.4"] = true
+	srv.blocked["192.0.2.4"] = time.Time{}
 	srv.mu.Unlock()
 
-	resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "del", IP: "1.2.3.4"})
+	resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "del", IP: "192.0.2.4"})
 	if !resp.OK {
 		t.Fatalf("del failed: %s", resp.Error)
 	}
 
 	srv.mu.RLock()
 	defer srv.mu.RUnlock()
-	if srv.blocked["1.2.3.4"] {
-		t.Error("1.2.3.4 still in blocked set after del")
+	if _, ok := srv.blocked["192.0.2.4"]; ok {
+		t.Error("192.0.2.4 still in blocked set after del")
 	}
 }
 
@@ -255,8 +256,8 @@ func TestDispatch_List_ReturnsMemoryState(t *testing.T) {
 	srv := startTestServer(t, mock)
 
 	srv.mu.Lock()
-	srv.blocked["1.1.1.1"] = true
-	srv.blocked["2.2.2.2"] = true
+	srv.blocked["192.0.2.1"] = time.Time{}
+	srv.blocked["192.0.2.2"] = time.Time{}
 	srv.mu.Unlock()
 
 	resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "list"})
@@ -264,7 +265,7 @@ func TestDispatch_List_ReturnsMemoryState(t *testing.T) {
 		t.Fatalf("list failed: %s", resp.Error)
 	}
 	sort.Strings(resp.IPs)
-	if len(resp.IPs) != 2 || resp.IPs[0] != "1.1.1.1" || resp.IPs[1] != "2.2.2.2" {
+	if len(resp.IPs) != 2 || resp.IPs[0] != "192.0.2.1" || resp.IPs[1] != "192.0.2.2" {
 		t.Errorf("unexpected list result: %v", resp.IPs)
 	}
 }
@@ -274,8 +275,8 @@ func TestDispatch_Flush_ClearsState(t *testing.T) {
 	srv := startTestServer(t, mock)
 
 	srv.mu.Lock()
-	srv.blocked["1.1.1.1"] = true
-	srv.blocked["2.2.2.2"] = true
+	srv.blocked["192.0.2.1"] = time.Time{}
+	srv.blocked["192.0.2.2"] = time.Time{}
 	srv.mu.Unlock()
 
 	resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "flush"})
@@ -298,8 +299,8 @@ func TestDispatch_Add_RawNftSyntaxInIPField(t *testing.T) {
 
 	// An attacker might try to inject nft statements via the IP field.
 	injections := []string{
-		"1.2.3.4 ; flush table inet filter",
-		"1.2.3.4\ndelete table inet ezyshield",
+		"192.0.2.4 ; flush table inet filter",
+		"192.0.2.4\ndelete table inet ezyshield",
 		"@blocked",
 	}
 	for _, ip := range injections {
@@ -450,19 +451,22 @@ func TestParseSetElements(t *testing.T) {
         type ipv4_addr
         flags interval, timeout
         auto-merge
-        elements = { 1.2.3.4 timeout 5m0s expires 4m55s,
-                     5.6.7.8 }
+        elements = { 192.0.2.4 timeout 5m0s expires 4m55s,
+                     198.51.100.8 }
     }
 }`)
 	got := parseSetElements(out)
-	sort.Strings(got)
-	want := []string{"1.2.3.4", "5.6.7.8"}
+	sort.Slice(got, func(i, j int) bool { return got[i].ip < got[j].ip })
+	want := []setElem{
+		{ip: "192.0.2.4", ttl: 4*time.Minute + 55*time.Second}, // remaining `expires` wins over `timeout`
+		{ip: "198.51.100.8", ttl: 0},                           // no annotation → permanent
+	}
 	if len(got) != len(want) {
 		t.Fatalf("expected %v, got %v", want, got)
 	}
 	for i := range want {
 		if got[i] != want[i] {
-			t.Errorf("[%d] expected %s, got %s", i, want[i], got[i])
+			t.Errorf("[%d] expected %+v, got %+v", i, want[i], got[i])
 		}
 	}
 }
@@ -496,7 +500,7 @@ func TestNftDel_ElementAbsent_ReturnsSentinel(t *testing.T) {
 	}{
 		{
 			name:   "not_found_in_set (older nft)",
-			nftErr: "Error: interval not found in set\ndelete element inet ezyshield blocked { 1.2.3.4 }",
+			nftErr: "Error: interval not found in set\ndelete element inet ezyshield blocked { 192.0.2.4 }",
 		},
 		{
 			name:   "no_such_file_or_directory (set missing)",
@@ -571,7 +575,7 @@ func TestDispatch_Del_AlreadyAbsent_TypedCode(t *testing.T) {
 	srv.runSs = func(_ context.Context, _ []string) error { return nil }
 	// Pre-populate the in-memory cache to prove the already-absent branch
 	// still evicts the entry (otherwise Sync would keep retrying every tick).
-	srv.blocked["1.2.3.4"] = true
+	srv.blocked["192.0.2.4"] = time.Time{}
 
 	lc := &net.ListenConfig{}
 	ln, err := lc.Listen(context.Background(), "unix", sockPath)
@@ -583,7 +587,7 @@ func TestDispatch_Del_AlreadyAbsent_TypedCode(t *testing.T) {
 	t.Cleanup(func() { cancel(); _ = os.Remove(sockPath) })
 	go func() { _ = srv.serve(ctx) }() //nolint:errcheck
 
-	resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "del", IP: "1.2.3.4"})
+	resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "del", IP: "192.0.2.4"})
 	if !resp.OK {
 		t.Fatalf("expected OK=true for already-absent, got OK=false Error=%q", resp.Error)
 	}
@@ -594,10 +598,10 @@ func TestDispatch_Del_AlreadyAbsent_TypedCode(t *testing.T) {
 		t.Errorf("Error must be empty for already-absent success (nft stderr must not leak to client), got: %q", resp.Error)
 	}
 	srv.mu.RLock()
-	still := srv.blocked["1.2.3.4"]
+	_, still := srv.blocked["192.0.2.4"]
 	srv.mu.RUnlock()
 	if still {
-		t.Error("in-memory blocked cache still contains 1.2.3.4 after already-absent del")
+		t.Error("in-memory blocked cache still contains 192.0.2.4 after already-absent del")
 	}
 }
 
@@ -629,7 +633,7 @@ func TestDispatch_Del_RealError_NoTypedCode(t *testing.T) {
 	t.Cleanup(func() { cancel(); _ = os.Remove(sockPath) })
 	go func() { _ = srv.serve(ctx) }() //nolint:errcheck
 
-	resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "del", IP: "1.2.3.4"})
+	resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "del", IP: "192.0.2.4"})
 	if resp.OK {
 		t.Fatal("expected OK=false for permission-denied, got OK=true")
 	}
@@ -689,7 +693,7 @@ func TestIntegration_BanUnban(t *testing.T) {
 	// This test is intentionally guarded: it only runs as root with nft present.
 	ctx := context.Background()
 	srv := newServer("", realNftRunner)
-	srv.blocked = make(map[string]bool)
+	srv.blocked = make(map[string]time.Time)
 
 	// init: create the table/set/chain
 	if err := srv.init(ctx); err != nil {
@@ -742,7 +746,7 @@ func TestDispatch_AddInvokesNftAddThenKill(t *testing.T) {
 	ssMock := &mockSsCalls{}
 	srv.runSs = ssMock.runner()
 
-	resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "add", IP: "1.2.3.4", TTLSeconds: 300})
+	resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "add", IP: "192.0.2.4", TTLSeconds: 300})
 	if !resp.OK {
 		t.Fatalf("add failed: %s", resp.Error)
 	}
@@ -753,14 +757,14 @@ func TestDispatch_AddInvokesNftAddThenKill(t *testing.T) {
 	if len(ssMock.calls) != 1 {
 		t.Fatalf("expected exactly 1 ss call, got %d", len(ssMock.calls))
 	}
-	wantSsArgs := []string{"-K", "dst", "1.2.3.4"}
+	wantSsArgs := []string{"-K", "dst", "192.0.2.4"}
 	if !reflect.DeepEqual(ssMock.calls[0], wantSsArgs) {
 		t.Errorf("ss args: got %v, want %v", ssMock.calls[0], wantSsArgs)
 	}
 	// nftAdd script content sanity: contains the IP, so we know it ran with
 	// the right target. Order-of-invocation is guaranteed by the synchronous
 	// dispatch path — ss only runs if nftAdd returned nil.
-	if !strings.Contains(nftMock.scripts[0], "1.2.3.4") {
+	if !strings.Contains(nftMock.scripts[0], "192.0.2.4") {
 		t.Errorf("nft script did not contain the target IP: %s", nftMock.scripts[0])
 	}
 }
@@ -796,7 +800,7 @@ func TestDispatch_AllowAddDoesNotKill(t *testing.T) {
 	ssMock := &mockSsCalls{}
 	srv.runSs = ssMock.runner()
 
-	resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "allow_add", IP: "1.2.3.4"})
+	resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "allow_add", IP: "192.0.2.4"})
 	if !resp.OK {
 		t.Fatalf("allow_add failed: %s", resp.Error)
 	}
@@ -837,7 +841,7 @@ func TestDispatch_AddNftFailure_SkipsKill(t *testing.T) {
 	t.Cleanup(func() { cancel(); _ = os.Remove(sockPath) })
 	go func() { _ = srv.serve(ctx) }() //nolint:errcheck
 
-	resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "add", IP: "1.2.3.4"})
+	resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "add", IP: "192.0.2.4"})
 	if resp.OK {
 		t.Fatalf("expected add to fail when nft fails, got OK")
 	}
@@ -862,8 +866,8 @@ func defaultNames() nftnames.Names {
 func TestDispatch_CustomNames_SwitchAndPin(t *testing.T) {
 	mock := &mockNftCalls{}
 	srv := startTestServer(t, mock)
-	srv.listFn = func(_ context.Context, _ nftnames.Names) ([]string, error) {
-		return []string{"198.51.100.7"}, nil // pre-existing entry in the custom table
+	srv.listFn = func(_ context.Context, _ nftnames.Names) ([]setElem, error) {
+		return []setElem{{ip: "198.51.100.7"}}, nil // pre-existing entry in the custom table
 	}
 
 	resp := doRPC(t, srv.sockPath(), enforce.Request{

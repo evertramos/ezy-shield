@@ -139,9 +139,15 @@ func slackColor(severity string) string {
 	}
 }
 
-// escSlack escapes Slack mrkdwn special characters so that attacker-controlled
-// content cannot inject formatting, links, or channel/user mentions.
-// Characters requiring escaping: & < > (HTML entities) and Slack-specific: * _ ~ ` @
+// escSlack neutralizes the injection vectors Slack actually lets us guard
+// against: & < > (the HTML entities Slack requires escaped — also what makes
+// <http://...|links> and <!channel> sequences inert) and @ (broadcast
+// mentions, replaced with the fullwidth lookalike). The mrkdwn FORMATTING
+// characters (* _ ~ `) have no escape syntax in Slack's mrkdwn at all, so
+// attacker text can still render bold/italic/code — a purely cosmetic
+// residual accepted by design (issue #357: this doc used to claim they were
+// escaped). Links, mentions, and channel broadcasts — the vectors with
+// side effects — cannot be injected.
 func escSlack(s string) string {
 	// HTML entities first (required by Slack before mrkdwn escaping).
 	s = strings.ReplaceAll(s, "&", "&amp;")

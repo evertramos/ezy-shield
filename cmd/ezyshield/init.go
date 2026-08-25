@@ -21,6 +21,7 @@ import (
 	"github.com/evertramos/ezy-shield/internal/config"
 	"github.com/evertramos/ezy-shield/internal/decision"
 	"github.com/evertramos/ezy-shield/internal/ownership"
+	"github.com/evertramos/ezy-shield/internal/vhostdetect"
 )
 
 const (
@@ -727,7 +728,7 @@ func askQuestions(out io.Writer, sc *bufio.Scanner, state *wizardState, yes bool
 		p,
 		closurePrompter{askFn: ask, askBoolFn: askBool},
 		state.cdn,
-		cdnDeps{Yes: yes},
+		cdnDeps{Yes: yes, LocalVHosts: vhostdetect.DetectLocalDefault},
 	)
 
 	// AI — model + key prompts shared with `config ai <provider>` via the

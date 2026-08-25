@@ -9,7 +9,9 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/evertramos/ezy-shield/internal/nftnames"
 )
@@ -217,17 +219,22 @@ func nftDelAllow(ctx context.Context, run nftRunner, n nftnames.Names, ip string
 	return nil
 }
 
-// nftListAllow returns the current elements of both allowed sets.
+// nftListAllow returns the current elements of both allowed sets. Allow
+// entries carry no nft-native timeout, so only the IP strings are returned.
 func nftListAllow(ctx context.Context, n nftnames.Names) ([]string, error) {
-	ips4, err := listSet(ctx, n, n.Allow4)
+	els4, err := listSet(ctx, n, n.Allow4)
 	if err != nil {
 		return nil, err
 	}
-	ips6, err := listSet(ctx, n, n.Allow6)
+	els6, err := listSet(ctx, n, n.Allow6)
 	if err != nil {
 		return nil, err
 	}
-	return append(ips4, ips6...), nil
+	ips := make([]string, 0, len(els4)+len(els6))
+	for _, e := range append(els4, els6...) {
+		ips = append(ips, e.ip)
+	}
+	return ips, nil
 }
 
 // nftFlushAllow clears both allowed sets. Used by the daemon at startup
@@ -238,19 +245,19 @@ func nftFlushAllow(ctx context.Context, run nftRunner, n nftnames.Names) error {
 	return run(ctx, []byte(script))
 }
 
-// nftList returns the current elements of both blocked sets by running
-// `nft list set` and parsing the output.
+// nftList returns the current elements of both blocked sets (with remaining
+// lifetimes) by running `nft list set` and parsing the output.
 // Falls back to empty slice (not an error) when the set is empty.
-func nftList(ctx context.Context, n nftnames.Names) ([]string, error) {
-	ips4, err := listSet(ctx, n, n.Set4)
+func nftList(ctx context.Context, n nftnames.Names) ([]setElem, error) {
+	els4, err := listSet(ctx, n, n.Set4)
 	if err != nil {
 		return nil, err
 	}
-	ips6, err := listSet(ctx, n, n.Set6)
+	els6, err := listSet(ctx, n, n.Set6)
 	if err != nil {
 		return nil, err
 	}
-	return append(ips4, ips6...), nil
+	return append(els4, els6...), nil
 }
 
 // listSetOutput runs `nft list set` and returns its stdout. It is a variable
@@ -262,7 +269,7 @@ var listSetOutput = func(ctx context.Context, family, tbl, set string) ([]byte, 
 	return cmd.Output()
 }
 
-func listSet(ctx context.Context, n nftnames.Names, set string) ([]string, error) {
+func listSet(ctx context.Context, n nftnames.Names, set string) ([]setElem, error) {
 	// n.Table is "family name"; nft's CLI wants them as separate argv words.
 	family, tbl, _ := strings.Cut(n.Table, " ")
 	out, err := listSetOutput(ctx, family, tbl, set)
@@ -282,10 +289,21 @@ func listSet(ctx context.Context, n nftnames.Names, set string) ([]string, error
 	return parseSetElements(out), nil
 }
 
-// parseSetElements extracts IP/CIDR strings from `nft list set` output.
+// setElem is one element of a blocked set: the canonical IP/CIDR string plus
+// its remaining kernel lifetime. ttl == 0 means permanent (no nft `timeout`).
+// The remaining lifetime matters because the kernel expires timed elements on
+// its own — a cache that ignores it serves ghosts after expiry (issue #383).
+type setElem struct {
+	ip  string
+	ttl time.Duration
+}
+
+// parseSetElements extracts the elements of `nft list set` output.
 // It finds the `elements = { ... }` block and parses each comma-separated
-// token as a netip.Addr or netip.Prefix, ignoring timeout/expires annotations.
-func parseSetElements(out []byte) []string {
+// entry as a netip.Addr or netip.Prefix plus its remaining lifetime from the
+// `expires` annotation (falling back to `timeout` when nft omits `expires`,
+// which it does in the brief window right after an element is added).
+func parseSetElements(out []byte) []setElem {
 	s := string(out)
 	start := strings.Index(s, "elements = {")
 	if start < 0 {
@@ -298,7 +316,7 @@ func parseSetElements(out []byte) []string {
 	}
 	block := s[start : start+end]
 
-	var ips []string
+	var elems []setElem
 	for _, part := range strings.Split(block, ",") {
 		fields := strings.Fields(strings.TrimSpace(part))
 		if len(fields) == 0 {
@@ -306,14 +324,66 @@ func parseSetElements(out []byte) []string {
 		}
 		tok := fields[0]
 		if _, err := netip.ParseAddr(tok); err == nil {
-			ips = append(ips, tok)
+			elems = append(elems, setElem{ip: tok, ttl: elemTTL(fields[1:])})
 			continue
 		}
 		if pfx, err := netip.ParsePrefix(tok); err == nil {
-			ips = append(ips, pfx.String())
+			elems = append(elems, setElem{ip: pfx.String(), ttl: elemTTL(fields[1:])})
 		}
 	}
-	return ips
+	return elems
+}
+
+// elemTTL extracts the remaining lifetime from an element's annotation
+// fields (`timeout 24h expires 3h2m11s`). Preference order: `expires`
+// (remaining) over `timeout` (original). No annotation → 0 (permanent).
+// An annotation that is present but unparseable returns one second: the
+// fail-safe direction is treating the element as ABOUT TO EXPIRE — the
+// daemon's next Sync then re-adds it — never as permanent, which is exactly
+// the ghost-entry failure this parser exists to prevent (issue #383).
+func elemTTL(annotations []string) time.Duration {
+	dur := func(key string) (time.Duration, bool) {
+		for i := 0; i+1 < len(annotations); i++ {
+			if annotations[i] != key {
+				continue
+			}
+			d, err := parseNftDuration(annotations[i+1])
+			if err != nil {
+				return time.Second, true
+			}
+			return d, true
+		}
+		return 0, false
+	}
+	if d, ok := dur("expires"); ok {
+		return d
+	}
+	if d, ok := dur("timeout"); ok {
+		return d
+	}
+	return 0
+}
+
+// parseNftDuration parses nft's duration syntax, which is Go's except that it
+// also uses `d` for days (`6d23h59m12s`).
+func parseNftDuration(s string) (time.Duration, error) {
+	var days time.Duration
+	if i := strings.IndexByte(s, 'd'); i >= 0 {
+		n, err := strconv.ParseUint(s[:i], 10, 32)
+		if err != nil {
+			return 0, fmt.Errorf("nft duration %q: %w", s, err)
+		}
+		days = time.Duration(n) * 24 * time.Hour
+		s = s[i+1:]
+		if s == "" {
+			return days, nil
+		}
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("nft duration: %w", err)
+	}
+	return days + d, nil
 }
 
 // setForIP returns the v4 or v6 blocked set for ip.

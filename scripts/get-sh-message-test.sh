@@ -353,7 +353,54 @@ case "$CALLS" in
   *) bad "apt-get install was never called; calls:
 $CALLS" ;;
 esac
+# issue #448: the default package install must track the stable suite —
+# the old hardcoded 'testing' shipped an RC to every fresh install.
+APT_LINE="$(cat "$SANDBOX/etc/apt/sources.list.d/ezyshield.list" 2>/dev/null || true)"
+case "$APT_LINE" in
+  *" stable main"*) ok "apt source entry uses the 'stable' suite by default" ;;
+  *) bad "apt source entry is not on the stable suite: $APT_LINE" ;;
+esac
 rm -rf "$FAKEBIN" "$SANDBOX"
+
+echo
+echo "▸ Scenario: EZYSHIELD_SUITE=testing opts the package install into the RC suite (issue #448)"
+setup_fakebin
+SANDBOX="$(mktemp -d)"
+start_mock 404
+EXTRA_ENV=(
+  EZY_TEST_CALLLOG="$CALLLOG"
+  EZYSHIELD_METHOD=packages
+  EZYSHIELD_SUITE=testing
+  EZYSHIELD_PACKAGES_BASE_URL="http://127.0.0.1:${MOCK_PORT}"
+  EZYSHIELD_ROOT="$SANDBOX"
+)
+run_get_sh_only
+stop_mock
+if [ "$RC" -eq 0 ]; then ok "exits 0 (package install path completed)"; else bad "exit code = $RC, want 0; output:
+$OUT"; fi
+APT_LINE="$(cat "$SANDBOX/etc/apt/sources.list.d/ezyshield.list" 2>/dev/null || true)"
+case "$APT_LINE" in
+  *" testing main"*) ok "apt source entry uses the 'testing' suite when opted in" ;;
+  *) bad "apt source entry is not on the testing suite: $APT_LINE" ;;
+esac
+rm -rf "$FAKEBIN" "$SANDBOX"
+
+echo
+echo "▸ Scenario: invalid EZYSHIELD_SUITE is rejected before any filesystem or network action"
+SANDBOX="$(mktemp -d)"
+EXTRA_ENV=(
+  EZYSHIELD_SUITE=nightly
+  EZYSHIELD_ROOT="$SANDBOX"
+)
+run_get_sh_only
+if [ "$RC" -eq 1 ]; then ok "exits 1"; else bad "exit code = $RC, want 1"; fi
+case "$OUT" in
+  *"EZYSHIELD_SUITE must be 'stable' or 'testing'"*) ok "prints the invalid-suite error" ;;
+  *) bad "missing the invalid-suite error; output:
+$OUT" ;;
+esac
+if [ -z "$(ls -A "$SANDBOX" 2>/dev/null)" ]; then ok "sandbox untouched (validation runs first)"; else bad "sandbox was written to despite invalid suite"; fi
+rm -rf "$SANDBOX"
 
 echo
 echo "▸ Scenario: repo unreachable — falls back to binary install with a loud warning, packages never touched"

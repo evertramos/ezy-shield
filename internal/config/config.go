@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"sort"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -519,6 +520,20 @@ var validParserNames = map[string]bool{
 	"apache-error": true,
 	"traefik":      true,
 	"caddy":        true,
+}
+
+// ValidParserNames returns the set of collector parser names accepted by config
+// validation, sorted for stable output. Exposed so the daemon's parser-routing
+// coverage test can assert every accepted name is actually handled by a
+// registered parser (issue #308): a name that validates but has no parser
+// silently drops every line from that log source.
+func ValidParserNames() []string {
+	names := make([]string, 0, len(validParserNames))
+	for name := range validParserNames {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func validateCollector(col CollectorCfg, idx int) error {

@@ -1198,7 +1198,10 @@ func writeCloudflareEnvFile(configDir, envVar, token string) (wrote, kept bool, 
 	}
 	updated := upsertEnvLine(existing, envVar, token)
 	body := renderEnvFile(updated)
-	if err := os.WriteFile(envPath, []byte(body), 0o600); err != nil {
+	// Atomic replace (temp + fsync + rename), same as the AI-key writer
+	// since issue #299: a crash or full disk mid-write must never leave the
+	// shared .env truncated, wiping the other secrets it holds (issue #437).
+	if err := atomicWriteFile(envPath, []byte(body), 0o600); err != nil {
 		return false, false, fmt.Errorf("writing %s: %w", envPath, err)
 	}
 	if err := applyDaemonOwnership(envPath, 0o600); err != nil {

@@ -55,11 +55,12 @@ func (f *fakeNotifier) Count() int {
 	return len(f.msgs)
 }
 
-// fakeEnforcer records Ban/Unban calls without touching nftables.
+// fakeEnforcer records Ban/Unban/Sync calls without touching nftables.
 type fakeEnforcer struct {
 	mu     sync.Mutex
 	bans   []sdk.Target
 	unbans []sdk.Target
+	syncs  [][]sdk.Target
 }
 
 func (f *fakeEnforcer) Name() string { return "fake" }
@@ -75,11 +76,36 @@ func (f *fakeEnforcer) Unban(_ context.Context, t sdk.Target) error {
 	f.mu.Unlock()
 	return nil
 }
-func (f *fakeEnforcer) Sync(_ context.Context, _ []sdk.Target) error { return nil }
+func (f *fakeEnforcer) Sync(_ context.Context, ts []sdk.Target) error {
+	f.mu.Lock()
+	cp := make([]sdk.Target, len(ts))
+	copy(cp, ts)
+	f.syncs = append(f.syncs, cp)
+	f.mu.Unlock()
+	return nil
+}
 func (f *fakeEnforcer) BanCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.bans)
+}
+
+// SyncCount / LastSync expose the recorded Sync calls (issue #327: the
+// post-expiry reconcile is the only path that removes expired bans from
+// edge enforcers with no native TTL).
+func (f *fakeEnforcer) SyncCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.syncs)
+}
+
+func (f *fakeEnforcer) LastSync() []sdk.Target {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.syncs) == 0 {
+		return nil
+	}
+	return f.syncs[len(f.syncs)-1]
 }
 
 // fakeAllowSyncEnforcer additionally satisfies the daemon's allowlistSyncer

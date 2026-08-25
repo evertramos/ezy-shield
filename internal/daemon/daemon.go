@@ -121,6 +121,9 @@ type Config struct {
 	// EnfProbeTick overrides the enforcement health-probe interval (tests
 	// only; 0 = default 5m). See runEnforceProbe (issue #174).
 	EnfProbeTick time.Duration
+	// ExpireTick overrides the ban/allow expiry poll interval (tests only;
+	// 0 = default 1m). See runExpireBans / runExpireAllows (issue #327).
+	ExpireTick time.Duration
 	// SSHRecheckTick / SSHRecheckDelay override the deferred anti-lockout
 	// re-evaluation poll interval and refusal→re-check delay (tests only;
 	// 0 = defaults). See sshrecheck.go (issue #420).
@@ -169,6 +172,8 @@ type Daemon struct {
 	armWindowTick time.Duration
 	// enfProbeTick is the enforcement health-probe interval (0 = default 5m).
 	enfProbeTick time.Duration
+	// expireTick is the ban/allow expiry poll interval (0 = default 1m).
+	expireTick time.Duration
 	// sshRecheckTick / sshRecheckDelay tune the deferred anti-lockout
 	// re-evaluation (0 = defaults; see sshrecheck.go, issue #420).
 	sshRecheckTick  time.Duration
@@ -323,6 +328,7 @@ func New(dcfg Config) (*Daemon, error) {
 		policyPath:      dcfg.PolicyPath,
 		armWindowTick:   dcfg.ArmWindowTick,
 		enfProbeTick:    dcfg.EnfProbeTick,
+		expireTick:      dcfg.ExpireTick,
 		sshRecheckTick:  dcfg.SSHRecheckTick,
 		sshRecheckDelay: dcfg.SSHRecheckDelay,
 	}
@@ -1146,7 +1152,7 @@ func (d *Daemon) runFlush(ctx context.Context) {
 // and rebuilds the in-memory runtime allowlist so expired ranges stop bypassing
 // the decision pipeline within at most one tick.
 func (d *Daemon) runExpireAllows(ctx context.Context) {
-	t := time.NewTicker(time.Minute)
+	t := time.NewTicker(d.expireTickVal())
 	defer t.Stop()
 	for {
 		select {
@@ -1173,9 +1179,19 @@ func (d *Daemon) runExpireAllows(ctx context.Context) {
 	}
 }
 
+// expireTickVal returns the configured expiry poll interval (tests) or the
+// 1-minute default (issue #327 gave this loop the same injection point the
+// arm-window and enforcement-probe loops already had, so it is testable).
+func (d *Daemon) expireTickVal() time.Duration {
+	if d.expireTick > 0 {
+		return d.expireTick
+	}
+	return time.Minute
+}
+
 // runExpireBans periodically removes elapsed bans from the store.
 func (d *Daemon) runExpireBans(ctx context.Context) {
-	t := time.NewTicker(time.Minute)
+	t := time.NewTicker(d.expireTickVal())
 	defer t.Stop()
 	for {
 		select {

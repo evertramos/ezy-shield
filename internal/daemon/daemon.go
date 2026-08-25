@@ -10,7 +10,6 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -159,11 +158,10 @@ type Daemon struct {
 	enricher   geoLookup // nil = enrichment disabled; set via enricherFrom()
 
 	// AI optional components; all three must be non-nil to enable AI analysis.
-	aiProvider     sdk.AIProvider
-	aiBudget       *ai.Budget
-	aiCache        *ai.Cache
-	aiLo, aiHi     int         // ambiguous band: lo <= score <= hi triggers AI
-	aiBudgetWarned atomic.Bool // guards the single "budget exceeded" WARN
+	aiProvider sdk.AIProvider
+	aiBudget   *ai.Budget
+	aiCache    *ai.Cache
+	aiLo, aiHi int // ambiguous band: lo <= score <= hi triggers AI
 
 	socketPath string
 	// policyPath is where arm/disarm persist the armed flag ("" = skip).
@@ -756,7 +754,9 @@ func (d *Daemon) maybeConsultAI(ctx context.Context, ip netip.Addr, verdicts []s
 		return verdicts
 	}
 	if exceeded {
-		if d.aiBudgetWarned.CompareAndSwap(false, true) {
+		// Once per UTC day (Budget owns the rollover, issue #359) — the old
+		// process-lifetime bool meant day-two breaches were never logged.
+		if d.aiBudget.NoteExceededToday() {
 			slog.WarnContext(ctx, "daemon: AI daily token budget exceeded; switching to rules-only")
 		}
 		return verdicts
@@ -808,7 +808,6 @@ func (d *Daemon) maybeConsultAI(ctx context.Context, ip netip.Addr, verdicts []s
 		slog.WarnContext(ctx, "daemon: ai budget consume failed", "err", err)
 	} else if budgetExceeded {
 		slog.WarnContext(ctx, "daemon: AI daily token budget now exhausted")
-		d.aiBudgetWarned.Store(true)
 	}
 
 	// Bind BEFORE the cache Set: an off-request verdict must neither reach the

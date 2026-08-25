@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/evertramos/ezy-shield/pkg/sdk"
 )
@@ -26,7 +27,16 @@ type Budget struct {
 	provider string
 	daily    int
 	store    BudgetStore
-	notified bool // guards single-notification-per-day for budget exceeded
+	// notifiedDay is the UTC day ("2026-01-02") whose breach has already
+	// been notified. Day-aware, not a plain bool: the old flag was supposed
+	// to be cleared by a ResetDay call that no production code ever made,
+	// so breaches on subsequent days went unnotified until the daemon
+	// restarted (issue #359).
+	notifiedDay string
+
+	// nowFn is the clock behind day boundaries (defaults to time.Now).
+	// Injectable so tests can cross midnight without sleeping.
+	nowFn func() time.Time
 }
 
 // NewBudget creates a Budget for provider with the given daily token limit.
@@ -36,6 +46,7 @@ func NewBudget(provider string, dailyTokens int, store BudgetStore) *Budget {
 		provider: provider,
 		daily:    dailyTokens,
 		store:    store,
+		nowFn:    time.Now,
 	}
 }
 
@@ -87,19 +98,25 @@ func (b *Budget) Consume(ctx context.Context, usage sdk.Usage) (exceeded bool, e
 		return false, err
 	}
 
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if budget.Remaining == 0 && !b.notified {
-		b.notified = true
+	if budget.Remaining == 0 && b.NoteExceededToday() {
 		return true, nil
 	}
 	return false, nil
 }
 
-// ResetDay clears the single-notification flag so the next day's breach
-// triggers a fresh notification. Call at midnight or daemon restart.
-func (b *Budget) ResetDay() {
+// NoteExceededToday marks today's budget breach as notified and reports
+// whether this call was the first to do so — the caller that gets true owns
+// emitting the once-per-day operator notification. The day key is UTC, so
+// the flag rolls over at midnight with no external reset call (the old
+// ResetDay API was never wired and the flag stuck for the process lifetime,
+// issue #359).
+func (b *Budget) NoteExceededToday() bool {
+	today := b.nowFn().UTC().Format(time.DateOnly)
 	b.mu.Lock()
-	b.notified = false
-	b.mu.Unlock()
+	defer b.mu.Unlock()
+	if b.notifiedDay == today {
+		return false
+	}
+	b.notifiedDay = today
+	return true
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/evertramos/ezy-shield/pkg/sdk"
 )
@@ -113,25 +114,30 @@ func TestBudget_Exceeded(t *testing.T) {
 	}
 }
 
-// TestBudget_ResetDay restores the notification flag.
-func TestBudget_ResetDay(t *testing.T) {
+// TestBudget_NotificationRollsOverAtMidnight (issue #359): the notification
+// flag is day-aware and clears itself at the UTC day boundary — no external
+// ResetDay call needed (that API existed but no production code ever called
+// it, so day-two breaches went unnotified until the daemon restarted).
+func TestBudget_NotificationRollsOverAtMidnight(t *testing.T) {
 	store := &stubBudgetStore{}
 	b := NewBudget("anthropic", 100, store)
+	day := time.Date(2026, 8, 25, 23, 0, 0, 0, time.UTC)
+	b.nowFn = func() time.Time { return day }
 	ctx := context.Background()
 
 	_, _ = b.Consume(ctx, sdk.Usage{InputTokens: 200}) // exceeds
 	exceeded, _ := b.Consume(ctx, sdk.Usage{InputTokens: 1})
 	if exceeded {
-		t.Error("notification should not fire twice before ResetDay")
+		t.Error("notification should not fire twice within one day")
 	}
 
-	b.ResetDay()
-	// Manually reset the store's today total to simulate midnight.
+	// Midnight: the store's per-day totals reset naturally; the flag must too.
+	day = day.Add(2 * time.Hour) // 2026-08-26 01:00 UTC
 	store.today = sdk.Usage{}
 
 	exceeded, _ = b.Consume(ctx, sdk.Usage{InputTokens: 200})
 	if !exceeded {
-		t.Error("after ResetDay, next breach should fire notification again")
+		t.Error("a breach on the NEXT day must notify again without any reset call")
 	}
 }
 

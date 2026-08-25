@@ -91,3 +91,15 @@ collectors: []
 #     password: env:SMTP_PASSWORD
 #     tls: starttls            # starttls | tls | none
 #     severity: []             # empty = all severities; or: [critical]
+
+# Verified-bot protection (issue #215) — spare well-known crawlers from
+# over-eager rules via forward-confirmed reverse DNS (never UA alone: a
+# spoofed Googlebot UA whose rDNS does not confirm is banned normally).
+# Built-in providers: googlebot, bingbot, applebot, yandexbot, baiduspider,
+# duckduckbot. Docs: guides/verified-bots.
+# verified_bots:
+#   enabled: true
+#   providers:                       # optional: extend/override by name
+#     - name: mymonitor
+#       ua_contains: [MyMonitor]     # case-insensitive UA substrings
+#       domains: [monitor.example.com]  # PTR must fall under one of these

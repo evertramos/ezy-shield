@@ -358,6 +358,44 @@
           "description": "SQLite file storing the admin password hash. Defaults to <data_dir>/dashboard.db."
         }
       }
+    },
+    "verified_bots": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Verified-bot protection (issue #215): forward-confirmed reverse DNS sparing of well-known crawlers from over-eager rules. Absent/disabled = no DNS lookups ever happen. UA alone is never trusted.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Turn the guard on. Built-in providers: googlebot, bingbot, applebot, yandexbot, baiduspider, duckduckbot."
+        },
+        "providers": {
+          "type": "array",
+          "description": "Extend or override the built-in provider table, matched by name.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "ua_contains", "domains"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Provider identifier used in audits; overriding a built-in name replaces that entry."
+              },
+              "ua_contains": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+                "description": "Case-insensitive User-Agent substrings that make an IP a verification candidate."
+              },
+              "domains": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+                "description": "DNS suffixes the PTR name must fall under (dot-anchored match)."
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

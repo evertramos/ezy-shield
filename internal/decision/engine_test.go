@@ -505,6 +505,44 @@ func TestDecide(t *testing.T) {
 }
 
 // TestDecide_RateLimitExceeded verifies the global ban-rate cap.
+// TestDecide_PermanentRungSetsPermanent is the issue #315 regression: the
+// permanent strike rung (TTL 0) must set Action.Permanent — TTL alone is
+// lossy (issue #279: an expired remaining-time and "no expiry" must never
+// be conflated), and the field's contract (ADR-0010) says producers set it
+// explicitly.
+func TestDecide_PermanentRungSetsPermanent(t *testing.T) {
+	pol := armedPolicy()
+	ladderLen := len(pol.Strikes)
+
+	// One strike below the top: next strike lands on the permanent rung.
+	st := newMock(map[string]int{ip1.String(): ladderLen - 1})
+	e := mustEngine(t, pol, st)
+	act, err := e.Decide(context.Background(), []sdk.Verdict{mkVerdict(ip1, 95, "bruteforce")})
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if act.Op != "ban" {
+		t.Fatalf("op = %q, want ban", act.Op)
+	}
+	if act.TTL != 0 || !act.Permanent {
+		t.Errorf("permanent rung: TTL=%v Permanent=%v, want TTL=0 Permanent=true", act.TTL, act.Permanent)
+	}
+
+	// First strike (timed rung): Permanent must stay false.
+	st2 := newMock(nil)
+	e2 := mustEngine(t, pol, st2)
+	act2, err := e2.Decide(context.Background(), []sdk.Verdict{mkVerdict(ip2, 95, "bruteforce")})
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if act2.Op != "ban" || act2.TTL == 0 {
+		t.Fatalf("timed rung: op=%q ttl=%v, want a timed ban", act2.Op, act2.TTL)
+	}
+	if act2.Permanent {
+		t.Errorf("timed rung has Permanent=true — invariant Permanent ⇒ TTL==0 broken")
+	}
+}
+
 func TestDecide_RateLimitExceeded(t *testing.T) {
 	pol := armedPolicy()
 	pol.MaxBansPerMinute = 2

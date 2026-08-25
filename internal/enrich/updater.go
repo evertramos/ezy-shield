@@ -4,16 +4,16 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/evertramos/ezy-shield/internal/httpx"
 )
 
 const (
@@ -117,29 +117,18 @@ func (u *Updater) downloadEdition(ctx context.Context, edition, destPath string)
 
 // redactURLErr strips the request URL from an HTTP transport error before it is
 // wrapped, logged, or shown to an operator (Hard Rule 3, SECURITY-REVIEW §4,
-// issue #294). It mirrors internal/notify.redactTransportErr (issues #319/#389).
+// issue #294). Thin alias over the shared helper in internal/httpx (issue
+// #439 — it used to be an independent near-copy of
+// internal/notify.redactTransportErr and the two could drift).
 //
-// http.Client.Do (and http.NewRequestWithContext on a parse failure) returns a
-// *url.Error whose Error() embeds the full request URL. The MaxMind download URL
-// carries the account license key in its license_key query parameter, and
-// net/http redacts only userinfo passwords — never the query — so the raw error
-// must never propagate.
-//
-// The MaxMind host (download.maxmind.com) is a fixed, public, non-secret
-// constant, so scheme+host are kept to aid debugging while the path and query
-// (the only secret-bearing parts) collapse to "/[redacted]". The underlying
-// transport cause (ue.Err: dial / TLS / timeout) never contains the query and
-// is preserved via %w for diagnosis and errors.Is matching.
+// The MaxMind download URL carries the account license key in its
+// license_key query parameter; the MaxMind host (download.maxmind.com) is a
+// fixed, public, non-secret constant, so keepHost=true: scheme+host survive
+// for debugging while path and query (the only secret-bearing parts)
+// collapse to "/[redacted]", and the transport cause stays wrapped via %w
+// for errors.Is matching.
 func redactURLErr(err error) error {
-	var ue *url.Error
-	if !errors.As(err, &ue) {
-		return err
-	}
-	redacted := "[redacted]"
-	if u, perr := url.Parse(ue.URL); perr == nil && u.Host != "" {
-		redacted = u.Scheme + "://" + u.Host + "/[redacted]"
-	}
-	return fmt.Errorf("%s %s: %w", ue.Op, redacted, ue.Err)
+	return httpx.RedactTransportErr(err, true)
 }
 
 // extractMMDB reads a tar.gz stream and writes the first .mmdb entry to destPath

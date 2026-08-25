@@ -1149,6 +1149,49 @@ func TestWriteCloudflareEnvFile_PreservesAIKey(t *testing.T) {
 	}
 }
 
+// TestWriteCloudflareEnvFile_FailedWriteKeepsPriorContent is the issue #437
+// regression: the CF token path used a plain os.WriteFile (O_TRUNC), so a
+// failed write could leave the shared .env truncated, destroying every
+// other secret it held — the same class PR #431 fixed for the AI key
+// writer. With atomicWriteFile, a write that cannot complete (here: the
+// temp file cannot be created in a read-only dir) leaves the original
+// intact.
+func TestWriteCloudflareEnvFile_FailedWriteKeepsPriorContent(t *testing.T) {
+	t.Parallel()
+	if os.Getuid() == 0 {
+		t.Skip("read-only dir does not block root")
+	}
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, envFileName)
+	if err := writeEnvFileContent(envPath, "ANTHROPIC_API_KEY", "sk-ant-preexisting"); err != nil {
+		t.Fatalf("prep: %v", err)
+	}
+	before, err := os.ReadFile(envPath) //nolint:gosec // test path
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Make the directory unwritable so the atomic writer cannot create its
+	// temp file — the failure mode where O_TRUNC would already have
+	// destroyed the target.
+	if err := os.Chmod(dir, 0o500); err != nil { //nolint:gosec // G302: deliberately read-only DIR to force the write failure
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) }) //nolint:gosec // G302: restore a test temp dir
+
+	if _, _, err := writeCloudflareEnvFile(dir, "CLOUDFLARE_API_TOKEN", "cf-secret-xyz"); err == nil {
+		t.Fatal("write into a read-only dir succeeded unexpectedly")
+	}
+
+	after, err := os.ReadFile(envPath) //nolint:gosec // test path
+	if err != nil {
+		t.Fatalf(".env unreadable after failed write: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Errorf(".env changed across a failed write:\nbefore: %q\nafter:  %q", before, after)
+	}
+}
+
 // ── Config emitter test helpers ──────────────────────────────────────────────
 
 // mustCFAccounts wraps mustCFConfig into the one-account cfAccounts slice

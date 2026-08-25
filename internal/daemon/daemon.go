@@ -180,6 +180,11 @@ type Daemon struct {
 	// re-evaluation (0 = defaults; see sshrecheck.go, issue #420).
 	sshRecheckTick  time.Duration
 	sshRecheckDelay time.Duration
+
+	// sigCh, when non-nil, replaces the process-signal channel in Run so
+	// tests can drive the SIGTERM drain / SIGINT immediate-exit branches
+	// without raising real signals (issue #361).
+	sigCh chan os.Signal
 	// sshRecheck holds the per-IP deferred re-checks armed after SSH-peer
 	// anti-lockout refusals that suppressed a would-be ban (issue #420).
 	sshRecheck sshRecheckQueue
@@ -477,10 +482,15 @@ func (d *Daemon) Run(parentCtx context.Context) error {
 	// Trailing notify_only summaries for scanners that stopped (issue #421).
 	go d.runNotifySuppressFlush(ctx)
 
-	// Signal handling.
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
-	defer signal.Stop(sigCh)
+	// Signal handling. Tests inject d.sigCh to drive the SIGTERM/SIGINT
+	// branches without raising real process signals (which would leak into
+	// every other daemon test running in the same process, issue #361).
+	sigCh := d.sigCh
+	if sigCh == nil {
+		sigCh = make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+		defer signal.Stop(sigCh)
+	}
 
 	select {
 	case sig := <-sigCh:

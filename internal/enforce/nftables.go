@@ -43,21 +43,32 @@ type NftablesEnforcer struct {
 	// so custom names hard-require the helper to advertise support.
 	capsOnce sync.Once
 	capsErr  error
+
+	// initErr records an invalid WithNames configuration. Options cannot
+	// return errors, and panicking in library code violates the project's
+	// Go conventions (issue #358) — so the error is stored and surfaced on
+	// every RPC instead: the enforcer refuses to operate rather than
+	// silently enforcing into the wrong table.
+	initErr error
 }
 
 // Option configures a NftablesEnforcer.
 type Option func(*NftablesEnforcer)
 
 // WithNames sets the nftables table and set names from config. Values must
-// already have passed config validation (nftnames.Resolve); New re-resolves
-// them defensively and panics on programmer error (invalid names reaching
-// this point mean config validation was bypassed).
+// already have passed config validation (nftnames.Resolve); they are
+// re-resolved defensively here, and an invalid pair marks the enforcer
+// broken (every RPC fails with the stored error) instead of panicking in
+// library code (issue #358).
 func WithNames(table, set string) Option {
 	return func(e *NftablesEnforcer) {
-		if _, err := nftnames.Resolve(table, set); err != nil {
-			panic(fmt.Sprintf("enforce.WithNames: invalid names not caught by config validation: %v", err))
+		n, err := nftnames.Resolve(table, set)
+		if err != nil {
+			// Config validation should have rejected this; refuse every
+			// later call instead of panicking in library code (issue #358).
+			e.initErr = fmt.Errorf("enforce: invalid nftables names (config validation bypassed?): %w", err)
+			return
 		}
-		n, _ := nftnames.Resolve(table, set)
 		if n.IsDefault() {
 			return // defaults: keep fields empty, nothing goes on the wire
 		}
@@ -260,6 +271,9 @@ func (e *NftablesEnforcer) rpc(ctx context.Context, req Request) error {
 // Non-OK responses return a wrapped error (matching rpc's contract).
 func (e *NftablesEnforcer) rpcResp(ctx context.Context, req Request) (Response, error) {
 	var resp Response
+	if e.initErr != nil {
+		return resp, e.initErr
+	}
 	// Custom names ride on every request (the helper pins them on first
 	// use); default names stay off the wire for old-helper compatibility.
 	req.Table = e.table
@@ -337,16 +351,32 @@ func (e *NftablesEnforcer) dial(ctx context.Context) (net.Conn, error) {
 	return conn, nil
 }
 
-// isAllowlisted returns true if the target's address is covered by any
-// entry in the enforcer's allowlist copy.
+// isAllowlisted returns true if the target overlaps any entry in the
+// enforcer's allowlist copy.
 func (e *NftablesEnforcer) isAllowlisted(t sdk.Target) bool {
-	addr, ok := targetAddr(t)
-	if !ok {
+	return targetOverlapsAllowlist(t, e.allowlist)
+}
+
+// targetOverlapsAllowlist is the shared belt-and-suspenders allowlist check
+// for every enforcer: Overlaps for prefix targets (the Gate's semantics),
+// Contains for single addresses. Comparing only the prefix's BASE address
+// let a CIDR ban that merely CONTAINS an allowlisted host pass the check —
+// the documented protection against accidental direct invocation did not
+// hold for CIDR targets (issue #358).
+func targetOverlapsAllowlist(t sdk.Target, allowlist []netip.Prefix) bool {
+	if t.Prefix.IsValid() {
+		for _, p := range allowlist {
+			if t.Prefix.Overlaps(p) {
+				return true
+			}
+		}
 		return false
 	}
-	for _, p := range e.allowlist {
-		if p.Contains(addr) {
-			return true
+	if t.IP.IsValid() {
+		for _, p := range allowlist {
+			if p.Contains(t.IP) {
+				return true
+			}
 		}
 	}
 	return false

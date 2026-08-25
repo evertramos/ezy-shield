@@ -187,6 +187,11 @@ func runCDNStep(
 		return
 	}
 
+	// A broken embedded range table means "detection unavailable", never
+	// "no CDN detected" — say so instead of probing against nothing.
+	if err := cdndetect.LoadError(); err != nil {
+		p.printf("  CDN detection unavailable (%v) — answer the CDN questions manually\n", err)
+	}
 	p.printf("  CDN detection: probing %d vhost domain(s)...\n", len(domains))
 	step.results = cdndetect.MatchDomains(ctx, domains, cdndetect.Options{
 		Resolver: deps.Resolver,

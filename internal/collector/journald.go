@@ -82,10 +82,20 @@ func (c *JournaldCollector) Run(ctx context.Context, out chan<- sdk.RawLine) err
 		lineCopy := make([]byte, len(line))
 		copy(lineCopy, line)
 
-		out <- sdk.RawLine{
-			Source: source,
-			Line:   lineCopy,
-			At:     time.Now(),
+		// Send races cancellation (issue #358): blocking here would wedge
+		// the goroutine forever once the pipeline stops reading. The
+		// non-blocking attempt runs FIRST so a graceful SIGTERM drain
+		// (ctx already done, pipeline still consuming) never randomly
+		// drops deliverable lines to the select's uniform choice; only a
+		// truly full channel with a dead consumer drops the line.
+		rl := sdk.RawLine{Source: source, Line: lineCopy, At: time.Now()}
+		select {
+		case out <- rl:
+		default:
+			select {
+			case out <- rl:
+			case <-ctx.Done():
+			}
 		}
 	})
 	if readErr != nil && ctx.Err() == nil {

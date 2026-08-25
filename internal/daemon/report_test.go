@@ -107,7 +107,7 @@ func TestHandleReport_ManualBanOnly(t *testing.T) {
 	d, db := newReportTestDaemon(t)
 
 	ip := netip.MustParseAddr("198.51.100.9")
-	if err := db.RecordManualBan(context.Background(), ip, 0, "manual permanent ban"); err != nil {
+	if err := db.RecordManualBan(context.Background(), ip, 0, "manual permanent ban", false); err != nil {
 		t.Fatalf("RecordManualBan: %v", err)
 	}
 

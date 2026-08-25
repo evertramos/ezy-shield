@@ -371,13 +371,13 @@ func TestHandleList_ExpiredNeverRendersPermanent(t *testing.T) {
 	d := newTestDaemonForSocket(t, true)
 	ctx := context.Background()
 
-	if err := d.store.RecordManualBan(ctx, netip.MustParseAddr("203.0.113.1"), time.Nanosecond, "expired"); err != nil {
+	if err := d.store.RecordManualBan(ctx, netip.MustParseAddr("203.0.113.1"), time.Nanosecond, "expired", false); err != nil {
 		t.Fatalf("seed expired: %v", err)
 	}
-	if err := d.store.RecordManualBan(ctx, netip.MustParseAddr("203.0.113.2"), 0, "really permanent"); err != nil {
+	if err := d.store.RecordManualBan(ctx, netip.MustParseAddr("203.0.113.2"), 0, "really permanent", false); err != nil {
 		t.Fatalf("seed permanent: %v", err)
 	}
-	if err := d.store.RecordManualBan(ctx, netip.MustParseAddr("203.0.113.3"), 5*time.Minute, "strike-1 style"); err != nil {
+	if err := d.store.RecordManualBan(ctx, netip.MustParseAddr("203.0.113.3"), 5*time.Minute, "strike-1 style", false); err != nil {
 		t.Fatalf("seed timed: %v", err)
 	}
 

@@ -73,7 +73,7 @@ type daemonStore interface {
 	GetState(ctx context.Context, key string) (string, bool, error)
 	DeleteState(ctx context.Context, key string) error
 	AuditSystem(ctx context.Context, op, reason string) error
-	RecordManualBan(ctx context.Context, ip netip.Addr, ttl time.Duration, reason string) error
+	RecordManualBan(ctx context.Context, ip netip.Addr, ttl time.Duration, reason string, dryRun bool) error
 	AddAllow(ctx context.Context, prefix netip.Prefix, expiresAt *time.Time, reason string) error
 	RemoveAllow(ctx context.Context, prefix netip.Prefix) (int, error)
 	ListAllow(ctx context.Context) ([]store.AllowEntry, error)

@@ -317,3 +317,23 @@ func ProviderByID(id string) (Provider, bool) {
 	}
 	return Provider{}, false
 }
+
+// SharedRanges returns the union of every populated provider's edge prefixes
+// for ban-path guarding (issue #178): a shared CDN edge IP must never be
+// banned — blocking it blocks legitimate traffic for everyone behind it.
+// "Data unavailable" (embedded table failed to load, or no provider carries
+// ranges) is a DISTINCT error state, never an empty no-match slice: consumers
+// must fail toward caution and say so, not silently skip the check.
+func SharedRanges() ([]netip.Prefix, error) {
+	if err := LoadError(); err != nil {
+		return nil, err
+	}
+	var out []netip.Prefix
+	for _, p := range defaultProviders {
+		out = append(out, p.Prefixes...)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("cdndetect: no provider ranges loaded")
+	}
+	return out, nil
+}

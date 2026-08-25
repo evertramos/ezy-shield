@@ -9,15 +9,18 @@ package decision
 // own session bypassed every engine guard. AuthorizeManualBan closes that:
 // the daemon MUST call it before acting on any manual ban.
 //
-// There is deliberately NO override for any of these guards: allowlist and
+// There is deliberately NO override for the hard guards: allowlist and
 // anti-lockout are hard rules (AGENTS.md §1), and the rate limit is the
 // runaway safety valve — the policy knob for legitimate bulk operator work
-// is max_bans_per_minute, not a bypass flag.
+// is max_bans_per_minute, not a bypass flag. The one exception is the CDN
+// shared-range guard (issue #178), overridable with --force because it rests
+// on a shipped data snapshot rather than operator intent.
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/netip"
 )
 
@@ -29,6 +32,18 @@ var ErrManualBanAllowlisted = errors.New("target overlaps the allowlist/admin_ci
 // SSH session (the daemon's own derivation or a peer forwarded by the CLI).
 // Never overridable: this is the anti-lockout invariant.
 var ErrManualBanSSHPeer = errors.New("target covers an active SSH session")
+
+// ErrManualBanCDNRange is returned when a manual ban target overlaps a known
+// shared CDN edge range (issue #178) — blocking a shared edge IP blocks
+// legitimate traffic for everyone behind that CDN. Overridable with --force:
+// unlike the allowlist (operator intent) this is a shipped data snapshot
+// that can go stale, so a deliberate operator override must stay possible.
+var ErrManualBanCDNRange = errors.New("target overlaps a known shared CDN edge range (use --force to override)")
+
+// ErrManualBanCDNUnverified is returned when the CDN range table is
+// unavailable and the ban therefore cannot be verified against shared edge
+// ranges (issue #178). Overridable with --force.
+var ErrManualBanCDNUnverified = errors.New("CDN range data unavailable — target cannot be verified against shared edge ranges (use --force to ban anyway)")
 
 // AuthorizeManualBan applies the same safety guards to an operator-issued
 // ban that Decide applies to automatic ones. target is the requested ban
@@ -47,7 +62,9 @@ var ErrManualBanSSHPeer = errors.New("target covers an active SSH session")
 // The returned errors are typed (ErrManualBanAllowlisted, ErrManualBanSSHPeer,
 // ErrRateLimited) and carry the specific entry that fired, so refusals can be
 // audited and reported to the operator by name.
-func (e *Engine) AuthorizeManualBan(_ context.Context, target netip.Prefix, peers ...netip.Addr) error {
+// force bypasses ONLY the CDN-range guards (match and data-unavailable) —
+// never the allowlist, the SSH anti-lockout, or the rate limit.
+func (e *Engine) AuthorizeManualBan(ctx context.Context, target netip.Prefix, force bool, peers ...netip.Addr) error {
 	// Normalize the IPv4-mapped IPv6 spelling operators copy from dual-stack
 	// logs ("ezyshield ban ::ffff:a.b.c.d") — netip treats it as distinct
 	// from the plain form, which would bypass every Overlaps/Contains guard
@@ -86,6 +103,24 @@ func (e *Engine) AuthorizeManualBan(_ context.Context, target netip.Prefix, peer
 		if peer.IsValid() && target.Contains(peer) {
 			return fmt.Errorf("%w: %s contains your session's IP %s", ErrManualBanSSHPeer, target, peer)
 		}
+	}
+
+	// ── Safety invariant §1: shared CDN edge ranges (issue #178) ──────────
+	// Force-overridable (see the error docs); a forced override is loud.
+	if e.cdnRanges != nil && !force {
+		ranges, err := e.cdnRanges()
+		if err != nil {
+			e.warnCDNRangesUnavailable(ctx, err)
+			return fmt.Errorf("refusing manual ban of %s: %w", target, ErrManualBanCDNUnverified)
+		}
+		for _, p := range ranges {
+			if p.Overlaps(target) {
+				return fmt.Errorf("%w: %s overlaps %s", ErrManualBanCDNRange, target, p)
+			}
+		}
+	} else if e.cdnRanges != nil && force {
+		slog.WarnContext(ctx, "decision: manual ban with --force — CDN shared-range guard bypassed",
+			"target", target.String())
 	}
 
 	// ── Safety invariant §1: rate limit — shared window with Decide ───────

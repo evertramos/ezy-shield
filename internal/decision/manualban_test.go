@@ -39,7 +39,7 @@ func TestAuthorizeManualBan_AllowlistWins(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := eng.AuthorizeManualBan(context.Background(), tc.target)
+			err := eng.AuthorizeManualBan(context.Background(), tc.target, false)
 			if !errors.Is(err, decision.ErrManualBanAllowlisted) {
 				t.Errorf("err = %v, want ErrManualBanAllowlisted", err)
 			}
@@ -53,12 +53,12 @@ func TestAuthorizeManualBan_DaemonSSHPeerRefused(t *testing.T) {
 	eng := mustEngine(t, armedPolicy(), newMock(nil))
 	t.Setenv("SSH_CLIENT", "203.0.113.50 51000 22")
 
-	err := eng.AuthorizeManualBan(context.Background(), hostPrefix("203.0.113.50"))
+	err := eng.AuthorizeManualBan(context.Background(), hostPrefix("203.0.113.50"), false)
 	if !errors.Is(err, decision.ErrManualBanSSHPeer) {
 		t.Errorf("banning the env-derived SSH peer: err = %v, want ErrManualBanSSHPeer", err)
 	}
 	// A CIDR covering the peer is just as much a lockout.
-	err = eng.AuthorizeManualBan(context.Background(), netip.MustParsePrefix("203.0.113.0/24"))
+	err = eng.AuthorizeManualBan(context.Background(), netip.MustParsePrefix("203.0.113.0/24"), false)
 	if !errors.Is(err, decision.ErrManualBanSSHPeer) {
 		t.Errorf("banning a CIDR covering the SSH peer: err = %v, want ErrManualBanSSHPeer", err)
 	}
@@ -69,12 +69,12 @@ func TestAuthorizeManualBan_ForwardedPeerRefused(t *testing.T) {
 	eng := mustEngine(t, armedPolicy(), newMock(nil))
 	operator := netip.MustParseAddr("198.51.100.9")
 
-	err := eng.AuthorizeManualBan(context.Background(), hostPrefix("198.51.100.9"), operator)
+	err := eng.AuthorizeManualBan(context.Background(), hostPrefix("198.51.100.9"), false, operator)
 	if !errors.Is(err, decision.ErrManualBanSSHPeer) {
 		t.Errorf("banning the CLI-forwarded peer: err = %v, want ErrManualBanSSHPeer", err)
 	}
 	// Invalid (zero) forwarded peers are ignored, not matched.
-	if err := eng.AuthorizeManualBan(context.Background(), hostPrefix("192.0.2.7"), netip.Addr{}); err != nil {
+	if err := eng.AuthorizeManualBan(context.Background(), hostPrefix("192.0.2.7"), false, netip.Addr{}); err != nil {
 		t.Errorf("zero-value peer must be ignored: %v", err)
 	}
 }
@@ -90,19 +90,19 @@ func TestAuthorizeManualBan_RateLimitSharedAndOrdered(t *testing.T) {
 	// Refused-by-allowlist attempts must NOT consume the rate budget: the
 	// guard order is allowlist → anti-lockout → rate limit.
 	for i := 0; i < 5; i++ {
-		if err := eng.AuthorizeManualBan(ctx, hostPrefix("203.0.113.10")); !errors.Is(err, decision.ErrManualBanAllowlisted) {
+		if err := eng.AuthorizeManualBan(ctx, hostPrefix("203.0.113.10"), false); !errors.Is(err, decision.ErrManualBanAllowlisted) {
 			t.Fatalf("attempt %d: err = %v, want allowlist refusal", i, err)
 		}
 	}
 
 	// Two admitted bans fit the cap; the third trips it.
-	if err := eng.AuthorizeManualBan(ctx, hostPrefix("192.0.2.1")); err != nil {
+	if err := eng.AuthorizeManualBan(ctx, hostPrefix("192.0.2.1"), false); err != nil {
 		t.Fatalf("first admitted ban: %v", err)
 	}
-	if err := eng.AuthorizeManualBan(ctx, hostPrefix("192.0.2.2")); err != nil {
+	if err := eng.AuthorizeManualBan(ctx, hostPrefix("192.0.2.2"), false); err != nil {
 		t.Fatalf("second admitted ban: %v", err)
 	}
-	if err := eng.AuthorizeManualBan(ctx, hostPrefix("192.0.2.3")); !errors.Is(err, decision.ErrRateLimited) {
+	if err := eng.AuthorizeManualBan(ctx, hostPrefix("192.0.2.3"), false); !errors.Is(err, decision.ErrRateLimited) {
 		t.Errorf("third ban: err = %v, want ErrRateLimited (manual bans share the cap)", err)
 	}
 }
@@ -113,10 +113,10 @@ func TestAuthorizeManualBan_ValidBanPasses(t *testing.T) {
 	pol.Allowlist = []string{"198.51.100.0/24"}
 	eng := mustEngine(t, pol, newMock(nil))
 
-	if err := eng.AuthorizeManualBan(context.Background(), hostPrefix("192.0.2.200")); err != nil {
+	if err := eng.AuthorizeManualBan(context.Background(), hostPrefix("192.0.2.200"), false); err != nil {
 		t.Errorf("legitimate manual ban refused: %v", err)
 	}
-	if err := eng.AuthorizeManualBan(context.Background(), netip.MustParsePrefix("192.0.2.0/29")); err != nil {
+	if err := eng.AuthorizeManualBan(context.Background(), netip.MustParsePrefix("192.0.2.0/29"), false); err != nil {
 		t.Errorf("legitimate CIDR manual ban refused: %v", err)
 	}
 }
@@ -163,7 +163,7 @@ func TestAuthorizeManualBan_MappedForms(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := eng.AuthorizeManualBan(context.Background(), tc.target, tc.peers...)
+			err := eng.AuthorizeManualBan(context.Background(), tc.target, false, tc.peers...)
 			if !errors.Is(err, tc.wantErr) {
 				t.Errorf("err = %v, want %v (mapped form bypassed the guard — issue #314)", err, tc.wantErr)
 			}
@@ -183,7 +183,7 @@ func TestAuthorizeManualBan_MappedSuperPrefixRefused(t *testing.T) {
 	eng.SetSSHPeerProbe(func() []netip.Addr { return nil })
 
 	err := eng.AuthorizeManualBan(context.Background(),
-		netip.MustParsePrefix("::ffff:0.0.0.0/95"),
+		netip.MustParsePrefix("::ffff:0.0.0.0/95"), false,
 		netip.MustParseAddr("198.51.100.9"))
 	if err == nil {
 		t.Fatal("mapped super-prefix was authorized — the allowlist/SSH-peer guards cannot see it (PR #364 review)")

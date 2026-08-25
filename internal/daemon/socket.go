@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/evertramos/ezy-shield/internal/cdndetect"
 	"github.com/evertramos/ezy-shield/internal/decision"
 	"github.com/evertramos/ezy-shield/internal/ownership"
 	"github.com/evertramos/ezy-shield/internal/store"
@@ -282,6 +283,12 @@ func (d *Daemon) handleStatus(ctx context.Context) SocketResponse {
 
 	enfState, enfDetail := d.enforcementState()
 	collState, collDetail := d.collectorsState()
+	// Shared-CDN-range guard health (issue #178): "unavailable" means bans
+	// are proceeding WITHOUT the shared-range check — loud, never silent.
+	cdnState := "ok"
+	if _, err := cdndetect.SharedRanges(); err != nil {
+		cdnState = "unavailable: " + err.Error()
+	}
 	data := StatusData{
 		Uptime:            time.Since(d.startTime).Round(time.Second).String(),
 		Armed:             d.policy.IsArmed(),
@@ -289,6 +296,7 @@ func (d *Daemon) handleStatus(ctx context.Context) SocketResponse {
 		EnforcementDetail: enfDetail,
 		CollectorsState:   string(collState),
 		CollectorsDetail:  collDetail,
+		CDNRangesState:    cdnState,
 		ActiveBans:        active,
 		SimulatedBans:     simulated,
 		ArmedUntil:        d.armedUntil(ctx),
@@ -344,9 +352,10 @@ func (d *Daemon) handleList(ctx context.Context) SocketResponse {
 // allowlist / anti-lockout / rate-limit gate as automatic decisions
 // (issue #211, decision.AuthorizeManualBan) plus the daemon's runtime
 // allowlist. Refusals are audited (op "ban_refused") and returned to the
-// CLI naming the guard that fired. There is no override — allowlist and
-// anti-lockout are hard rules, and the rate-limit knob is policy's
-// max_bans_per_minute.
+// CLI naming the guard that fired. The hard guards have no override —
+// allowlist and anti-lockout are hard rules, the rate-limit knob is
+// policy's max_bans_per_minute; only the CDN shared-range guard (issue
+// #178) honors req.Force.
 func (d *Daemon) handleBan(ctx context.Context, req SocketRequest) SocketResponse {
 	prefix, err := parseSocketTarget(req.IP)
 	if err != nil {
@@ -374,7 +383,7 @@ func (d *Daemon) handleBan(ctx context.Context, req SocketRequest) SocketRespons
 	if p, perr := netip.ParseAddr(strings.TrimSpace(req.Peer)); perr == nil {
 		peers = append(peers, p)
 	}
-	if err := d.decEng.AuthorizeManualBan(ctx, prefix, peers...); err != nil {
+	if err := d.decEng.AuthorizeManualBan(ctx, prefix, req.Force, peers...); err != nil {
 		return d.refuseManualBan(ctx, prefix, ttl, err.Error())
 	}
 

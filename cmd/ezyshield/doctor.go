@@ -98,6 +98,8 @@ func runDoctor(cmd *cobra.Command, configDir, dbPath, socketPath string, jsonOut
 	}
 	// issue #386: zero configured collectors means nothing is observed.
 	checks = append(checks, checkCollectorsConfigured(filepath.Join(configDir, "config.yaml")))
+	// issue #178: the shared-CDN-range ban guard must have its data.
+	checks = append(checks, checkCDNRanges())
 	checks = append(checks, checkAllowlistBreadth(configDir)...)
 	checks = append(checks, checkCloudflareEnforcers(configDir)...)
 	// issue #240: PATH/systemd shadowing between a script install and a

@@ -42,6 +42,20 @@ var ErrRateLimited = errors.New("decision: global ban rate limit exceeded")
 // closes). Pinned by TestAntiLockout_SSHPeerRefusal_ReasonIsStableContract.
 const ReasonAntiLockoutSSHPeer = "anti-lockout: active SSH peer"
 
+// ReasonAntiLockoutCDNRange is the Action.Reason Decide emits when it refuses
+// to ban an IP inside a known shared CDN edge range (issue #178): blocking a
+// shared edge IP blocks legitimate traffic for everyone behind that CDN.
+const ReasonAntiLockoutCDNRange = "anti-lockout: shared CDN edge range"
+
+// ReasonMarkCDNUnverified is appended to a ban's Reason when the CDN range
+// table was unavailable at decision time (issue #178) — the audit trail must
+// record that this ban was sentenced WITHOUT the shared-range check.
+const ReasonMarkCDNUnverified = " [cdn-ranges-unverified]"
+
+// cdnWarnInterval rate-limits the "CDN range data unavailable" WARN so a
+// busy daemon does not log it per event.
+const cdnWarnInterval = 15 * time.Minute
+
 // Store is the persistence interface required by Engine.
 // The concrete *store.DB satisfies this interface.
 type Store interface {
@@ -112,6 +126,16 @@ type Engine struct {
 	// diag is the optional delivery sink for enforcement-anomaly signals
 	// (ADR-0009 §4, issue #146); nil = log-only.
 	diag Diagnostics
+
+	// cdnRanges supplies the shared CDN edge prefixes for the ban-path
+	// guard (issue #178); nil = check disabled (tests, minimal builds).
+	// An error return is the DISTINCT "data unavailable" state: bans still
+	// proceed (refusing every ban would disable protection outright) but
+	// carry ReasonMarkCDNUnverified in the audit trail and a rate-limited
+	// WARN fires.
+	cdnRanges func() ([]netip.Prefix, error)
+	// cdnWarnLast is the last "unavailable" WARN, guarded by e.mu.
+	cdnWarnLast time.Time
 }
 
 // New creates an Engine from policy and a store.
@@ -183,6 +207,31 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 				slog.ErrorContext(ctx, "decision: audit anti-lockout", "ip", ip, "err", err)
 			}
 			return act, nil
+		}
+	}
+
+	// ── Safety invariant §1: shared CDN edge ranges can never be banned ───────
+	// Data unavailable is a DISTINCT state (issue #178): the check cannot
+	// silently degrade to "no match" — bans proceed but are marked
+	// unverified in the audit trail, and a rate-limited WARN surfaces it.
+	cdnUnverified := false
+	if e.cdnRanges != nil {
+		ranges, err := e.cdnRanges()
+		if err != nil {
+			cdnUnverified = true
+			e.warnCDNRangesUnavailable(ctx, err)
+		} else {
+			for _, p := range ranges {
+				if p.Contains(ip) {
+					slog.WarnContext(ctx, "decision: anti-lockout — refusing to ban shared CDN edge IP",
+						"ip", ip, "range", p)
+					act := sdk.Action{IP: ip, Op: "record", Reason: ReasonAntiLockoutCDNRange, Verdicts: verdicts}
+					if err := e.store.Audit(ctx, act); err != nil {
+						slog.ErrorContext(ctx, "decision: audit anti-lockout", "ip", ip, "err", err)
+					}
+					return act, nil
+				}
+			}
 		}
 	}
 
@@ -308,6 +357,12 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 		op = "dry_ban"
 	}
 
+	reason := fmt.Sprintf("score=%d category=%s source=%s", score, best.Category, best.Source)
+	if cdnUnverified {
+		// The audit trail records that this ban was sentenced without the
+		// shared-CDN-range check (issue #178).
+		reason += ReasonMarkCDNUnverified
+	}
 	act := sdk.Action{
 		IP:  ip,
 		Op:  op,
@@ -318,7 +373,7 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 		// ADR-0010, issue #315).
 		Permanent: ttl == 0,
 		Strike:    nextStrike,
-		Reason:    fmt.Sprintf("score=%d category=%s source=%s", score, best.Category, best.Source),
+		Reason:    reason,
 		Verdicts:  verdicts,
 	}
 

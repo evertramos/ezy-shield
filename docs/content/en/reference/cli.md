@@ -344,12 +344,20 @@ sudo ezyshield ban 203.0.113.0/24
 |------|-------------|
 | `--ttl` | ban duration (`5m`, `24h`, `7d`); empty = permanent |
 | `--for` | alias of `--ttl`, matching `allow --for` and `arm --for` |
+| `--force` | bypass the shared-CDN-range guard (never the allowlist/anti-lockout guards) — see below |
 | `--reason` | free-text reason stored in the audit log |
 | `--socket` | control socket path override |
 
 Manual bans bypass the rule engine, **not** the allowlist — an allowlisted IP
 can never be banned, manually or otherwise (safety invariant: allowlist always
 wins).
+
+Manual bans are also checked against the built-in table of **shared CDN edge
+ranges** — blocking a shared edge IP blocks legitimate traffic for everyone
+behind that CDN. A target inside a known range is refused, and when the range
+table is unavailable the ban is refused as unverifiable; `--force` overrides
+only these two refusals (the table is a shipped snapshot that can go stale),
+never the allowlist or anti-lockout guards.
 
 ## ezyshield unban
 
@@ -474,6 +482,10 @@ Checks:
   banned, so it silently exempts a large chunk of address space from
   enforcement forever. See the allowlist section in [Policy Reference](policy.md).
 - ban_ineffective diagnostics: **FAIL** when an active ban is flagged ineffective (traffic flowing despite the ban) — names the IPs and points at the systemic remedy (edge enforcement / real-IP parsing / enforcer health); **WARN** when no ban is currently ineffective but some offender was flagged historically; **PASS** otherwise. Read-only query against the database at `--db`.
+- cdn range data: **FAIL** when the embedded shared-CDN-range table (backing
+  the ban-path anti-lockout guard, issue #178) fails to load — bans then
+  proceed marked `[cdn-ranges-unverified]` in the audit log; **PASS** shows
+  the loaded range count.
 - **Enforcement state** (issue #174) — the honest health of the enforcement
   path, derived from real enforcer outcomes, not config alone, and re-verified
   by a periodic reconcile probe (every 5 minutes) so it stays honest on quiet

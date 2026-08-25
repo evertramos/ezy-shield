@@ -152,9 +152,6 @@ nfpms:
       - src: configs/policy.yaml
         dst: /etc/ezyshield/policy.yaml.example
         type: config|noreplace
-      - src: configs/rules.yaml
-        dst: /etc/ezyshield/rules.yaml.example
-        type: config|noreplace
     scripts:
       postinstall: scripts/package/postinstall.sh
       preremove: scripts/package/preremove.sh

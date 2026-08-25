@@ -162,13 +162,16 @@ func printScanTable(w io.Writer, listeners []scan.Listener, newOnes []scan.Liste
 		if exe == "" {
 			exe = "?"
 		}
+		// Binary path, user, and unit/container name are external data (a
+		// container is named by whoever created it; an exe path is chosen by
+		// whoever ran it) — sanitize before the terminal (issue #302).
 		if _, err := fmt.Fprintf(tw, "%s%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\n",
 			flag, l.Protocol,
 			l.Addr.String(),
-			l.PID, exe,
-			l.UserName,
+			l.PID, sanitizeField(exe, 120),
+			sanitizeField(l.UserName, 32),
 			l.OwnerType,
-			owner,
+			sanitizeField(owner, 64),
 			l.LogSource,
 		); err != nil {
 			return err

@@ -67,6 +67,8 @@ permissões seguras (0600).
 
 O assistente percorre seções nomeadas — **Environment** (o que foi detectado
 no host), **Collectors**, **Allowlist**, **Edge enforcers**, **AI analysis**,
+**Notifications** (zero ou mais canais: telegram, email, slack, discord,
+webhook — os mesmos prompts de `config notifier <name>`),
 **Policy**, **Files** e **System services** — com marcas de status `✓`/`✗`/`!`
 por linha. A estilização segue as [convenções globais de cores](#cores);
 saída por pipe permanece texto puro.

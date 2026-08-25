@@ -476,32 +476,8 @@ func envHasNonPlaceholderValue(path string) (bool, string) {
 	return false, "value is the placeholder (" + config.PlaceholderAPIKey + ")"
 }
 
-// checkJournaldReadable returns PASS when journalctl is present and responds.
-func checkJournaldReadable() CheckResult {
-	jctlPath, err := exec.LookPath("journalctl")
-	if err != nil {
-		return CheckResult{
-			Name:   "journald: readable",
-			Status: statusFail,
-			Hint:   "journalctl not found -- EzyShield requires systemd journald to read SSH/service logs",
-		}
-	}
-
-	// Quick probe: list 0 lines; non-zero exit means access is denied.
-	// G204: jctlPath is from LookPath("journalctl"), not user input.
-	ctx := context.Background()
-	out, err := exec.CommandContext(ctx, jctlPath, "-n", "0", "--no-pager").CombinedOutput() //nolint:gosec
-	if err != nil {
-		return CheckResult{
-			Name:   "journald: readable",
-			Status: statusFail,
-			Hint: fmt.Sprintf(
-				"journalctl error: %v -- add user to 'systemd-journal' group: %s",
-				err, strings.TrimSpace(string(out))),
-		}
-	}
-	return CheckResult{Name: "journald: readable", Status: statusPass}
-}
+// checkJournaldReadable lives in doctor_journal.go: it probes journal
+// readability as the identity the daemon actually runs under (issue #455).
 
 // ── Cloudflare enforcer checks (issue #234) ─────────────────────────────────
 

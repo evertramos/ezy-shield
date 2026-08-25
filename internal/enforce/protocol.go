@@ -4,8 +4,11 @@
 // main daemon as an unprivileged user. It communicates with the
 // ezyshield-enforcer helper (CAP_NET_ADMIN) over a unix socket using
 // newline-delimited JSON. The helper accepts only the fixed verb set
-// {add, del, flush, list, ping} with typed, validated arguments — no raw
-// nft syntax is ever passed from caller to helper.
+// {add, del, flush, list, ping, caps, allow_add, allow_del, allow_list,
+// allow_flush} with typed, validated arguments — no raw nft syntax is ever
+// passed from caller to helper (the authoritative list is validVerbs in
+// cmd/ezyshield-enforcer/server.go; issue #351 caught this doc understating
+// the privilege surface).
 package enforce
 
 // Request is sent from the main daemon to the privileged enforcer helper.

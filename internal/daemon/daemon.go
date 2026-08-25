@@ -564,7 +564,7 @@ func (d *Daemon) runCollectorOnce(ctx context.Context, c sdk.Collector, out chan
 			stack := debug.Stack()
 			slog.ErrorContext(ctx, "daemon: collector panic recovered",
 				"collector", collectorName(c), "panic", r, "stack", string(stack))
-			d.notifyPanic(ctx, fmt.Sprintf("collector panic: %v", r))
+			d.notifyPanic(ctx, collectorName(c), fmt.Sprintf("collector panic: %v", r))
 			err = fmt.Errorf("collector panic: %v", r)
 		}
 	}()
@@ -593,7 +593,7 @@ func (d *Daemon) runPipeline(ctx context.Context, rawLines <-chan sdk.RawLine) {
 			stack := debug.Stack()
 			slog.ErrorContext(ctx, "daemon: pipeline panic recovered",
 				"panic", r, "stack", string(stack))
-			d.notifyPanic(ctx, fmt.Sprintf("pipeline panic: %v", r))
+			d.notifyPanic(ctx, "pipeline", fmt.Sprintf("pipeline panic: %v", r))
 		}
 	}()
 
@@ -1214,14 +1214,21 @@ func (d *Daemon) runExpireBans(ctx context.Context) {
 	}
 }
 
-// notifyPanic sends a critical notification about a recovered panic.
-func (d *Daemon) notifyPanic(ctx context.Context, msg string) {
+// notifyPanic sends a critical notification about a recovered panic. The
+// panicking source (collector name, "pipeline") is part of the Title, which
+// is also the notifier's system dedup key (severity+Title): with a constant
+// Title, panics from DIFFERENT collectors collapsed into one alert per
+// suppression window and the per-source detail never survived — under
+// restart-on-panic (#305) a wedged collector could panic-loop while every
+// alert after the first was suppressed (issue #438). Repeated panics from
+// the SAME source still share a key and stay rate-limited.
+func (d *Daemon) notifyPanic(ctx context.Context, source, msg string) {
 	if d.notifier == nil {
 		return
 	}
 	_ = d.notifier.Send(ctx, sdk.Notification{
 		Severity: "critical",
-		Title:    "daemon panic recovered",
+		Title:    "daemon panic recovered (" + source + ")",
 		Body:     msg,
 	})
 }

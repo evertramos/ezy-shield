@@ -92,6 +92,25 @@ ezyshield test enforcer cloudflare
 
 Ele verifica as permissões do token, testa a conectividade com a Cloudflare, lista as zones que você consegue acessar e mostra o status da lista (existência, quantidade de items).
 
+### Fontes de detecção de domínios
+
+Antes de perguntar sobre CDNs, o wizard enumera os domínios que este host
+realmente serve e os classifica contra faixas conhecidas de CDN. A detecção é
+best-effort (ferramenta ou diretório ausente é pulado em silêncio) e cobre:
+
+- **containers nginx-proxy** — a convenção de env `VIRTUAL_HOST=`;
+- **Traefik via labels do docker** — labels `traefik.*.routers.<nome>.rule`,
+  incluindo multi-host `` Host(`a`, `b`) ``, formas com `||` e `HostSNI`;
+- **Traefik local** — entradas `rule: Host(...)` em
+  `/etc/traefik/*.{yml,yaml,toml}`;
+- **nginx local** — diretivas `server_name` em `/etc/nginx/sites-enabled` e
+  `/etc/nginx/conf.d` (wildcards classificados pelo domínio registrável;
+  `_` e variáveis são ignorados).
+
+Domínios detectados atrás da Cloudflare alimentam diretamente a etapa de
+cobertura de zones abaixo, fechando o ciclo da detecção até a regra de
+bloqueio ativa.
+
 ### Cobertura de zones no wizard
 
 Os dois entry points do wizard (`init` e `config enforcer cloudflare`)

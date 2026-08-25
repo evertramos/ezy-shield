@@ -151,6 +151,11 @@ type cdnDeps struct {
 	// entirely (the whole CDN subflow becomes a no-op, since we cannot
 	// safely make firewall + secret decisions without operator input).
 	Yes bool
+	// LocalVHosts supplies the file-based detection sources (Traefik local
+	// config, nginx server_name — issue #488). Production wires
+	// vhostdetect.DetectLocalDefault; nil (the test default) scans nothing,
+	// so wizard tests never touch the host's real /etc.
+	LocalVHosts func() []vhostdetect.VHost
 }
 
 // runCDNStep executes the CDN detection + optional CF subflow. It writes
@@ -174,6 +179,12 @@ func runCDNStep(
 
 	// 1. Enumerate vhosts + resolve → classify.
 	step.vhosts = detectVHosts(ctx, deps.DockerCLI)
+	// File-based sources (issue #488): Traefik local config and nginx
+	// server_name directives. Injected so tests never scan the host's /etc;
+	// nil (the test default) skips them.
+	if deps.LocalVHosts != nil {
+		step.vhosts = append(step.vhosts, deps.LocalVHosts()...)
+	}
 	domains := vhostdetect.AllDomains(step.vhosts)
 
 	if len(domains) == 0 {

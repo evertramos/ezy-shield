@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -59,6 +61,7 @@ type cfListsMock struct {
 	addCalls         int  // POST items requests observed (throttled ones included)
 	deleteCalls      int  // DELETE items requests observed (throttled ones included)
 	bulkOpPolls      int  // bulk-operation status requests observed
+	getItemsCalls    int  // GET items page requests observed (issue #491)
 }
 
 func newCFListsMock(accountID string) *cfListsMock {
@@ -172,24 +175,59 @@ type cfListsMockItemWire struct {
 	Comment string `json:"comment"`
 }
 
-func (m *cfListsMock) handleGetItems(w http.ResponseWriter, _ *http.Request, listID string) {
+// handleGetItems paginates like the real API (issue #491): per_page
+// DEFAULTS to 25 when the client does not send it — the exact behavior
+// that broke lists past maxPages×25 items before the enforcer started
+// requesting per_page=500 — and cursors walk a deterministic (sorted)
+// item order.
+func (m *cfListsMock) handleGetItems(w http.ResponseWriter, r *http.Request, listID string) {
+	perPage := 25 // mirror the real API default
+	if v := r.URL.Query().Get("per_page"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= 500 {
+			perPage = n
+		}
+	}
+	offset := 0
+	if c := r.URL.Query().Get("cursor"); c != "" {
+		if n, err := strconv.Atoi(c); err == nil && n >= 0 {
+			offset = n
+		}
+	}
 	m.mu.Lock()
+	m.getItemsCalls++
 	l, ok := m.lists[listID]
 	if !ok {
 		m.mu.Unlock()
 		writeJSON(w, cfError(1002, "list not found"))
 		return
 	}
-	wire := make([]cfListsMockItemWire, 0, len(l.items))
-	for _, it := range l.items {
+	ids := make([]string, 0, len(l.items))
+	for id := range l.items {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	if offset > len(ids) {
+		offset = len(ids)
+	}
+	end := offset + perPage
+	if end > len(ids) {
+		end = len(ids)
+	}
+	wire := make([]cfListsMockItemWire, 0, end-offset)
+	for _, id := range ids[offset:end] {
+		it := l.items[id]
 		wire = append(wire, cfListsMockItemWire{ID: it.ID, IP: it.IP, Comment: it.Comment})
+	}
+	after := ""
+	if end < len(ids) {
+		after = strconv.Itoa(end)
 	}
 	m.mu.Unlock()
 	writeJSON(w, map[string]any{
 		"success":     true,
 		"errors":      []any{},
 		"result":      wire,
-		"result_info": map[string]any{"cursors": map[string]any{}},
+		"result_info": map[string]any{"cursors": map[string]any{"after": after}},
 	})
 }
 
@@ -778,6 +816,39 @@ func TestCFListsSync_TwoInstancesShareOneList(t *testing.T) {
 	}
 	if !mock.hasItem(testCFListName, ipB) {
 		t.Error("B's ban must survive A's expiry sync")
+	}
+}
+
+// TestCFListsSync_LargeListPagination is the issue #491 regression (ovh1
+// field report): a list with more items than maxPages × the API's DEFAULT
+// page size (50×25 = 1,250) failed every Sync with "pagination exceeded 50
+// pages" and flipped enforcement DEGRADED, because fetchAllItems never sent
+// per_page. With per_page=500 the same list reads in a handful of pages and
+// reconciles normally.
+func TestCFListsSync_LargeListPagination(t *testing.T) {
+	mock, ts := newMockCFListsServer(t)
+	ctx := context.Background()
+
+	// 1,300 items owned by this instance — past the old 1,250 ceiling.
+	const n = 1300
+	for i := 0; i < n; i++ {
+		mock.seedTaggedItem(testCFListName, fmt.Sprintf("2001:db8::%x", i+1), "ezyshield:test-instance")
+	}
+
+	e := enforce.NewCFListsEnforcerForTest("tok", ts.URL, testCFAccount, testCFListName)
+	// Empty desired set: discovery must read ALL 1,300 items (old code
+	// errors here), then reconcile removes every owned item.
+	if err := e.Sync(ctx, nil); err != nil {
+		t.Fatalf("Sync on a %d-item list: %v", n, err)
+	}
+	if got := mock.itemCount(testCFListName); got != 0 {
+		t.Errorf("items after full reconcile = %d, want 0", got)
+	}
+	mock.mu.Lock()
+	pages := mock.getItemsCalls
+	mock.mu.Unlock()
+	if pages > 5 {
+		t.Errorf("GET items pages = %d — per_page=500 not honored (1,300 items should read in ≤3 pages)", pages)
 	}
 }
 

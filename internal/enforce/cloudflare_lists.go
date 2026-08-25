@@ -31,6 +31,13 @@ const (
 	cfListItemTag  = "ezyshield"
 	cfListBatchMax = 1000 // Cloudflare bulk add/remove limit per request
 
+	// cfListItemsPerPage is the page size requested when reading list items.
+	// The API maximum is 500 — and its DEFAULT is 25, which silently capped
+	// fetchAllItems at maxPages×25 = 1,250 items: real lists past that size
+	// failed every Sync with "pagination exceeded 50 pages" and flipped
+	// enforcement DEGRADED (issue #491, ovh1 field report).
+	cfListItemsPerPage = 500
+
 	// cfListCapWarnThreshold triggers a WARN when the shared list approaches
 	// the free-plan cap (10 000 items across every instance sharing it).
 	cfListCapWarnThreshold = 9000
@@ -581,8 +588,10 @@ func (e *CloudflareListsEnforcer) discoverList(ctx context.Context) (string, map
 // in the list regardless of owner — pushes use the latter to avoid re-adding
 // an IP another instance already blocks (issue #486). The page count is
 // bounded to defend against a misbehaving API that returns an unmoving
-// cursor — the free-plan cap is 10 000 items, so 50 pages of 1 000 is plenty.
-// When numItems is 0 (empty list), returns early to avoid Cloudflare API error 10027.
+// cursor — at cfListItemsPerPage=500, 50 pages cover 25 000 items, well past
+// the 10 000-item free-plan cap.
+// When numItems is 0 (empty list), returns early to avoid Cloudflare API
+// error 10027 (per_page on an empty list).
 func (e *CloudflareListsEnforcer) fetchAllItems(ctx context.Context, listID string, numItems int) (map[string]string, map[string]struct{}, error) {
 	const maxPages = 50
 	owned := make(map[string]string)
@@ -598,10 +607,10 @@ func (e *CloudflareListsEnforcer) fetchAllItems(ctx context.Context, listID stri
 		if err := e.limiter.wait(ctx); err != nil {
 			return nil, nil, err
 		}
-		url := fmt.Sprintf("%s/accounts/%s/rules/lists/%s/items",
-			e.baseURL, e.accountID, listID)
+		url := fmt.Sprintf("%s/accounts/%s/rules/lists/%s/items?per_page=%d",
+			e.baseURL, e.accountID, listID, cfListItemsPerPage)
 		if cursor != "" {
-			url += "?cursor=" + cursor
+			url += "&cursor=" + cursor
 		}
 		resp, err := e.doRequest(ctx, http.MethodGet, url, nil)
 		if err != nil {
@@ -631,7 +640,8 @@ func (e *CloudflareListsEnforcer) fetchAllItems(ctx context.Context, listID stri
 		}
 		cursor = next
 	}
-	return nil, nil, fmt.Errorf("cloudflare list items: pagination exceeded %d pages", maxPages)
+	return nil, nil, fmt.Errorf("cloudflare list items: pagination exceeded %d pages at %d items/page (unmoving cursor?)",
+		maxPages, cfListItemsPerPage)
 }
 
 // ── CF Lists API mutators ────────────────────────────────────────────────────

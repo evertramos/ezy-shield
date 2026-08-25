@@ -30,6 +30,18 @@ static Go binary — no Python, no Java, no runtime to install.
 > once you trust them. Interfaces may still change before 1.0 — bug reports via
 > [issues](https://github.com/evertramos/ezy-shield/issues) are very welcome.
 
+<!-- demo: after recording (see scripts/demo/README.md), commit
+     assets/demo/ezyshield-demo.gif and uncomment this block.
+<p align="center">
+  <img src="assets/demo/ezyshield-demo.gif" alt="EzyShield demo: a wp-login probe gets detected, strike 1 (15s, dry-run), the attacker returns, the ladder escalates to strike 2 (1h), and the report shows the receipt" width="820">
+</p>
+<p align="center"><sub>Real daemon, dry-run policy, synthetic attacker (RFC 5737). Reproduce it yourself: <code>bash scripts/demo/demo.sh</code>.</sub></p>
+-->
+
+**See it run**: `bash scripts/demo/demo.sh` replays a full attack against a
+throwaway dry-run instance — detection, the strike ladder escalating on the
+repeat offense, and the ban receipt — in about 90 seconds, no root needed.
+
 ---
 
 ## Quickstart

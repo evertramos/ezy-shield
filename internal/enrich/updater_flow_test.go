@@ -121,10 +121,14 @@ func TestRun_DownloadsImmediatelyWhenDBsMissing(t *testing.T) {
 	go func() { u.Run(ctx); close(done) }()
 
 	deadline := time.After(5 * time.Second)
-	for hits.Load() < 2 {
+	// Wait for the INSTALLED FILES, not the request counter: hits increments
+	// when a request ARRIVES, so counting requests could cancel the ctx while
+	// the second download was still streaming — aborting it mid-flight and
+	// flaking the file assertion below (seen once on the release-PR CI).
+	for !fileExists(countryPath) || !fileExists(asnPath) {
 		select {
 		case <-deadline:
-			t.Fatal("Run never performed the immediate download for missing DBs")
+			t.Fatalf("Run never installed the missing DBs (downloads served: %d)", hits.Load())
 		case <-time.After(10 * time.Millisecond):
 		}
 	}

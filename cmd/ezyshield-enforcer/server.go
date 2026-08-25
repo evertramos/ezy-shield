@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/evertramos/ezy-shield/internal/enforce"
 	"github.com/evertramos/ezy-shield/internal/nftnames"
@@ -35,7 +36,12 @@ type Server struct {
 	// listFn reads the current blocked-set contents (defaults to the real
 	// `nft list set` exec). Injectable so unit tests can exercise the
 	// name-switch path without a real nft binary on the host.
-	listFn func(ctx context.Context, n nftnames.Names) ([]string, error)
+	listFn func(ctx context.Context, n nftnames.Names) ([]setElem, error)
+
+	// nowFn is the clock behind cache-expiry decisions (defaults to
+	// time.Now). Injectable so tests can drive an entry past its kernel
+	// timeout without sleeping.
+	nowFn func() time.Time
 
 	// mutateMu serializes every blocked-set MUTATION (add/del/flush) across
 	// its full span — the nft kernel exec AND the follow-up s.blocked cache
@@ -53,8 +59,16 @@ type Server struct {
 	// blocked for a whole nft exec, only for the brief map access.
 	mutateMu sync.Mutex
 
+	// blocked maps each canonical IP/CIDR string in the nft set to its
+	// expiry deadline; the zero Time means permanent. The deadline mirrors
+	// nft's per-element `timeout`, which the KERNEL enforces on its own —
+	// so `list` must treat entries past their deadline as gone even though
+	// no del verb ever removed them. A plain presence map here is how a
+	// permanently-banned IP went unenforced for 12+ days on the dogfooding
+	// host: the kernel expired the old timed element, the cache kept
+	// claiming it was present, and every Sync skipped the re-add (#383).
 	mu      sync.RWMutex
-	blocked map[string]bool // canonical IP/CIDR strings currently in nft set
+	blocked map[string]time.Time
 
 	// names is the active nftables name set (issue #268). Boot initializes
 	// the defaults; the first request that resolves to a DIFFERENT name set
@@ -77,7 +91,8 @@ func newServer(socketPath string, run nftRunner) *Server {
 		run:        run,
 		runSs:      realSsRunner,
 		listFn:     nftList,
-		blocked:    make(map[string]bool),
+		nowFn:      time.Now,
+		blocked:    make(map[string]time.Time),
 		names:      defaults,
 	}
 }
@@ -123,17 +138,26 @@ func (s *Server) init(ctx context.Context) error {
 	if err := initTable(ctx, s.run, s.names); err != nil {
 		return fmt.Errorf("enforcer: init nft table: %w", err)
 	}
-	ips, err := s.listFn(ctx, s.names)
+	els, err := s.listFn(ctx, s.names)
 	if err != nil {
 		return fmt.Errorf("enforcer: load existing set state: %w", err)
 	}
 	s.mu.Lock()
-	for _, ip := range ips {
-		s.blocked[ip] = true
+	for _, el := range els {
+		s.blocked[el.ip] = s.deadline(el.ttl)
 	}
 	s.mu.Unlock()
-	slog.Info("enforcer: nft table ready", "existing_entries", len(ips))
+	slog.Info("enforcer: nft table ready", "existing_entries", len(els))
 	return nil
+}
+
+// deadline converts a remaining lifetime into a cache deadline; 0 (permanent)
+// maps to the zero Time.
+func (s *Server) deadline(ttl time.Duration) time.Time {
+	if ttl <= 0 {
+		return time.Time{}
+	}
+	return s.nowFn().Add(ttl)
 }
 
 // serve accepts connections until ctx is cancelled.
@@ -199,12 +223,32 @@ func (s *Server) dispatch(ctx context.Context, req enforce.Request) enforce.Resp
 		return enforce.Response{OK: true, Features: []string{enforce.FeatureCustomNames}}
 
 	case "list":
+		// Entries past their deadline were already removed by the KERNEL's
+		// per-element timeout — reporting them would make Sync skip re-adds
+		// against an empty kernel set (the 12-day silent ban leak of #383).
+		now := s.nowFn()
 		s.mu.RLock()
 		ips := make([]string, 0, len(s.blocked))
-		for ip := range s.blocked {
+		var stale []string
+		for ip, dl := range s.blocked {
+			if !dl.IsZero() && now.After(dl) {
+				stale = append(stale, ip)
+				continue
+			}
 			ips = append(ips, ip)
 		}
 		s.mu.RUnlock()
+		if len(stale) > 0 {
+			// Lazy prune, re-checked under the write lock: a concurrent
+			// re-add may have refreshed the deadline since the read pass.
+			s.mu.Lock()
+			for _, ip := range stale {
+				if dl, ok := s.blocked[ip]; ok && !dl.IsZero() && now.After(dl) {
+					delete(s.blocked, ip)
+				}
+			}
+			s.mu.Unlock()
+		}
 		return enforce.Response{OK: true, IPs: ips}
 
 	case "flush":
@@ -217,7 +261,7 @@ func (s *Server) dispatch(ctx context.Context, req enforce.Request) enforce.Resp
 			return enforce.Response{OK: false, Error: err.Error()}
 		}
 		s.mu.Lock()
-		s.blocked = make(map[string]bool)
+		s.blocked = make(map[string]time.Time)
 		s.mu.Unlock()
 		return enforce.Response{OK: true}
 
@@ -231,12 +275,32 @@ func (s *Server) dispatch(ctx context.Context, req enforce.Request) enforce.Resp
 		// field comment for the leak this prevents. Released before the ss
 		// teardown below, which touches neither the kernel set nor the cache.
 		s.mutateMu.Lock()
+		// Re-adding an element that is still in the kernel does NOT replace
+		// its `timeout` — nft keeps the old timer (auto-merge). A strike
+		// upgrade (24h → 7d → permanent) would silently retain the shorter
+		// expiry: on the dogfooding host a permanent re-ban kept a dying
+		// timer and the IP went unenforced for 12+ days (issue #383). When
+		// the cache says the element exists, delete it first so the add
+		// installs the new TTL. The element being already gone (kernel timer
+		// fired) is fine; any other delete failure would make the add
+		// meaningless, so it surfaces. The microseconds-wide unprotected
+		// window between del and add is held under mutateMu and is strictly
+		// safer than a ban running on the wrong, shorter timer.
+		s.mu.RLock()
+		_, present := s.blocked[req.IP]
+		s.mu.RUnlock()
+		if present {
+			if err := nftDel(ctx, s.run, names, req.IP); err != nil && !errors.Is(err, errElementAbsent) {
+				s.mutateMu.Unlock()
+				return enforce.Response{OK: false, Error: err.Error()}
+			}
+		}
 		if err := nftAdd(ctx, s.run, names, req.IP, req.TTLSeconds); err != nil {
 			s.mutateMu.Unlock()
 			return enforce.Response{OK: false, Error: err.Error()}
 		}
 		s.mu.Lock()
-		s.blocked[req.IP] = true
+		s.blocked[req.IP] = s.deadline(time.Duration(req.TTLSeconds) * time.Second)
 		s.mu.Unlock()
 		s.mutateMu.Unlock()
 		// Kill any TCP sessions already established from this peer (issue #30).
@@ -362,13 +426,13 @@ func (s *Server) switchNamesLocked(ctx context.Context, want nftnames.Names) err
 	if err := initTable(ctx, s.run, want); err != nil {
 		return fmt.Errorf("enforcer: init table %q: %w", want.Table, err)
 	}
-	ips, err := s.listFn(ctx, want)
+	els, err := s.listFn(ctx, want)
 	if err != nil {
 		return fmt.Errorf("enforcer: load state from table %q: %w", want.Table, err)
 	}
-	s.blocked = make(map[string]bool, len(ips))
-	for _, ip := range ips {
-		s.blocked[ip] = true
+	s.blocked = make(map[string]time.Time, len(els))
+	for _, el := range els {
+		s.blocked[el.ip] = s.deadline(el.ttl)
 	}
 	s.names = want
 	s.pinned = true
@@ -384,7 +448,7 @@ func (s *Server) switchNamesLocked(ctx context.Context, want nftnames.Names) err
 		}
 	}
 	slog.InfoContext(ctx, "enforcer: switched nftables names",
-		"table", want.Table, "set", want.Set4, "existing_entries", len(ips))
+		"table", want.Table, "set", want.Set4, "existing_entries", len(els))
 	return nil
 }
 

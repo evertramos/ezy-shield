@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -131,4 +132,70 @@ func TestJournaldCollector_EmitsLines(t *testing.T) {
 	}
 
 	<-done
+}
+
+// TestJournaldCollector_PermissionDenialIsNamed verifies the issue #456 error
+// labeling: when journalctl exits non-zero with the journald permission
+// denial on stderr, the returned error names the cause and the exact fix
+// instead of an opaque "exit status 1" (the #454 field failure was invisible
+// in the daemon's own logs without this).
+func TestJournaldCollector_PermissionDenialIsNamed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+	script := "#!/bin/sh\n" +
+		"echo 'No journal files were opened due to insufficient permissions.' >&2\n" +
+		"exit 1\n"
+	scriptPath := t.TempDir() + "/denied.sh"
+	if err := os.WriteFile(scriptPath, []byte(script), 0700); err != nil { //nolint:gosec // temp test script, not attacker-controlled
+		t.Fatalf("write script: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	c := &collector.JournaldCollector{Unit: "sshd", Cmd: scriptPath}
+
+	err := c.Run(ctx, make(chan sdk.RawLine, 1))
+	if err == nil {
+		t.Fatal("Run returned nil, want the permission-denial error")
+	}
+	for _, want := range []string{
+		"insufficient permissions",
+		"usermod -aG systemd-journal ezyshield",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q missing %q", err, want)
+		}
+	}
+}
+
+// TestJournaldCollector_GenericStderrIsAttached verifies non-permission
+// stderr still reaches the error label (bounded), so the supervisor's log
+// line carries the actual cause without the permission hint.
+func TestJournaldCollector_GenericStderrIsAttached(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+	script := "#!/bin/sh\n" +
+		"echo 'Failed to open journal: No space left on device' >&2\n" +
+		"exit 1\n"
+	scriptPath := t.TempDir() + "/enospc.sh"
+	if err := os.WriteFile(scriptPath, []byte(script), 0700); err != nil { //nolint:gosec // temp test script, not attacker-controlled
+		t.Fatalf("write script: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	c := &collector.JournaldCollector{Unit: "sshd", Cmd: scriptPath}
+
+	err := c.Run(ctx, make(chan sdk.RawLine, 1))
+	if err == nil {
+		t.Fatal("Run returned nil, want an error")
+	}
+	if !strings.Contains(err.Error(), "No space left on device") {
+		t.Errorf("error %q lost the stderr detail", err)
+	}
+	if strings.Contains(err.Error(), "usermod") {
+		t.Errorf("error %q carries the permission hint for a non-permission failure", err)
+	}
 }

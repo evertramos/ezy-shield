@@ -156,6 +156,7 @@ unban is immediate).
 notify:
   rate_limit_per_minute: 5       # default — cap on notifications per minute
   dedup_window_sec: 600          # default — identical alerts collapsed
+  notify_only_window_sec: 3600   # default — repeat notify_only per (IP, rule) folds into one summary
 
   telegram:
     bot_token: env:EZYSHIELD_TELEGRAM_TOKEN
@@ -184,7 +185,7 @@ notify:
       Authorization: env:EZYSHIELD_WEBHOOK_TOKEN   # value must be a full env: reference
 ```
 
-Shared fields: `rate_limit_per_minute` (default 5) and `dedup_window_sec` (default 600) protect against notification storms. Every channel accepts an optional `severity` list (`info` \| `warn` \| `critical`).
+Shared fields: `rate_limit_per_minute` (default 5) and `dedup_window_sec` (default 600) protect against notification storms. `notify_only_window_sec` (default 3600) additionally windows below-threshold `notify_only` events per (IP, rule): the first event notifies immediately and repeats within the window fold into a single summary notification — set it negative to disable. Audit log entries are never suppressed. Every channel accepts an optional `severity` list (`info` \| `warn` \| `critical`).
 
 > Secret-typed fields (`bot_token`, `password`, `webhook_url`, webhook `url`) only accept `env:VARNAME` references — inline values are rejected at load time. They are also **required** for their channel: a `telegram` block without `bot_token`, an `email` block without `password`, or a `slack`/`discord`/`webhook` block without its URL fails validation (the daemon resolves them at startup). Webhook header **values** are sent verbatim unless the entire value is an `env:` reference, which is resolved.
 

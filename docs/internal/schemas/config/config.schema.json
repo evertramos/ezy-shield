@@ -248,6 +248,10 @@
           "minimum": 0,
           "description": "Suppress repeat notifications for the same IP+reason within this window. Defaults to 600 seconds."
         },
+        "notify_only_window_sec": {
+          "type": "integer",
+          "description": "Per-(IP, rule) suppression window for notify_only events: the first event notifies immediately, repeats within the window fold into one summary notification. Omitted or 0 = 3600 (1 hour); negative = disabled. Audit log rows are never suppressed."
+        },
         "telegram": {
           "type": "object",
           "additionalProperties": false,

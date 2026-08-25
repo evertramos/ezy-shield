@@ -82,12 +82,18 @@ type NotifyCfg struct {
 	RateLimitPerMinute int `yaml:"rate_limit_per_minute"`
 	// DedupWindowSec suppresses repeat notifications for the same IP+reason
 	// within this window. Defaults to 600 seconds (10 minutes) when omitted or zero.
-	DedupWindowSec int          `yaml:"dedup_window_sec"`
-	Telegram       *TelegramCfg `yaml:"telegram"`
-	Email          *EmailCfg    `yaml:"email"`
-	Slack          *SlackCfg    `yaml:"slack"`
-	Discord        *DiscordCfg  `yaml:"discord"`
-	Webhook        *WebhookCfg  `yaml:"webhook"`
+	DedupWindowSec int `yaml:"dedup_window_sec"`
+	// NotifyOnlyWindowSec is the per-(IP, rule) suppression window for
+	// notify_only events (issue #421): the first event notifies immediately,
+	// repeats within the window fold into a single summary notification.
+	// Omitted or 0 = 3600 (1 hour); negative = disabled (every event
+	// notifies, pre-#421 behavior). Audit log rows are never suppressed.
+	NotifyOnlyWindowSec int          `yaml:"notify_only_window_sec"`
+	Telegram            *TelegramCfg `yaml:"telegram"`
+	Email               *EmailCfg    `yaml:"email"`
+	Slack               *SlackCfg    `yaml:"slack"`
+	Discord             *DiscordCfg  `yaml:"discord"`
+	Webhook             *WebhookCfg  `yaml:"webhook"`
 }
 
 // SlackCfg configures the Slack incoming webhook notification channel.

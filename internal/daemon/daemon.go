@@ -156,7 +156,11 @@ type Daemon struct {
 	collectors []sdk.Collector
 	enforcer   sdk.Enforcer
 	notifier   *notify.Dispatcher
-	enricher   geoLookup // nil = enrichment disabled; set via enricherFrom()
+	// notifySup windows notify_only notifications per (IP, rule) — nil when
+	// no notifier is configured or the operator disabled the window
+	// (notify.notify_only_window_sec < 0, issue #421).
+	notifySup *notifySuppressor
+	enricher  geoLookup // nil = enrichment disabled; set via enricherFrom()
 
 	// AI optional components; all three must be non-nil to enable AI analysis.
 	aiProvider     sdk.AIProvider
@@ -342,6 +346,19 @@ func New(dcfg Config) (*Daemon, error) {
 		d.aiHi = dcfg.Cfg.AI.AmbiguousBand[1]
 	}
 
+	// notify_only suppression window (issue #421). Only built when a
+	// notifier exists; window comes from notify.notify_only_window_sec
+	// (0/omitted = 1h default, negative = disabled).
+	if d.notifier != nil {
+		windowSec := 0
+		if dcfg.Cfg != nil && dcfg.Cfg.Notify != nil {
+			windowSec = dcfg.Cfg.Notify.NotifyOnlyWindowSec
+		}
+		if windowSec >= 0 {
+			d.notifySup = newNotifySuppressor(time.Duration(windowSec) * time.Second)
+		}
+	}
+
 	return d, nil
 }
 
@@ -446,6 +463,9 @@ func (d *Daemon) Run(parentCtx context.Context) error {
 	// Re-evaluate IPs whose would-be ban was refused because of an
 	// ESTABLISHED SSH connection, once that connection is gone (issue #420).
 	go d.runSSHRecheck(ctx)
+
+	// Trailing notify_only summaries for scanners that stopped (issue #421).
+	go d.runNotifySuppressFlush(ctx)
 
 	// Signal handling.
 	sigCh := make(chan os.Signal, 1)
@@ -935,6 +955,21 @@ func (d *Daemon) dispatch(ctx context.Context, action sdk.Action) {
 	}
 
 	if d.notifier != nil && (action.Op == "ban" || action.Op == "dry_ban" || action.Op == "notify_only") {
+		// notify_only streams are windowed per (IP, rule): the first event
+		// notifies, repeats within the window fold into one summary (issue
+		// #421). Only the notification is suppressed — the audit row was
+		// already written by the decision engine.
+		if action.Op == "notify_only" && d.notifySup != nil {
+			send, summary := d.notifySup.admit(action)
+			if summary != nil {
+				if err := d.notifier.Send(ctx, *summary); err != nil {
+					slog.ErrorContext(ctx, "daemon: notifier error", "err", err)
+				}
+			}
+			if !send {
+				return
+			}
+		}
 		msg := sdk.Notification{
 			Severity: severityFor(action.Op),
 			Title:    fmt.Sprintf("[%s] %s — strike %d", action.Op, action.IP, action.Strike),

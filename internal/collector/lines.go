@@ -22,6 +22,58 @@ import (
 // their own per-field caps downstream.
 const maxStreamLineBytes = 128 * 1024
 
+// lineAssembler accumulates arbitrary chunks into newline-delimited lines
+// with a hard per-line cap (issue #307). Unlike a plain append-until-newline
+// buffer, content past the cap is discarded while newline scanning
+// continues on the full chunk — so a newline-free flood cannot grow memory,
+// and a late newline still terminates the (truncated) line at the right
+// place instead of gluing lines together. Zero value is NOT ready: use
+// newLineAssembler.
+type lineAssembler struct {
+	max  int
+	line []byte
+}
+
+func newLineAssembler(maxLine int) *lineAssembler {
+	return &lineAssembler{max: maxLine, line: make([]byte, 0, 4096)}
+}
+
+// feed scans chunk and calls emit once per completed line (CR of a CRLF
+// ending stripped; line capped at max bytes). The emitted slice is only
+// valid during the call. Returns true when emit requested a stop.
+func (a *lineAssembler) feed(chunk []byte, emit func(line []byte) (stop bool)) bool {
+	rest := chunk
+	for {
+		idx := bytes.IndexByte(rest, '\n')
+		seg := rest
+		if idx >= 0 {
+			seg = rest[:idx]
+		}
+		if room := a.max - len(a.line); room > 0 {
+			if len(seg) > room {
+				seg = seg[:room]
+			}
+			a.line = append(a.line, seg...)
+		}
+		if idx < 0 {
+			return false
+		}
+		l := a.line
+		if len(l) > 0 && l[len(l)-1] == '\r' {
+			l = l[:len(l)-1]
+		}
+		if emit(l) {
+			return true
+		}
+		a.line = a.line[:0]
+		rest = rest[idx+1:]
+	}
+}
+
+// discard drops a buffered partial line (log rotation replaced the file
+// mid-line — the fragment belongs to the old file).
+func (a *lineAssembler) discard() { a.line = a.line[:0] }
+
 // forEachLine reads newline-delimited lines from r and calls emit for each,
 // with truncated=true when the line exceeded maxLine and was cut there. The
 // line slice is only valid during the emit call (callers copy, as they

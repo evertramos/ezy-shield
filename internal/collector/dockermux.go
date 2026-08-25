@@ -8,7 +8,6 @@ package collector
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -34,12 +33,16 @@ const dockerAPIMaxFrameSize = 1 << 20
 //	bytes 1-3: padding
 //	bytes 4-7: payload length (big-endian uint32)
 //
-// Frames larger than dockerAPIMaxFrameSize are rejected to cap memory use.
-// A trailing CR is stripped from CRLF-terminated lines.
+// Frames larger than dockerAPIMaxFrameSize are rejected to cap memory use,
+// and the cross-frame line-reassembly buffer is itself capped at
+// maxStreamLineBytes (issue #307): N newline-free frames used to accumulate
+// N MiB resident, defeating the per-frame cap — now a line past the cap is
+// delivered truncated at its (eventual) newline while the overflow is
+// discarded. A trailing CR is stripped from CRLF-terminated lines.
 func DemuxDockerLogStream(ctx context.Context, r io.Reader, emit func(line []byte) (stop bool)) error {
 	br := bufio.NewReaderSize(r, 32*1024)
 	header := make([]byte, 8)
-	var line []byte
+	asm := newLineAssembler(maxStreamLineBytes)
 
 	for {
 		if ctx.Err() != nil {
@@ -66,22 +69,8 @@ func DemuxDockerLogStream(ctx context.Context, r io.Reader, emit func(line []byt
 			return fmt.Errorf("docker api: read payload: %w", err)
 		}
 
-		line = append(line, payload...)
-		for {
-			idx := bytes.IndexByte(line, '\n')
-			if idx < 0 {
-				break
-			}
-			chunk := line[:idx]
-			// Strip optional CR from CRLF endings — some app logs use them
-			// and parsers don't expect a literal \r at end-of-line.
-			if len(chunk) > 0 && chunk[len(chunk)-1] == '\r' {
-				chunk = chunk[:len(chunk)-1]
-			}
-			if emit(chunk) {
-				return nil
-			}
-			line = line[idx+1:]
+		if asm.feed(payload, emit) {
+			return nil
 		}
 	}
 }

@@ -340,6 +340,18 @@ func New(dcfg Config) (*Daemon, error) {
 	if dcfg.Cfg != nil && dcfg.Cfg.AI != nil {
 		d.aiLo = dcfg.Cfg.AI.AmbiguousBand[0]
 		d.aiHi = dcfg.Cfg.AI.AmbiguousBand[1]
+		// An OMITTED ambiguous_band (the config loader stamped the
+		// compile-time default) follows the operator's CONFIGURED
+		// ban_threshold, not the default one (issue #443): with a raised
+		// threshold, scores in (default_hi, threshold) are genuinely
+		// ambiguous — below the operator's auto-ban line — yet fell outside
+		// the static default band, so the AI was silently never consulted
+		// for them. An explicitly configured band is always honored as-is.
+		if dcfg.Cfg.AI.AmbiguousBand == config.DefaultAmbiguousBand && dcfg.Policy != nil {
+			if hi := dcfg.Policy.BanThreshold - 1; hi > d.aiLo {
+				d.aiHi = hi
+			}
+		}
 	}
 
 	return d, nil

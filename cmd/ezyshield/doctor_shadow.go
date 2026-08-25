@@ -75,12 +75,13 @@ func checkPathShadowing(pathEnv string, binaries []string) []CheckResult {
 			sum  string
 		}
 		var hits []hit
-		seen := map[string]bool{}
+		seenDir := map[string]bool{}
+		seenFile := map[string]bool{}
 		for _, dir := range dirs {
-			if dir == "" || seen[dir] {
+			if dir == "" || seenDir[dir] {
 				continue
 			}
-			seen[dir] = true
+			seenDir[dir] = true
 			path := filepath.Join(dir, bin)
 			// G703/G304: path is built from PATH directories the admin
 			// controls (dirs, ultimately os.Getenv("PATH")), not from
@@ -89,6 +90,21 @@ func checkPathShadowing(pathEnv string, binaries []string) []CheckResult {
 			if err != nil || !info.Mode().IsRegular() {
 				continue
 			}
+			// usr-merged systems (/bin is a symlink to /usr/bin) list the
+			// same file under two PATH entries; count each real file once so
+			// the hint doesn't claim "2 PATH locations" for one binary
+			// (issue #457). PATH resolution order is preserved: the first
+			// spelling encountered is the one reported. EvalSymlinks failure
+			// (dangling/looping link) falls back to the lexical path, which
+			// at worst re-hashes a duplicate — same as before this fix.
+			key := path
+			if real, rerr := filepath.EvalSymlinks(path); rerr == nil {
+				key = real
+			}
+			if seenFile[key] {
+				continue
+			}
+			seenFile[key] = true
 			sum, err := fileSHA256(path)
 			if err != nil {
 				continue

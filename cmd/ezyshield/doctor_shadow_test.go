@@ -28,6 +28,40 @@ func TestCheckPathShadowing(t *testing.T) {
 		}
 	})
 
+	t.Run("usr-merge: symlinked dir is the same location, returns N/A", func(t *testing.T) {
+		t.Parallel()
+		// Debian-style usr-merge: /bin -> /usr/bin puts the one real binary
+		// under two PATH entries (issue #457). That is one location, not two.
+		realDir := t.TempDir()
+		writeFakeBin(t, filepath.Join(realDir, "ezyshield"), "v1")
+		linkDir := filepath.Join(t.TempDir(), "bin")
+		if err := os.Symlink(realDir, linkDir); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+
+		pathEnv := linkDir + string(os.PathListSeparator) + realDir
+		results := checkPathShadowing(pathEnv, []string{"ezyshield"})
+		if len(results) != 1 || results[0].Status != statusNA {
+			t.Fatalf("got %+v, want single N/A result (one real file)", results)
+		}
+	})
+
+	t.Run("symlinked binary to the same file is one location, returns N/A", func(t *testing.T) {
+		t.Parallel()
+		realDir, linkDir := t.TempDir(), t.TempDir()
+		target := filepath.Join(realDir, "ezyshield")
+		writeFakeBin(t, target, "v1")
+		if err := os.Symlink(target, filepath.Join(linkDir, "ezyshield")); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+
+		pathEnv := linkDir + string(os.PathListSeparator) + realDir
+		results := checkPathShadowing(pathEnv, []string{"ezyshield"})
+		if len(results) != 1 || results[0].Status != statusNA {
+			t.Fatalf("got %+v, want single N/A result (one real file)", results)
+		}
+	})
+
 	t.Run("two locations identical content returns PASS", func(t *testing.T) {
 		t.Parallel()
 		dirA, dirB := t.TempDir(), t.TempDir()

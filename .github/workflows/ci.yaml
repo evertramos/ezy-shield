@@ -200,6 +200,23 @@ jobs:
         run: |
           set -o pipefail
           go test -fuzz=FuzzNginxParser -fuzztime=10s ./internal/parser/ | tee fuzz-nginx.txt
+      # Issue #331: every parser fuzz target runs in fuzz mode — the policy
+      # (AGENTS.md security gates) covers ALL parsers, not just the first two.
+      - name: Fuzz Caddy parser (10s)
+        id: fcaddy
+        run: |
+          set -o pipefail
+          go test -fuzz=FuzzCaddyParser -fuzztime=10s ./internal/parser/ | tee fuzz-caddy.txt
+      - name: Fuzz Traefik parser (10s)
+        id: ftraefik
+        run: |
+          set -o pipefail
+          go test -fuzz=FuzzTraefikParser -fuzztime=10s ./internal/parser/ | tee fuzz-traefik.txt
+      - name: Fuzz Apache error parser (10s)
+        id: fapacheerr
+        run: |
+          set -o pipefail
+          go test -fuzz=FuzzApacheErrorParser -fuzztime=10s ./internal/parser/ | tee fuzz-apache-error.txt
       - name: Fuzz proc SSH-peer parser (10s)
         id: fproc
         run: |
@@ -222,6 +239,9 @@ jobs:
             echo "|---|---|---|"
             echo "| FuzzSSHParser | $(execs fuzz-ssh.txt) | ${{ steps.fssh.outcome }} |"
             echo "| FuzzNginxParser | $(execs fuzz-nginx.txt) | ${{ steps.fnginx.outcome }} |"
+            echo "| FuzzCaddyParser | $(execs fuzz-caddy.txt) | ${{ steps.fcaddy.outcome }} |"
+            echo "| FuzzTraefikParser | $(execs fuzz-traefik.txt) | ${{ steps.ftraefik.outcome }} |"
+            echo "| FuzzApacheErrorParser | $(execs fuzz-apache-error.txt) | ${{ steps.fapacheerr.outcome }} |"
             echo "| FuzzProcTCPPeers | $(execs fuzz-proc.txt) | ${{ steps.fproc.outcome }} |"
             echo "| FuzzSIEMFormatters | $(execs fuzz-siem.txt) | ${{ steps.fsiem.outcome }} |"
           } >> "$GITHUB_STEP_SUMMARY"

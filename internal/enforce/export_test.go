@@ -52,6 +52,16 @@ func NewCFListsEnforcerForTest(token, baseURL, accountID, listName string) *Clou
 	return newCFListsEnforcerForTest(token, baseURL, accountID, listName)
 }
 
+// NewCFListsEnforcerWithInstance constructs a CloudflareListsEnforcer with a
+// specific per-daemon instance identity and legacy-adoption flag, for the
+// shared-list multi-instance tests (issue #486).
+func NewCFListsEnforcerWithInstance(token, baseURL, accountID, listName, instance string, adoptLegacy bool) *CloudflareListsEnforcer {
+	e := newCFListsEnforcerForTest(token, baseURL, accountID, listName)
+	e.ownTag = cfOwnTag(instance)
+	e.adoptLegacy = adoptLegacy
+	return e
+}
+
 // NewCFListsEnforcerWithAllowlist constructs a CloudflareListsEnforcer with an
 // explicit allowlist for tests.
 func NewCFListsEnforcerWithAllowlist(token, baseURL, accountID, listName string, allowlist []netip.Prefix) *CloudflareListsEnforcer {

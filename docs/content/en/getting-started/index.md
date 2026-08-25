@@ -27,15 +27,17 @@ Get EzyShield running on your server in under 5 minutes.
 curl -sfL https://get.ezyshield.com | sudo sh
 ```
 
-This downloads the latest `ezyshield` and `ezyshield-enforcer` binaries,
-verifies their checksum's cosign signature when `cosign` is installed
-(falling back to a plain SHA-256 checksum check otherwise), and installs
-them.
+The installer is package-first: on apt/dnf hosts it sets up the EzyShield
+package repository and installs the signed `ezyshield` package (upgrades then
+arrive via the package manager). On other hosts it falls back to downloading
+the latest `ezyshield` and `ezyshield-enforcer` binaries, verifying their
+checksum's cosign signature when `cosign` is installed (plain SHA-256
+otherwise).
 
 To install a specific version:
 
 ```bash
-curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=v0.1.0 sh
+curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_VERSION=v0.1.2 sh
 ```
 
 ### Build from source

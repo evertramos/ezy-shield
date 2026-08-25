@@ -588,7 +588,7 @@ func (f *fakeAIProvider) CallCount() int {
 // fakeBudgetStore satisfies ai.BudgetStore without a real database.
 type fakeBudgetStore struct{}
 
-func (f *fakeBudgetStore) RecordUsage(_ context.Context, _ string, _ sdk.Usage) error {
+func (f *fakeBudgetStore) RecordUsage(_ context.Context, _ string, _ sdk.Usage, _ string) error {
 	return nil
 }
 func (f *fakeBudgetStore) TodayUsage(_ context.Context, _ string) (sdk.Usage, error) {

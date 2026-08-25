@@ -90,7 +90,7 @@ enforce:
   nftables: {}                   # enforcement local ligado; os padrões bastam
 
   cloudflare:
-    api_token: env:CF_API_TOKEN  # segredos são referências env:, nunca inline
+    api_token: env:CLOUDFLARE_API_TOKEN  # segredos são referências env:, nunca inline — este NOME é o que o init escreve
     account_id: "abc123..."      # obrigatório no modo padrão "lists"
     # mode: lists                # "lists" (padrão) ou "rulesets"
     # list_name: ezyshield_blocked
@@ -154,9 +154,10 @@ nftables é imediato).
 notify:
   rate_limit_per_minute: 5       # padrão — teto de notificações por minuto
   dedup_window_sec: 600          # padrão — alertas idênticos são colapsados
+  notify_only_window_sec: 3600   # padrão — notify_only repetido por (IP, regra) vira um único resumo
 
   telegram:
-    bot_token: env:EZYSHIELD_TELEGRAM_TOKEN
+    bot_token: env:TELEGRAM_BOT_TOKEN
     chat_ids: ["123456789"]
     severity: [warn, critical]   # filtro opcional: info | warn | critical
 
@@ -164,25 +165,25 @@ notify:
     host: smtp.example.com
     port: 587
     username: alerts@example.com
-    password: env:EZYSHIELD_SMTP_PASSWORD
+    password: env:SMTP_PASSWORD
     tls: starttls                # starttls (padrão) | tls | none
     from: alerts@example.com
     to: [admin@example.com]
 
   slack:
-    webhook_url: env:EZYSHIELD_SLACK_WEBHOOK
+    webhook_url: env:SLACK_WEBHOOK_URL
     channel: "#security"         # override opcional
 
   discord:
-    webhook_url: env:EZYSHIELD_DISCORD_WEBHOOK
+    webhook_url: env:DISCORD_WEBHOOK_URL
 
   webhook:
-    url: env:EZYSHIELD_WEBHOOK_URL
+    url: env:WEBHOOK_URL
     headers:
-      Authorization: env:EZYSHIELD_WEBHOOK_TOKEN   # o valor precisa ser uma referência env: completa
+      Authorization: env:WEBHOOK_AUTH_TOKEN   # o valor precisa ser uma referência env: completa
 ```
 
-Campos compartilhados: `rate_limit_per_minute` (padrão 5) e `dedup_window_sec` (padrão 600) protegem contra tempestades de notificação. Todo canal aceita uma lista `severity` opcional (`info` \| `warn` \| `critical`).
+Campos compartilhados: `rate_limit_per_minute` (padrão 5) e `dedup_window_sec` (padrão 600) protegem contra tempestades de notificação. `notify_only_window_sec` (padrão 3600) adicionalmente janela os eventos `notify_only` abaixo do limiar por (IP, regra): o primeiro evento notifica na hora e as repetições dentro da janela viram um único resumo — valor negativo desativa. Entradas do audit log nunca são suprimidas. Todo canal aceita uma lista `severity` opcional (`info` \| `warn` \| `critical`).
 
 > Campos do tipo segredo (`bot_token`, `password`, `webhook_url`, o `url` do webhook) só aceitam referências `env:VARNAME` — valores inline são rejeitados no carregamento. Eles também são **obrigatórios** no seu canal: um bloco `telegram` sem `bot_token`, um `email` sem `password`, ou um `slack`/`discord`/`webhook` sem sua URL falha na validação (o daemon os resolve na inicialização). Os **valores** dos headers do webhook são enviados literalmente, a menos que o valor inteiro seja uma referência `env:`, que é resolvida.
 
@@ -223,12 +224,21 @@ ai:
 | `model` | nome do modelo |
 | `api_key` | referência `env:VARNAME` (nunca inline) |
 | `endpoint` | URL base apenas para o provedor **`ollama`** (padrão `http://localhost:11434`). Os provedores `anthropic` e `openai` a ignoram e sempre chamam suas APIs oficiais (`https://api.anthropic.com`, `https://api.openai.com`) — não há override de endpoint compatível com OpenAI. Mesmo comportamento nas formas de provedor único e de failover `providers`. |
-| `ambiguous_band` | `[low, high]` — apenas scores dentro da faixa consultam a IA. Omitida (ou `[0, 0]`) assume `[30, 69]`; qualquer outra faixa com `low >= high` ou valores fora de 0–100 é rejeitada no carregamento. Mantenha `high` **abaixo** do `ban_threshold` da policy: um score no limiar ou acima já decidiu o ban só com as regras, então o daemon nunca consulta a IA para ele — uma faixa que invade o limiar apenas dispara um aviso no start e no `validate` |
+| `ambiguous_band` | `[low, high]` — apenas scores dentro da faixa consultam a IA. Omitida (ou `[0, 0]`) assume `[30, ban_threshold − 1]`, seguindo o ban_threshold CONFIGURADO na policy.yaml (`[30, 69]` com o limiar padrão de 70) — então elevar o limiar alarga automaticamente a faixa omitida em vez de deixar silenciosamente uma lacuna sem consulta; qualquer outra faixa com `low >= high` ou valores fora de 0–100 é rejeitada no carregamento. Mantenha `high` **abaixo** do `ban_threshold` da policy: um score no limiar ou acima já decidiu o ban só com as regras, então o daemon nunca consulta a IA para ele — uma faixa que invade o limiar apenas dispara um aviso no start e no `validate` |
 | `token_budget_daily` | teto diário de tokens; quando esgotado, as decisões voltam para as rules |
 | `cache_ttl` | duração do cache de vereditos; omitido ou `0` significa o padrão de **15m** (o cache não pode ser desativado — é o segundo freio contra consultas repetidas para o mesmo comportamento). As entradas são indexadas pela assinatura de comportamento (contagem de kinds + janela), não pelo IP — padrões de ataque idênticos de IPs diferentes reutilizam um veredito; num hit o veredito em cache é redirecionado para o IP em avaliação. Vereditos clampados por allowlist nunca são cacheados |
 | `providers` | lista de failover multi-provedor (`name`, `priority`, `model`, `api_key`, `endpoint`, `token_budget_daily`); tem precedência sobre os campos de provedor único |
 
 O veredito da IA é sempre consultivo: validado por schema, limitado pela policy e nunca capaz de banir um IP da allowlist.
+
+Cada chamada de IA é registrada na tabela `ai_usage` com o IP analisado, então a atribuição de custo vira uma única consulta — os maiores gastadores (um IP drenando o orçamento é, por si só, sintoma de vazamento):
+
+```bash
+sudo sqlite3 /var/lib/ezyshield/ezyshield.db \
+  "SELECT ip, COUNT(*) calls, ROUND(SUM(cost_usd), 4) usd
+   FROM ai_usage WHERE ip IS NOT NULL
+   GROUP BY ip ORDER BY usd DESC LIMIT 10;"
+```
 
 ## enrich (GeoIP/ASN)
 

@@ -10,7 +10,6 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -73,7 +72,7 @@ type daemonStore interface {
 	GetState(ctx context.Context, key string) (string, bool, error)
 	DeleteState(ctx context.Context, key string) error
 	AuditSystem(ctx context.Context, op, reason string) error
-	RecordManualBan(ctx context.Context, ip netip.Addr, ttl time.Duration, reason string) error
+	RecordManualBan(ctx context.Context, ip netip.Addr, ttl time.Duration, reason string, dryRun bool) error
 	AddAllow(ctx context.Context, prefix netip.Prefix, expiresAt *time.Time, reason string) error
 	RemoveAllow(ctx context.Context, prefix netip.Prefix) (int, error)
 	ListAllow(ctx context.Context) ([]store.AllowEntry, error)
@@ -156,14 +155,17 @@ type Daemon struct {
 	collectors []sdk.Collector
 	enforcer   sdk.Enforcer
 	notifier   *notify.Dispatcher
-	enricher   geoLookup // nil = enrichment disabled; set via enricherFrom()
+	// notifySup windows notify_only notifications per (IP, rule) — nil when
+	// no notifier is configured or the operator disabled the window
+	// (notify.notify_only_window_sec < 0, issue #421).
+	notifySup *notifySuppressor
+	enricher  geoLookup // nil = enrichment disabled; set via enricherFrom()
 
 	// AI optional components; all three must be non-nil to enable AI analysis.
-	aiProvider     sdk.AIProvider
-	aiBudget       *ai.Budget
-	aiCache        *ai.Cache
-	aiLo, aiHi     int         // ambiguous band: lo <= score <= hi triggers AI
-	aiBudgetWarned atomic.Bool // guards the single "budget exceeded" WARN
+	aiProvider sdk.AIProvider
+	aiBudget   *ai.Budget
+	aiCache    *ai.Cache
+	aiLo, aiHi int // ambiguous band: lo <= score <= hi triggers AI
 
 	socketPath string
 	// policyPath is where arm/disarm persist the armed flag ("" = skip).
@@ -345,6 +347,31 @@ func New(dcfg Config) (*Daemon, error) {
 	if dcfg.Cfg != nil && dcfg.Cfg.AI != nil {
 		d.aiLo = dcfg.Cfg.AI.AmbiguousBand[0]
 		d.aiHi = dcfg.Cfg.AI.AmbiguousBand[1]
+		// An OMITTED ambiguous_band (the config loader stamped the
+		// compile-time default) follows the operator's CONFIGURED
+		// ban_threshold, not the default one (issue #443): with a raised
+		// threshold, scores in (default_hi, threshold) are genuinely
+		// ambiguous — below the operator's auto-ban line — yet fell outside
+		// the static default band, so the AI was silently never consulted
+		// for them. An explicitly configured band is always honored as-is.
+		if dcfg.Cfg.AI.AmbiguousBand == config.DefaultAmbiguousBand && dcfg.Policy != nil {
+			if hi := dcfg.Policy.BanThreshold - 1; hi > d.aiLo {
+				d.aiHi = hi
+			}
+		}
+	}
+
+	// notify_only suppression window (issue #421). Only built when a
+	// notifier exists; window comes from notify.notify_only_window_sec
+	// (0/omitted = 1h default, negative = disabled).
+	if d.notifier != nil {
+		windowSec := 0
+		if dcfg.Cfg != nil && dcfg.Cfg.Notify != nil {
+			windowSec = dcfg.Cfg.Notify.NotifyOnlyWindowSec
+		}
+		if windowSec >= 0 {
+			d.notifySup = newNotifySuppressor(time.Duration(windowSec) * time.Second)
+		}
 	}
 
 	return d, nil
@@ -451,6 +478,9 @@ func (d *Daemon) Run(parentCtx context.Context) error {
 	// Re-evaluate IPs whose would-be ban was refused because of an
 	// ESTABLISHED SSH connection, once that connection is gone (issue #420).
 	go d.runSSHRecheck(ctx)
+
+	// Trailing notify_only summaries for scanners that stopped (issue #421).
+	go d.runNotifySuppressFlush(ctx)
 
 	// Signal handling. Tests inject d.sigCh to drive the SIGTERM/SIGINT
 	// branches without raising real process signals (which would leak into
@@ -574,7 +604,7 @@ func (d *Daemon) runCollectorOnce(ctx context.Context, c sdk.Collector, out chan
 			stack := debug.Stack()
 			slog.ErrorContext(ctx, "daemon: collector panic recovered",
 				"collector", collectorName(c), "panic", r, "stack", string(stack))
-			d.notifyPanic(ctx, fmt.Sprintf("collector panic: %v", r))
+			d.notifyPanic(ctx, collectorName(c), fmt.Sprintf("collector panic: %v", r))
 			err = fmt.Errorf("collector panic: %v", r)
 		}
 	}()
@@ -603,7 +633,7 @@ func (d *Daemon) runPipeline(ctx context.Context, rawLines <-chan sdk.RawLine) {
 			stack := debug.Stack()
 			slog.ErrorContext(ctx, "daemon: pipeline panic recovered",
 				"panic", r, "stack", string(stack))
-			d.notifyPanic(ctx, fmt.Sprintf("pipeline panic: %v", r))
+			d.notifyPanic(ctx, "pipeline", fmt.Sprintf("pipeline panic: %v", r))
 		}
 	}()
 
@@ -766,7 +796,9 @@ func (d *Daemon) maybeConsultAI(ctx context.Context, ip netip.Addr, verdicts []s
 		return verdicts
 	}
 	if exceeded {
-		if d.aiBudgetWarned.CompareAndSwap(false, true) {
+		// Once per UTC day (Budget owns the rollover, issue #359) — the old
+		// process-lifetime bool meant day-two breaches were never logged.
+		if d.aiBudget.NoteExceededToday() {
 			slog.WarnContext(ctx, "daemon: AI daily token budget exceeded; switching to rules-only")
 		}
 		return verdicts
@@ -814,11 +846,10 @@ func (d *Daemon) maybeConsultAI(ctx context.Context, ip netip.Addr, verdicts []s
 		"cost_usd", usage.CostUSD,
 	)
 
-	if budgetExceeded, err := d.aiBudget.Consume(ctx, usage); err != nil {
+	if budgetExceeded, err := d.aiBudget.Consume(ctx, usage, ip); err != nil {
 		slog.WarnContext(ctx, "daemon: ai budget consume failed", "err", err)
 	} else if budgetExceeded {
 		slog.WarnContext(ctx, "daemon: AI daily token budget now exhausted")
-		d.aiBudgetWarned.Store(true)
 	}
 
 	// Bind BEFORE the cache Set: an off-request verdict must neither reach the
@@ -945,6 +976,21 @@ func (d *Daemon) dispatch(ctx context.Context, action sdk.Action) {
 	}
 
 	if d.notifier != nil && (action.Op == "ban" || action.Op == "dry_ban" || action.Op == "notify_only") {
+		// notify_only streams are windowed per (IP, rule): the first event
+		// notifies, repeats within the window fold into one summary (issue
+		// #421). Only the notification is suppressed — the audit row was
+		// already written by the decision engine.
+		if action.Op == "notify_only" && d.notifySup != nil {
+			send, summary := d.notifySup.admit(action)
+			if summary != nil {
+				if err := d.notifier.Send(ctx, *summary); err != nil {
+					slog.ErrorContext(ctx, "daemon: notifier error", "err", err)
+				}
+			}
+			if !send {
+				return
+			}
+		}
 		msg := sdk.Notification{
 			Severity: severityFor(action.Op),
 			Title:    fmt.Sprintf("[%s] %s — strike %d", action.Op, action.IP, action.Strike),
@@ -1224,14 +1270,21 @@ func (d *Daemon) runExpireBans(ctx context.Context) {
 	}
 }
 
-// notifyPanic sends a critical notification about a recovered panic.
-func (d *Daemon) notifyPanic(ctx context.Context, msg string) {
+// notifyPanic sends a critical notification about a recovered panic. The
+// panicking source (collector name, "pipeline") is part of the Title, which
+// is also the notifier's system dedup key (severity+Title): with a constant
+// Title, panics from DIFFERENT collectors collapsed into one alert per
+// suppression window and the per-source detail never survived — under
+// restart-on-panic (#305) a wedged collector could panic-loop while every
+// alert after the first was suppressed (issue #438). Repeated panics from
+// the SAME source still share a key and stay rate-limited.
+func (d *Daemon) notifyPanic(ctx context.Context, source, msg string) {
 	if d.notifier == nil {
 		return
 	}
 	_ = d.notifier.Send(ctx, sdk.Notification{
 		Severity: "critical",
-		Title:    "daemon panic recovered",
+		Title:    "daemon panic recovered (" + source + ")",
 		Body:     msg,
 	})
 }

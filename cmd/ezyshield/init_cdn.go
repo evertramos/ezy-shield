@@ -151,6 +151,11 @@ type cdnDeps struct {
 	// entirely (the whole CDN subflow becomes a no-op, since we cannot
 	// safely make firewall + secret decisions without operator input).
 	Yes bool
+	// LocalVHosts supplies the file-based detection sources (Traefik local
+	// config, nginx server_name — issue #488). Production wires
+	// vhostdetect.DetectLocalDefault; nil (the test default) scans nothing,
+	// so wizard tests never touch the host's real /etc.
+	LocalVHosts func() []vhostdetect.VHost
 }
 
 // runCDNStep executes the CDN detection + optional CF subflow. It writes
@@ -174,6 +179,12 @@ func runCDNStep(
 
 	// 1. Enumerate vhosts + resolve → classify.
 	step.vhosts = detectVHosts(ctx, deps.DockerCLI)
+	// File-based sources (issue #488): Traefik local config and nginx
+	// server_name directives. Injected so tests never scan the host's /etc;
+	// nil (the test default) skips them.
+	if deps.LocalVHosts != nil {
+		step.vhosts = append(step.vhosts, deps.LocalVHosts()...)
+	}
 	domains := vhostdetect.AllDomains(step.vhosts)
 
 	if len(domains) == 0 {
@@ -187,6 +198,11 @@ func runCDNStep(
 		return
 	}
 
+	// A broken embedded range table means "detection unavailable", never
+	// "no CDN detected" — say so instead of probing against nothing.
+	if err := cdndetect.LoadError(); err != nil {
+		p.printf("  CDN detection unavailable (%v) — answer the CDN questions manually\n", err)
+	}
 	p.printf("  CDN detection: probing %d vhost domain(s)...\n", len(domains))
 	step.results = cdndetect.MatchDomains(ctx, domains, cdndetect.Options{
 		Resolver: deps.Resolver,
@@ -657,7 +673,7 @@ func promptOneCFAccount(
 			return nil, false
 		}
 		cfg.AccountID = accountID
-		listName := pr.ask("Custom IP List name", "ezyshield_blocked")
+		listName := pr.ask("Custom IP List name", config.DefaultCFListName)
 		listName = strings.TrimSpace(listName)
 		if !cfListNameRe.MatchString(listName) {
 			p.printf("  list_name must match [A-Za-z0-9_]+; got %q; skipping this account.\n", listName)
@@ -1180,9 +1196,12 @@ func writeCloudflareEnvFile(configDir, envVar, token string) (wrote, kept bool, 
 	}
 	envPath := filepath.Join(configDir, envFileName)
 
-	// Idempotency: if the file already has envVar=<non-placeholder>,
-	// leave it alone. This lets a re-run avoid clobbering a manually
-	// rotated token — matches the AI-key idempotency (§5 issue #13).
+	// Idempotency: re-pasting the SAME token is a no-op on disk. A
+	// DIFFERING paste deliberately replaces the stored value — the operator
+	// typed a new token into the wizard, so honoring it wins over the old
+	// file (issue #357: this comment used to claim a manually rotated token
+	// always survived a re-run, which was only true when the re-run pasted
+	// the rotated value itself).
 	if existing, ok := readEnvValue(envPath, envVar); ok &&
 		existing != "" && existing != envAPIKeyPlaceholder {
 		if existing == token {

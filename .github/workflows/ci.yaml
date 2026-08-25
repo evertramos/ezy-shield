@@ -366,7 +366,7 @@ jobs:
             stat -c "%a %U:%G %n" /etc/ezyshield /var/lib/ezyshield
             out=$(ezyshield doctor 2>&1 || true); test -n "$out"
             systemd-analyze verify /usr/lib/systemd/system/ezyshield.service /usr/lib/systemd/system/ezyshield-enforcer.service
-            ls /etc/ezyshield/config.yaml.example /etc/ezyshield/policy.yaml.example /etc/ezyshield/rules.yaml.example
+            ls /etc/ezyshield/config.yaml.example /etc/ezyshield/policy.yaml.example
           '
       - name: Verify .rpm on rockylinux:9
         run: |

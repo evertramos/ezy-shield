@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/netip"
 
 	"github.com/evertramos/ezy-shield/pkg/sdk"
 )
@@ -80,9 +81,15 @@ func (c *ChainProvider) Analyze(
 			continue
 		}
 
-		// Record per-provider budget consumption.
+		// Record per-provider budget consumption, attributed to the analyzed
+		// IP (issue #422): all aggregates in one Analyze batch describe the
+		// same subject IP.
+		var analyzedIP netip.Addr
+		if len(batch) > 0 {
+			analyzedIP = batch[0].IP
+		}
 		if entry.Budget != nil {
-			if _, consumeErr := entry.Budget.Consume(ctx, usage); consumeErr != nil {
+			if _, consumeErr := entry.Budget.Consume(ctx, usage, analyzedIP); consumeErr != nil {
 				slog.WarnContext(ctx, "ai: chain: budget consume failed",
 					"provider", name, "err", consumeErr)
 			}

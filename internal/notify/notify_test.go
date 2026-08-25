@@ -146,6 +146,49 @@ func TestDispatcher_DedupAllowsAfterWindowExpires(t *testing.T) {
 	}
 }
 
+// TestDispatcher_PanicDedupPerSource covers issue #438: daemon panic alerts
+// carry the panicking source in the Title (the system dedup key is
+// severity+Title), so panics from DIFFERENT collectors must produce separate
+// notifications within one window, while repeated panics from the SAME
+// source stay suppressed. Pre-fix every panic shared the constant Title
+// "daemon panic recovered" and cross-collector alerts collapsed into one.
+func TestDispatcher_PanicDedupPerSource(t *testing.T) {
+	title := func(source string) string { return "daemon panic recovered (" + source + ")" }
+	cases := []struct {
+		name      string
+		titles    []string
+		wantSends int32
+	}{
+		{
+			name:      "same collector suppressed within window",
+			titles:    []string{title("journald:sshd"), title("journald:sshd"), title("journald:sshd")},
+			wantSends: 1,
+		},
+		{
+			name:      "different collectors alert independently",
+			titles:    []string{title("journald:sshd"), title("docker:web"), title("file:/var/log/auth.log")},
+			wantSends: 3,
+		},
+		{
+			name:      "pipeline and collector panics are distinct",
+			titles:    []string{title("pipeline"), title("journald:sshd")},
+			wantSends: 2,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			n := &stubNotifier{name: "panickey"}
+			d := notify.New([]sdk.Notifier{n}, 100, time.Hour, nil)
+			for _, ti := range tc.titles {
+				_ = d.Send(context.Background(), makeMsg("critical", ti))
+			}
+			if got := n.sends.Load(); got != tc.wantSends {
+				t.Errorf("expected %d sends, got %d (titles: %v)", tc.wantSends, got, tc.titles)
+			}
+		})
+	}
+}
+
 func TestDispatcher_DedupKeyPerIP(t *testing.T) {
 	n := &stubNotifier{name: "ipkey"}
 	d := notify.New([]sdk.Notifier{n}, 100, time.Hour, nil)

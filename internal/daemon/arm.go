@@ -173,7 +173,7 @@ func (d *Daemon) setArmedState(ctx context.Context, armed bool, op, reason strin
 			// Persist-first: if policy.yaml cannot be updated, do not flip
 			// the runtime state either — a mismatch between file and runtime
 			// is worse than a refused command.
-			return fmt.Errorf("persisting armed=%v: %v", armed, err)
+			return fmt.Errorf("persisting armed=%v: %w", armed, err)
 		}
 	}
 	d.policy.SetArmed(armed)

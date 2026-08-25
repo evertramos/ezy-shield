@@ -410,9 +410,14 @@ func (d *Daemon) handleBan(ctx context.Context, req SocketRequest) SocketRespons
 	// succeeded. We only emit the "daemon: action" INFO line on that happy path:
 	// the audit-fallback ERROR-log branch already surfaces the failure, and a
 	// duplicate INFO there would falsely suggest the action was recorded.
+	// Recorded regardless of armed state: a manual ban while disarmed is a
+	// dry_ban ROW (dry_run=1), so `list` and the status SimulatedBans count
+	// mirror it exactly like pipeline dry_bans — audit-only recording made
+	// the operator's own action invisible in dry-run mode (issue #358,
+	// ADR-0009 §5 "dry-run mirrors armed").
 	stored := false
-	if prefix.Bits() == prefix.Addr().BitLen() && d.policy.IsArmed() {
-		if err := d.store.RecordManualBan(ctx, prefix.Addr(), ttl, reason); err != nil {
+	if prefix.Bits() == prefix.Addr().BitLen() {
+		if err := d.store.RecordManualBan(ctx, prefix.Addr(), ttl, reason, !d.policy.IsArmed()); err != nil {
 			slog.ErrorContext(ctx, "daemon: record manual ban failed, falling back to audit-only",
 				"ip", prefix.Addr(), "err", err)
 			if auditErr := d.store.AuditOp(ctx, op, prefix, ttl, reason); auditErr != nil {

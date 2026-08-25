@@ -82,12 +82,18 @@ type NotifyCfg struct {
 	RateLimitPerMinute int `yaml:"rate_limit_per_minute"`
 	// DedupWindowSec suppresses repeat notifications for the same IP+reason
 	// within this window. Defaults to 600 seconds (10 minutes) when omitted or zero.
-	DedupWindowSec int          `yaml:"dedup_window_sec"`
-	Telegram       *TelegramCfg `yaml:"telegram"`
-	Email          *EmailCfg    `yaml:"email"`
-	Slack          *SlackCfg    `yaml:"slack"`
-	Discord        *DiscordCfg  `yaml:"discord"`
-	Webhook        *WebhookCfg  `yaml:"webhook"`
+	DedupWindowSec int `yaml:"dedup_window_sec"`
+	// NotifyOnlyWindowSec is the per-(IP, rule) suppression window for
+	// notify_only events (issue #421): the first event notifies immediately,
+	// repeats within the window fold into a single summary notification.
+	// Omitted or 0 = 3600 (1 hour); negative = disabled (every event
+	// notifies, pre-#421 behavior). Audit log rows are never suppressed.
+	NotifyOnlyWindowSec int          `yaml:"notify_only_window_sec"`
+	Telegram            *TelegramCfg `yaml:"telegram"`
+	Email               *EmailCfg    `yaml:"email"`
+	Slack               *SlackCfg    `yaml:"slack"`
+	Discord             *DiscordCfg  `yaml:"discord"`
+	Webhook             *WebhookCfg  `yaml:"webhook"`
 }
 
 // SlackCfg configures the Slack incoming webhook notification channel.
@@ -209,6 +215,12 @@ type NFTablesCfg struct {
 	Set    string `yaml:"set"`
 }
 
+// DefaultCFListName is the Cloudflare Custom IP List EzyShield manages when
+// list_name is unset. Single source of truth: the enforcer, doctor, test
+// wizard, and init prompt all derive from here (issue #356 — the literal used
+// to be re-declared at each site and could drift silently).
+const DefaultCFListName = "ezyshield_blocked"
+
 // CloudflareCfg holds Cloudflare edge enforcer settings.
 // APIToken must be an "env:VARNAME" reference; inline values are rejected.
 //
@@ -237,7 +249,7 @@ type CloudflareCfg struct {
 	// AccountID is the Cloudflare account ID; required when Mode=="lists".
 	AccountID string `yaml:"account_id"`
 	// ListName is the Custom IP List name used by Mode=="lists".
-	// Defaults to "ezyshield_blocked"; auto-created when missing.
+	// Defaults to DefaultCFListName; auto-created when missing.
 	// Must match [A-Za-z0-9_]+ (Cloudflare constraint) and be 1..50 characters.
 	ListName string `yaml:"list_name"`
 	// Instance identifies THIS daemon among several EzyShield servers

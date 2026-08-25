@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -51,7 +50,7 @@ are auto-removed by the daemon's expiry sweep.`,
 }
 
 func runAllow(cmd *cobra.Command, socketPath, target, forDur, until, reason string) error {
-	resp, err := daemonRPC(context.Background(), socketPath,
+	resp, err := daemonRPC(cmd.Context(), socketPath,
 		daemon.SocketRequest{
 			Verb:   "allow",
 			IP:     target,
@@ -109,7 +108,7 @@ runtime — edit the config and restart the daemon instead.`,
 }
 
 func runUnallow(cmd *cobra.Command, socketPath, target, reason string) error {
-	resp, err := daemonRPC(context.Background(), socketPath,
+	resp, err := daemonRPC(cmd.Context(), socketPath,
 		daemon.SocketRequest{
 			Verb:   "unallow",
 			IP:     target,

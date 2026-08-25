@@ -33,7 +33,7 @@ against:
 | Command | Shape |
 |---------|-------|
 | `status` | Object: `daemon`, `enforcer`, `mode`, `uptime`, `version`, `active_bans`, `bans_by_strike`, `message` |
-| `list` | Envelope: `ok`, `error`, `data` (rows under `data`) |
+| `list` | Array of rows — active bans, `--allow` entries, or `--audit` events (`[]` when empty) |
 | `report <ip>` | Object: versioned abuse report (`schema_version`, `ip`, `country`, `asn`, `current_ban`, `strikes`, `actions`, plus `evidence` with `--evidence`) |
 | `report` | Array of offender summaries (`ip`, `first_seen`, `last_seen`, `total_strikes`, `banned`, `permanent`, `country`, `asn`) |
 | `watch` | NDJSON: one event object per line |
@@ -217,6 +217,12 @@ Output:
 - Mode (enforce / dry-run), uptime, version
 - Active bans total and per-strike breakdown
 
+Stable `--json` fields beyond those: `enforcement_state` /
+`enforcement_detail` (the honest enforcement health, same vocabulary as
+doctor), `collectors_state` / `collectors_detail`, `simulated_bans`
+(dry-run bans that would be enforced if armed), and `armed_until` (the
+auto-revert deadline while an `arm --for` window is active).
+
 ## ezyshield list
 
 List active bans (default) or the allowlist.
@@ -237,7 +243,7 @@ ezyshield list --audit
 ezyshield list --audit --ip 203.0.113.42
 ezyshield list --audit --limit 50
 
-# JSON output (works with --audit too)
+# JSON output — always a bare array of entries (works with --audit and --allow too)
 ezyshield list --json
 ```
 
@@ -337,6 +343,7 @@ sudo ezyshield ban 203.0.113.0/24
 | Flag | Description |
 |------|-------------|
 | `--ttl` | ban duration (`5m`, `24h`, `7d`); empty = permanent |
+| `--for` | alias of `--ttl`, matching `allow --for` and `arm --for` |
 | `--reason` | free-text reason stored in the audit log |
 | `--socket` | control socket path override |
 
@@ -453,6 +460,7 @@ sudo ezyshield doctor
 |------|---------|-------------|
 | `--config-dir` | `/etc/ezyshield` | configuration directory to check |
 | `--db` | `/var/lib/ezyshield/ezyshield.db` | database for the read-only ban_ineffective check |
+| `--socket` | `/run/ezyshield/ezyshield.sock` | daemon control socket (queried for the live enforcement state) |
 
 Checks:
 - config.yaml / policy.yaml exist, parse, and have safe permissions/ownership
@@ -691,7 +699,7 @@ ezyshield version --json
 
 ## ezyshield test
 
-Run connectivity tests against configured components. Like `config`, the group follows the `<kind> <name>` pattern, so future component kinds plug into the same verbs.
+Run connectivity tests against configured components. Like `config`, the group follows the `<kind> <name>` pattern, so future component kinds plug into the same verbs. Both subcommands accept `--config-dir` (default `/etc/ezyshield`) to point at the directory holding `config.yaml`.
 
 ### ezyshield test enforcer `<name>`
 
@@ -719,7 +727,7 @@ sudo ezyshield test notifier telegram
 sudo ezyshield test notifier all
 ```
 
-Available names: `all`, `email`, `telegram`.
+Available names: `all`, `discord`, `email`, `slack`, `telegram`, `webhook`.
 
 Exit code is non-zero on failure.
 
@@ -736,7 +744,8 @@ The pre-1.0 verbs `test-enforce <name>` and `test-notify <name>` keep working as
 | `-h, --help` | Show help text |
 
 `--config` / `--policy` are **not** global — they exist on the commands that
-read those files (`run`, `config show`, `validate`, `dashboard`), with
+read those files (`run`, `config show`, `validate`; `dashboard` takes `--config`
+only — it never reads policy.yaml), with
 defaults under `/etc/ezyshield`.
 
 ### Root-command-only flags
@@ -761,7 +770,7 @@ ezyshield watch --kind ban,dry_ban
 **Export per-IP history with evidence to JSON:**
 
 ```bash
-ezyshield report --json > report.json
+ezyshield report 203.0.113.42 --json > report.json
 ```
 
 **Check if an IP is currently banned:**

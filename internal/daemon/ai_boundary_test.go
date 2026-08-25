@@ -460,7 +460,7 @@ func TestMaybeConsultAI_ActiveBan_NoConsult(t *testing.T) {
 	d := newAIDaemonWithBand(t, prov, [2]int{30, 75}, false)
 
 	ctx := context.Background()
-	if err := d.store.RecordManualBan(ctx, ip, time.Hour, "test ban"); err != nil {
+	if err := d.store.RecordManualBan(ctx, ip, time.Hour, "test ban", false); err != nil {
 		t.Fatalf("RecordManualBan: %v", err)
 	}
 

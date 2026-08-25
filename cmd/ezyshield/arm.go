@@ -6,7 +6,6 @@ package main
 // survives losing the SSH session (the revert runs in the daemon).
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -70,12 +69,16 @@ moving toward dry-run is always the safe direction. The transition is
 persisted to policy.yaml and audited.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			resp, err := daemonRPC(context.Background(), socketPath, daemon.SocketRequest{Verb: "disarm"})
+			resp, err := daemonRPC(cmd.Context(), socketPath, daemon.SocketRequest{Verb: "disarm"})
 			if err != nil {
 				return err
 			}
 			if resp.Error != "" {
 				return fmt.Errorf("%s", resp.Error)
+			}
+			// Honor the root --json contract like arm/ban/allow (issue #356).
+			if jsonOutput {
+				return writeJSON(cmd.OutOrStdout(), map[string]any{"armed": false, "status": "disarmed"})
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), "disarmed — daemon is back in dry-run mode") //nolint:errcheck
 			return nil
@@ -97,7 +100,7 @@ func runArm(cmd *cobra.Command, socketPath, forWindow string, force bool) error 
 	// A refusal is a non-OK response WITH a payload (the pre-flight report).
 	// daemonRPC surfaces it as resp+err together — keep going so the
 	// operator sees WHICH checks failed, then exit non-zero.
-	resp, err := daemonRPC(context.Background(), socketPath, req)
+	resp, err := daemonRPC(cmd.Context(), socketPath, req)
 	if resp == nil {
 		return err // unreachable daemon or transport failure
 	}
@@ -141,12 +144,16 @@ func runArm(cmd *cobra.Command, socketPath, forWindow string, force bool) error 
 }
 
 func runArmKeep(cmd *cobra.Command, socketPath string) error {
-	resp, err := daemonRPC(context.Background(), socketPath, daemon.SocketRequest{Verb: "arm_keep"})
+	resp, err := daemonRPC(cmd.Context(), socketPath, daemon.SocketRequest{Verb: "arm_keep"})
 	if err != nil {
 		return err
 	}
 	if resp.Error != "" {
 		return fmt.Errorf("%s", resp.Error)
+	}
+	// Honor the root --json contract like arm/ban/allow (issue #356).
+	if jsonOutput {
+		return writeJSON(cmd.OutOrStdout(), map[string]any{"armed": true, "status": "confirmed"})
 	}
 	fmt.Fprintln(cmd.OutOrStdout(), "confirmed — armed is now unconditional (auto-revert window cleared)") //nolint:errcheck
 	return nil

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"net/netip"
 
@@ -14,6 +13,7 @@ func newBanCmd() *cobra.Command {
 	var (
 		socketPath string
 		ttl        string
+		forDur     string
 		reason     string
 	)
 
@@ -32,6 +32,14 @@ recorded in the audit log but no firewall rule is written.`,
 			if err := validateTarget(args[0]); err != nil {
 				return err
 			}
+			// --for is the cross-verb name for an entry lifetime (allow --for,
+			// arm --for; issue #356); --ttl remains as the historical spelling.
+			if ttl != "" && forDur != "" {
+				return fmt.Errorf("--ttl and --for are the same flag under two names; pass only one")
+			}
+			if forDur != "" {
+				ttl = forDur
+			}
 			return runBan(cmd, socketPath, args[0], ttl, reason)
 		},
 	}
@@ -40,6 +48,8 @@ recorded in the audit log but no firewall rule is written.`,
 		"path to daemon control socket")
 	cmd.Flags().StringVar(&ttl, "ttl", "",
 		"ban duration, e.g. \"5m\", \"24h\", \"7d\" (empty = permanent)")
+	cmd.Flags().StringVar(&forDur, "for", "",
+		"alias of --ttl, matching 'allow --for' and 'arm --for'")
 	cmd.Flags().StringVar(&reason, "reason", "",
 		"free-text note, shown in audit log")
 
@@ -47,7 +57,7 @@ recorded in the audit log but no firewall rule is written.`,
 }
 
 func runBan(cmd *cobra.Command, socketPath, target, ttl, reason string) error {
-	resp, err := daemonRPC(context.Background(), socketPath,
+	resp, err := daemonRPC(cmd.Context(), socketPath,
 		// Peer forwards this session's SSH client IP so the daemon's
 		// manual-ban anti-lockout guard can protect it (issue #211) — the
 		// daemon has no SSH_CLIENT of its own under systemd.

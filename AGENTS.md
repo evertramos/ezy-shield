@@ -5,7 +5,7 @@ same rules, so all tools and people follow one source of truth.
 
 ## Project Context
 
-EzyShield is a CLI-first Linux security tool: detects malicious IPs from logs, escalates bans by strikes (5min → 1h → 24h → 7d → permanent), enforces locally (nftables) and at the edge (Cloudflare/Bunny/AWS), uses AI providers for ambiguous cases with a rule-engine fallback. Interface contracts must not change without an ADR in `docs/internal/adr/`.
+EzyShield is a CLI-first Linux security tool: detects malicious IPs from logs, escalates bans by strikes (5min → 1h → 24h → 7d → permanent), enforces locally (nftables) and at the edge (Cloudflare today; Bunny and AWS WAF are planned, not implemented), uses AI providers for ambiguous cases with a rule-engine fallback. Interface contracts must not change without an ADR in `docs/internal/adr/`.
 
 ## Hard Rules
 

@@ -70,6 +70,14 @@ func (p *ApacheErrorParser) Parse(line sdk.RawLine) ([]sdk.Event, error) {
 		return nil, nil
 	}
 
+	// Unwrap Docker json-file log format, matching the HTTP parsers
+	// (issue #358): Apache in a container logs through json-file too.
+	if len(raw) > 0 && raw[0] == '{' {
+		if inner := extractDockerLogField(raw); inner != "" {
+			raw = strings.TrimRight(inner, "\r\n")
+		}
+	}
+
 	m := reApacheError.FindStringSubmatch(raw)
 	if m == nil {
 		p.logger.Debug("apache-error: unrecognised line, skipping",

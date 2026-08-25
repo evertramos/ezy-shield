@@ -38,11 +38,14 @@ func mustAddr(t *testing.T, s string) netip.Addr {
 }
 
 // TestLoadProviders_EmbeddedFileParses is a smoke test that the shipped
-// ranges.yaml decodes cleanly. Any hand-edit that breaks CIDR parsing will
-// panic init() (see cdndetect.go) — this test catches it in CI without
-// waiting for a full daemon start.
+// ranges.yaml decodes cleanly. A hand-edit that breaks it no longer panics
+// init() (no panic outside main — issue #358); it sets LoadError instead,
+// and THIS test is the gate that keeps a broken table from shipping.
 func TestLoadProviders_EmbeddedFileParses(t *testing.T) {
 	t.Parallel()
+	if err := LoadError(); err != nil {
+		t.Fatalf("embedded ranges.yaml failed to load: %v", err)
+	}
 	ps := Providers()
 	if len(ps) == 0 {
 		t.Fatal("Providers() returned nothing — embedded ranges.yaml is empty")

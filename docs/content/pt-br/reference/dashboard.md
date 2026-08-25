@@ -25,9 +25,10 @@ release.
 O dashboard escuta **exclusivamente em endereços de loopback** —
 `127.0.0.1`, `::1` ou o literal `localhost`. Qualquer outro bind
 (`0.0.0.0`, interface pública, etc.) é recusado na inicialização,
-tanto em `internal/dashboard.New()` quanto em `Server.Run()` — um
-invariante rígido, checado duas vezes para que um erro de config não
-consiga expô-lo. O dashboard só é alcançável a partir do próprio
+em `internal/dashboard.New()` — o `Server.Run()` então faz bind
+exatamente no endereço que o `New()` validou e congelou (uma
+re-checagem ali seria redundante por construção). O dashboard só é
+alcançável a partir do próprio
 host, e acesso remoto é, por design, uma
 *preocupação do operador* — resolvida fora do daemon.
 
@@ -178,6 +179,7 @@ para que URLs forjadas não injetem strings arbitrárias na UI.
 | `missing-ip`     | O campo `ip` veio vazio                                         |
 | `invalid-ip`     | O campo `ip` não passou no parser `netip` (IP ou CIDR)          |
 | `bad-form`       | Submit malformado                                               |
+| `bad-reason`     | Reason com caracteres não permitidos ou acima de 500 caracteres |
 | `daemon-error`   | Daemon acessível mas devolveu resposta não-OK                   |
 | `daemon-offline` | Socket unix do daemon não aceitou a conexão                     |
 
@@ -304,7 +306,10 @@ Read-only — não tem forms.
   `netip.ParsePrefix` (com fallback para `netip.ParseAddr` → /32 ou
   /128) *antes* de qualquer RPC — hostnames, strings gigantes e
   caracteres inválidos são recusados na borda do dashboard.
-- Reasons vindos do operador são prefixados com `dashboard:admin`
+- Reasons vindos do operador são validados antes do uso: no máximo
+  500 caracteres e sem bytes de controle — uma violação redireciona
+  com o flash code `bad-reason` e nunca chega ao daemon.
+- Reasons válidos são prefixados com `dashboard:admin`
   para que o `audit_log` distinga escritas do dashboard dos verbos
   da CLI. Reason vazio produz o tag puro; reason preenchido produz
   `dashboard:admin: <texto>`.

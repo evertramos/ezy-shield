@@ -60,7 +60,7 @@ func newDoctorCmd() *cobra.Command {
   - install shadowing -- a previous script install (scripts/get.sh) isn't
     silently shadowing a package install via PATH or systemd unit precedence
 
-Each check prints PASS, FAIL, or N/A with a remediation hint on failure.`,
+Each check prints PASS, WARN, FAIL, or N/A with a remediation hint on failure.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runDoctor(cmd, configDir, dbPath, socketPath, jsonOutput)
@@ -595,7 +595,7 @@ func checkOneCloudflare(ctx context.Context, client cfClient, base, configDir st
 	case "lists":
 		listName := eff.ListName
 		if listName == "" {
-			listName = "ezyshield_blocked"
+			listName = config.DefaultCFListName
 		}
 		info, err := cfFindList(ctx, client, base, eff.AccountID, listName, token)
 		switch {

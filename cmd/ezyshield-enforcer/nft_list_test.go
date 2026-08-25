@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"testing"
+	"time"
 
 	"github.com/evertramos/ezy-shield/internal/nftnames"
 )
@@ -85,17 +86,23 @@ func TestListSet_ParsesElements(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	ips, err := listSet(context.Background(), names, names.Set4)
+	els, err := listSet(context.Background(), names, names.Set4)
 	if err != nil {
 		t.Fatalf("listSet: %v", err)
 	}
-	want := map[string]bool{"192.0.2.10": true, "198.51.100.0/24": true}
-	if len(ips) != len(want) {
-		t.Fatalf("got %v, want the %d elements %v", ips, len(want), want)
+	// Remaining lifetime comes from `expires`; no annotation means permanent.
+	want := map[string]time.Duration{"192.0.2.10": 4*time.Minute + 3*time.Second, "198.51.100.0/24": 0}
+	if len(els) != len(want) {
+		t.Fatalf("got %v, want the %d elements %v", els, len(want), want)
 	}
-	for _, ip := range ips {
-		if !want[ip] {
-			t.Errorf("unexpected element %q in %v", ip, ips)
+	for _, el := range els {
+		ttl, ok := want[el.ip]
+		if !ok {
+			t.Errorf("unexpected element %q in %v", el.ip, els)
+			continue
+		}
+		if el.ttl != ttl {
+			t.Errorf("element %q ttl = %v, want %v", el.ip, el.ttl, ttl)
 		}
 	}
 }

@@ -146,7 +146,7 @@ func (c *FileTailCollector) Run(ctx context.Context, out chan<- sdk.RawLine) err
 					asm.discard()
 				}
 				if fi.Size() > lastSize {
-					err = drainLines(f, asm, source, out, logger)
+					err = drainLines(ctx, f, asm, source, out, logger)
 					if err != nil {
 						logger.Debug("filetail: stat-fallback drain", slog.String("err", err.Error()))
 					}
@@ -167,7 +167,7 @@ func (c *FileTailCollector) Run(ctx context.Context, out chan<- sdk.RawLine) err
 			}
 
 			// Drain any pending data first.
-			err = drainLines(f, asm, source, out, logger)
+			err = drainLines(ctx, f, asm, source, out, logger)
 			if err != nil {
 				logger.Debug("filetail: drain error", slog.String("err", err.Error()))
 			}
@@ -216,21 +216,36 @@ func (c *FileTailCollector) Run(ctx context.Context, out chan<- sdk.RawLine) err
 // capped assembler, and sends complete lines to out. Partial trailing data
 // stays buffered in asm — bounded at maxStreamLineBytes, so a newline-less
 // writer can no longer grow the accumulator without limit (issue #307).
-func drainLines(f *os.File, asm *lineAssembler, source string, out chan<- sdk.RawLine, logger *slog.Logger) error {
+func drainLines(ctx context.Context, f *os.File, asm *lineAssembler, source string, out chan<- sdk.RawLine, logger *slog.Logger) error {
 	tmp := make([]byte, 4096)
 	for {
 		n, err := f.Read(tmp)
 		if n > 0 {
-			asm.feed(tmp[:n], func(line []byte) bool {
+			stopped := asm.feed(tmp[:n], func(line []byte) bool {
 				cp := make([]byte, len(line))
 				copy(cp, line)
-				out <- sdk.RawLine{
-					Source: source,
-					Line:   cp,
-					At:     time.Now(),
+				// Send races cancellation (issue #358): after the pipeline
+				// stops reading, a plain blocking send would wedge the
+				// collector goroutine forever during shutdown. The
+				// non-blocking attempt runs FIRST so a graceful SIGTERM
+				// drain (ctx done, pipeline still consuming) never randomly
+				// drops deliverable lines to the select's uniform choice.
+				rl := sdk.RawLine{Source: source, Line: cp, At: time.Now()}
+				select {
+				case out <- rl:
+					return false
+				default:
 				}
-				return false
+				select {
+				case out <- rl:
+					return false
+				case <-ctx.Done():
+					return true
+				}
 			})
+			if stopped {
+				return ctx.Err()
+			}
 		}
 		if err == io.EOF {
 			break

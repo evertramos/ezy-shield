@@ -106,6 +106,15 @@ func runDoctor(cmd *cobra.Command, configDir, dbPath, socketPath string, jsonOut
 	// package install. New function + this single registration line only --
 	// see doctor_shadow.go.
 	checks = append(checks, checkInstallShadowing(os.Getenv("PATH"))...)
+	// issue #177: ufw/firewalld coexistence + the table-gone-with-active-bans
+	// conflict. Read-only (never execs the managers' own CLIs); see
+	// doctor_firewall.go. cmd.Context() is nil when tests call runDoctor on
+	// a command that was built but not Executed.
+	doctorCtx := cmd.Context()
+	if doctorCtx == nil {
+		doctorCtx = context.Background()
+	}
+	checks = append(checks, checkFirewallCoexistence(doctorCtx, dbPath)...)
 	// issue #146: fired ban_ineffective diagnostics (read-only DB query).
 	checks = append(checks, checkBanIneffective(dbPath))
 	// issue #174: honest enforcement state from the running daemon.

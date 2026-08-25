@@ -194,6 +194,60 @@ func TestPrintEnforceResults_WithFailures(t *testing.T) {
 	}
 }
 
+// TestPrintEnforceResults_AllBackendsPrinted reproduces issue #303: the
+// nftables entry always carries Notes ("not yet implemented"), and an early
+// `return` inside the backend loop dropped every backend the map yielded
+// after it — with random map order, `test enforcer all` lost the Cloudflare
+// sections roughly half the time. All sections must print, in deterministic
+// (sorted) order, and the nftables entry must not be labeled "Cloudflare".
+func TestPrintEnforceResults_AllBackendsPrinted(t *testing.T) {
+	results := &testEnforceResults{
+		Backends: map[string]*backendResult{
+			"nftables": {
+				Status: "skipped",
+				Notes:  "nftables testing not yet implemented",
+			},
+			"prod-account": {
+				Status: "pass",
+				Mode:   "lists",
+				Checks: []checkResult{{Name: "Token validity", Status: "pass", Details: "ok"}},
+				Passed: 1,
+			},
+			"z-second-account": {
+				Status:  "error",
+				Message: "token file unreadable",
+			},
+		},
+	}
+
+	var buf strings.Builder
+	if err := printEnforceResults(&buf, results); err != nil {
+		t.Fatalf("printEnforceResults failed: %v", err)
+	}
+	output := buf.String()
+
+	for _, want := range []string{
+		"nftables enforcer: skipped",
+		"nftables testing not yet implemented",
+		`Cloudflare enforcer "prod-account" (mode: lists): pass`,
+		"✓ Token validity",
+		`Cloudflare enforcer "z-second-account": error`,
+		"✗ Error: token file unreadable",
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("output missing %q:\n%s", want, output)
+		}
+	}
+	if strings.Contains(output, "Cloudflare enforcer: skipped") {
+		t.Errorf("nftables entry still labeled as Cloudflare:\n%s", output)
+	}
+	// Deterministic ordering: sorted keys.
+	if strings.Index(output, "nftables enforcer") > strings.Index(output, "prod-account") ||
+		strings.Index(output, "prod-account") > strings.Index(output, "z-second-account") {
+		t.Errorf("backends not printed in sorted order:\n%s", output)
+	}
+}
+
 func TestCheckZoneWAFAccess(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -397,26 +451,5 @@ enforce:
 				t.Fatalf("expected non-zero-exit error for unresolvable token, got nil (output: %s)", out.String())
 			}
 		})
-	}
-}
-
-func TestRepeatStr(t *testing.T) {
-	tests := []struct {
-		s     string
-		count int
-		want  string
-	}{
-		{"─", 5, "─────"},
-		{"x", 3, "xxx"},
-		{"ab", 2, "abab"},
-		{"", 5, ""},
-		{"a", 0, ""},
-	}
-
-	for _, tt := range tests {
-		got := repeatStr(tt.s, tt.count)
-		if got != tt.want {
-			t.Errorf("repeatStr(%q, %d): got %q, want %q", tt.s, tt.count, got, tt.want)
-		}
 	}
 }

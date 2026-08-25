@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"sync"
 	"testing"
 
 	"github.com/evertramos/ezy-shield/pkg/sdk"
@@ -126,6 +127,89 @@ func TestEnricher_Close(t *testing.T) {
 	if got != (sdk.Enrichment{}) {
 		t.Errorf("want empty enrichment after close, got %+v", got)
 	}
+}
+
+// raceReader models a maxminddb reader whose Close() munmaps its backing
+// buffer (buffer = nil), exactly as maxminddb-golang v1.13.1 does in
+// reader_mmap.go. A Lookup that reads buf concurrently with a Close that nils
+// it is a data race — the in-process, race-detector-observable analogue of the
+// use-after-munmap SIGSEGV that issue #310 fixes. In production the same
+// unsynchronized access dereferences unmapped memory and kills the daemon.
+type raceReader struct {
+	buf     []byte
+	country string
+}
+
+func newRaceReader(country string) *raceReader {
+	return &raceReader{buf: make([]byte, 4096), country: country}
+}
+
+func (r *raceReader) Lookup(_ net.IP, v any) error {
+	// Read the mmap-backed buffer, as a real lookup would. Racing with Close's
+	// r.buf = nil, this is the flagged read.
+	if len(r.buf) == 0 {
+		return errors.New("closed reader")
+	}
+	_ = r.buf[len(r.buf)-1]
+	switch dst := v.(type) {
+	case *countryRecord:
+		dst.Country.ISOCode = r.country
+	case *asnRecord:
+		dst.ASN = 64500
+	}
+	return nil
+}
+
+func (r *raceReader) Close() error {
+	r.buf = nil // simulates munmap of the mmap'd region
+	return nil
+}
+
+// TestEnricher_LookupReloadRace hammers Lookup on many goroutines while Reload
+// repeatedly swaps and closes (munmaps) the underlying readers. It must be
+// clean under `go test -race`; on the pre-fix code (Lookup copies the reader
+// pointer and releases the lock before reading) the detector flags a read of
+// the closed reader's buffer against Reload's Close. (issue #310)
+func TestEnricher_LookupReloadRace(t *testing.T) {
+	e := newWithReaders(newRaceReader("BR"), newRaceReader("BR"))
+	// Drive Reload through its real path, but open instrumented readers instead
+	// of touching the filesystem.
+	e.countryPath = "country"
+	e.asnPath = "asn"
+	e.open = func(_ string) (dbReader, error) { return newRaceReader("BR"), nil }
+
+	const readers = 8
+	const reloads = 100
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	for i := 0; i < readers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					_ = e.Lookup(addr("203.0.113.7"))
+				}
+			}
+		}()
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < reloads; i++ {
+			e.Reload()
+		}
+		close(stop)
+	}()
+
+	wg.Wait()
+	e.Close()
 }
 
 func TestToNetIP(t *testing.T) {

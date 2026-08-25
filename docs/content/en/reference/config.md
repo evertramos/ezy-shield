@@ -132,8 +132,21 @@ is written. Two operational notes for custom names:
 | `zone_ids` | when `mode: rulesets` | zones to attach rules to |
 | `action` | no | `block` (default), `challenge`, or `js_challenge` |
 | `name` | no | label shown in status/test output |
+| `debounce` | no | how long rapid ban/unban mutations are coalesced before one batched API push (Go duration, default `15s`) |
+| `expire_flush_interval` | no | cadence for batched item **removals** in `lists` mode (Go duration, default `3m`) — expired bans and unbans accumulate and go out in one API call per interval |
 
 Multiple Cloudflare accounts are supported: `cloudflare` also accepts a **list** of these objects. See the [Cloudflare guide](../guides/cloudflare.md).
+
+Tuning the two cadences trades edge-propagation speed for fewer API calls.
+The defaults keep a busy server comfortably inside Cloudflare's Lists API
+throttle; raise them if `ezyshield status` still reports throttling
+(`ratelimited` in the enforcement detail), lower `debounce` if a new ban must
+reach the edge faster. Removals are deliberately the slow path: an expired IP
+staying blocked at the edge for up to `expire_flush_interval` is fail-closed
+and harmless, while a delayed *ban* is real exposure — which is why bans ride
+`debounce` and only removals wait for the flush interval. Manual `ezyshield
+unban` also propagates to the edge on the flush cadence (the local nftables
+unban is immediate).
 
 ## notify
 
@@ -185,9 +198,9 @@ ai:
   provider: anthropic            # anthropic | openai | ollama
   model: claude-haiku-4-5-20251001
   api_key: env:ANTHROPIC_API_KEY
-  ambiguous_band: [30, 75]       # scores in this band consult the AI
+  ambiguous_band: [30, 69]       # scores in this band consult the AI (keep high < ban_threshold)
   token_budget_daily: 50000      # hard daily cap; rule engine takes over beyond it
-  cache_ttl: 1h                  # identical-verdict cache
+  cache_ttl: 15m                 # identical-verdict cache (default 15m)
 ```
 
 ```yaml
@@ -210,9 +223,9 @@ ai:
 | `model` | model name |
 | `api_key` | `env:VARNAME` reference (never inline) |
 | `endpoint` | base URL for the **`ollama`** provider only (default `http://localhost:11434`). The `anthropic` and `openai` providers ignore it and always call their official APIs (`https://api.anthropic.com`, `https://api.openai.com`) — there is no OpenAI-compatible-endpoint override. Same in the single-provider and `providers` failover forms. |
-| `ambiguous_band` | `[low, high]` — only scores inside the band consult the AI. Omitted (or `[0, 0]`) defaults to `[30, 75]`; any other band with `low >= high` or values outside 0–100 is rejected at load |
+| `ambiguous_band` | `[low, high]` — only scores inside the band consult the AI. Omitted (or `[0, 0]`) defaults to `[30, 69]`; any other band with `low >= high` or values outside 0–100 is rejected at load. Keep `high` **below** the policy `ban_threshold`: a score at or above the threshold has already decided a ban on rules alone, so the daemon never consults the AI for it — a band reaching into the threshold only triggers a startup/`validate` warning |
 | `token_budget_daily` | daily token cap; when exhausted, decisions fall back to rules |
-| `cache_ttl` | verdict cache duration. Entries are keyed by behavior signature (event kind counts + window), not by IP, so identical attack patterns from different IPs reuse one verdict; on a hit the cached verdict is re-targeted to the IP being evaluated |
+| `cache_ttl` | verdict cache duration; omitted or `0` means the default **15m** (the cache cannot be disabled — it is the second brake on repeated consults for the same behavior). Entries are keyed by behavior signature (event kind counts + window), not by IP, so identical attack patterns from different IPs reuse one verdict; on a hit the cached verdict is re-targeted to the IP being evaluated. Allowlist-clamped verdicts are never cached |
 | `providers` | multi-provider failover list (`name`, `priority`, `model`, `api_key`, `endpoint`, `token_budget_daily`); takes precedence over the single-provider fields |
 
 The AI verdict is always advisory: schema-validated, clamped by policy, and never able to ban an allowlisted IP.

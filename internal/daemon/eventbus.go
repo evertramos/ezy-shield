@@ -94,7 +94,9 @@ func prefixDisplay(p netip.Prefix) string {
 // kind is the daemon op vocabulary ("ban", "dry_ban", "unban", "allow", ...);
 // source is "pipeline" for rule/AI-driven actions and "cli" for socket verbs.
 func (d *Daemon) publishActionEvent(kind, ip string, strike int, ttl time.Duration, reason, source string) {
-	if !d.events.hasSubscribers() {
+	// nil bus: a Daemon assembled without New() (unit tests exercising one
+	// subsystem) has no subscribers by definition.
+	if d.events == nil || !d.events.hasSubscribers() {
 		return
 	}
 	enforcer := ""

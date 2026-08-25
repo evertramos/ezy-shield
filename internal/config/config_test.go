@@ -1189,3 +1189,153 @@ func TestValidate_DashboardAddrLoopbackOnly(t *testing.T) {
 		})
 	}
 }
+
+// ── Issue #419: ambiguous band vs. ban threshold cross-check ───────────────
+
+// TestAIBandOverlapWarning covers the advisory cross-file check: a band whose
+// upper bound reaches the policy ban threshold warns (the daemon skips those
+// consults, so the configured band overstates what the AI sees), while a
+// non-overlapping band, a missing provider, or missing sections stay silent.
+func TestAIBandOverlapWarning(t *testing.T) {
+	t.Parallel()
+
+	pol := func(threshold int) *Policy { return &Policy{BanThreshold: threshold} }
+	aiCfg := func(lo, hi int) *Config {
+		return &Config{AI: &AICfg{Provider: "anthropic", AmbiguousBand: [2]int{lo, hi}}}
+	}
+
+	cases := []struct {
+		name     string
+		cfg      *Config
+		pol      *Policy
+		wantWarn bool
+	}{
+		{"hi above threshold warns", aiCfg(30, 75), pol(70), true},
+		{"hi equal to threshold warns", aiCfg(30, 70), pol(70), true},
+		{"hi below threshold is silent", aiCfg(30, 69), pol(70), false},
+		{"default band vs default threshold is silent",
+			&Config{AI: &AICfg{Provider: "anthropic", AmbiguousBand: DefaultAmbiguousBand}},
+			pol(DefaultBanThreshold), false},
+		{"no provider configured is silent",
+			&Config{AI: &AICfg{AmbiguousBand: [2]int{30, 75}}}, pol(70), false},
+		{"multi-provider form warns",
+			&Config{AI: &AICfg{
+				Providers:     []ProviderCfg{{Name: "anthropic"}},
+				AmbiguousBand: [2]int{30, 75},
+			}}, pol(70), true},
+		{"nil AI section is silent", &Config{}, pol(70), false},
+		{"nil config is silent", nil, pol(70), false},
+		{"nil policy is silent", aiCfg(30, 75), nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			msg := AIBandOverlapWarning(tc.cfg, tc.pol)
+			if got := msg != ""; got != tc.wantWarn {
+				t.Errorf("AIBandOverlapWarning = %q, wantWarn=%v", msg, tc.wantWarn)
+			}
+		})
+	}
+}
+
+// TestDefaultAmbiguousBand_DoesNotOverlapDefaultThreshold pins the shipped
+// defaults against regression: the default band's upper bound must stay below
+// the default ban threshold, or every default install would warn on startup
+// (and silently waste every consult in the overlap before issue #419's gate).
+func TestDefaultAmbiguousBand_DoesNotOverlapDefaultThreshold(t *testing.T) {
+	t.Parallel()
+	if DefaultAmbiguousBand[1] >= DefaultBanThreshold {
+		t.Errorf("DefaultAmbiguousBand = %v overlaps DefaultBanThreshold = %d",
+			DefaultAmbiguousBand, DefaultBanThreshold)
+	}
+}
+
+// ── Cloudflare mutation-cadence knobs (issue #445) ───────────────────────────
+
+func TestLoadConfig_CloudflareCadenceDefaults(t *testing.T) {
+	src := `
+enforce:
+  cloudflare:
+    api_token: env:CF_TOKEN
+    account_id: acct1
+`
+	cfg, err := LoadConfigReader(strings.NewReader(src), "test.yaml")
+	if err != nil {
+		t.Fatalf("LoadConfigReader: %v", err)
+	}
+	cf := cfg.Enforce.Cloudflare[0]
+	if got := cf.Debounce.AsDuration(); got != DefaultCFDebounce {
+		t.Errorf("debounce default = %v, want %v", got, DefaultCFDebounce)
+	}
+	if got := cf.ExpireFlushInterval.AsDuration(); got != DefaultCFExpireFlushInterval {
+		t.Errorf("expire_flush_interval default = %v, want %v", got, DefaultCFExpireFlushInterval)
+	}
+}
+
+func TestLoadConfig_CloudflareCadenceExplicit(t *testing.T) {
+	src := `
+enforce:
+  cloudflare:
+    api_token: env:CF_TOKEN
+    account_id: acct1
+    debounce: 30s
+    expire_flush_interval: 10m
+`
+	cfg, err := LoadConfigReader(strings.NewReader(src), "test.yaml")
+	if err != nil {
+		t.Fatalf("LoadConfigReader: %v", err)
+	}
+	cf := cfg.Enforce.Cloudflare[0]
+	if got := cf.Debounce.AsDuration(); got != 30*time.Second {
+		t.Errorf("debounce = %v, want 30s", got)
+	}
+	if got := cf.ExpireFlushInterval.AsDuration(); got != 10*time.Minute {
+		t.Errorf("expire_flush_interval = %v, want 10m", got)
+	}
+}
+
+func TestLoadConfig_CloudflareCadenceZeroMeansDefault(t *testing.T) {
+	// YAML zero and omitted are indistinguishable; both take the default,
+	// same convention as the AI ambiguous band.
+	src := `
+enforce:
+  cloudflare:
+    api_token: env:CF_TOKEN
+    account_id: acct1
+    debounce: 0
+    expire_flush_interval: 0
+`
+	cfg, err := LoadConfigReader(strings.NewReader(src), "test.yaml")
+	if err != nil {
+		t.Fatalf("LoadConfigReader: %v", err)
+	}
+	cf := cfg.Enforce.Cloudflare[0]
+	if got := cf.Debounce.AsDuration(); got != DefaultCFDebounce {
+		t.Errorf("debounce = %v, want default %v", got, DefaultCFDebounce)
+	}
+	if got := cf.ExpireFlushInterval.AsDuration(); got != DefaultCFExpireFlushInterval {
+		t.Errorf("expire_flush_interval = %v, want default %v", got, DefaultCFExpireFlushInterval)
+	}
+}
+
+func TestLoadConfig_CloudflareCadenceNegativeRejected(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{"negative debounce", "debounce: -5s", "'debounce' must be positive"},
+		{"negative flush", "expire_flush_interval: -1m", "'expire_flush_interval' must be positive"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := "enforce:\n  cloudflare:\n    api_token: env:CF_TOKEN\n    account_id: acct1\n    " + tc.body + "\n"
+			_, err := LoadConfigReader(strings.NewReader(src), "test.yaml")
+			if err == nil {
+				t.Fatal("LoadConfigReader accepted a negative duration")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not mention %q", err, tc.want)
+			}
+		})
+	}
+}

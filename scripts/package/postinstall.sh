@@ -37,6 +37,17 @@ if ! getent passwd ezyshield >/dev/null 2>&1; then
 		--comment "EzyShield daemon" ezyshield
 fi
 
+# The journald collector runs as this user and the journal is group-readable
+# only (issue #454). The unit's SupplementaryGroups=systemd-journal is the
+# primary fix; this usermod is belt-and-braces for hosts whose service
+# manager ignores that directive. It must run BEFORE the try-restart below:
+# supplementary groups are resolved at process start, so the upgrade restart
+# is what picks the membership up. Idempotent; guarded because the group is
+# owned by the systemd package.
+if getent group systemd-journal >/dev/null 2>&1; then
+	usermod -aG systemd-journal ezyshield || true
+fi
+
 install -d -m 0750 -o root -g ezyshield /etc/ezyshield
 install -d -m 0750 -o ezyshield -g ezyshield /var/lib/ezyshield
 

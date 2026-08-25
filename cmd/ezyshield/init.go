@@ -19,7 +19,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/evertramos/ezy-shield/configs"
 	"github.com/evertramos/ezy-shield/internal/config"
 	"github.com/evertramos/ezy-shield/internal/decision"
 	"github.com/evertramos/ezy-shield/internal/ownership"
@@ -44,11 +43,6 @@ const (
 	// equivalent to "unset" so a stale placeholder never gets forwarded to a
 	// real AI provider (issue #13 §5, §6).
 	envAPIKeyPlaceholder = "YOUR_API_KEY_HERE" //nolint:gosec // G101: literal placeholder, deliberately public — the loader (SecretRef.Resolve) treats this exact string as "unset" so a stale placeholder never reaches a real AI provider.
-
-	// systemdDropInDir is the per-unit drop-in override directory. The init
-	// wizard writes env.conf here so EnvironmentFile= is active even on hosts
-	// with an older embedded service file that predates issue #22.
-	systemdDropInDir = defaultSystemdDir + "/ezyshield.service.d"
 )
 
 func newInitCmd() *cobra.Command {
@@ -65,7 +59,8 @@ func newInitCmd() *cobra.Command {
 		Use:   "init",
 		Short: "Interactive setup wizard (or scripted with --non-interactive)",
 		Long: `Detect the environment, ask a few questions, write config files,
-install systemd units, and start EzyShield in dry-run mode.
+install systemd units (skipped when the OS package already provides them),
+and start EzyShield in dry-run mode.
 
 Pass --yes to accept all smart defaults without prompting.
 Pass --config-dir to write files elsewhere (skips systemd/service steps — useful for testing).
@@ -390,12 +385,6 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 
 	if err := installSystemdUnits(p.w); err != nil {
 		return err
-	}
-
-	if wrote, err := writeSystemdEnvDropIn(); err != nil {
-		p.printf("  warning: could not write systemd drop-in: %v\n", err)
-	} else if wrote {
-		p.printf("  wrote %s/env.conf (EnvironmentFile drop-in)\n", systemdDropInDir)
 	}
 
 	if err := runSysCmd("systemctl", "daemon-reload"); err != nil {
@@ -749,25 +738,6 @@ func askQuestions(out io.Writer, sc *bufio.Scanner, state *wizardState, yes bool
 	state.armed = askBool("Start in armed mode? (no = dry-run, recommended for first run)", false)
 }
 
-// writeSystemdEnvDropIn emits /etc/systemd/system/ezyshield.service.d/env.conf
-// so EnvironmentFile=-/etc/ezyshield/.env is active even on hosts running an
-// older service file that predates this directive (issue #22). Idempotent: if
-// the file already contains the exact content no write occurs.
-func writeSystemdEnvDropIn() (wrote bool, err error) {
-	if err := os.MkdirAll(systemdDropInDir, 0o750); err != nil {
-		return false, fmt.Errorf("creating drop-in dir %s: %w", systemdDropInDir, err)
-	}
-	content := "[Service]\nEnvironmentFile=-" + defaultConfigDir + "/" + envFileName + "\n"
-	dst := filepath.Join(systemdDropInDir, "env.conf")
-	if existing, rerr := os.ReadFile(dst); rerr == nil && string(existing) == content { //nolint:gosec // path is a fixed admin-only constant
-		return false, nil
-	}
-	if err := os.WriteFile(dst, []byte(content), 0o644); err != nil { //nolint:gosec // 0644 is standard for systemd units
-		return false, fmt.Errorf("writing %s: %w", dst, err)
-	}
-	return true, nil
-}
-
 // ── Config file generation ───────────────────────────────────────────────────
 
 // preflightExistingConfigFiles refuses the wizard when config.yaml or
@@ -887,7 +857,8 @@ func renderGeneratedConfig(state *wizardState) ([]byte, error) {
 		if state.aiKeyEnvVar != "" {
 			fmt.Fprintf(&b, "  api_key: env:%s\n", state.aiKeyEnvVar)
 		}
-		b.WriteString("  ambiguous_band: [30, 75]\n")
+		fmt.Fprintf(&b, "  ambiguous_band: [%d, %d]\n",
+			config.DefaultAmbiguousBand[0], config.DefaultAmbiguousBand[1])
 		b.WriteString("  token_budget_daily: 100000\n")
 	}
 
@@ -978,13 +949,18 @@ func renderGeneratedPolicy(state *wizardState) ([]byte, error) {
 // writeOrKeepEnvFile writes /etc/ezyshield/.env with the operator-supplied
 // token (issue #13 §3). Behavior matrix:
 //
-//	token != ""                       → overwrite with the real token
+//	token != ""                       → upsert the real token
 //	token == "", .env already good    → preserve (idempotent re-run, §5)
 //	token == "", .env absent / stub   → write the placeholder
 //
 // "already good" means the file contains a line `<KEY>=<value>` where value is
 // neither empty nor the literal placeholder. This lets an operator re-run
 // `ezyshield init` without clobbering a working key.
+//
+// All write paths go through writeEnvFileContent, which merges (read-modify-
+// write) rather than truncating — so an unrelated secret already in .env (e.g.
+// a CLOUDFLARE_API_TOKEN from the CDN step or a prior install) is preserved
+// even when this function writes the AI key on a regenerate run (issue #299).
 //
 // Returned wrote/kept booleans tell the caller which log line to print — the
 // token itself never appears in that log path (issue #13 §6).
@@ -1011,22 +987,71 @@ func writeOrKeepEnvFile(path, keyEnvVar, token string) (wrote, kept bool, err er
 	return true, false, nil
 }
 
-// writeEnvFileContent writes exactly `<name>=<value>\n` (plus a short header
-// that does NOT include the token or a fingerprint of it) to path with mode
-// 0600 and root:ezyshield ownership. Extracted so tests can drive it directly.
+// writeEnvFileContent upserts `<name>=<value>` into the shell env file at path,
+// preserving every other line (other operator-stored secrets such as
+// CLOUDFLARE_API_TOKEN, comments, blanks). It is a read-modify-write — never a
+// wholesale truncate — so a re-run of `ezyshield init` (which may leave a .env
+// carrying an edge token behind) cannot destroy unrelated secrets (issue #299).
+// This matches its sibling writers writeAIEnvFile / writeCloudflareEnvFile,
+// which already merge via loadEnvFileLines + upsertEnvLine + renderEnvFile.
+//
+// The file is written mode 0600 with root:ezyshield ownership, atomically
+// (temp file + rename in the same directory) so a crash mid-write can never
+// leave a partial .env — and perms are never widened past 0600. When the file
+// is absent, renderEnvFile prepends the standard header so a fresh file looks
+// identical to what the CF step would have written. Extracted so tests can
+// drive it directly. The value may be a real token; it never enters any log,
+// error, or print path (issue #13 §6).
 func writeEnvFileContent(path, name, value string) error {
-	var b strings.Builder
-	fmt.Fprintf(&b, "# EzyShield environment — generated by 'ezyshield init'\n")
-	fmt.Fprintf(&b, "# systemd loads this via EnvironmentFile= (see ezyshield.service).\n")
-	// One shell-style KEY=VALUE line, no quoting, no export, trailing \n so
-	// systemd parses it cleanly (issue #13 §3).
-	fmt.Fprintf(&b, "%s=%s\n", name, value)
+	lines, err := loadEnvFileLines(path)
+	if err != nil {
+		return err
+	}
+	body := renderEnvFile(upsertEnvLine(lines, name, value))
 
-	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+	if err := atomicWriteFile(path, []byte(body), 0o600); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
 	if err := applyDaemonOwnership(path, 0o600); err != nil {
 		return fmt.Errorf("set ownership on %s: %w", path, err)
+	}
+	return nil
+}
+
+// atomicWriteFile writes data to path atomically: it creates a temp file in the
+// same directory (so rename stays on one filesystem), fixes its mode to perm
+// (CreateTemp defaults to 0600, but we set it explicitly so perm is never wider
+// than requested — never widening a secrets file), writes, fsyncs, and renames
+// over path. On any error the temp file is removed and path is left untouched,
+// so a crash mid-write can never expose a truncated or partial .env.
+func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".env-*.tmp")
+	if err != nil {
+		return fmt.Errorf("creating temp file in %s: %w", dir, err)
+	}
+	tmpName := tmp.Name()
+	// Best-effort cleanup on any failure path below; a successful rename makes
+	// this a no-op (the temp name no longer exists).
+	defer func() { _ = os.Remove(tmpName) }()
+
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("chmod temp file: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("writing temp file: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("syncing temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("closing temp file: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("renaming temp file into place: %w", err)
 	}
 	return nil
 }
@@ -1109,6 +1134,11 @@ func createEzyshieldUser(out io.Writer) error {
 		if _, err := fmt.Fprintln(out, "  user ezyshield: already exists"); err != nil {
 			return fmt.Errorf("writing output: %w", err)
 		}
+		// Fall through to the group adds: on a package install the user was
+		// created by postinstall with NO supplementary groups, so returning
+		// here left the journald collector permanently unable to read the
+		// journal (issue #454).
+		addLogAccessGroups()
 		return nil
 	}
 	if err := runSysCmd("useradd", "-r", "-s", "/usr/sbin/nologin", "-d", "/var/lib/ezyshield", "-m", "ezyshield"); err != nil {
@@ -1117,27 +1147,18 @@ func createEzyshieldUser(out io.Writer) error {
 	if _, err := fmt.Fprintln(out, "  user ezyshield: created"); err != nil {
 		return fmt.Errorf("writing output: %w", err)
 	}
-	// best-effort: add to docker and systemd-journal groups for log access
-	_ = runCmdSilent("usermod", "-aG", "docker", "ezyshield")
-	_ = runCmdSilent("usermod", "-aG", "systemd-journal", "ezyshield")
+	addLogAccessGroups()
 	return nil
 }
 
-func installSystemdUnits(out io.Writer) error {
-	for _, unit := range []string{"ezyshield.service", "ezyshield-enforcer.service"} {
-		data, err := configs.FS.ReadFile("systemd/" + unit)
-		if err != nil {
-			return fmt.Errorf("reading embedded %s: %w", unit, err)
-		}
-		dst := filepath.Join(defaultSystemdDir, unit)
-		if err := os.WriteFile(dst, data, 0o644); err != nil { //nolint:gosec // 0644 is standard for systemd units
-			return fmt.Errorf("installing %s: %w", dst, err)
-		}
-		if _, err := fmt.Fprintf(out, "  installed %s\n", dst); err != nil {
-			return fmt.Errorf("writing output: %w", err)
-		}
-	}
-	return nil
+// addLogAccessGroups best-effort adds the service user to the groups that
+// gate log sources: systemd-journal (journald collector; also declared as
+// SupplementaryGroups= in the daemon unit) and docker (container-log
+// collectors). usermod -aG is idempotent, and a missing group just fails
+// silently — docker in particular is absent on most hosts.
+func addLogAccessGroups() {
+	_ = runCmdSilent("usermod", "-aG", "docker", "ezyshield")
+	_ = runCmdSilent("usermod", "-aG", "systemd-journal", "ezyshield")
 }
 
 // waitForSocket polls for a unix socket to appear within timeout.

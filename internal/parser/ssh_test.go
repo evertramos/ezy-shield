@@ -680,6 +680,85 @@ func TestSSHParser_NeverCapturesOwnListenAddress(t *testing.T) {
 	}
 }
 
+// TestSSHParser_UsernameCannotSpoofSourceIP is the regression test for issue
+// #309: SSH IP attribution must always be the sshd-appended peer address (the
+// trailing "from <rhost> port <port>"), never a field the client controls. An
+// SSH username may contain spaces and is logged verbatim, so an attacker
+// connecting from peerIP with a username crafted to look like
+// "root from <victim> port 22" produces a line with TWO "from <ip> port <n>"
+// segments; the real peer is always the LAST one (sshd writes it after the
+// username). The parser must attribute the strike to peerIP, never victimIP.
+func TestSSHParser_UsernameCannotSpoofSourceIP(t *testing.T) {
+	p := parser.NewSSHParser(discardLogger())
+
+	// RFC 5737 documentation ranges. victimIP is the attacker-injected decoy
+	// embedded in the username; peerIP is the true sshd-provided connection IP.
+	const victimIP = "192.0.2.111"
+	const peerIP = "198.51.100.222"
+
+	cases := []struct {
+		name string
+		line string
+	}{
+		{
+			name: "invalid_user",
+			line: "Invalid user root from " + victimIP + " port 22 from " + peerIP + " port 40000",
+		},
+		{
+			name: "failed_invalid_user_ssh2",
+			line: "Failed password for invalid user root from " + victimIP + " port 22 ssh2 from " + peerIP + " port 40000 ssh2",
+		},
+		{
+			name: "failed_valid_user_ssh2",
+			line: "Failed password for admin from " + victimIP + " port 22 ssh2 from " + peerIP + " port 40000 ssh2",
+		},
+		{
+			name: "not_allowed",
+			line: "User bob from " + victimIP + " not allowed because from " + peerIP + " not allowed because not listed in AllowUsers",
+		},
+		{
+			name: "dispatch_fatal",
+			line: "ssh_dispatch_run_fatal: Connection from invalid user x " + victimIP + " port 22: y " + peerIP + " port 40000: Too many authentication failures [preauth]",
+		},
+		{
+			name: "conn_closed_invalid_user",
+			line: "Connection closed by invalid user x " + victimIP + " port 22 " + peerIP + " port 40000 [preauth]",
+		},
+		{
+			name: "accepted_telemetry",
+			line: "Accepted password for x from " + victimIP + " port 22 ssh2 from " + peerIP + " port 40000 ssh2",
+		},
+		// Hostile whitespace / control tricks in the username must not shift the IP.
+		{
+			name: "crlf_in_username",
+			line: "Invalid user root\tfrom " + victimIP + " port 22 from " + peerIP + " port 40000",
+		},
+		{
+			name: "bracketed_lookalike_in_username",
+			line: "Invalid user root from " + victimIP + " port 22 [preauth] from " + peerIP + " port 40000",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			evs, err := p.Parse(sdk.RawLine{Source: "journald:ssh", Line: []byte(tc.line), At: time.Now()})
+			if err != nil {
+				t.Fatalf("Parse error: %v", err)
+			}
+			if len(evs) != 1 {
+				t.Fatalf("expected 1 event, got %d for line %q", len(evs), tc.line)
+			}
+			got := evs[0].SourceIP.String()
+			if got == victimIP {
+				t.Fatalf("SourceIP was spoofed to the attacker-injected username IP %q (line %q) — strike would land on a third party", victimIP, tc.line)
+			}
+			if got != peerIP {
+				t.Errorf("SourceIP: got %q, want true peer %q (line %q)", got, peerIP, tc.line)
+			}
+		})
+	}
+}
+
 // TestSSHParser_MaxstartupsNotServerPenalty ensures the sibling "past
 // Maxstartups" drop reason (global unauthenticated-connection cap, can hit a
 // legitimate client caught in an unrelated flood) is NOT treated as a

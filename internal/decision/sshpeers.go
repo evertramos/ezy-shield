@@ -36,10 +36,13 @@ var (
 // procTCPEstablished is the kernel's TCP_ESTABLISHED state in /proc/net/tcp.
 const procTCPEstablished = "01"
 
-// sshPeerCacheTTL bounds how often the proc files are re-read on the hot
+// SSHPeerCacheTTL bounds how often the proc files are re-read on the hot
 // decision path. Two seconds keeps a freshly opened SSH session protected
 // well before any realistic detection-to-ban latency, at ~zero cost.
-const sshPeerCacheTTL = 2 * time.Second
+// Exported so the daemon can derive its deferred anti-lockout re-check delay
+// from it (issue #420): waiting ≥ 2×TTL after the last refusal guarantees the
+// re-check sees a fresh kernel probe, never this cache.
+const SSHPeerCacheTTL = 2 * time.Second
 
 // ProcSSHPeers returns the remote addresses of established inbound
 // connections to the local sshd port(s), best-effort: any unreadable file
@@ -186,7 +189,7 @@ func (c *sshPeerCache) get() []netip.Addr {
 	if c.probe == nil {
 		c.probe = ProcSSHPeers
 	}
-	if time.Since(c.fetched) > sshPeerCacheTTL {
+	if time.Since(c.fetched) > SSHPeerCacheTTL {
 		c.peers = c.probe()
 		c.fetched = time.Now()
 	}

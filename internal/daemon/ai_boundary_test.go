@@ -55,6 +55,14 @@ func (r *rawAIProvider) CallCount() int {
 // are started (tests call maybeConsultAI directly).
 func newAIDaemon(t *testing.T, prov sdk.AIProvider) *Daemon {
 	t.Helper()
+	return newAIDaemonWithBand(t, prov, [2]int{30, 95}, false)
+}
+
+// newAIDaemonWithBand is newAIDaemon with an explicit ambiguous band and armed
+// flag, for tests that pin band/threshold interplay (issue #419). The policy
+// keeps the default ban threshold (70).
+func newAIDaemonWithBand(t *testing.T, prov sdk.AIProvider, band [2]int, armed bool) *Daemon {
+	t.Helper()
 	ctx := context.Background()
 
 	db, err := store.Open(ctx, ":memory:")
@@ -64,7 +72,7 @@ func newAIDaemon(t *testing.T, prov sdk.AIProvider) *Daemon {
 	t.Cleanup(func() { _ = db.Close() })
 
 	policy := &config.Policy{
-		Armed:            false,
+		Armed:            armed,
 		BanThreshold:     config.DefaultBanThreshold,
 		ObserveThreshold: config.DefaultObserveThreshold,
 		MaxBansPerMinute: config.DefaultMaxBansPerMinute,
@@ -73,7 +81,7 @@ func newAIDaemon(t *testing.T, prov sdk.AIProvider) *Daemon {
 
 	d, err := New(Config{
 		Cfg: &config.Config{
-			AI: &config.AICfg{AmbiguousBand: [2]int{30, 95}},
+			AI: &config.AICfg{AmbiguousBand: band},
 		},
 		Policy:     policy,
 		Store:      db,
@@ -377,5 +385,132 @@ func TestEndToEnd_AI_InjectedVerdict_NoStrikeOnVictim(t *testing.T) {
 	}
 	if len(strikes) != 0 {
 		t.Fatalf("victim %s received %d strike(s) from an injected verdict", victim, len(strikes))
+	}
+}
+
+// ── Issue #419: no consult when the outcome is already decided ─────────────
+//
+// The decision engine takes the MAX score across verdicts
+// (decision.Engine.Decide), so once a rule alone reaches ban_threshold an AI
+// verdict is structurally unable to change the outcome; likewise, an actively
+// banned IP is suppressed by the engine's active-ban guard for the ban's
+// duration. Consulting the AI in either state is pure token spend — 61% of
+// audited calls in the 2026-08-06 kylian audit.
+
+// TestMaybeConsultAI_RuleScoreAlreadyDecisive_NoConsult pins the acceptance
+// case of issue #419: band [30,75] with the default ban threshold (70) — a
+// top rule score of 72 sits inside the band but has already decided "ban" on
+// its own, so the provider must not be called and the verdicts pass through
+// unchanged.
+func TestMaybeConsultAI_RuleScoreAlreadyDecisive_NoConsult(t *testing.T) {
+	ip := netip.MustParseAddr("192.0.2.10")
+	prov := &rawAIProvider{verdicts: []sdk.Verdict{
+		{IP: ip, Score: 40, Category: "scanner", Source: "ai:raw-ai"},
+	}}
+	d := newAIDaemonWithBand(t, prov, [2]int{30, 75}, false)
+
+	in := []sdk.Verdict{{IP: ip, Score: 72, Category: "scanner", Source: "rules"}}
+	out := d.maybeConsultAI(context.Background(), ip, in)
+
+	if got := prov.CallCount(); got != 0 {
+		t.Errorf("provider calls = %d, want 0 (score 72 >= threshold 70 already decided)", got)
+	}
+	if len(out) != len(in) {
+		t.Errorf("verdicts = %+v, want unchanged rules-only slice", out)
+	}
+}
+
+// TestMaybeConsultAI_InBandBelowThreshold_StillConsults is the regression
+// guard for the genuinely-decisive case: a score inside the band and below
+// the ban threshold is exactly what the AI exists for, and the #419 gates
+// must not swallow it.
+func TestMaybeConsultAI_InBandBelowThreshold_StillConsults(t *testing.T) {
+	ip := netip.MustParseAddr("192.0.2.11")
+	prov := &rawAIProvider{verdicts: []sdk.Verdict{
+		{IP: ip, Score: 80, Category: "bruteforce", Source: "ai:raw-ai"},
+	}}
+	d := newAIDaemonWithBand(t, prov, [2]int{30, 75}, false)
+
+	in := []sdk.Verdict{{IP: ip, Score: 65, Category: "scanner", Source: "rules"}}
+	out := d.maybeConsultAI(context.Background(), ip, in)
+
+	if got := prov.CallCount(); got != 1 {
+		t.Fatalf("provider calls = %d, want 1 (score 65 is in-band and undecided)", got)
+	}
+	found := false
+	for _, v := range out {
+		if v.Source == "ai:raw-ai" && v.IP == ip {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("AI verdict missing from output: %+v", out)
+	}
+}
+
+// TestMaybeConsultAI_ActiveBan_NoConsult verifies the already-banned gate:
+// with a real (non-dry) active ban on the IP, an in-band consult is skipped —
+// the engine's active-ban guard suppresses any new strike for the ban's
+// duration, so the call could only re-analyze leakage traffic.
+func TestMaybeConsultAI_ActiveBan_NoConsult(t *testing.T) {
+	ip := netip.MustParseAddr("192.0.2.12")
+	prov := &rawAIProvider{verdicts: []sdk.Verdict{
+		{IP: ip, Score: 60, Category: "scanner", Source: "ai:raw-ai"},
+	}}
+	d := newAIDaemonWithBand(t, prov, [2]int{30, 75}, false)
+
+	ctx := context.Background()
+	if err := d.store.RecordManualBan(ctx, ip, time.Hour, "test ban"); err != nil {
+		t.Fatalf("RecordManualBan: %v", err)
+	}
+
+	out := d.maybeConsultAI(ctx, ip, inBandVerdicts(ip))
+
+	if got := prov.CallCount(); got != 0 {
+		t.Errorf("provider calls = %d, want 0 (IP already actively banned)", got)
+	}
+	for _, v := range out {
+		if v.Source == "ai:raw-ai" {
+			t.Errorf("AI verdict appended despite active ban: %+v", v)
+		}
+	}
+}
+
+// TestMaybeConsultAI_DryRunBan_ArmedMirrorsEngineGuard pins the one asymmetry
+// the ban gate inherits from the engine's active-ban guard (ADR-0009 §5): an
+// ARMED engine ignores simulated (dry-run) bans — nothing is enforced for
+// them, so the consult can still convert the episode into a real ban and must
+// happen. An unarmed engine treats its own dry ban as suppressing, so the
+// consult is skipped.
+func TestMaybeConsultAI_DryRunBan_ArmedMirrorsEngineGuard(t *testing.T) {
+	cases := []struct {
+		name      string
+		armed     bool
+		wantCalls int
+	}{
+		{"armed: dry ban does not suppress consult", true, 1},
+		{"unarmed: dry ban suppresses consult", false, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ip := netip.MustParseAddr("192.0.2.13")
+			prov := &rawAIProvider{verdicts: []sdk.Verdict{
+				{IP: ip, Score: 60, Category: "scanner", Source: "ai:raw-ai"},
+			}}
+			d := newAIDaemonWithBand(t, prov, [2]int{30, 75}, tc.armed)
+
+			ctx := context.Background()
+			if err := d.store.RecordStrike(ctx, sdk.Action{
+				IP: ip, Op: "dry_ban", TTL: time.Hour, Strike: 1,
+				Reason: "test dry ban",
+			}); err != nil {
+				t.Fatalf("RecordStrike: %v", err)
+			}
+
+			_ = d.maybeConsultAI(ctx, ip, inBandVerdicts(ip))
+			if got := prov.CallCount(); got != tc.wantCalls {
+				t.Errorf("provider calls = %d, want %d", got, tc.wantCalls)
+			}
+		})
 	}
 }

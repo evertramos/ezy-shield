@@ -50,6 +50,14 @@
           "type": "string",
           "enum": ["block", "challenge", "js_challenge"],
           "description": "Rule action; default 'block'."
+        },
+        "debounce": {
+          "type": "string",
+          "description": "Mutation-coalescing window as a Go duration string (e.g. '15s'). Rapid ban/unban mutations batch into one API push per window. Omitted or 0 means the default 15s."
+        },
+        "expire_flush_interval": {
+          "type": "string",
+          "description": "Cadence for batched item removals (expired bans, unbans) in 'lists' mode, as a Go duration string (e.g. '3m'). Omitted or 0 means the default 3m. Fail-closed: an expired IP can stay blocked at the edge for up to this long."
         }
       }
     }
@@ -178,7 +186,7 @@
           "items": {"type": "integer", "minimum": 0, "maximum": 100},
           "minItems": 2,
           "maxItems": 2,
-          "description": "Score range [low, high] sent to AI; outside this range the rule engine decides. Omitted defaults to [30, 75]."
+          "description": "Score range [low, high] sent to AI; outside this range the rule engine decides. Omitted defaults to [30, 69]. Keep high below the policy ban_threshold: scores at or above the threshold already decide a ban on rules alone and are never sent to the AI (a reaching band triggers a warning)."
         },
         "token_budget_daily": {
           "type": "integer",
@@ -187,7 +195,7 @@
         },
         "cache_ttl": {
           "type": "string",
-          "description": "Verdict cache TTL as a Go duration string (e.g. '1h'). Entries are keyed by behavior signature, not IP."
+          "description": "Verdict cache TTL as a Go duration string (e.g. '15m'). Omitted or 0 means the default 15m; the cache cannot be disabled. Entries are keyed by behavior signature, not IP."
         },
         "providers": {
           "type": "array",

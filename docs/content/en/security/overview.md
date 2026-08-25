@@ -57,6 +57,19 @@ ban and every reconcile before it can reach nftables or any edge platform.
 Even a backend with no allowlist logic of its own can never receive a
 protected address — including via a sync that would re-introduce it.
 
+**The live SSH re-check protects a *connection*, not an address forever.** A
+bruteforcer that reconnects faster than the peer table is re-read keeps an
+established connection visible at every evaluation, so each attempt in its
+threshold window is (correctly) refused. To close the gap where such a burst
+would otherwise never be banned, an IP whose ban was refused *solely* because
+of an active SSH connection is re-evaluated shortly after that connection
+closes — from its still-in-window event history, through the identical guards
+(allowlist, a fresh live SSH-peer probe, ban-rate limit). If the connection is
+still established at re-check time — a genuine operator session — the refusal
+simply repeats and nothing is banned. A ban can therefore only ever result
+from a full check that found no established SSH connection at that moment; the
+operator's session remains unbannable for as long as it is open.
+
 ## Allowlist supremacy
 
 The allowlist is checked FIRST, before any rule engine decision. An allowlisted IP cannot be banned by any rule, AI decision, or manual ban attempt.
@@ -72,6 +85,23 @@ admin_cidrs:
 ## Rate limiting
 
 A broken rule or poisoned feed cannot ban the entire internet. The `max_bans_per_minute` cap (default 30) rejects excess bans with an explicit error — never silently, never by dropping the limit. Escalation bans re-blocking an IP whose previous ban ended within `escalation_exempt_window` (default 24h) are exempt from this cap, so a returning repeat offender is never let back in while the rate limit is saturated; first-time bans always count against the cap.
+
+## Detection resilience
+
+Detection is only useful if it keeps running. Each log source (a file tail, a
+`journalctl` reader, a Docker container stream) is watched by its own
+supervisor. If a collector hits a transient fault — a log file briefly missing
+at startup, a `logrotate` reopen that runs long, `journald` restarting and
+killing `journalctl` — the supervisor **restarts that collector automatically**
+with capped exponential backoff, so a routine operational hiccup can't silently
+disable detection on that source until the next daemon restart.
+
+The supervisor distinguishes a genuine fault from a clean shutdown: on
+`SIGTERM`/`SIGINT` (context cancellation) collectors stop and are **not**
+restarted, so shutdown never hot-loops. A collector that fails repeatedly
+raises a **critical notification** naming the source, so a permanently broken
+input surfaces to you instead of retrying in silence. The other log sources
+keep running throughout — one failing collector never takes down the pipeline.
 
 ## Secret handling
 

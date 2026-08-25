@@ -59,6 +59,20 @@ ou a qualquer plataforma de edge. Mesmo um backend sem lógica própria de
 allowlist nunca recebe um endereço protegido — inclusive via um sync que o
 reintroduziria.
 
+**A re-checagem de SSH ao vivo protege uma *conexão*, não um endereço para
+sempre.** Um bruteforcer que reconecta mais rápido do que a tabela de peers é
+relida mantém uma conexão estabelecida visível em toda avaliação, então cada
+tentativa dentro da janela do threshold é (corretamente) recusada. Para fechar
+a brecha em que uma rajada dessas nunca seria banida, um IP cujo ban foi
+recusado *apenas* por causa de uma conexão SSH ativa é reavaliado logo depois
+que essa conexão fecha — a partir do histórico de eventos ainda dentro da
+janela, pelos mesmos guards (allowlist, uma nova sondagem de peer SSH ao vivo,
+rate limit de bans). Se a conexão ainda estiver estabelecida no momento da
+reavaliação — uma sessão legítima do operador — a recusa simplesmente se
+repete e nada é banido. Um ban só pode resultar de uma checagem completa que
+não encontrou nenhuma conexão SSH estabelecida naquele instante; a sessão do
+operador continua imbanível enquanto estiver aberta.
+
 ## Supremacia da allowlist
 
 A allowlist é checada PRIMEIRO, antes de qualquer decisão do rule engine. Um IP na allowlist não pode ser banido por nenhuma rule, decisão de IA ou tentativa de ban manual.
@@ -74,6 +88,25 @@ admin_cidrs:
 ## Limite de taxa
 
 Uma rule quebrada ou um feed envenenado não consegue banir a internet inteira. A trava `max_bans_per_minute` (default 30) rejeita bans excedentes com um erro explícito — nunca em silêncio, nunca descartando o limite. Bans de escalação que re-bloqueiam um IP cujo ban anterior terminou dentro da `escalation_exempt_window` (default 24h) ficam isentos dessa trava, para que um reincidente que já foi banido não volte a entrar enquanto o rate limit está saturado; bans de primeira ofensa sempre contam para a trava.
+
+## Resiliência da detecção
+
+Detecção só serve se continuar rodando. Cada fonte de log (um tail de arquivo,
+um leitor de `journalctl`, um stream de container Docker) é vigiada por seu
+próprio supervisor. Se um collector sofre uma falha transitória — um arquivo de
+log momentaneamente ausente na inicialização, um `logrotate` cuja reabertura
+demora, o `journald` reiniciando e matando o `journalctl` — o supervisor
+**reinicia esse collector automaticamente** com backoff exponencial limitado,
+de modo que um contratempo operacional rotineiro não desative silenciosamente a
+detecção naquela fonte até o próximo restart do daemon.
+
+O supervisor distingue uma falha real de um desligamento limpo: em
+`SIGTERM`/`SIGINT` (cancelamento de contexto) os collectors param e **não** são
+reiniciados, então o shutdown nunca entra em hot-loop. Um collector que falha
+repetidamente dispara uma **notificação crítica** nomeando a fonte, para que
+uma entrada permanentemente quebrada apareça para você em vez de tentar de novo
+em silêncio. As demais fontes de log continuam rodando o tempo todo — um
+collector com falha nunca derruba o pipeline.
 
 ## Tratamento de segredos
 

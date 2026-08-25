@@ -17,16 +17,11 @@ serviço `ezyshield` e upgrades limpos. Os metadados do repositório são
 assinados com GPG; releases estáveis ficam na suite `stable`, release
 candidates em `testing`.
 
-> **Antes do v0.1.0 ser lançado:** toda release publicada é um release
-> candidate, então os snippets abaixo usam a suite `testing` — a que
-> funciona hoje. Quando o v0.1.0 sair, troque `testing` por `stable` nos
-> dois para acompanhar só releases estáveis.
-
 **Debian / Ubuntu:**
 
 ```bash
 curl -fsSL https://packages.ezyshield.com/ezyshield.asc | sudo gpg --dearmor -o /usr/share/keyrings/ezyshield.gpg
-echo "deb [signed-by=/usr/share/keyrings/ezyshield.gpg] https://packages.ezyshield.com/apt testing main" | sudo tee /etc/apt/sources.list.d/ezyshield.list
+echo "deb [signed-by=/usr/share/keyrings/ezyshield.gpg] https://packages.ezyshield.com/apt stable main" | sudo tee /etc/apt/sources.list.d/ezyshield.list
 sudo apt update && sudo apt install ezyshield
 ```
 
@@ -36,7 +31,7 @@ sudo apt update && sudo apt install ezyshield
 sudo tee /etc/yum.repos.d/ezyshield.repo <<'EOF'
 [ezyshield]
 name=EzyShield
-baseurl=https://packages.ezyshield.com/rpm/testing/$basearch
+baseurl=https://packages.ezyshield.com/rpm/stable/$basearch
 enabled=1
 gpgcheck=0
 repo_gpgcheck=1
@@ -64,9 +59,23 @@ chave publicada a cada release, então ele não diverge silenciosamente):
 gpg --show-keys /usr/share/keyrings/ezyshield.gpg
 ```
 
-Para trocar para o canal estável quando o v0.1.0 sair, troque `testing`
-por `stable` em qualquer dos snippets. Os pacotes **não** habilitam nem
-iniciam serviço algum — rode `sudo ezyshield init` depois de instalar.
+Para acompanhar release candidates em vez das estáveis, troque `stable`
+por `testing` em qualquer dos snippets (o equivalente no script de
+instalação é
+`curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_SUITE=testing sh`).
+
+> **Instalou antes da suite `stable` virar o padrão?** Instalações feitas
+> enquanto toda release ainda era release candidate configuraram a suite
+> `testing`. Para migrar esse host para a estável, edite
+> `/etc/apt/sources.list.d/ezyshield.list` (ou
+> `/etc/yum.repos.d/ezyshield.repo`), troque `testing` por `stable` e rode
+> `sudo apt update` / `sudo dnf clean metadata`. O pacote estável instala
+> na próxima release com versão maior que o RC atual (apt/dnf nunca fazem
+> downgrade sozinhos — use `sudo apt install ezyshield=<versão>` para
+> migrar imediatamente).
+
+Os pacotes **não** habilitam nem iniciam serviço algum — rode
+`sudo ezyshield init` depois de instalar.
 
 ---
 
@@ -188,12 +197,6 @@ instalação via pacote, ele imprime os comandos exatos de limpeza para que o
 novo pacote não fique escondido atrás da instalação antiga — veja
 [Migrando da instalação via script para pacotes](#migrando-da-instalação-via-script-para-pacotes)
 abaixo.
-
-> **Antes do v0.1.0 ser lançado:** quando nenhum dos dois métodos de
-> instalação resolve uma release estável, o comando acima imprime
-> instruções de instalação em vez de instalar (veja o repositório de
-> pacotes `testing` mais acima) — nenhuma flag será necessária assim que o
-> v0.1.0 sair.
 
 ---
 
@@ -361,6 +364,7 @@ sudo rm -rf /etc/ezyshield
 | Variável | Propósito | Exemplo |
 |----------|-----------|---------|
 | `EZYSHIELD_METHOD` | `auto` (padrão), `packages`, ou `binary` — força o método de instalação em vez de auto-detectar | `EZYSHIELD_METHOD=binary` |
+| `EZYSHIELD_SUITE` | Suite do repositório de pacotes: `stable` (padrão) ou `testing` (release candidates). Só no modo pacote | `EZYSHIELD_SUITE=testing` |
 | `EZYSHIELD_VERSION` | Instalar uma versão específica (deve começar com `v`). Só no modo binário | `EZYSHIELD_VERSION=v0.1.0-rc.N` |
 | `EZYSHIELD_BASE_URL` | Instalar a partir de um espelho customizado (sobrescreve seleção de versão, força modo binário). Exige `--local` + `EZYSHIELD_LOCAL_ACK=1` | `EZYSHIELD_BASE_URL=https://mirror.exemplo.com/ezyshield/v0.1.0` |
 | `EZYSHIELD_DEV` | Defina como `1` — igual à flag `--dev` (prerelease mais novo) | `EZYSHIELD_DEV=1` |

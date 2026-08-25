@@ -223,7 +223,7 @@ func checkPolicyFile(w io.Writer, path string, errs, warns *int) (*config.Policy
 // checkCross runs the small set of cross-section sanity checks listed in #84.
 // Most loader-level invariants are already enforced; this section surfaces
 // reachability so an operator sees which integrations are wired up.
-func checkCross(w io.Writer, cfg *config.Config, _ *config.Policy, errs, warns *int) {
+func checkCross(w io.Writer, cfg *config.Config, pol *config.Policy, errs, warns *int) {
 	any := false
 	if cfg.Enforce != nil && len(cfg.Enforce.Cloudflare) > 0 {
 		passLine(w, "Cloudflare api_token referenced via env:")
@@ -233,13 +233,18 @@ func checkCross(w io.Writer, cfg *config.Config, _ *config.Policy, errs, warns *
 		passLine(w, "Telegram bot_token + chat_ids present")
 		any = true
 	}
+	// AI ambiguous band vs. ban threshold (issue #419): warning, not error —
+	// previously shipped defaults carried the overlapping band [30, 75].
+	if msg := config.AIBandOverlapWarning(cfg, pol); msg != "" {
+		warnLine(w, msg)
+		*warns++
+		any = true
+	}
 	if !any {
 		passLine(w, "no integrations to cross-validate")
 	}
-	// Cross-check is informational only here — errs/warns are passed so future
-	// checks can extend without re-threading.
+	// errs is threaded so future cross-checks can extend without re-plumbing.
 	_ = errs
-	_ = warns
 }
 
 // checkStrikesMonotonic verifies non-zero TTLs are strictly increasing and

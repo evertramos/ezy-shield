@@ -8,6 +8,13 @@ Requires=ezyshield-enforcer.service
 Type=simple
 User=ezyshield
 Group=ezyshield
+# The journald collector runs `journalctl` as this user, and the journal is
+# group-readable only (root:systemd-journal). Declaring the membership here
+# survives user recreation and needs no postinst logic (issue #454 — without
+# it the collector is permanently blind while status reports ACTIVE). The
+# group is created by the systemd package itself on every supported distro,
+# and systemd is already a hard requirement of this unit.
+SupplementaryGroups=systemd-journal
 # Load the AI API key (and any other secret) from /etc/ezyshield/.env. The
 # file is written by `ezyshield init` with 0600 root:ezyshield permissions.
 # Leading `-` means "don't fail the unit if the file is missing" — a fresh

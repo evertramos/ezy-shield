@@ -84,3 +84,27 @@ func NewCFListsEnforcerWithName(name, token, baseURL, accountID, listName string
 	e.instanceName = name
 	return e
 }
+
+// NewCFListsEnforcerWithRetryDelays constructs a CloudflareListsEnforcer with
+// a custom throttle backoff schedule, for testing retry behaviour (issue #445).
+func NewCFListsEnforcerWithRetryDelays(token, baseURL, accountID, listName string, delays []time.Duration) *CloudflareListsEnforcer {
+	e := newCFListsEnforcerForTest(token, baseURL, accountID, listName)
+	e.retryDelays = delays
+	return e
+}
+
+// NewCFListsEnforcerWithExpireFlush constructs a CloudflareListsEnforcer with
+// deferred removals on the given cadence and starts the removal flusher, for
+// testing the expire-flush batching (issue #445).
+func NewCFListsEnforcerWithExpireFlush(ctx context.Context, token, baseURL, accountID, listName string, flush time.Duration) *CloudflareListsEnforcer {
+	e := newCFListsEnforcerForTestWithCtx(ctx, token, baseURL, accountID, listName)
+	e.expireFlushInterval = flush
+	go e.runRemovalFlusher()
+	return e
+}
+
+// FlushRemovalsForTest triggers one deferred-removal flush deterministically,
+// without waiting for the background ticker (issue #445).
+func (e *CloudflareListsEnforcer) FlushRemovalsForTest(ctx context.Context) error {
+	return e.flushRemovals(ctx)
+}

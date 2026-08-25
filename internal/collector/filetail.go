@@ -41,6 +41,9 @@ type FileTailCollector struct {
 	SourceOverride string
 }
 
+// Name returns a stable identity for supervision logs/alerts (issue #305).
+func (c *FileTailCollector) Name() string { return "filetail:" + c.Path }
+
 // Run starts tailing the file and writes sdk.RawLine values to out until ctx
 // is cancelled or a fatal error occurs.  It returns nil on clean shutdown and
 // a wrapped error on failure.

@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand/v2"
 	"net/http"
 	"net/netip"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,13 +22,124 @@ import (
 )
 
 const (
-	cfBaseURL      = "https://api.cloudflare.com/client/v4"
-	cfMaxRPS       = 4.0 // 1200 req/5 min = 4 req/s
-	cfRulePhase    = "http_request_firewall_custom"
-	cfDescBase     = "ezyshield-blocklist"
-	cfExprMax      = 3900 // split rule when expression would exceed this byte count
-	cfDebounceTime = 5 * time.Second
+	cfBaseURL   = "https://api.cloudflare.com/client/v4"
+	cfMaxRPS    = 4.0 // 1200 req/5 min = 4 req/s (global API quota)
+	cfRulePhase = "http_request_firewall_custom"
+	cfDescBase  = "ezyshield-blocklist"
+	cfExprMax   = 3900 // split rule when expression would exceed this byte count
+
+	// cfRetryAfterCap bounds how long a server-provided Retry-After can make
+	// a single backoff wait (issue #445).
+	cfRetryAfterCap = 5 * time.Minute
 )
+
+// cfRetryDelays is the base backoff schedule between throttled mutation
+// attempts (issue #445): the Lists API has its own, much stricter throttle
+// than the global 1200 req/5 min quota, and it answers with error 10040/971
+// or HTTP 429 instead of failing hard. len(cfRetryDelays)+1 attempts total.
+// Each delay is jittered ±20% and stretched to Retry-After when the server
+// provides a longer one (capped at cfRetryAfterCap).
+var cfRetryDelays = []time.Duration{2 * time.Second, 8 * time.Second, 30 * time.Second}
+
+// ErrCFThrottled marks a Cloudflare mutation that kept being rate limited
+// after every backoff attempt. The daemon treats a throttle-only enforcement
+// failure as transient (a streak is required before DEGRADED) — see
+// IsThrottleOnly and internal/daemon/enfstate.go.
+var ErrCFThrottled = errors.New("cloudflare API throttled")
+
+// cfThrottleCodes are the Cloudflare API error codes that signal transient
+// rate limiting on Lists mutations, observed in production (issue #445):
+// 10040 "you have been ratelimited", 971 "Please wait and consider
+// throttling your request speed".
+var cfThrottleCodes = map[int]bool{10040: true, 971: true}
+
+// cfIsThrottle reports whether an API response signals transient throttling:
+// HTTP 429 or a known throttle error code in the decoded error list.
+func cfIsThrottle(status int, errs []cfAPIError) bool {
+	if status == http.StatusTooManyRequests {
+		return true
+	}
+	for _, e := range errs {
+		if cfThrottleCodes[e.Code] {
+			return true
+		}
+	}
+	return false
+}
+
+// IsThrottleOnly reports whether every failure in err's tree is a transient
+// Cloudflare throttle (ErrCFThrottled). A mixed tree — throttle on one
+// enforcer joined with a real failure on another — returns false, so real
+// failures still degrade enforcement state immediately.
+func IsThrottleOnly(err error) bool {
+	if err == nil {
+		return false
+	}
+	if multi, ok := err.(interface{ Unwrap() []error }); ok {
+		branches := multi.Unwrap()
+		if len(branches) == 0 {
+			return false
+		}
+		for _, b := range branches {
+			if !IsThrottleOnly(b) {
+				return false
+			}
+		}
+		return true
+	}
+	if inner := errors.Unwrap(err); inner != nil {
+		if _, ok := inner.(interface{ Unwrap() []error }); ok {
+			return IsThrottleOnly(inner)
+		}
+	}
+	return errors.Is(err, ErrCFThrottled)
+}
+
+// parseRetryAfter parses a Retry-After header value in seconds. HTTP-date
+// forms and garbage return 0 (no server hint).
+func parseRetryAfter(v string) time.Duration {
+	if v == "" {
+		return 0
+	}
+	secs, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || secs <= 0 {
+		return 0
+	}
+	return time.Duration(secs) * time.Second
+}
+
+// cfBackoffWait sleeps for the attempt's base delay jittered ±20%, stretched
+// to the server-provided Retry-After when that is longer (capped at
+// cfRetryAfterCap). Honors ctx cancellation.
+func cfBackoffWait(ctx context.Context, delays []time.Duration, attempt int, retryAfter time.Duration) error {
+	if len(delays) == 0 {
+		return nil // no schedule: nothing to wait (callers exhaust retries first)
+	}
+	if attempt >= len(delays) {
+		attempt = len(delays) - 1
+	}
+	d := delays[attempt]
+	d = time.Duration(float64(d) * (0.8 + 0.4*rand.Float64())) //nolint:gosec // backoff jitter needs no cryptographic randomness
+	if retryAfter > d {
+		d = min(retryAfter, cfRetryAfterCap)
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(d):
+		return nil
+	}
+}
+
+// cfDebounceFromCfg returns the operator-configured mutation-coalescing
+// window, falling back to the load-time default for configs constructed
+// programmatically (issue #445).
+func cfDebounceFromCfg(cfg *config.CloudflareCfg) time.Duration {
+	if cfg.Debounce > 0 {
+		return cfg.Debounce.AsDuration()
+	}
+	return config.DefaultCFDebounce
+}
 
 // cfRateLimiter enforces a minimum interval between outbound API calls.
 type cfRateLimiter struct {
@@ -140,7 +254,7 @@ func newCloudflareRulesetsEnforcer(ctx context.Context, cfg *config.CloudflareCf
 		baseURL:          cfBaseURL,
 		limiter:          newCFRateLimiter(cfMaxRPS),
 		allowlist:        allowlist,
-		debounceInterval: cfDebounceTime,
+		debounceInterval: cfDebounceFromCfg(cfg),
 		exprMax:          cfExprMax,
 		zones:            make(map[string]*zoneState),
 		svcCtx:           ctx,

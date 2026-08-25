@@ -42,6 +42,13 @@ type mockStore struct {
 	lastSeenBumps       []string     // IPs whose last_seen was bumped
 	banned              []sdk.Action // calls to RecordStrike
 	audited             []sdk.Action // calls to Audit
+
+	// Test hooks (nil = no-op). Invoked WITHOUT m.mu held so a hook may block
+	// one Decide caller mid-critical-section without freezing the store for the
+	// other. Set once before any concurrent Decide, never mutated after — so
+	// the lock-free read below is race-free.
+	onGetBanInfo     func(ip netip.Addr)
+	onGetStrikeCount func(ip netip.Addr)
 }
 
 func newMock(initial map[string]int) *mockStore {
@@ -95,6 +102,9 @@ func (m *mockStore) setSimulatedBan(ip netip.Addr, strike int) {
 }
 
 func (m *mockStore) GetBanInfo(_ context.Context, ip netip.Addr) (time.Time, int, bool, bool, error) {
+	if m.onGetBanInfo != nil {
+		m.onGetBanInfo(ip)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	k := ip.String()
@@ -151,6 +161,9 @@ func (m *mockStore) BumpLastSeen(_ context.Context, ip netip.Addr) error {
 }
 
 func (m *mockStore) GetStrikeCount(_ context.Context, ip netip.Addr) (int, error) {
+	if m.onGetStrikeCount != nil {
+		m.onGetStrikeCount(ip)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.strikes[ip.String()], nil

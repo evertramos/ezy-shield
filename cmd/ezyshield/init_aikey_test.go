@@ -416,57 +416,6 @@ func TestInit_KeySource_Option2_RejectsSecretShape(t *testing.T) {
 	}
 }
 
-// TestInit_WriteSystemdDropIn verifies that writeSystemdEnvDropIn creates the
-// drop-in directory and writes a correctly-formed [Service] section pointing at
-// the canonical env file path.
-func TestInit_WriteSystemdDropIn(t *testing.T) {
-	dir := t.TempDir()
-	// Override the package-level constant via a closure-driven helper so we
-	// don't actually write to /etc/systemd. Because systemdDropInDir is a
-	// package-level const we cannot reassign it; we call writeSystemdDropInTo
-	// which is the testable factored form.
-	dst := filepath.Join(dir, "env.conf")
-	content := "[Service]\nEnvironmentFile=-" + defaultConfigDir + "/" + envFileName + "\n"
-	if err := os.WriteFile(dst, []byte(content), 0o644); err != nil { //nolint:gosec // test file
-		t.Fatalf("pre-seed: %v", err)
-	}
-
-	// Second write with same content must be idempotent (no error, wrote=false).
-	data, err := os.ReadFile(dst) //nolint:gosec // test path
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if string(data) != content {
-		t.Errorf("drop-in content mismatch\ngot:  %q\nwant: %q", data, content)
-	}
-	if !strings.HasPrefix(content, "[Service]\n") {
-		t.Errorf("drop-in missing [Service] section header")
-	}
-	if !strings.Contains(content, "EnvironmentFile=-"+defaultConfigDir+"/"+envFileName) {
-		t.Errorf("drop-in missing EnvironmentFile= line pointing at env file")
-	}
-
-	// Verify live writeSystemdEnvDropIn is idempotent on the real path when
-	// the directory doesn't exist. We can't call it against /etc/systemd in a
-	// unit test, but we can exercise the MkdirAll + WriteFile branch via a
-	// temp dir by temporarily substituting the target.
-	dropInDir2 := filepath.Join(dir, "ezyshield.service.d")
-	if err := os.MkdirAll(dropInDir2, 0o750); err != nil { //nolint:gosec // test file
-		t.Fatalf("mkdir: %v", err)
-	}
-	dst2 := filepath.Join(dropInDir2, "env.conf")
-	if err := os.WriteFile(dst2, []byte(content), 0o644); err != nil { //nolint:gosec // test file
-		t.Fatalf("write: %v", err)
-	}
-	fi, err := os.Stat(dst2)
-	if err != nil {
-		t.Fatalf("stat: %v", err)
-	}
-	if fi.Mode().Perm() != 0o644 {
-		t.Errorf("drop-in perms = %04o, want 0644", fi.Mode().Perm())
-	}
-}
-
 // TestInit_YesMode_NoKeyPrompt verifies that --yes skips askKeySource entirely:
 // no tokenReader call, no env var name prompt, state.aiToken stays empty.
 func TestInit_YesMode_NoKeyPrompt(t *testing.T) {

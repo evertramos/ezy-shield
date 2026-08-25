@@ -77,6 +77,22 @@ func FuzzSSHParser(f *testing.F) {
 	f.Add([]byte("Failed password for root from \x00192.0.2.1 port 22 ssh2"))            // null byte in IP field
 	f.Add([]byte("Failed password for root from 192.0.2.1 port 22 ssh2\r\nINJECTED"))    // CRLF log-line injection
 	f.Add([]byte(strings.Repeat("\xff", 64)))                                            // high-byte garbage
+	// Issue #309 — username-spoofed IP attribution. Usernames may contain spaces
+	// and are logged verbatim, so these craft a second "from <ip> port <n>"
+	// segment inside the username; the parser must attribute to the trailing
+	// (sshd-appended) peer, never the injected one, and never panic.
+	f.Add([]byte("Invalid user root from 192.0.2.111 port 22 from 198.51.100.222 port 40000"))
+	f.Add([]byte("Failed password for invalid user root from 192.0.2.111 port 22 ssh2 from 198.51.100.222 port 40000 ssh2"))
+	f.Add([]byte("Failed password for admin from 192.0.2.111 port 22 ssh2 from 198.51.100.222 port 40000 ssh2"))
+	f.Add([]byte("User bob from 192.0.2.111 not allowed because from 198.51.100.222 not allowed because not listed in AllowUsers"))
+	f.Add([]byte("ssh_dispatch_run_fatal: Connection from invalid user x 192.0.2.111 port 22: y 198.51.100.222 port 40000: Too many authentication failures [preauth]"))
+	f.Add([]byte("Connection closed by invalid user x 192.0.2.111 port 22 198.51.100.222 port 40000 [preauth]"))
+	f.Add([]byte("Accepted password for x from 192.0.2.111 port 22 ssh2 from 198.51.100.222 port 40000 ssh2"))
+	// Hostile whitespace, bracket lookalikes and unicode in the username.
+	f.Add([]byte("Invalid user root\tfrom 192.0.2.111 port 22 from 198.51.100.222 port 40000"))
+	f.Add([]byte("Invalid user root from 192.0.2.111 port 22 [preauth] from 198.51.100.222 port 40000"))
+	f.Add([]byte("Invalid user роот from 198.51.100.222 port 40000")) // unicode username (rune-boundary truncation)
+	f.Add([]byte("Invalid user " + strings.Repeat("é", 200) + " from 198.51.100.222 port 40000"))
 
 	f.Fuzz(func(_ *testing.T, b []byte) {
 		p := parser.NewSSHParser(fuzzDiscardLogger())

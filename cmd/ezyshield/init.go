@@ -1134,6 +1134,11 @@ func createEzyshieldUser(out io.Writer) error {
 		if _, err := fmt.Fprintln(out, "  user ezyshield: already exists"); err != nil {
 			return fmt.Errorf("writing output: %w", err)
 		}
+		// Fall through to the group adds: on a package install the user was
+		// created by postinstall with NO supplementary groups, so returning
+		// here left the journald collector permanently unable to read the
+		// journal (issue #454).
+		addLogAccessGroups()
 		return nil
 	}
 	if err := runSysCmd("useradd", "-r", "-s", "/usr/sbin/nologin", "-d", "/var/lib/ezyshield", "-m", "ezyshield"); err != nil {
@@ -1142,10 +1147,18 @@ func createEzyshieldUser(out io.Writer) error {
 	if _, err := fmt.Fprintln(out, "  user ezyshield: created"); err != nil {
 		return fmt.Errorf("writing output: %w", err)
 	}
-	// best-effort: add to docker and systemd-journal groups for log access
+	addLogAccessGroups()
+	return nil
+}
+
+// addLogAccessGroups best-effort adds the service user to the groups that
+// gate log sources: systemd-journal (journald collector; also declared as
+// SupplementaryGroups= in the daemon unit) and docker (container-log
+// collectors). usermod -aG is idempotent, and a missing group just fails
+// silently — docker in particular is absent on most hosts.
+func addLogAccessGroups() {
 	_ = runCmdSilent("usermod", "-aG", "docker", "ezyshield")
 	_ = runCmdSilent("usermod", "-aG", "systemd-journal", "ezyshield")
-	return nil
 }
 
 // waitForSocket polls for a unix socket to appear within timeout.

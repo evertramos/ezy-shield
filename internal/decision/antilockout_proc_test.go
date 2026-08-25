@@ -51,12 +51,12 @@ func TestAntiLockout_ProcDerivedPeer_ManualBan(t *testing.T) {
 	eng := mustEngine(t, armedPolicy(), newMock(nil))
 	eng.SetSSHPeerProbe(func() []netip.Addr { return []netip.Addr{peer} })
 
-	err := eng.AuthorizeManualBan(context.Background(), hostPrefix("203.0.113.61"))
+	err := eng.AuthorizeManualBan(context.Background(), hostPrefix("203.0.113.61"), false)
 	if !errors.Is(err, decision.ErrManualBanSSHPeer) {
 		t.Errorf("manual ban of kernel-derived peer: err = %v, want ErrManualBanSSHPeer", err)
 	}
 	// A CIDR covering the peer is refused too.
-	err = eng.AuthorizeManualBan(context.Background(), netip.MustParsePrefix("203.0.113.0/24"))
+	err = eng.AuthorizeManualBan(context.Background(), netip.MustParsePrefix("203.0.113.0/24"), false)
 	if !errors.Is(err, decision.ErrManualBanSSHPeer) {
 		t.Errorf("manual CIDR ban covering kernel-derived peer: err = %v, want ErrManualBanSSHPeer", err)
 	}

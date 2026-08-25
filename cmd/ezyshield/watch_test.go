@@ -17,7 +17,7 @@ type keyCaptureBudgetStore struct {
 	seen []string
 }
 
-func (k *keyCaptureBudgetStore) RecordUsage(_ context.Context, _ string, _ sdk.Usage) error {
+func (k *keyCaptureBudgetStore) RecordUsage(_ context.Context, _ string, _ sdk.Usage, _ string) error {
 	return nil
 }
 

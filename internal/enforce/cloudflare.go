@@ -756,16 +756,7 @@ func (e *CloudflareEnforcer) doRequest(ctx context.Context, method, url string, 
 }
 
 func (e *CloudflareEnforcer) isAllowlisted(t sdk.Target) bool {
-	addr, ok := targetAddr(t)
-	if !ok {
-		return false
-	}
-	for _, p := range e.allowlist {
-		if p.Contains(addr) {
-			return true
-		}
-	}
-	return false
+	return targetOverlapsAllowlist(t, e.allowlist)
 }
 
 // ruleDesc returns the CF rule description for the i-th (0-based) chunk.

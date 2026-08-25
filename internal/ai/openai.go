@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/netip"
-	"strconv"
 	"time"
 
 	"github.com/evertramos/ezy-shield/internal/config"
@@ -19,22 +18,13 @@ import (
 const (
 	openaiEndpoint     = "https://api.openai.com/v1/chat/completions"
 	openaiDefaultModel = "gpt-4o-mini"
-	maxOpenAIRetries   = 3
 	// gpt-4o-mini pricing in USD per token.
 	openaiInputCostPerToken  = 1.5e-7 // $0.15 / 1M input tokens
 	openaiOutputCostPerToken = 6e-7   // $0.60 / 1M output tokens
 )
 
-// openaiRateLimitError signals a 429 response so Analyze can apply backoff.
-// hasExplicitDelay distinguishes "Retry-After: 0" (no sleep) from header absent (use backoff).
-type openaiRateLimitError struct {
-	retryAfter       time.Duration
-	hasExplicitDelay bool
-}
-
-func (e *openaiRateLimitError) Error() string {
-	return fmt.Sprintf("openai: rate limited (retry after %v)", e.retryAfter)
-}
+// Retry policy (429 handling, bounded backoff, usage accumulation) is the
+// shared analyzeWithRetry in retry.go (issue #313).
 
 // OpenAIProvider implements sdk.AIProvider using the OpenAI Chat Completions API.
 // The API key is stored as a config.Secret so struct dumps (%+v, log lines,
@@ -102,41 +92,20 @@ func (p *OpenAIProvider) Analyze(
 
 	prompt := buildPrompt(payload, budget)
 
-	var (
-		verdicts []sdk.Verdict
-		usage    sdk.Usage
-		callErr  error
-	)
-	for attempt := 0; attempt <= maxOpenAIRetries; attempt++ {
-		verdicts, usage, callErr = p.callOnce(ctx, prompt)
-		if callErr == nil {
-			break
-		}
-
-		var rle *openaiRateLimitError
-		if errors.As(callErr, &rle) {
-			delay := rle.retryAfter
-			if !rle.hasExplicitDelay {
-				delay = time.Duration(1<<uint(attempt)) * time.Second
-			}
-			slog.WarnContext(ctx, "ai: openai rate limited, backing off",
-				"attempt", attempt+1, "delay", delay)
-			select {
-			case <-ctx.Done():
-				return nil, usage, ctx.Err()
-			case <-time.After(delay):
-			}
-			continue
-		}
-
-		slog.WarnContext(ctx, "ai: openai attempt failed",
-			"attempt", attempt+1, "err", callErr)
-	}
+	// Shared bounded-backoff retry loop (issue #313): capped Retry-After,
+	// no sleep after the final attempt, usage accumulated across attempts.
+	verdicts, usage, callErr := analyzeWithRetry(ctx, "openai",
+		func(ctx context.Context) ([]sdk.Verdict, sdk.Usage, error) {
+			return p.callOnce(ctx, prompt)
+		})
 
 	if callErr != nil {
+		if errors.Is(callErr, context.Canceled) || errors.Is(callErr, context.DeadlineExceeded) {
+			return nil, usage, callErr
+		}
 		if p.fallback != nil {
 			slog.WarnContext(ctx, "ai: openai falling back to rules engine",
-				"attempts", maxOpenAIRetries+1, "err", callErr)
+				"attempts", aiMaxRetries+1, "err", callErr)
 			return p.fallback(batch), usage, nil
 		}
 		return nil, usage, fmt.Errorf("ai: openai: %w", callErr)
@@ -177,14 +146,7 @@ func (p *OpenAIProvider) callOnce(ctx context.Context, prompt string) ([]sdk.Ver
 	defer resp.Body.Close() //nolint:errcheck // read-only close
 
 	if resp.StatusCode == http.StatusTooManyRequests {
-		rle := &openaiRateLimitError{}
-		if s := resp.Header.Get("Retry-After"); s != "" {
-			if secs, parseErr := strconv.Atoi(s); parseErr == nil {
-				rle.hasExplicitDelay = true
-				rle.retryAfter = time.Duration(secs) * time.Second
-			}
-		}
-		return nil, sdk.Usage{}, rle
+		return nil, sdk.Usage{}, newRateLimitError("openai", resp.Header.Get("Retry-After"))
 	}
 
 	if resp.StatusCode != http.StatusOK {

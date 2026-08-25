@@ -33,6 +33,21 @@ func sourceID(parserName, path string) string {
 	return parserName + ":" + path
 }
 
+// defaultParsers returns the parser set the daemon routes collector lines
+// through. Every parser name accepted by config validation (see
+// internal/config validParserNames) must be handled by exactly one parser
+// here; otherwise a collector with that parser silently drops every line
+// (issue #308). The parser-coverage test in run_parsers_test.go enforces this.
+func defaultParsers(logger *slog.Logger) []sdk.Parser {
+	return []sdk.Parser{
+		parser.NewSSHParser(logger),
+		parser.NewNginxParser(logger, parser.NginxConfig{}),
+		parser.NewApacheErrorParser(logger),
+		parser.NewCaddyParser(logger, parser.CaddyConfig{}),
+		parser.NewTraefikParser(logger, parser.TraefikConfig{}),
+	}
+}
+
 func newRunCmd() *cobra.Command {
 	var (
 		configPath string
@@ -116,12 +131,7 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 		slog.Warn("run: " + msg)
 	}
 
-	parsers := []sdk.Parser{
-		parser.NewSSHParser(logger),
-		parser.NewNginxParser(logger, parser.NginxConfig{}),
-		parser.NewCaddyParser(logger, parser.CaddyConfig{}),
-		parser.NewTraefikParser(logger, parser.TraefikConfig{}),
-	}
+	parsers := defaultParsers(logger)
 
 	collectors := buildCollectors(cfg, logger)
 
@@ -289,7 +299,15 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 }
 
 // buildCollectors creates sdk.Collector instances from the config slice.
+// An empty result is legal (config validate treats it as a warning since
+// issue #339) but must be LOUD: an armed daemon with zero collectors
+// ingests nothing and protects nothing, while status/systemd look healthy
+// (issue #386; status additionally reports collectors_state NONE, #456).
 func buildCollectors(cfg *config.Config, logger *slog.Logger) []sdk.Collector {
+	if len(cfg.Collectors) == 0 {
+		logger.Warn("run: no collectors configured — no log source is being monitored, nothing will ever be detected; " +
+			"add collectors to config.yaml (see '" + progName + " doctor')")
+	}
 	var cols []sdk.Collector
 	for _, c := range cfg.Collectors {
 		switch c.Kind {

@@ -59,7 +59,7 @@ These happen interactively, never from the daemon:
   system package manager if missing; and, only if you choose Cloudflare,
   verifies the token and sets up the list/WAF rule against
   `api.cloudflare.com`.
-- **`ezyshield config enforcer cloudflare` / `ezyshield test enforce
+- **`ezyshield config enforcer cloudflare` / `ezyshield test enforcer
   cloudflare`** — token verification and connectivity checks against
   `api.cloudflare.com`.
 - **`ezyshield doctor`** — when a Cloudflare enforcer is configured, runs

@@ -141,8 +141,8 @@ func TestOllama_BadResponseThenFallback(t *testing.T) {
 	if !fallbackCalled {
 		t.Error("expected fallback to be called")
 	}
-	if calls != maxOllamaRetries+1 {
-		t.Errorf("expected %d API calls (1+retries), got %d", maxOllamaRetries+1, calls)
+	if calls != aiMaxRetries+1 {
+		t.Errorf("expected %d API calls (1+retries), got %d", aiMaxRetries+1, calls)
 	}
 	if len(verdicts) != 1 || verdicts[0].Source != "rules" {
 		t.Errorf("expected rules fallback verdict, got %+v", verdicts)
@@ -172,8 +172,8 @@ func TestOllama_HTTPError(t *testing.T) {
 	if !fallbackCalled {
 		t.Error("expected fallback to be called")
 	}
-	if calls != maxOllamaRetries+1 {
-		t.Errorf("expected %d calls, got %d", maxOllamaRetries+1, calls)
+	if calls != aiMaxRetries+1 {
+		t.Errorf("expected %d calls, got %d", aiMaxRetries+1, calls)
 	}
 }
 

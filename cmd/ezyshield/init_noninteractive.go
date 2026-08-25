@@ -157,7 +157,7 @@ func runNonInteractiveInit(cmd *cobra.Command, configDir string, skipSystem, for
 	applyAnswers(state, answers)
 	if len(state.adminIPs) == 0 {
 		p.println(st.warn("admin_cidrs will be EMPTY — set allowlist.admin_ips (or --admin-ips) so a"))
-		p.println(st.warn("management IP survives; 'ezyshield arm' flags an empty list before arming."))
+		p.println(st.warn("management IP survives; '" + progName + " arm' flags an empty list before arming."))
 	}
 	summarizeChoices(state, sum, false)
 
@@ -247,7 +247,7 @@ func runNonInteractiveInit(cmd *cobra.Command, configDir string, skipSystem, for
 	}
 
 	sum.skipped = append(sum.skipped,
-		"systemd services — not started (non-interactive writes config only; start with systemctl or 'ezyshield run')")
+		"systemd services — not started (non-interactive writes config only; start with systemctl or '"+progName+" run')")
 
 	if p.err != nil {
 		return fmt.Errorf("writing output: %w", p.err)

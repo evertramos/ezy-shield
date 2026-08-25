@@ -58,7 +58,7 @@ collectors:
 | `path` | for `file` | file to tail |
 | `unit` | for `journald` | systemd unit to follow |
 | `container` | for `docker` | container name, short ID, or full ID |
-| `parser` | no | force a parser: `nginx` \| `ssh` \| `apache` \| `apache-error` \| `traefik` \| `caddy` (default: routed automatically from the source). **Honored only for `file` and `docker` collectors** — `journald` ignores it and always routes its parser from the unit. |
+| `parser` | no | force a parser: `nginx` \| `ssh` \| `apache` \| `apache-error` \| `traefik` \| `caddy` (default: routed automatically from the source). `apache` reads the Apache **access** log (combined format, shared with `nginx`); `apache-error` reads the Apache **error_log** (`error.log` / `error_log`). **Honored only for `file` and `docker` collectors** — `journald` ignores it and always routes its parser from the unit. |
 
 ### SSH collector (unit name varies by distro)
 
@@ -93,7 +93,7 @@ enforce:
   nftables: {}                   # local enforcement on; defaults are fine
 
   cloudflare:
-    api_token: env:CF_API_TOKEN  # secrets are env: references, never inline
+    api_token: env:CLOUDFLARE_API_TOKEN  # secrets are env: references, never inline — this NAME is what init writes
     account_id: "abc123..."      # required in the default "lists" mode
     # mode: lists                # "lists" (default) or "rulesets"
     # list_name: ezyshield_blocked
@@ -156,9 +156,10 @@ unban is immediate).
 notify:
   rate_limit_per_minute: 5       # default — cap on notifications per minute
   dedup_window_sec: 600          # default — identical alerts collapsed
+  notify_only_window_sec: 3600   # default — repeat notify_only per (IP, rule) folds into one summary
 
   telegram:
-    bot_token: env:EZYSHIELD_TELEGRAM_TOKEN
+    bot_token: env:TELEGRAM_BOT_TOKEN
     chat_ids: ["123456789"]
     severity: [warn, critical]   # optional filter: info | warn | critical
 
@@ -166,25 +167,25 @@ notify:
     host: smtp.example.com
     port: 587
     username: alerts@example.com
-    password: env:EZYSHIELD_SMTP_PASSWORD
+    password: env:SMTP_PASSWORD
     tls: starttls                # starttls (default) | tls | none
     from: alerts@example.com
     to: [admin@example.com]
 
   slack:
-    webhook_url: env:EZYSHIELD_SLACK_WEBHOOK
+    webhook_url: env:SLACK_WEBHOOK_URL
     channel: "#security"         # optional override
 
   discord:
-    webhook_url: env:EZYSHIELD_DISCORD_WEBHOOK
+    webhook_url: env:DISCORD_WEBHOOK_URL
 
   webhook:
-    url: env:EZYSHIELD_WEBHOOK_URL
+    url: env:WEBHOOK_URL
     headers:
-      Authorization: env:EZYSHIELD_WEBHOOK_TOKEN   # value must be a full env: reference
+      Authorization: env:WEBHOOK_AUTH_TOKEN   # value must be a full env: reference
 ```
 
-Shared fields: `rate_limit_per_minute` (default 5) and `dedup_window_sec` (default 600) protect against notification storms. Every channel accepts an optional `severity` list (`info` \| `warn` \| `critical`).
+Shared fields: `rate_limit_per_minute` (default 5) and `dedup_window_sec` (default 600) protect against notification storms. `notify_only_window_sec` (default 3600) additionally windows below-threshold `notify_only` events per (IP, rule): the first event notifies immediately and repeats within the window fold into a single summary notification — set it negative to disable. Audit log entries are never suppressed. Every channel accepts an optional `severity` list (`info` \| `warn` \| `critical`).
 
 > Secret-typed fields (`bot_token`, `password`, `webhook_url`, webhook `url`) only accept `env:VARNAME` references — inline values are rejected at load time. They are also **required** for their channel: a `telegram` block without `bot_token`, an `email` block without `password`, or a `slack`/`discord`/`webhook` block without its URL fails validation (the daemon resolves them at startup). Webhook header **values** are sent verbatim unless the entire value is an `env:` reference, which is resolved.
 
@@ -225,12 +226,21 @@ ai:
 | `model` | model name |
 | `api_key` | `env:VARNAME` reference (never inline) |
 | `endpoint` | base URL for the **`ollama`** provider only (default `http://localhost:11434`). The `anthropic` and `openai` providers ignore it and always call their official APIs (`https://api.anthropic.com`, `https://api.openai.com`) — there is no OpenAI-compatible-endpoint override. Same in the single-provider and `providers` failover forms. |
-| `ambiguous_band` | `[low, high]` — only scores inside the band consult the AI. Omitted (or `[0, 0]`) defaults to `[30, 69]`; any other band with `low >= high` or values outside 0–100 is rejected at load. Keep `high` **below** the policy `ban_threshold`: a score at or above the threshold has already decided a ban on rules alone, so the daemon never consults the AI for it — a band reaching into the threshold only triggers a startup/`validate` warning |
+| `ambiguous_band` | `[low, high]` — only scores inside the band consult the AI. Omitted (or `[0, 0]`) defaults to `[30, ban_threshold − 1]`, following the ban_threshold CONFIGURED in policy.yaml (`[30, 69]` with the default threshold of 70) — so raising the threshold automatically widens the omitted band instead of silently leaving an unconsulted gap; any other band with `low >= high` or values outside 0–100 is rejected at load. Keep `high` **below** the policy `ban_threshold`: a score at or above the threshold has already decided a ban on rules alone, so the daemon never consults the AI for it — a band reaching into the threshold only triggers a startup/`validate` warning |
 | `token_budget_daily` | daily token cap; when exhausted, decisions fall back to rules |
 | `cache_ttl` | verdict cache duration; omitted or `0` means the default **15m** (the cache cannot be disabled — it is the second brake on repeated consults for the same behavior). Entries are keyed by behavior signature (event kind counts + window), not by IP, so identical attack patterns from different IPs reuse one verdict; on a hit the cached verdict is re-targeted to the IP being evaluated. Allowlist-clamped verdicts are never cached |
 | `providers` | multi-provider failover list (`name`, `priority`, `model`, `api_key`, `endpoint`, `token_budget_daily`); takes precedence over the single-provider fields |
 
 The AI verdict is always advisory: schema-validated, clamped by policy, and never able to ban an allowlisted IP.
+
+Every AI call is recorded in the `ai_usage` table with the analyzed IP, so cost attribution is a single query — the top spenders (an IP draining the budget is itself a leakage symptom):
+
+```bash
+sudo sqlite3 /var/lib/ezyshield/ezyshield.db \
+  "SELECT ip, COUNT(*) calls, ROUND(SUM(cost_usd), 4) usd
+   FROM ai_usage WHERE ip IS NOT NULL
+   GROUP BY ip ORDER BY usd DESC LIMIT 10;"
+```
 
 ## enrich
 

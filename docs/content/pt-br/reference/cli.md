@@ -33,7 +33,7 @@ seguros para scripts:
 | Comando | Formato |
 |---------|---------|
 | `status` | Objeto: `daemon`, `enforcer`, `mode`, `uptime`, `version`, `active_bans`, `bans_by_strike`, `message` |
-| `list` | Envelope: `ok`, `error`, `data` (linhas dentro de `data`) |
+| `list` | Array de linhas — bans ativos, entradas de `--allow` ou eventos de `--audit` (`[]` quando vazio) |
 | `report <ip>` | Objeto: relatório de abuso versionado (`schema_version`, `ip`, `country`, `asn`, `current_ban`, `strikes`, `actions`, mais `evidence` com `--evidence`) |
 | `report` | Array de resumos de ofensores (`ip`, `first_seen`, `last_seen`, `total_strikes`, `banned`, `permanent`, `country`, `asn`) |
 | `watch` | NDJSON: um objeto de evento por linha |
@@ -227,6 +227,13 @@ Saída:
 - Modo (enforce / dry-run), uptime, versão
 - Total de banimentos ativos e distribuição por strike
 
+Campos estáveis do `--json` além desses: `enforcement_state` /
+`enforcement_detail` (a saúde real do enforcement, mesmo vocabulário do
+doctor), `collectors_state` / `collectors_detail`, `simulated_bans`
+(bans simulados do dry-run que seriam aplicados se armado) e
+`armed_until` (o prazo de auto-reversão enquanto uma janela `arm --for`
+está ativa).
+
 ## ezyshield list
 
 Lista os banimentos ativos (padrão) ou a allowlist.
@@ -247,7 +254,7 @@ ezyshield list --audit
 ezyshield list --audit --ip 203.0.113.42
 ezyshield list --audit --limit 50
 
-# Saída em JSON (funciona com --audit também)
+# Saída em JSON — sempre um array puro de entradas (funciona com --audit e --allow também)
 ezyshield list --json
 ```
 
@@ -349,12 +356,22 @@ sudo ezyshield ban 203.0.113.0/24
 | Flag | Descrição |
 |------|-----------|
 | `--ttl` | duração do banimento (`5m`, `24h`, `7d`); vazio = permanente |
+| `--for` | apelido de `--ttl`, alinhado com `allow --for` e `arm --for` |
+| `--force` | ignora a guarda de faixas CDN compartilhadas (nunca a allowlist/anti-lockout) — veja abaixo |
 | `--reason` | motivo em texto livre armazenado no log de auditoria |
 | `--socket` | override do caminho do socket de controle |
 
 Banimentos manuais contornam o motor de regras, **não** a allowlist — um IP na
 allowlist nunca pode ser banido, manualmente ou de qualquer outra forma
 (invariante de segurança: a allowlist sempre vence).
+
+Bans manuais também são verificados contra a tabela embutida de **faixas de
+borda compartilhadas de CDN** — bloquear um IP de borda compartilhado bloqueia
+o tráfego legítimo de todos atrás daquela CDN. Um alvo dentro de uma faixa
+conhecida é recusado, e quando a tabela está indisponível o ban é recusado por
+não ser verificável; `--force` sobrepõe apenas essas duas recusas (a tabela é
+um snapshot distribuído que pode ficar desatualizado), nunca a allowlist ou o
+anti-lockout.
 
 ## ezyshield unban
 
@@ -469,6 +486,7 @@ sudo ezyshield doctor
 |------|--------|-----------|
 | `--config-dir` | `/etc/ezyshield` | diretório de configuração a verificar |
 | `--db` | `/var/lib/ezyshield/ezyshield.db` | banco para a checagem read-only de ban_ineffective |
+| `--socket` | `/run/ezyshield/ezyshield.sock` | socket de controle do daemon (consultado para o estado vivo do enforcement) |
 
 Verificações:
 - config.yaml / policy.yaml existem, fazem parse e têm permissões/dono seguros
@@ -483,6 +501,11 @@ Verificações:
   pedaço grande do espaço de endereços do enforcement para sempre. Veja a
   seção de allowlist na [Referência de Policy](policy.md).
 - diagnóstico ban_ineffective: **FAIL** quando um ban ativo é marcado ineficaz (tráfego passando apesar do ban) — nomeia os IPs e aponta o remédio sistêmico (edge enforcement / real-IP parsing / saúde do enforcer); **WARN** quando nenhum ban está ineficaz no momento, mas algum offender foi marcado historicamente; **PASS** caso contrário. Consulta read-only ao banco em `--db`.
+- cdn range data: **FAIL** quando a tabela embutida de faixas CDN
+  compartilhadas (que sustenta a guarda anti-lockout do caminho de ban,
+  issue #178) falha ao carregar — os bans então prosseguem marcados com
+  `[cdn-ranges-unverified]` no audit log; **PASS** mostra a contagem de
+  faixas carregadas.
 - **Estado do enforcement** (issue #174) — a saúde real do caminho de
   enforcement, derivada dos resultados reais do enforcer, não só da config, e
   re-verificada por um probe de reconcile periódico (a cada 5 minutos) para
@@ -708,7 +731,7 @@ ezyshield version --json
 
 ## ezyshield test
 
-Executa testes de conectividade contra os componentes configurados. Como o `config`, o grupo segue o padrão `<kind> <name>`, então tipos de componente futuros se encaixam nos mesmos verbos.
+Executa testes de conectividade contra os componentes configurados. Como o `config`, o grupo segue o padrão `<kind> <name>`, então tipos de componente futuros se encaixam nos mesmos verbos. Os dois subcomandos aceitam `--config-dir` (padrão `/etc/ezyshield`) para apontar o diretório que contém o `config.yaml`.
 
 ### ezyshield test enforcer `<name>`
 
@@ -736,7 +759,7 @@ sudo ezyshield test notifier telegram
 sudo ezyshield test notifier all
 ```
 
-Nomes disponíveis: `all`, `email`, `telegram`.
+Nomes disponíveis: `all`, `discord`, `email`, `slack`, `telegram`, `webhook`.
 
 Código de saída diferente de zero em caso de falha.
 
@@ -753,7 +776,8 @@ Os verbos pré-1.0 `test-enforce <name>` e `test-notify <name>` continuam funcio
 | `-h, --help` | Mostra o texto de ajuda |
 
 `--config` / `--policy` **não** são globais — existem nos comandos que leem
-esses arquivos (`run`, `config show`, `validate`, `dashboard`), com defaults
+esses arquivos (`run`, `config show`, `validate`; o `dashboard` aceita apenas
+`--config` — ele nunca lê policy.yaml), com defaults
 em `/etc/ezyshield`.
 
 ### Flags exclusivas do comando raiz
@@ -778,7 +802,7 @@ ezyshield watch --kind ban,dry_ban
 **Exportar o histórico por IP com evidências para JSON:**
 
 ```bash
-ezyshield report --json > report.json
+ezyshield report 203.0.113.42 --json > report.json
 ```
 
 **Verificar se um IP está banido no momento:**

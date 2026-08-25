@@ -247,6 +247,15 @@ func (p *SSHParser) Parse(line sdk.RawLine) ([]sdk.Event, error) {
 		return nil, nil
 	}
 
+	// Unwrap Docker json-file log format, matching the HTTP parsers — an
+	// sshd in a container reached this parser still wrapped and every line
+	// silently missed the regexes (issue #358).
+	if len(raw) > 0 && raw[0] == '{' {
+		if inner := extractDockerLogField(raw); inner != "" {
+			raw = strings.TrimRight(inner, "\r\n")
+		}
+	}
+
 	// Determine event timestamp, connection pid and message body by stripping a
 	// syslog prefix, if present. Two prefix formats are supported (ISO-8601
 	// first, then the legacy RFC3164 stamp); a prefix-less message (journald

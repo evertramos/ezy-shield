@@ -4,7 +4,6 @@
 package collector
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -219,25 +218,45 @@ func (c *DockerCollector) tailJSONFile(ctx context.Context, logPath, source stri
 		done <- tail.Run(tailCtx, inner)
 	}()
 
+	// Every send races ctx cancellation: after the pipeline stops reading,
+	// a plain blocking send would wedge this goroutine forever and the
+	// daemon's rawLines-closing goroutine would never finish (issue #358).
+	// The non-blocking attempt runs FIRST so a graceful SIGTERM drain (ctx
+	// done, pipeline still consuming) never randomly drops deliverable
+	// lines to the select's uniform choice.
+	send := func(rawLine sdk.RawLine) bool {
+		line := unwrapDockerJSONLine(rawLine.Line)
+		rl := sdk.RawLine{
+			Source: source,
+			Line:   []byte(strings.TrimRight(line, "\n")),
+			At:     rawLine.At,
+		}
+		select {
+		case out <- rl:
+			return true
+		default:
+		}
+		select {
+		case out <- rl:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+
 	for {
 		select {
 		case rawLine := <-inner:
-			line := unwrapDockerJSONLine(rawLine.Line)
-			out <- sdk.RawLine{
-				Source: source,
-				Line:   []byte(strings.TrimRight(line, "\n")),
-				At:     rawLine.At,
+			if !send(rawLine) {
+				return nil
 			}
 		case err := <-done:
 			// Drain any buffered lines before returning.
 			for {
 				select {
 				case rawLine := <-inner:
-					line := unwrapDockerJSONLine(rawLine.Line)
-					out <- sdk.RawLine{
-						Source: source,
-						Line:   []byte(strings.TrimRight(line, "\n")),
-						At:     rawLine.At,
+					if !send(rawLine) {
+						return err
 					}
 				default:
 					return err
@@ -280,22 +299,36 @@ func (c *DockerCollector) tailJournald(ctx context.Context, source string, out c
 		return fmt.Errorf("docker journald: start journalctl: %w", err)
 	}
 
-	sc := bufio.NewScanner(stdout)
-	for sc.Scan() {
-		line := sc.Bytes()
+	// forEachLine (not bufio.Scanner): same oversized-line failure mode as
+	// the journald collector (issue #306) — Scanner dies at its token cap
+	// and Wait then blocks forever on the follow-mode journalctl.
+	readErr := forEachLine(stdout, maxStreamLineBytes, func(line []byte, truncated bool) {
+		if truncated {
+			logger.Warn("docker journald: oversized log line truncated",
+				slog.Int("cap_bytes", maxStreamLineBytes),
+				slog.String("container", c.Container),
+			)
+		}
 		cp := make([]byte, len(line))
 		copy(cp, line)
-		out <- sdk.RawLine{
-			Source: source,
-			Line:   cp,
-			At:     time.Now(),
+		// Send races cancellation (issue #358); non-blocking attempt first
+		// so a graceful drain never randomly drops deliverable lines.
+		rl := sdk.RawLine{Source: source, Line: cp, At: time.Now()}
+		select {
+		case out <- rl:
+		default:
+			select {
+			case out <- rl:
+			case <-ctx.Done():
+			}
 		}
-	}
-	if err := sc.Err(); err != nil {
-		logger.Debug("docker journald: scanner error",
-			slog.String("err", err.Error()),
+	})
+	if readErr != nil && ctx.Err() == nil {
+		logger.Warn("docker journald: read error",
+			slog.String("err", readErr.Error()),
 			slog.String("container", c.Container),
 		)
+		_ = cmd.Process.Kill() // see the journald collector: never wedge in Wait (issue #306)
 	}
 
 	waitErr := cmd.Wait()

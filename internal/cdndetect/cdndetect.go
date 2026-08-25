@@ -63,17 +63,28 @@ type providersFile struct {
 }
 
 // defaultProviders is the parsed table built at package init from rangesYAML.
-// A load failure panics — the file is compiled in, so this can only fail if
-// a maintainer breaks the YAML in a PR. The panic surfaces the mistake in
-// tests before any binary ships.
-var defaultProviders []Provider
+// The file is compiled in, so a load failure can only mean a maintainer broke
+// the YAML in a PR: TestEmbeddedRangesLoad fails the build's test gate, and
+// loadErr lets runtime consumers surface the breakage loudly. No panic —
+// "no panic outside main" (AGENTS.md Go conventions, issue #358).
+var (
+	defaultProviders []Provider
+	loadErr          error
+)
 
 func init() {
-	ps, err := loadProviders(rangesYAML)
-	if err != nil {
-		panic(fmt.Sprintf("cdndetect: parsing embedded ranges.yaml: %v", err))
+	defaultProviders, loadErr = loadProviders(rangesYAML)
+}
+
+// LoadError reports whether the embedded provider table failed to parse at
+// startup. Consumers must treat a non-nil error as "detection unavailable"
+// and say so — an empty provider table must never silently pass for "no CDN
+// detected".
+func LoadError() error {
+	if loadErr != nil {
+		return fmt.Errorf("cdndetect: embedded ranges.yaml unusable: %w", loadErr)
 	}
-	defaultProviders = ps
+	return nil
 }
 
 // loadProviders parses raw YAML into the Provider slice and validates every
@@ -305,4 +316,24 @@ func ProviderByID(id string) (Provider, bool) {
 		}
 	}
 	return Provider{}, false
+}
+
+// SharedRanges returns the union of every populated provider's edge prefixes
+// for ban-path guarding (issue #178): a shared CDN edge IP must never be
+// banned — blocking it blocks legitimate traffic for everyone behind it.
+// "Data unavailable" (embedded table failed to load, or no provider carries
+// ranges) is a DISTINCT error state, never an empty no-match slice: consumers
+// must fail toward caution and say so, not silently skip the check.
+func SharedRanges() ([]netip.Prefix, error) {
+	if err := LoadError(); err != nil {
+		return nil, err
+	}
+	var out []netip.Prefix
+	for _, p := range defaultProviders {
+		out = append(out, p.Prefixes...)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("cdndetect: no provider ranges loaded")
+	}
+	return out, nil
 }

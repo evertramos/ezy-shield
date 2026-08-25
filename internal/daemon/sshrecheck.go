@@ -31,13 +31,23 @@ package daemon
 // The AI layer is deliberately NOT consulted on re-checks: the evidence
 // already went through maybeConsultAI when the events arrived, and rule/geo
 // scores are deterministic — re-asking would only double-spend budget
-// (Result 5 of the same audit) without changing the outcome.
+// (Result 5 of the same audit) without changing the outcome. Instead, when
+// the ORIGINAL refusal suppressed a ban that needed the AI push (rules-only
+// score below ban_threshold, an ai:* verdict at/above it — issue #442), the
+// elevated verdict is carried on the queue entry and REPLAYED into the
+// deferred Decide alongside the freshly derived rule/geo verdicts. Replay
+// happens only while in-window rule evidence still exists (aged-out
+// evidence still drops), the verdict's IP is re-checked against the entry
+// (same discipline as the #402 rebind), and every safety check in Decide —
+// fresh SSH-peer probe included — applies to the replayed verdict exactly
+// as it did originally.
 
 import (
 	"context"
 	"errors"
 	"log/slog"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 
@@ -71,11 +81,16 @@ const (
 type sshRecheckItem struct {
 	ip       netip.Addr
 	attempts int
+	// aiVerdict is the AI-elevated verdict that made the original refusal a
+	// would-be ban when rules alone did not reach ban_threshold; nil when
+	// rules alone sufficed (issue #442). Replayed into the deferred Decide.
+	aiVerdict *sdk.Verdict
 }
 
 type sshRecheckEntry struct {
-	due      time.Time
-	attempts int
+	due       time.Time
+	attempts  int
+	aiVerdict *sdk.Verdict // see sshRecheckItem.aiVerdict
 }
 
 // sshRecheckQueue is the per-IP deferred re-check schedule. All methods are
@@ -87,14 +102,17 @@ type sshRecheckQueue struct {
 }
 
 // schedule (re)arms the re-check for ip after an event-driven refusal:
-// deadline pushed to due, attempts reset (fresh evidence, fresh budget).
-// Returns false when the queue is full and ip is not already tracked.
-func (q *sshRecheckQueue) schedule(ip netip.Addr, due time.Time) bool {
+// deadline pushed to due, attempts reset (fresh evidence, fresh budget),
+// aiVerdict replaced (the newest refusal's evidence wins — nil when rules
+// alone reached ban_threshold, issue #442). Returns false when the queue is
+// full and ip is not already tracked.
+func (q *sshRecheckQueue) schedule(ip netip.Addr, due time.Time, aiVerdict *sdk.Verdict) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if e, ok := q.pending[ip]; ok {
 		e.due = due
 		e.attempts = 0
+		e.aiVerdict = aiVerdict
 		return true
 	}
 	if len(q.pending) >= sshRecheckMaxPending {
@@ -103,7 +121,7 @@ func (q *sshRecheckQueue) schedule(ip netip.Addr, due time.Time) bool {
 	if q.pending == nil {
 		q.pending = make(map[netip.Addr]*sshRecheckEntry)
 	}
-	q.pending[ip] = &sshRecheckEntry{due: due}
+	q.pending[ip] = &sshRecheckEntry{due: due, aiVerdict: aiVerdict}
 	return true
 }
 
@@ -111,7 +129,7 @@ func (q *sshRecheckQueue) schedule(ip netip.Addr, due time.Time) bool {
 // ESTABLISHED) or rate-limited. attempts is the count ALREADY spent; returns
 // false when the retry budget is exhausted. If a fresh event-driven refusal
 // re-armed ip meanwhile, that entry (newer deadline, reset budget) wins.
-func (q *sshRecheckQueue) requeue(ip netip.Addr, attempts int, due time.Time) bool {
+func (q *sshRecheckQueue) requeue(ip netip.Addr, attempts int, due time.Time, aiVerdict *sdk.Verdict) bool {
 	if attempts >= sshRecheckMaxAttempts {
 		return false
 	}
@@ -126,7 +144,7 @@ func (q *sshRecheckQueue) requeue(ip netip.Addr, attempts int, due time.Time) bo
 	if q.pending == nil {
 		q.pending = make(map[netip.Addr]*sshRecheckEntry)
 	}
-	q.pending[ip] = &sshRecheckEntry{due: due, attempts: attempts}
+	q.pending[ip] = &sshRecheckEntry{due: due, attempts: attempts, aiVerdict: aiVerdict}
 	return true
 }
 
@@ -137,7 +155,7 @@ func (q *sshRecheckQueue) due(now time.Time) []sshRecheckItem {
 	var items []sshRecheckItem
 	for ip, e := range q.pending {
 		if !e.due.After(now) {
-			items = append(items, sshRecheckItem{ip: ip, attempts: e.attempts})
+			items = append(items, sshRecheckItem{ip: ip, attempts: e.attempts, aiVerdict: e.aiVerdict})
 			delete(q.pending, ip)
 		}
 	}
@@ -176,10 +194,39 @@ func (d *Daemon) maybeScheduleSSHRecheck(ctx context.Context, action sdk.Action,
 	if high < d.policy.BanThreshold {
 		return
 	}
-	if !d.sshRecheck.schedule(action.IP, time.Now().Add(d.sshRecheckDelayVal())) {
+	if !d.sshRecheck.schedule(action.IP, time.Now().Add(d.sshRecheckDelayVal()),
+		elevatedAIVerdict(verdicts, d.policy.BanThreshold)) {
 		slog.WarnContext(ctx, "daemon: ssh re-check queue full — deferred re-evaluation dropped",
 			"ip", action.IP)
 	}
+}
+
+// elevatedAIVerdict returns (a copy of) the highest-scoring ai:* verdict at
+// or above banThreshold — but only when the non-AI verdicts alone stay
+// BELOW the threshold, i.e. the would-be ban existed only because of the AI
+// push (issue #442). When rules alone suffice, nil: the deferred re-check
+// reproduces the ban from live rule evidence and a replay would be
+// redundant.
+func elevatedAIVerdict(verdicts []sdk.Verdict, banThreshold int) *sdk.Verdict {
+	nonAIHigh := 0
+	var best *sdk.Verdict
+	for i := range verdicts {
+		v := &verdicts[i]
+		if strings.HasPrefix(v.Source, "ai:") {
+			if v.Score >= banThreshold && (best == nil || v.Score > best.Score) {
+				best = v
+			}
+			continue
+		}
+		if v.Score > nonAIHigh {
+			nonAIHigh = v.Score
+		}
+	}
+	if best == nil || nonAIHigh >= banThreshold {
+		return nil
+	}
+	cp := *best
+	return &cp
 }
 
 // runSSHRecheck is the re-check loop goroutine: it pops due entries every
@@ -197,7 +244,7 @@ func (d *Daemon) runSSHRecheck(ctx context.Context) {
 			return
 		case now := <-t.C:
 			for _, it := range d.sshRecheck.due(now) {
-				d.recheckAfterAntiLockout(ctx, it.ip, it.attempts)
+				d.recheckAfterAntiLockout(ctx, it)
 			}
 		}
 	}
@@ -208,7 +255,8 @@ func (d *Daemon) runSSHRecheck(ctx context.Context) {
 // static allowlist, SSH-peer probe (fresh — the delay outlives the cache
 // TTL), active-ban guard, and the ban rate limit inside Decide. attempts is
 // the retry budget already spent for this evidence.
-func (d *Daemon) recheckAfterAntiLockout(ctx context.Context, ip netip.Addr, attempts int) {
+func (d *Daemon) recheckAfterAntiLockout(ctx context.Context, it sshRecheckItem) {
+	ip, attempts := it.ip, it.attempts
 	if ctx.Err() != nil {
 		return
 	}
@@ -220,9 +268,24 @@ func (d *Daemon) recheckAfterAntiLockout(ctx context.Context, ip netip.Addr, att
 	verdicts := d.evaluateRules(ctx, ip)
 	verdicts = d.maybeInjectGeoVerdict(ctx, ip, verdicts)
 	if len(verdicts) == 0 {
-		// The evidence aged out of every rule window — nothing left to decide.
+		// The evidence aged out of every rule window — nothing left to
+		// decide. A carried AI verdict is deliberately NOT replayed alone:
+		// with no live rule evidence there is nothing for it to elevate.
 		slog.DebugContext(ctx, "daemon: ssh re-check — no in-window verdicts, dropping", "ip", ip)
 		return
+	}
+	// Replay the AI-elevated verdict that made the original refusal a
+	// would-be ban (issue #442) — only alongside live rule evidence, and
+	// only for the IP it was issued for (same rebind discipline as #402).
+	// Every safety check in Decide, the fresh SSH-peer probe included,
+	// applies to it exactly as on the original pass.
+	if it.aiVerdict != nil {
+		if it.aiVerdict.IP == ip {
+			verdicts = append(verdicts, *it.aiVerdict)
+		} else {
+			slog.WarnContext(ctx, "daemon: ssh re-check — dropping carried AI verdict for mismatched IP",
+				"entry_ip", ip, "verdict_ip", it.aiVerdict.IP)
+		}
 	}
 
 	action, err := d.decEng.Decide(ctx, verdicts)
@@ -232,7 +295,7 @@ func (d *Daemon) recheckAfterAntiLockout(ctx context.Context, ip netip.Addr, att
 			// retry later, bounded by the attempt budget.
 			slog.WarnContext(ctx, "daemon: ssh re-check hit ban rate limit — deferring", "ip", ip)
 			d.notifyCritical(ctx, "ban rate limit exceeded")
-			d.sshRecheck.requeue(ip, attempts+1, time.Now().Add(d.sshRecheckDelayVal()))
+			d.sshRecheck.requeue(ip, attempts+1, time.Now().Add(d.sshRecheckDelayVal()), it.aiVerdict)
 			return
 		}
 		slog.ErrorContext(ctx, "daemon: ssh re-check decide error", "ip", ip, "err", err)
@@ -245,7 +308,8 @@ func (d *Daemon) recheckAfterAntiLockout(ctx context.Context, ip netip.Addr, att
 
 	if action.Op == "record" && action.Reason == decision.ReasonAntiLockoutSSHPeer {
 		// Still ESTABLISHED — an operator session or an attacker holding the
-		// connection. The invariant held; re-arm within the retry budget.
-		d.sshRecheck.requeue(ip, attempts+1, time.Now().Add(d.sshRecheckDelayVal()))
+		// connection. The invariant held; re-arm within the retry budget,
+		// keeping the carried verdict for the next pass.
+		d.sshRecheck.requeue(ip, attempts+1, time.Now().Add(d.sshRecheckDelayVal()), it.aiVerdict)
 	}
 }

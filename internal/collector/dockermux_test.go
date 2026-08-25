@@ -83,3 +83,35 @@ func TestDemuxDockerLogStream_TruncatedPayload(t *testing.T) {
 		t.Errorf("want payload read error, got %v", err)
 	}
 }
+
+// TestDemuxDockerLogStream_NewlineFreeFloodIsCapped is the issue #307
+// regression: newline-free frames used to accumulate without bound
+// (N × 1 MiB frames = N MiB resident), defeating the per-frame cap. The
+// reassembly buffer is now capped: the flood is delivered as one truncated
+// line at its eventual newline, and the stream continues correctly.
+func TestDemuxDockerLogStream_NewlineFreeFloodIsCapped(t *testing.T) {
+	const lineCap = 128 * 1024 // maxStreamLineBytes (internal/collector/lines.go)
+	var stream []byte
+	for i := 0; i < 3; i++ { // 300 KiB with no newline — well past the cap
+		stream = append(stream, muxFrame(1, strings.Repeat("A", 100*1024))...)
+	}
+	stream = append(stream, muxFrame(1, "\ntail\n")...)
+
+	var got []string
+	err := collector.DemuxDockerLogStream(context.Background(), bytes.NewReader(stream), func(line []byte) bool {
+		got = append(got, string(line))
+		return false
+	})
+	if err != nil {
+		t.Fatalf("demux error: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("lines = %d, want 2 (truncated flood + tail)", len(got))
+	}
+	if len(got[0]) != lineCap {
+		t.Errorf("flood line length = %d, want capped at %d", len(got[0]), lineCap)
+	}
+	if got[1] != "tail" {
+		t.Errorf("line after the flood = %q — reassembly glued lines together", got[1])
+	}
+}

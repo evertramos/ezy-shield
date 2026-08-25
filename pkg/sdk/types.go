@@ -58,8 +58,21 @@ type Verdict struct {
 
 // Action is what the decision engine decides to do about an IP.
 type Action struct {
-	IP  netip.Addr
-	Op  string // "ban", "unban", "ratelimit", "notify_only"
+	IP netip.Addr
+	// Op is the closed action vocabulary (ADR-0010; extending it requires a
+	// new ADR — §3 contract):
+	//
+	//	"ban"            enforceable ban (armed)
+	//	"dry_ban"        simulated ban — recorded, never enforced (ADR-0009 §5)
+	//	"unban"          ban lifted (manual or via expiry handling)
+	//	"expired"        ban TTL elapsed and was removed
+	//	"record"         observed below the notify band, or an anti-lockout
+	//	                 refusal (Reason distinguishes; see
+	//	                 decision.ReasonAntiLockoutSSHPeer)
+	//	"notify_only"    notify band — alert, no ban
+	//	"already_banned" suppressed: the IP already has an active ban
+	//	"allow_add"      allowlist entry added
+	Op  string
 	TTL time.Duration
 	// Permanent marks a ban with no expiry (expires_at NULL in the store).
 	// It exists because TTL alone is lossy: a remaining-time that reached

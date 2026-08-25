@@ -66,7 +66,7 @@ func journalProbeIdentity(
 	if err != nil {
 		return journalProbeID{
 			label: "root",
-			note: "'" + journaldServiceUser + "' user not found (run 'ezyshield init' or install the package) -- " +
+			note: "'" + journaldServiceUser + "' user not found (run '" + progName + " init' or install the package) -- " +
 				"probing as root, which can read journals the daemon cannot",
 		}
 	}

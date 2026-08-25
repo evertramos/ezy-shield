@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/netip"
 	"os"
@@ -22,6 +21,7 @@ import (
 	"github.com/evertramos/ezy-shield/internal/config"
 	"github.com/evertramos/ezy-shield/internal/decision"
 	"github.com/evertramos/ezy-shield/internal/ownership"
+	"github.com/evertramos/ezy-shield/internal/vhostdetect"
 )
 
 const (
@@ -69,7 +69,9 @@ Non-interactive (for Ansible / cloud-init / Terraform / golden images):
 
   --non-interactive (-n) runs without a TTY, driven by --answers and/or the
   override flags, producing the same validated config the wizard produces.
-  Detection still runs; answers pin or override the result. Secrets are NEVER
+  Environment detection still runs; answers pin or override the result. CDN
+  setup is the exception: it is driven solely by the answers file (no
+  interactive probing in scripted mode). Secrets are NEVER
   passed as flags or answers-file values — reference an env var NAME and put
   the value in the .env file. The config is always generated with armed: false.
   Re-running against an existing config refuses without --force. With --json
@@ -173,6 +175,13 @@ type wizardState struct {
 	aiProvider    string
 	aiModel       string
 	aiKeyEnvVar   string
+	// aiExternalKey is true when the operator chose key option 2 ("already
+	// in an env var — sops/vault/LoadCredential"): the key is managed
+	// OUTSIDE .env and the wizard must not write anything for it. Writing
+	// the placeholder would shadow the real value via EnvironmentFile=
+	// precedence (systemd.exec(5)) and silently disable AI (issue #300);
+	// the config-ai wizard already honors this contract (configwizard.go).
+	aiExternalKey bool
 	// aiToken holds the operator-typed API key between the prompt and the
 	// .env write. It's ONLY the empty string or the raw token — never used
 	// in any log/print/error path (issue #13 §6). Note the deliberate lack
@@ -198,8 +207,17 @@ func (s *wizardState) String() string {
 	if s.aiToken != "" {
 		tokenMark = "<redacted>"
 	}
-	return fmt.Sprintf("wizardState{enableAI=%v provider=%q model=%q keyEnvVar=%q token=%s armed=%v cdn=%s}",
-		s.enableAI, s.aiProvider, s.aiModel, s.aiKeyEnvVar, tokenMark, s.armed, s.cdn.String())
+	return fmt.Sprintf("wizardState{enableAI=%v provider=%q model=%q keyEnvVar=%q externalKey=%v token=%s armed=%v cdn=%s}",
+		s.enableAI, s.aiProvider, s.aiModel, s.aiKeyEnvVar, s.aiExternalKey, tokenMark, s.armed, s.cdn.String())
+}
+
+// shouldWriteAIEnv reports whether the wizard writes/keeps the AI key line
+// in .env. False for option-2 external keys: those are managed outside .env
+// (sops/vault/LoadCredential) and a placeholder line would SHADOW the real
+// environment value via EnvironmentFile= precedence, with SecretRef then
+// treating the placeholder as unset — AI silently disabled (issue #300).
+func shouldWriteAIEnv(state *wizardState) bool {
+	return state.enableAI && state.aiKeyEnvVar != "" && !state.aiExternalKey
 }
 
 type dockerContainer struct {
@@ -302,9 +320,14 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 	// AI env file: written whenever the provider expects a key (anthropic /
 	// openai) — even if the operator skipped the paste prompt, in which case
 	// we write the placeholder and print an instruction (issue #13 §5). We
-	// do NOT emit the token or a fingerprint of it here.
+	// do NOT emit the token or a fingerprint of it here. Option-2 external
+	// keys are the exception: managed outside .env, nothing is written
+	// (issue #300 — see shouldWriteAIEnv).
 	envTouched := false
-	if state.enableAI && state.aiKeyEnvVar != "" {
+	if state.enableAI && state.aiExternalKey {
+		p.println(st.ok("AI key managed externally in $" + state.aiKeyEnvVar + " — nothing written to " + envPath))
+	}
+	if shouldWriteAIEnv(state) {
 		wrote, kept, err := writeOrKeepEnvFile(envPath, state.aiKeyEnvVar, state.aiToken)
 		if err != nil {
 			return err
@@ -691,7 +714,7 @@ func askQuestions(out io.Writer, sc *bufio.Scanner, state *wizardState, yes bool
 		// anti-lockout protection; live-session detection alone only covers
 		// connections that exist at decision time.
 		p.println(st.warn("admin_cidrs will be EMPTY — strongly recommended to add your management"))
-		p.println(st.warn("IPs later in policy.yaml; 'ezyshield arm' will flag this before arming."))
+		p.println(st.warn("IPs later in policy.yaml; '" + progName + " arm' will flag this before arming."))
 	}
 
 	// CDN detection + Cloudflare subflow — runs BEFORE AI so the loud-skip
@@ -705,7 +728,7 @@ func askQuestions(out io.Writer, sc *bufio.Scanner, state *wizardState, yes bool
 		p,
 		closurePrompter{askFn: ask, askBoolFn: askBool},
 		state.cdn,
-		cdnDeps{Yes: yes},
+		cdnDeps{Yes: yes, LocalVHosts: vhostdetect.DetectLocalDefault},
 	)
 
 	// AI — model + key prompts shared with `config ai <provider>` via the
@@ -714,14 +737,28 @@ func askQuestions(out io.Writer, sc *bufio.Scanner, state *wizardState, yes bool
 	p.println(st.header("AI analysis"))
 	state.enableAI = askBool("Enable AI analysis?", false)
 	if state.enableAI {
-		state.aiProvider = ask("AI provider (anthropic/openai/ollama)", "anthropic")
 		// The env var NAME is fixed per provider (issue #13 §1) — we NEVER
-		// prompt the operator for it. Anything not in the table (typo) falls
-		// through to no key at all; the wizard warns instead of guessing.
-		if _, known := aiProviderKeyName[state.aiProvider]; !known {
-			p.printf("    unknown provider %q — supported: anthropic, openai, ollama; leaving AI key unset\n",
-				state.aiProvider)
+		// prompt the operator for it. A typo used to be "warned" as merely
+		// leaving the AI key unset but actually failed config validation at
+		// the Files step, aborting the whole wizard (issue #356) — so
+		// validate here like the scripted path does, re-prompting up to 3
+		// times and falling back to AI disabled.
+		for attempt := 1; ; attempt++ {
+			state.aiProvider = ask("AI provider (anthropic/openai/ollama)", "anthropic")
+			if _, known := aiProviderKeyName[state.aiProvider]; known {
+				break
+			}
+			if attempt == 3 {
+				p.printf("    unknown provider %q — supported: anthropic, openai, ollama; disabling AI analysis\n",
+					state.aiProvider)
+				state.enableAI = false
+				state.aiProvider = ""
+				break
+			}
+			p.printf("    unknown provider %q — supported: anthropic, openai, ollama\n", state.aiProvider)
 		}
+	}
+	if state.enableAI {
 		// Key prompts (issue #22 two-option menu) are skipped when yes=true
 		// (placeholder path, issue #13 §5).
 		step := &aiStep{provider: state.aiProvider}
@@ -730,6 +767,7 @@ func askQuestions(out io.Writer, sc *bufio.Scanner, state *wizardState, yes bool
 		state.aiModel = step.model
 		state.aiKeyEnvVar = step.keyEnvVar
 		state.aiToken = step.token
+		state.aiExternalKey = step.externalKey
 	}
 
 	// Dry-run vs armed
@@ -808,7 +846,7 @@ func writeGeneratedConfig(path string, state *wizardState) error {
 // `env:VARNAME` references, never inline secrets.
 func renderGeneratedConfig(state *wizardState) ([]byte, error) {
 	var b strings.Builder
-	b.WriteString("# EzyShield config — generated by 'ezyshield init'\n")
+	b.WriteString("# EzyShield config — generated by '" + progName + " init'\n")
 	b.WriteString("# Secrets must use 'env:VARNAME' references, never inline values.\n\n")
 	fmt.Fprintf(&b, "data_dir: /var/lib/ezyshield\n")
 	fmt.Fprintf(&b, "socket_path: %s\n", daemonSockPath)
@@ -891,6 +929,20 @@ func writeGeneratedPolicy(path string, state *wizardState) error {
 	return nil
 }
 
+// fmtStrikeTTL renders a strike TTL the way the generated policy.yaml has
+// always spelled it: whole hours as "Nh", sub-hour as "Nm", permanent as "0"
+// (never Go's "5m0s" form).
+func fmtStrikeTTL(d time.Duration) string {
+	switch {
+	case d == 0:
+		return "0"
+	case d%time.Hour == 0:
+		return fmt.Sprintf("%dh", d/time.Hour)
+	default:
+		return fmt.Sprintf("%dm", d/time.Minute)
+	}
+}
+
 // renderGeneratedPolicy builds the policy.yaml body from state and validates
 // it through the strict loader before returning the bytes. Extracted from
 // writeGeneratedPolicy so the non-interactive driver (issue #231) renders and
@@ -899,17 +951,18 @@ func writeGeneratedPolicy(path string, state *wizardState) error {
 // dry-run default). No file I/O and no secrets.
 func renderGeneratedPolicy(state *wizardState) ([]byte, error) {
 	var b strings.Builder
-	b.WriteString("# EzyShield policy — generated by 'ezyshield init'\n\n")
+	b.WriteString("# EzyShield policy — generated by '" + progName + " init'\n\n")
 	fmt.Fprintf(&b, "armed: %v\n", state.armed)
-	b.WriteString("ban_threshold: 70\n")
-	b.WriteString("observe_threshold: 40\n")
+	// Derived from the config package's default constants — never re-declared
+	// here as literals, so the generated file cannot drift from the daemon's
+	// own defaults (issue #356).
+	fmt.Fprintf(&b, "ban_threshold: %d\n", config.DefaultBanThreshold)
+	fmt.Fprintf(&b, "observe_threshold: %d\n", config.DefaultObserveThreshold)
 	b.WriteString("strikes:\n")
-	b.WriteString("  - ttl: 5m\n")
-	b.WriteString("  - ttl: 1h\n")
-	b.WriteString("  - ttl: 24h\n")
-	b.WriteString("  - ttl: 168h\n")
-	b.WriteString("  - ttl: 0\n")
-	b.WriteString("max_bans_per_minute: 30\n")
+	for _, s := range config.DefaultStrikes {
+		fmt.Fprintf(&b, "  - ttl: %s\n", fmtStrikeTTL(s.TTL.AsDuration()))
+	}
+	fmt.Fprintf(&b, "max_bans_per_minute: %d\n", config.DefaultMaxBansPerMinute)
 
 	b.WriteString("allowlist:\n")
 	for _, ip := range buildAllowlist(state) {
@@ -925,7 +978,7 @@ func renderGeneratedPolicy(state *wizardState) ([]byte, error) {
 	b.WriteString("# Trade-off: an allowlisted range can NEVER be banned (allowlist always wins\n")
 	b.WriteString("# over rules, AI, and geo blocking) — the broader the range, the more of your\n")
 	b.WriteString("# network permanently loses enforcement coverage.\n")
-	b.WriteString("# 'ezyshield doctor' warns if any private allowlist entry is /16 or broader.\n")
+	b.WriteString("# '" + progName + " doctor' warns if any private allowlist entry is /16 or broader.\n")
 	b.WriteString("#   - 10.0.0.0/8\n")
 
 	if len(state.adminIPs) > 0 {
@@ -1506,7 +1559,7 @@ func fetchPublicIP() string {
 	buf := make([]byte, 64)
 	n, _ := resp.Body.Read(buf)
 	ip := strings.TrimSpace(string(buf[:n]))
-	if net.ParseIP(ip) == nil {
+	if _, err := netip.ParseAddr(ip); err != nil {
 		return ""
 	}
 	return ip
@@ -1518,7 +1571,10 @@ func sshSourceIP() string {
 		return ""
 	}
 	parts := strings.Fields(val)
-	if len(parts) == 0 || net.ParseIP(parts[0]) == nil {
+	if len(parts) == 0 {
+		return ""
+	}
+	if _, err := netip.ParseAddr(parts[0]); err != nil {
 		return ""
 	}
 	return parts[0]
@@ -1556,11 +1612,11 @@ func normalizeToPrefix(ip string) string {
 	if strings.Contains(ip, "/") {
 		return ip
 	}
-	parsed := net.ParseIP(ip)
-	if parsed == nil {
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
 		return ip
 	}
-	if parsed.To4() != nil {
+	if addr.Is4() || addr.Is4In6() {
 		return ip + "/32"
 	}
 	return ip + "/128"
@@ -1664,7 +1720,7 @@ func writeWordPressDropin(path string) (bool, error) {
 	} else if !os.IsNotExist(err) {
 		return false, fmt.Errorf("checking %s: %w", path, err)
 	}
-	const template = `# EzyShield rules.d drop-in — generated by 'ezyshield init' (WordPress detected)
+	template := `# EzyShield rules.d drop-in — generated by '` + progName + ` init' (WordPress detected)
 #
 # The WordPress detection rules (wp-login, xmlrpc, .env probing) are BUILT IN
 # and already active — you do not need this file for detection to work.

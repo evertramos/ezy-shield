@@ -6,7 +6,6 @@ package main
 // survives losing the SSH session (the revert runs in the daemon).
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -31,7 +30,7 @@ a "would I ban myself?" simulation for your own client IP, and a summary
 of recent dry-run activity. Failing checks refuse the transition; --force
 overrides everything except the self-ban check.
 
---for arms temporarily: unless you confirm with 'ezyshield arm --keep'
+--for arms temporarily: unless you confirm with '` + progName + ` arm --keep'
 before the window expires, the daemon reverts to dry-run by itself and
 notifies. The revert is daemon-side — it fires even if you lose this
 session.`,
@@ -70,12 +69,16 @@ moving toward dry-run is always the safe direction. The transition is
 persisted to policy.yaml and audited.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			resp, err := daemonRPC(context.Background(), socketPath, daemon.SocketRequest{Verb: "disarm"})
+			resp, err := daemonRPC(cmd.Context(), socketPath, daemon.SocketRequest{Verb: "disarm"})
 			if err != nil {
 				return err
 			}
 			if resp.Error != "" {
 				return fmt.Errorf("%s", resp.Error)
+			}
+			// Honor the root --json contract like arm/ban/allow (issue #356).
+			if jsonOutput {
+				return writeJSON(cmd.OutOrStdout(), map[string]any{"armed": false, "status": "disarmed"})
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), "disarmed — daemon is back in dry-run mode") //nolint:errcheck
 			return nil
@@ -97,7 +100,7 @@ func runArm(cmd *cobra.Command, socketPath, forWindow string, force bool) error 
 	// A refusal is a non-OK response WITH a payload (the pre-flight report).
 	// daemonRPC surfaces it as resp+err together — keep going so the
 	// operator sees WHICH checks failed, then exit non-zero.
-	resp, err := daemonRPC(context.Background(), socketPath, req)
+	resp, err := daemonRPC(cmd.Context(), socketPath, req)
 	if resp == nil {
 		return err // unreachable daemon or transport failure
 	}
@@ -132,21 +135,25 @@ func runArm(cmd *cobra.Command, socketPath, forWindow string, force bool) error 
 	w := cmd.OutOrStdout()
 	fmt.Fprintln(w) //nolint:errcheck
 	if data.RevertAt != "" {
-		fmt.Fprintf(w, "ARMED until %s — confirm with 'ezyshield arm --keep' to keep enforcement on,\n", data.RevertAt) //nolint:errcheck
-		fmt.Fprintln(w, "or do nothing and the daemon reverts to dry-run automatically.")                               //nolint:errcheck
+		fmt.Fprintf(w, "ARMED until %s — confirm with '%s arm --keep' to keep enforcement on,\n", data.RevertAt, progName) //nolint:errcheck
+		fmt.Fprintln(w, "or do nothing and the daemon reverts to dry-run automatically.")                                  //nolint:errcheck
 	} else {
-		fmt.Fprintln(w, "ARMED — enforcement is live. 'ezyshield disarm' returns to dry-run.") //nolint:errcheck
+		fmt.Fprintf(w, "ARMED — enforcement is live. '%s disarm' returns to dry-run.\n", progName) //nolint:errcheck
 	}
 	return nil
 }
 
 func runArmKeep(cmd *cobra.Command, socketPath string) error {
-	resp, err := daemonRPC(context.Background(), socketPath, daemon.SocketRequest{Verb: "arm_keep"})
+	resp, err := daemonRPC(cmd.Context(), socketPath, daemon.SocketRequest{Verb: "arm_keep"})
 	if err != nil {
 		return err
 	}
 	if resp.Error != "" {
 		return fmt.Errorf("%s", resp.Error)
+	}
+	// Honor the root --json contract like arm/ban/allow (issue #356).
+	if jsonOutput {
+		return writeJSON(cmd.OutOrStdout(), map[string]any{"armed": true, "status": "confirmed"})
 	}
 	fmt.Fprintln(cmd.OutOrStdout(), "confirmed — armed is now unconditional (auto-revert window cleared)") //nolint:errcheck
 	return nil

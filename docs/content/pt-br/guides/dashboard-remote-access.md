@@ -76,8 +76,9 @@ Junte `-fN` para mandar para background, junte
   porta livre e mude o primeiro número: `-L 9091:127.0.0.1:9090`
   mapeia `http://localhost:9091` para a 9090 do lado do servidor.
 - O túnel te dá exatamente o que uma sessão local dá — sem multi-
-  usuário, sem controle de acesso por time, um login por vez. Isso
-  é ok para o escopo single-admin atual.
+  usuário, sem controle de acesso por time; sessões ao vivo são
+  limitadas a 3 simultâneas por conta (veja a referência do
+  dashboard). Isso é ok para o escopo single-admin atual.
 
 ## Opção 2: Cloudflare Tunnel (persistente, sem portas abertas)
 

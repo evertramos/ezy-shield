@@ -67,12 +67,15 @@ func (realCLI) Inspect(ctx context.Context, container, format string) (string, e
 	return string(out), nil
 }
 
-// VHost is one container that exposes one or more virtual-host domains via
-// its VIRTUAL_HOST env var (nginx-proxy convention).
+// VHost is one detection hit: a container (or local config directory) that
+// exposes one or more virtual-host domains.
 type VHost struct {
-	Container string   // container name
-	Image     string   // image ref (for display only)
-	Domains   []string // domains listed in VIRTUAL_HOST, trimmed & non-empty
+	Container string   // container name, or config directory for file sources
+	Image     string   // image ref (for display only; empty for file sources)
+	Domains   []string // detected domains, trimmed & non-empty
+	// Source names the detection convention that produced this entry
+	// (issue #488). Zero value ("") predates the field and means docker-env.
+	Source Source
 }
 
 // DefaultTimeout bounds one Detect call end-to-end when the caller passes
@@ -109,11 +112,7 @@ func Detect(ctx context.Context, cli DockerCLI) ([]VHost, error) {
 	names := parsePsOutput(raw)
 	out := make([]VHost, 0, len(names))
 	for _, n := range names {
-		vh, ok := inspectContainer(ctx, cli, n)
-		if !ok {
-			continue
-		}
-		out = append(out, vh)
+		out = append(out, inspectContainer(ctx, cli, n)...)
 	}
 	return out, nil
 }
@@ -149,30 +148,37 @@ func parsePsOutput(raw string) []psRow {
 	return out
 }
 
-// inspectContainer asks Docker for the container's env vars via a Go
-// template — one VAR=value per line — then extracts VIRTUAL_HOST if set.
-// Returns (VHost, true) only when VIRTUAL_HOST parses to at least one
-// non-empty domain; (_, false) otherwise (unset, empty, or inspect failure).
-func inspectContainer(ctx context.Context, cli DockerCLI, row psRow) (VHost, bool) {
-	// {{range .Config.Env}}{{println .}}{{end}} yields one env line per row.
-	raw, err := cli.Inspect(ctx, row.Name, "{{range .Config.Env}}{{println .}}{{end}}")
+// inspectContainer asks Docker for the container's env vars AND labels via a
+// Go template — one KEY=value per line — then extracts VIRTUAL_HOST
+// (nginx-proxy convention) and Traefik router rule labels (issue #488).
+// Returns zero, one, or two VHost entries (one per matching convention);
+// inspect failures yield none.
+func inspectContainer(ctx context.Context, cli DockerCLI, row psRow) []VHost {
+	raw, err := cli.Inspect(ctx, row.Name,
+		"{{range .Config.Env}}{{println .}}{{end}}"+
+			"{{range $k, $v := .Config.Labels}}{{printf \"%s=%s\\n\" $k $v}}{{end}}")
 	if err != nil {
-		return VHost{}, false
+		return nil
 	}
 	// Fallback used purely to satisfy tests: some cases pass rows built
 	// without the ps step.
 	if row.Name == "" {
-		return VHost{}, false
+		return nil
 	}
-	domains := extractVirtualHost(raw)
-	if len(domains) == 0 {
-		return VHost{}, false
+	var out []VHost
+	if domains := extractVirtualHost(raw); len(domains) > 0 {
+		out = append(out, VHost{
+			Container: row.Name, Image: row.Image,
+			Domains: domains, Source: SourceDockerEnv,
+		})
 	}
-	return VHost{
-		Container: row.Name,
-		Image:     row.Image,
-		Domains:   domains,
-	}, true
+	if domains := extractTraefikLabelDomains(raw); len(domains) > 0 {
+		out = append(out, VHost{
+			Container: row.Name, Image: row.Image,
+			Domains: domains, Source: SourceTraefikDocker,
+		})
+	}
+	return out
 }
 
 // extractVirtualHost scans docker-inspect env output for VIRTUAL_HOST=…

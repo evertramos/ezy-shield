@@ -41,20 +41,10 @@ func action(ip netip.Addr, strike int, ttl time.Duration) sdk.Action {
 	}
 }
 
-// TestMigrations verifies schema_migrations is populated after Open.
-func TestMigrations(t *testing.T) {
-	db := openTestDB(t)
-	// A second Open on the same file must not re-apply migrations.
-	path := filepath.Join(t.TempDir(), "idempotent.db")
-	for range 2 {
-		d, err := store.Open(context.Background(), path)
-		if err != nil {
-			t.Fatalf("Open (idempotent): %v", err)
-		}
-		_ = d.Close()
-	}
-	_ = db
-}
+// Migration integrity (schema_migrations contents, idempotent re-Open, and
+// the populated-DB upgrade path) is covered by migrations_test.go
+// (issue #329) — the placeholder TestMigrations that asserted nothing was
+// removed with it.
 
 // TestRecordStrike_and_GetStrikeCount covers the core strike path.
 func TestRecordStrike_and_GetStrikeCount(t *testing.T) {
@@ -364,14 +354,14 @@ func TestRecordUsage_and_TodayUsage(t *testing.T) {
 		InputTokens:  200,
 		OutputTokens: 50,
 		CostUSD:      0.00026,
-	}); err != nil {
+	}, ""); err != nil {
 		t.Fatalf("RecordUsage: %v", err)
 	}
 	if err := db.RecordUsage(ctx, "anthropic", sdk.Usage{
 		InputTokens:  100,
 		OutputTokens: 25,
 		CostUSD:      0.00018,
-	}); err != nil {
+	}, ""); err != nil {
 		t.Fatalf("RecordUsage second: %v", err)
 	}
 
@@ -387,7 +377,7 @@ func TestRecordUsage_and_TodayUsage(t *testing.T) {
 	}
 
 	// A different provider must not be included in the sum.
-	if err := db.RecordUsage(ctx, "ollama", sdk.Usage{InputTokens: 9999}); err != nil {
+	if err := db.RecordUsage(ctx, "ollama", sdk.Usage{InputTokens: 9999}, ""); err != nil {
 		t.Fatalf("RecordUsage ollama: %v", err)
 	}
 	u, err = db.TodayUsage(ctx, "anthropic")
@@ -704,7 +694,7 @@ func TestRecordManualBan_Insert(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
 
-	if err := db.RecordManualBan(ctx, ip1, time.Hour, "manual ban via CLI"); err != nil {
+	if err := db.RecordManualBan(ctx, ip1, time.Hour, "manual ban via CLI", false); err != nil {
 		t.Fatalf("RecordManualBan: %v", err)
 	}
 
@@ -730,10 +720,10 @@ func TestRecordManualBan_Refresh(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
 
-	if err := db.RecordManualBan(ctx, ip1, time.Hour, "first"); err != nil {
+	if err := db.RecordManualBan(ctx, ip1, time.Hour, "first", false); err != nil {
 		t.Fatalf("first RecordManualBan: %v", err)
 	}
-	if err := db.RecordManualBan(ctx, ip1, 24*time.Hour, "second"); err != nil {
+	if err := db.RecordManualBan(ctx, ip1, 24*time.Hour, "second", false); err != nil {
 		t.Fatalf("second RecordManualBan: %v", err)
 	}
 	bans, err := db.ActiveBans(ctx)
@@ -754,7 +744,7 @@ func TestRecordManualBan_Permanent(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
 
-	if err := db.RecordManualBan(ctx, ip2, 0, "forever"); err != nil {
+	if err := db.RecordManualBan(ctx, ip2, 0, "forever", false); err != nil {
 		t.Fatalf("RecordManualBan permanent: %v", err)
 	}
 	bans, err := db.ActiveBans(ctx)
@@ -798,7 +788,7 @@ func TestRecordManualBan_RefreshPreservesRuleEngineStrikeNum(t *testing.T) {
 		t.Fatalf("RecordStrike: %v", err)
 	}
 	// Operator issues a manual ban on the same IP.
-	if err := db.RecordManualBan(ctx, ip1, 24*time.Hour, "operator ack"); err != nil {
+	if err := db.RecordManualBan(ctx, ip1, 24*time.Hour, "operator ack", false); err != nil {
 		t.Fatalf("RecordManualBan: %v", err)
 	}
 	bans, err := db.ActiveBans(ctx)
@@ -823,7 +813,7 @@ func TestRecordManualBan_RejectsNegativeTTL(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
 
-	if err := db.RecordManualBan(ctx, ip1, -1*time.Hour, "typo"); err == nil {
+	if err := db.RecordManualBan(ctx, ip1, -1*time.Hour, "typo", false); err == nil {
 		t.Fatal("expected error for negative ttl, got nil")
 	}
 	bans, err := db.ActiveBans(ctx)
@@ -1340,13 +1330,13 @@ func TestActiveBans_ExpiredNeverPermanent(t *testing.T) {
 	future := netip.MustParseAddr("203.0.113.3")
 
 	// 1ns TTL: expires_at lands in the past by the time we query.
-	if err := s.RecordManualBan(ctx, expired, time.Nanosecond, "expired row"); err != nil {
+	if err := s.RecordManualBan(ctx, expired, time.Nanosecond, "expired row", false); err != nil {
 		t.Fatalf("seed expired: %v", err)
 	}
-	if err := s.RecordManualBan(ctx, perm, 0, "permanent row"); err != nil {
+	if err := s.RecordManualBan(ctx, perm, 0, "permanent row", false); err != nil {
 		t.Fatalf("seed permanent: %v", err)
 	}
-	if err := s.RecordManualBan(ctx, future, time.Hour, "future row"); err != nil {
+	if err := s.RecordManualBan(ctx, future, time.Hour, "future row", false); err != nil {
 		t.Fatalf("seed future: %v", err)
 	}
 

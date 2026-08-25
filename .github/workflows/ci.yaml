@@ -34,6 +34,7 @@ jobs:
       - name: gofmt
         id: gofmt
         run: |
+          command -v gofmt >/dev/null || { echo "gofmt not found on PATH"; exit 1; }
           out=$(gofmt -l .)
           if [ -n "$out" ]; then echo "gofmt needed on:"; echo "$out"; exit 1; fi
       - name: go vet
@@ -200,6 +201,23 @@ jobs:
         run: |
           set -o pipefail
           go test -fuzz=FuzzNginxParser -fuzztime=10s ./internal/parser/ | tee fuzz-nginx.txt
+      # Issue #331: every parser fuzz target runs in fuzz mode — the policy
+      # (AGENTS.md security gates) covers ALL parsers, not just the first two.
+      - name: Fuzz Caddy parser (10s)
+        id: fcaddy
+        run: |
+          set -o pipefail
+          go test -fuzz=FuzzCaddyParser -fuzztime=10s ./internal/parser/ | tee fuzz-caddy.txt
+      - name: Fuzz Traefik parser (10s)
+        id: ftraefik
+        run: |
+          set -o pipefail
+          go test -fuzz=FuzzTraefikParser -fuzztime=10s ./internal/parser/ | tee fuzz-traefik.txt
+      - name: Fuzz Apache error parser (10s)
+        id: fapacheerr
+        run: |
+          set -o pipefail
+          go test -fuzz=FuzzApacheErrorParser -fuzztime=10s ./internal/parser/ | tee fuzz-apache-error.txt
       - name: Fuzz proc SSH-peer parser (10s)
         id: fproc
         run: |
@@ -210,6 +228,11 @@ jobs:
         run: |
           set -o pipefail
           go test -fuzz=FuzzSIEMFormatters -fuzztime=10s ./internal/siem/ | tee fuzz-siem.txt
+      - name: Fuzz scan proc-listener parser (10s)
+        id: fscan
+        run: |
+          set -o pipefail
+          go test -fuzz=FuzzParseProcNetTCP -fuzztime=10s ./internal/scan/ | tee fuzz-scan.txt
       - name: Job summary
         if: always()
         run: |
@@ -222,8 +245,12 @@ jobs:
             echo "|---|---|---|"
             echo "| FuzzSSHParser | $(execs fuzz-ssh.txt) | ${{ steps.fssh.outcome }} |"
             echo "| FuzzNginxParser | $(execs fuzz-nginx.txt) | ${{ steps.fnginx.outcome }} |"
+            echo "| FuzzCaddyParser | $(execs fuzz-caddy.txt) | ${{ steps.fcaddy.outcome }} |"
+            echo "| FuzzTraefikParser | $(execs fuzz-traefik.txt) | ${{ steps.ftraefik.outcome }} |"
+            echo "| FuzzApacheErrorParser | $(execs fuzz-apache-error.txt) | ${{ steps.fapacheerr.outcome }} |"
             echo "| FuzzProcTCPPeers | $(execs fuzz-proc.txt) | ${{ steps.fproc.outcome }} |"
             echo "| FuzzSIEMFormatters | $(execs fuzz-siem.txt) | ${{ steps.fsiem.outcome }} |"
+            echo "| FuzzParseProcNetTCP | $(execs fuzz-scan.txt) | ${{ steps.fscan.outcome }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   govulncheck:
@@ -240,13 +267,34 @@ jobs:
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
       - name: Check for known vulnerabilities
         run: |
-          govulncheck ./... 2>&1 | tee /tmp/vulncheck.out || true
-          # Fail only if there are vulnerabilities with fixes available (meaning we should update)
-          if grep -q "Fixed in:" /tmp/vulncheck.out; then
-            # Check if ALL fixes are stdlib (Go version upgrade needed, not actionable now)
-            # Matches patterns like "Fixed in: go1.26.5" or "Fixed in: crypto/tls@go1.26.5"
+          # Issue #332: never swallow govulncheck's own exit status. Exit 3
+          # means "vulnerabilities found" (triaged below); any OTHER non-zero
+          # exit (package load failure, vulndb unreachable) is a broken scan
+          # and must fail the gate — a scan that didn't run is not a clean
+          # scan.
+          set +e
+          govulncheck ./... 2>&1 | tee /tmp/vulncheck.out
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then
+            echo "::error::govulncheck itself failed (exit $rc) — the scan did not run; see output above."
+            exit "$rc"
+          fi
+          if [ "$rc" -eq 3 ] && ! grep -q "Vulnerability #" /tmp/vulncheck.out; then
+            echo "::error::govulncheck exited 3 but reported no findings — treat as a broken scan."
+            exit 1
+          fi
+          # Findings triage: fail on any dependency vulnerability WITH a fix
+          # available; stdlib-only findings warn (toolchain bump is the fix).
+          # A finding WITHOUT any "Fixed in:" line still fails the gate when
+          # it is a dependency finding — an unfixed CVE is not a pass.
+          if grep -q "Vulnerability #" /tmp/vulncheck.out; then
             if grep "Fixed in:" /tmp/vulncheck.out | grep -qvE "(Fixed in: go[0-9]|@go[0-9])"; then
               echo "::error::Vulnerabilities with available fixes in dependencies. Run: go get -u && go mod tidy"
+              exit 1
+            fi
+            if ! grep -q "Fixed in:" /tmp/vulncheck.out; then
+              echo "::error::Vulnerabilities reported with no fix metadata — triage manually before merging."
               exit 1
             fi
             echo "::warning::All findings are in the Go stdlib and a fixed patch release exists — bump the toolchain directive in go.mod to the 'Fixed in' version above."
@@ -318,7 +366,7 @@ jobs:
             stat -c "%a %U:%G %n" /etc/ezyshield /var/lib/ezyshield
             out=$(ezyshield doctor 2>&1 || true); test -n "$out"
             systemd-analyze verify /usr/lib/systemd/system/ezyshield.service /usr/lib/systemd/system/ezyshield-enforcer.service
-            ls /etc/ezyshield/config.yaml.example /etc/ezyshield/policy.yaml.example /etc/ezyshield/rules.yaml.example
+            ls /etc/ezyshield/config.yaml.example /etc/ezyshield/policy.yaml.example
           '
       - name: Verify .rpm on rockylinux:9
         run: |

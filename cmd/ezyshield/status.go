@@ -171,7 +171,7 @@ func printStatusText(cmd *cobra.Command, out StatusOutput) error {
 		fmt.Fprintf(w, "collectors:  %s\n", banner) //nolint:errcheck
 	}
 	if out.ArmedUntil != "" {
-		fmt.Fprintf(w, "auto-revert: %s (confirm with 'ezyshield arm --keep')\n", out.ArmedUntil) //nolint:errcheck
+		fmt.Fprintf(w, "auto-revert: %s (confirm with '%s arm --keep')\n", out.ArmedUntil, progName) //nolint:errcheck
 	}
 	fmt.Fprintf(w, "uptime:    %s\n", out.Uptime)     //nolint:errcheck
 	fmt.Fprintf(w, "version:   %s\n", out.Version)    //nolint:errcheck
@@ -215,7 +215,7 @@ func collectorsBanner(state, detail string) string {
 		if detail != "" {
 			msg += " (" + detail + ")"
 		}
-		return msg + "; run 'ezyshield doctor'"
+		return msg + "; run '" + progName + " doctor'"
 	case "NONE":
 		return "NONE — " + detail
 	default:
@@ -231,7 +231,7 @@ func enforcementBanner(state, detail string) string {
 	case "ACTIVE":
 		return "ACTIVE — bans are enforced"
 	case "DRY-RUN":
-		return "DRY-RUN — NOTHING is enforced (observe only); 'ezyshield arm' to enforce"
+		return "DRY-RUN — NOTHING is enforced (observe only); '" + progName + " arm' to enforce"
 	case "DEGRADED":
 		msg := "⚠ DEGRADED — the enforcer is FAILING; bans may NOT be applied"
 		if detail != "" {

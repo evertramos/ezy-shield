@@ -42,6 +42,20 @@ var ErrRateLimited = errors.New("decision: global ban rate limit exceeded")
 // closes). Pinned by TestAntiLockout_SSHPeerRefusal_ReasonIsStableContract.
 const ReasonAntiLockoutSSHPeer = "anti-lockout: active SSH peer"
 
+// ReasonAntiLockoutCDNRange is the Action.Reason Decide emits when it refuses
+// to ban an IP inside a known shared CDN edge range (issue #178): blocking a
+// shared edge IP blocks legitimate traffic for everyone behind that CDN.
+const ReasonAntiLockoutCDNRange = "anti-lockout: shared CDN edge range"
+
+// ReasonMarkCDNUnverified is appended to a ban's Reason when the CDN range
+// table was unavailable at decision time (issue #178) — the audit trail must
+// record that this ban was sentenced WITHOUT the shared-range check.
+const ReasonMarkCDNUnverified = " [cdn-ranges-unverified]"
+
+// cdnWarnInterval rate-limits the "CDN range data unavailable" WARN so a
+// busy daemon does not log it per event.
+const cdnWarnInterval = 15 * time.Minute
+
 // Store is the persistence interface required by Engine.
 // The concrete *store.DB satisfies this interface.
 type Store interface {
@@ -112,6 +126,16 @@ type Engine struct {
 	// diag is the optional delivery sink for enforcement-anomaly signals
 	// (ADR-0009 §4, issue #146); nil = log-only.
 	diag Diagnostics
+
+	// cdnRanges supplies the shared CDN edge prefixes for the ban-path
+	// guard (issue #178); nil = check disabled (tests, minimal builds).
+	// An error return is the DISTINCT "data unavailable" state: bans still
+	// proceed (refusing every ban would disable protection outright) but
+	// carry ReasonMarkCDNUnverified in the audit trail and a rate-limited
+	// WARN fires.
+	cdnRanges func() ([]netip.Prefix, error)
+	// cdnWarnLast is the last "unavailable" WARN, guarded by e.mu.
+	cdnWarnLast time.Time
 }
 
 // New creates an Engine from policy and a store.
@@ -186,6 +210,31 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 		}
 	}
 
+	// ── Safety invariant §1: shared CDN edge ranges can never be banned ───────
+	// Data unavailable is a DISTINCT state (issue #178): the check cannot
+	// silently degrade to "no match" — bans proceed but are marked
+	// unverified in the audit trail, and a rate-limited WARN surfaces it.
+	cdnUnverified := false
+	if e.cdnRanges != nil {
+		ranges, err := e.cdnRanges()
+		if err != nil {
+			cdnUnverified = true
+			e.warnCDNRangesUnavailable(ctx, err)
+		} else {
+			for _, p := range ranges {
+				if p.Contains(ip) {
+					slog.WarnContext(ctx, "decision: anti-lockout — refusing to ban shared CDN edge IP",
+						"ip", ip, "range", p)
+					act := sdk.Action{IP: ip, Op: "record", Reason: ReasonAntiLockoutCDNRange, Verdicts: verdicts}
+					if err := e.store.Audit(ctx, act); err != nil {
+						slog.ErrorContext(ctx, "decision: audit anti-lockout", "ip", ip, "err", err)
+					}
+					return act, nil
+				}
+			}
+		}
+	}
+
 	score := best.Score
 
 	// Below observe threshold → record only (no notification).
@@ -219,7 +268,26 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 	// later by dispatch, so no lock is held across Enforcer.Ban.
 	strikeLock := e.strikeLockFor(ip)
 	strikeLock.Lock()
-	defer strikeLock.Unlock()
+	// pendingDiag collects notifier-bound diagnostics (ban_ineffective and
+	// its pre-permanent variant) to deliver only AFTER the strike lock is
+	// released: the diag callback reaches Daemon.notifier.Send — network
+	// I/O — and a slow Slack/webhook endpoint must not serialize same-IP
+	// Decide calls behind its latency (issue #441). All store I/O and the
+	// fire-once CAS stay under the lock; only the delivery moves out. The
+	// deferred flush runs on every return path, unlocking first, so the
+	// delivery ordering relative to Decide's return is unchanged
+	// (synchronous, before the caller sees the Action).
+	var pendingDiag []func()
+	unlocked := false
+	defer func() {
+		if !unlocked {
+			strikeLock.Unlock()
+			unlocked = true
+		}
+		for _, deliver := range pendingDiag {
+			deliver()
+		}
+	}()
 
 	// ── Active-ban guard (issues #28, #29, ADR-0009) ────────────────────────
 	// If the IP already has an active ban (temp or permanent), suppress the
@@ -257,8 +325,12 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 			act := sdk.Action{IP: ip, Op: "already_banned", Reason: reason, Verdicts: verdicts}
 
 			// Track suppressed events; ban_ineffective firing is armed-only
-			// (gated inside — ADR-0009 §5).
-			e.trackSuppressedEvent(ctx, ip, bannedAt, banStrike)
+			// (gated inside — ADR-0009 §5). Store I/O runs here, under the
+			// lock; the returned notifier delivery is deferred past unlock
+			// (issue #441).
+			if deliver := e.trackSuppressedEvent(ctx, ip, bannedAt, banStrike); deliver != nil {
+				pendingDiag = append(pendingDiag, deliver)
+			}
 
 			if err := e.store.BumpLastSeen(ctx, ip); err != nil {
 				slog.ErrorContext(ctx, "decision: BumpLastSeen failed", "ip", ip, "err", err)
@@ -285,13 +357,24 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 		op = "dry_ban"
 	}
 
+	reason := fmt.Sprintf("score=%d category=%s source=%s", score, best.Category, best.Source)
+	if cdnUnverified {
+		// The audit trail records that this ban was sentenced without the
+		// shared-CDN-range check (issue #178).
+		reason += ReasonMarkCDNUnverified
+	}
 	act := sdk.Action{
-		IP:       ip,
-		Op:       op,
-		TTL:      ttl,
-		Strike:   nextStrike,
-		Reason:   fmt.Sprintf("score=%d category=%s source=%s", score, best.Category, best.Source),
-		Verdicts: verdicts,
+		IP:  ip,
+		Op:  op,
+		TTL: ttl,
+		// A TTL-0 strike rung means "no expiry" — say so explicitly.
+		// Consumers must never have to conflate an expired remaining-time
+		// with a permanent ban (issue #279 semantics; contract ratified by
+		// ADR-0010, issue #315).
+		Permanent: ttl == 0,
+		Strike:    nextStrike,
+		Reason:    reason,
+		Verdicts:  verdicts,
 	}
 
 	// ── Safety invariant §1: dry-run must enforce nothing ─────────────────────
@@ -338,7 +421,11 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 			slog.WarnContext(ctx, "decision: ban_ineffective_permanent — promoting to permanent an IP that had ineffective bans",
 				"ip", ip, "strike", nextStrike)
 			if e.diag != nil {
-				e.diag.BanIneffectivePermanent(ctx, ip, nextStrike)
+				// Deliver after unlock — the callback reaches the notifier's
+				// network send (issue #441).
+				pendingDiag = append(pendingDiag, func() {
+					e.diag.BanIneffectivePermanent(ctx, ip, nextStrike)
+				})
 			}
 		}
 	}
@@ -436,33 +523,38 @@ func (e *Engine) escalationExempt(ctx context.Context, ip netip.Addr) bool {
 // exactly once per ban, across concurrent calls and daemon restarts. All
 // failures are non-fatal: the diagnostic must never break the suppression
 // path.
-func (e *Engine) trackSuppressedEvent(ctx context.Context, ip netip.Addr, bannedAt time.Time, banStrike int) {
+//
+// The store I/O (counters + fire-once CAS) runs synchronously — the caller
+// holds the per-IP strike lock and that is where the atomicity matters. The
+// notifier-bound delivery is RETURNED as a closure (nil when nothing fires)
+// so the caller can run it after releasing the lock (issue #441).
+func (e *Engine) trackSuppressedEvent(ctx context.Context, ip netip.Addr, bannedAt time.Time, banStrike int) func() {
 	grace := e.policy.BanIneffectiveGrace.AsDuration()
 	afterGrace := time.Since(bannedAt) >= grace
 
 	total, afterCount, fired, err := e.store.RecordSuppressed(ctx, ip, afterGrace)
 	if err != nil {
 		slog.ErrorContext(ctx, "decision: RecordSuppressed failed", "ip", ip, "err", err)
-		return
+		return nil
 	}
 	// ADR-0009 §5: ban_ineffective is armed-only. During a simulated ban
 	// traffic is EXPECTED (nothing blocks it), not an enforcement anomaly.
 	// Counters above are still recorded so dry-run observability shows what
 	// a real ban would have suppressed.
 	if !e.policy.IsArmed() {
-		return
+		return nil
 	}
 	if !afterGrace || fired || afterCount < e.policy.BanIneffectiveMinEvents {
-		return
+		return nil
 	}
 
 	newlyFired, err := e.store.MarkBanIneffective(ctx, ip)
 	if err != nil {
 		slog.ErrorContext(ctx, "decision: MarkBanIneffective failed", "ip", ip, "err", err)
-		return
+		return nil
 	}
 	if !newlyFired {
-		return // another Decide call won the race for this ban
+		return nil // another Decide call won the race for this ban
 	}
 
 	// Compute ladder context for the warning
@@ -495,17 +587,21 @@ func (e *Engine) trackSuppressedEvent(ctx context.Context, ip netip.Addr, banned
 	// deduplicated notification, injected by the daemon. Same fire-once
 	// guarantee as the WARN — this branch is only reached by the caller
 	// that won the MarkBanIneffective compare-and-set.
-	if e.diag != nil {
-		e.diag.BanIneffective(ctx, BanIneffectiveDiag{
-			IP:               ip,
-			Strike:           banStrike,
-			LadderLen:        ladderLen,
-			NextRungs:        nextRungs,
-			EventsAfterGrace: afterCount,
-			TotalSuppressed:  total,
-			GraceSeconds:     int(grace.Seconds()),
-		})
+	if e.diag == nil {
+		return nil
 	}
+	// Returned (not called): the caller holds the per-IP strike lock, and
+	// this callback reaches the notifier's network send (issue #441).
+	diag := BanIneffectiveDiag{
+		IP:               ip,
+		Strike:           banStrike,
+		LadderLen:        ladderLen,
+		NextRungs:        nextRungs,
+		EventsAfterGrace: afterCount,
+		TotalSuppressed:  total,
+		GraceSeconds:     int(grace.Seconds()),
+	}
+	return func() { e.diag.BanIneffective(ctx, diag) }
 }
 
 // buildAllowlist parses policy.Allowlist, policy.AdminCIDRs, and the SSH peer

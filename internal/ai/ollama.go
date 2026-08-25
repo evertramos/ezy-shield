@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -18,7 +19,6 @@ const (
 	ollamaDefaultEndpoint = "http://localhost:11434"
 	ollamaDefaultModel    = "llama3.1:8b"
 	ollamaTimeout         = 60 * time.Second
-	maxOllamaRetries      = 1
 )
 
 // OllamaProvider implements sdk.AIProvider using the Ollama /api/chat endpoint.
@@ -83,24 +83,21 @@ func (p *OllamaProvider) Analyze(
 
 	prompt := buildPrompt(payload, budget)
 
-	var (
-		verdicts []sdk.Verdict
-		usage    sdk.Usage
-		callErr  error
-	)
-	for attempt := 0; attempt <= maxOllamaRetries; attempt++ {
-		verdicts, usage, callErr = p.callOnce(ctx, prompt)
-		if callErr == nil {
-			break
-		}
-		slog.WarnContext(ctx, "ai: ollama attempt failed",
-			"attempt", attempt+1, "err", callErr)
-	}
+	// Shared bounded-backoff retry loop (issue #313). The 60s client
+	// timeout stays: local models legitimately take longer than the hosted
+	// APIs' 30s.
+	verdicts, usage, callErr := analyzeWithRetry(ctx, "ollama",
+		func(ctx context.Context) ([]sdk.Verdict, sdk.Usage, error) {
+			return p.callOnce(ctx, prompt)
+		})
 
 	if callErr != nil {
+		if errors.Is(callErr, context.Canceled) || errors.Is(callErr, context.DeadlineExceeded) {
+			return nil, usage, callErr
+		}
 		if p.fallback != nil {
 			slog.WarnContext(ctx, "ai: ollama falling back to rules engine",
-				"attempts", maxOllamaRetries+1, "err", callErr)
+				"attempts", aiMaxRetries+1, "err", callErr)
 			return p.fallback(batch), usage, nil
 		}
 		return nil, usage, fmt.Errorf("ai: ollama: %w", callErr)

@@ -12,7 +12,9 @@ import "encoding/json"
 // are logged to the append-only audit_log.
 type SocketRequest struct {
 	// Verb selects the operation: "status", "list", "list_allow", "events",
-	// "subscribe", "report", "ban", "unban", "allow".
+	// "subscribe", "report", "ban", "unban", "allow", "unallow", "arm",
+	// "arm_keep", "disarm" — the complete set handleConn dispatches
+	// (issue #357: the arm family and "unallow" were missing here).
 	Verb string `json:"verb"`
 	// IP is the target for ban/unban/allow/report. ban/unban/allow accept
 	// either a bare address ("1.2.3.4") or a CIDR ("203.0.113.0/24"); a bare
@@ -29,7 +31,9 @@ type SocketRequest struct {
 	// Until. Empty = permanent allow / unconditional arm.
 	For string `json:"for,omitempty"`
 	// Force lets the arm verb proceed past failing pre-flight checks
-	// (except the self-ban check, which is never bypassable).
+	// (except the self-ban check, which is never bypassable), and lets the
+	// ban verb bypass the CDN shared-range guard (issue #178) — never the
+	// allowlist, anti-lockout, or rate-limit guards.
 	Force bool `json:"force,omitempty"`
 	// Peer is the operator's own client IP, derived by the CLI from
 	// SSH_CLIENT: the arm verb uses it for the self-ban pre-flight, the ban
@@ -95,10 +99,17 @@ type StatusData struct {
 	// ArmedUntil is the RFC3339 auto-revert deadline when an arm window is
 	// active (issue #228); empty otherwise.
 	ArmedUntil string `json:"armed_until,omitempty"`
+	// CDNRangesState reports the shared-CDN-range ban guard's data health
+	// (issue #178): "ok", or "unavailable: <why>" when bans are proceeding
+	// WITHOUT the shared-range check (they are then marked
+	// [cdn-ranges-unverified] in the audit trail).
+	CDNRangesState string `json:"cdn_ranges_state,omitempty"`
 	// Version is the daemon binary version string.
 	Version string `json:"version"`
-	// AISpendToday is the estimated USD cost of AI provider calls today.
-	// Zero when the AI provider is not configured.
+	// AISpendToday is RESERVED: no daemon code populates it yet, so it is
+	// always 0 and omitted — even with AI configured (issue #357; wiring it
+	// needs a cross-provider cost sum from ai_usage). Kept in the contract
+	// so the field name is already stable when it lands.
 	AISpendToday float64 `json:"ai_spend_today_usd,omitempty"`
 }
 

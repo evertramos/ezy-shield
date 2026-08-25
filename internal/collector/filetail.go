@@ -4,7 +4,6 @@
 package collector
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -97,8 +96,8 @@ func (c *FileTailCollector) Run(ctx context.Context, out chan<- sdk.RawLine) err
 	if c.SourceOverride != "" {
 		source = c.SourceOverride
 	}
-	buf := make([]byte, 0, 4096)      // partial-line accumulator
-	ibuf := make([]byte, 4096+256*16) // inotify read buffer (multiple events)
+	asm := newLineAssembler(maxStreamLineBytes) // capped partial-line accumulator (issue #307)
+	ibuf := make([]byte, 4096+256*16)           // inotify read buffer (multiple events)
 
 	pollFds := []unix.PollFd{
 		{Fd: int32(ifd), Events: unix.POLLIN}, //nolint:gosec // ifd is a valid non-negative fd from InotifyInit1
@@ -144,10 +143,10 @@ func (c *FileTailCollector) Run(ctx context.Context, out chan<- sdk.RawLine) err
 					// any partial line from the old file that's still in buf.
 					_, _ = f.Seek(0, io.SeekStart)
 					lastSize = 0
-					buf = buf[:0]
+					asm.discard()
 				}
 				if fi.Size() > lastSize {
-					buf, err = drainLines(f, buf, source, out, logger)
+					err = drainLines(ctx, f, asm, source, out, logger)
 					if err != nil {
 						logger.Debug("filetail: stat-fallback drain", slog.String("err", err.Error()))
 					}
@@ -168,7 +167,7 @@ func (c *FileTailCollector) Run(ctx context.Context, out chan<- sdk.RawLine) err
 			}
 
 			// Drain any pending data first.
-			buf, err = drainLines(f, buf, source, out, logger)
+			err = drainLines(ctx, f, asm, source, out, logger)
 			if err != nil {
 				logger.Debug("filetail: drain error", slog.String("err", err.Error()))
 			}
@@ -203,7 +202,7 @@ func (c *FileTailCollector) Run(ctx context.Context, out chan<- sdk.RawLine) err
 					return fmt.Errorf("filetail: reopen after rotation: %w", openErr)
 				}
 				f = newF
-				buf = buf[:0]
+				asm.discard()
 
 				// Update inotify watch to the new file.
 				_, _ = unix.InotifyAddWatch(ifd, c.Path,
@@ -213,27 +212,39 @@ func (c *FileTailCollector) Run(ctx context.Context, out chan<- sdk.RawLine) err
 	}
 }
 
-// drainLines reads all available data from f, splits on newlines, and sends
-// complete lines to out. Partial trailing data is kept in buf.
-func drainLines(f *os.File, buf []byte, source string, out chan<- sdk.RawLine, logger *slog.Logger) ([]byte, error) {
+// drainLines reads all available data from f, splits on newlines via the
+// capped assembler, and sends complete lines to out. Partial trailing data
+// stays buffered in asm — bounded at maxStreamLineBytes, so a newline-less
+// writer can no longer grow the accumulator without limit (issue #307).
+func drainLines(ctx context.Context, f *os.File, asm *lineAssembler, source string, out chan<- sdk.RawLine, logger *slog.Logger) error {
 	tmp := make([]byte, 4096)
 	for {
 		n, err := f.Read(tmp)
 		if n > 0 {
-			buf = append(buf, tmp[:n]...)
-			for {
-				idx := bytes.IndexByte(buf, '\n')
-				if idx < 0 {
-					break
+			stopped := asm.feed(tmp[:n], func(line []byte) bool {
+				cp := make([]byte, len(line))
+				copy(cp, line)
+				// Send races cancellation (issue #358): after the pipeline
+				// stops reading, a plain blocking send would wedge the
+				// collector goroutine forever during shutdown. The
+				// non-blocking attempt runs FIRST so a graceful SIGTERM
+				// drain (ctx done, pipeline still consuming) never randomly
+				// drops deliverable lines to the select's uniform choice.
+				rl := sdk.RawLine{Source: source, Line: cp, At: time.Now()}
+				select {
+				case out <- rl:
+					return false
+				default:
 				}
-				line := make([]byte, idx)
-				copy(line, buf[:idx])
-				out <- sdk.RawLine{
-					Source: source,
-					Line:   line,
-					At:     time.Now(),
+				select {
+				case out <- rl:
+					return false
+				case <-ctx.Done():
+					return true
 				}
-				buf = buf[idx+1:]
+			})
+			if stopped {
+				return ctx.Err()
 			}
 		}
 		if err == io.EOF {
@@ -241,10 +252,10 @@ func drainLines(f *os.File, buf []byte, source string, out chan<- sdk.RawLine, l
 		}
 		if err != nil {
 			logger.Debug("filetail: read error", slog.String("err", err.Error()))
-			return buf, fmt.Errorf("drainLines: %w", err)
+			return fmt.Errorf("drainLines: %w", err)
 		}
 	}
-	return buf, nil
+	return nil
 }
 
 // reopenWithRetry attempts to open path up to maxTries times, waiting wait

@@ -18,6 +18,15 @@ import (
 // --audit table so a crafted reason cannot flood the terminal.
 const auditReasonMax = 200
 
+// Caps for the other untrusted table columns (issue #302). Country and ASN
+// come from the GeoIP databases — external data, sanitized like report.go
+// does; a country code is 2 letters and an ASN renders as "AS<digits>", so
+// anything longer is already suspect.
+const (
+	listCountryMax = 8
+	listASNMax     = 24
+)
+
 func newListCmd() *cobra.Command {
 	var (
 		socketPath string
@@ -158,13 +167,19 @@ func runList(cmd *cobra.Command, socketPath string, byCountry, byASN bool) error
 		return err
 	}
 
-	if jsonOutput {
-		return writeJSON(cmd.OutOrStdout(), resp)
-	}
-
 	var entries []daemon.BanEntry
 	if err := json.Unmarshal(resp.Data, &entries); err != nil {
 		return fmt.Errorf("parse list response: %w", err)
+	}
+
+	// Bare array, matching --audit and the documented jq recipes — the raw
+	// SocketResponse envelope ({"ok":true,"data":[...]}) leaked here and
+	// broke `list --json | jq '.[]'` (issue #301).
+	if jsonOutput {
+		if entries == nil {
+			entries = []daemon.BanEntry{} // `[]`, never `null` — jq '.[]' safe
+		}
+		return writeJSON(cmd.OutOrStdout(), entries)
 	}
 
 	if len(entries) == 0 {
@@ -189,13 +204,17 @@ func runListAllow(cmd *cobra.Command, socketPath string) error {
 		return err
 	}
 
-	if jsonOutput {
-		return writeJSON(cmd.OutOrStdout(), resp)
-	}
-
 	var entries []daemon.AllowEntry
 	if err := json.Unmarshal(resp.Data, &entries); err != nil {
 		return fmt.Errorf("parse list_allow response: %w", err)
+	}
+
+	// Bare array — same envelope fix as runList (issue #301).
+	if jsonOutput {
+		if entries == nil {
+			entries = []daemon.AllowEntry{} // `[]`, never `null`
+		}
+		return writeJSON(cmd.OutOrStdout(), entries)
 	}
 
 	if len(entries) == 0 {
@@ -206,7 +225,10 @@ func runListAllow(cmd *cobra.Command, socketPath string) error {
 	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "IP/CIDR\tEXPIRES\tREASON") //nolint:errcheck
 	for _, e := range entries {
-		fmt.Fprintf(w, "%s\t%s\t%s\n", e.Prefix, e.Expires, e.Reason) //nolint:errcheck
+		// Reason is free text that reaches the terminal — sanitize like the
+		// --audit path in this same file (issue #302).
+		fmt.Fprintf(w, "%s\t%s\t%s\n", e.Prefix, e.Expires, //nolint:errcheck
+			sanitizeField(e.Reason, auditReasonMax))
 	}
 	return w.Flush()
 }
@@ -220,8 +242,14 @@ func printBanTable(cmd *cobra.Command, entries []daemon.BanEntry) error {
 			// Dry-run simulated ban (ADR-0009 §5): recorded, never enforced.
 			ttl += " (simulated)"
 		}
+		// Reason is log-derived and Country/ASN come from GeoIP (external
+		// data) — all three are sanitized before reaching the terminal,
+		// matching the --audit path above and report.go (issue #302).
 		fmt.Fprintf(w, "%s\t%d\t%s\t%s\t%s\t%s\n", //nolint:errcheck
-			e.IP, e.Strike, ttl, e.Country, e.ASN, e.Reason)
+			e.IP, e.Strike, ttl,
+			sanitizeField(e.Country, listCountryMax),
+			sanitizeField(e.ASN, listASNMax),
+			sanitizeField(e.Reason, auditReasonMax))
 	}
 	return w.Flush()
 }
@@ -229,7 +257,9 @@ func printBanTable(cmd *cobra.Command, entries []daemon.BanEntry) error {
 func printByCountry(cmd *cobra.Command, entries []daemon.BanEntry) error {
 	groups := make(map[string][]daemon.BanEntry)
 	for _, e := range entries {
-		key := e.Country
+		// Sanitize the GeoIP-derived group key here so both the map key and
+		// the printed header are safe (issue #302).
+		key := sanitizeField(e.Country, listCountryMax)
 		if key == "" {
 			key = "(unknown)"
 		}
@@ -242,7 +272,8 @@ func printByCountry(cmd *cobra.Command, entries []daemon.BanEntry) error {
 		fmt.Fprintf(w, "Country: %s (%d ban(s))\n", country, len(groups[country])) //nolint:errcheck
 		fmt.Fprintln(w, "  IP\tSTRIKE\tTTL\tREASON")                               //nolint:errcheck
 		for _, e := range groups[country] {
-			fmt.Fprintf(w, "  %s\t%d\t%s\t%s\n", e.IP, e.Strike, e.TTL, e.Reason) //nolint:errcheck
+			fmt.Fprintf(w, "  %s\t%d\t%s\t%s\n", e.IP, e.Strike, e.TTL, //nolint:errcheck
+				sanitizeField(e.Reason, auditReasonMax))
 		}
 		fmt.Fprintln(w) //nolint:errcheck
 	}
@@ -252,7 +283,9 @@ func printByCountry(cmd *cobra.Command, entries []daemon.BanEntry) error {
 func printByASN(cmd *cobra.Command, entries []daemon.BanEntry) error {
 	groups := make(map[string][]daemon.BanEntry)
 	for _, e := range entries {
-		key := e.ASN
+		// Sanitize the GeoIP-derived group key here so both the map key and
+		// the printed header are safe (issue #302).
+		key := sanitizeField(e.ASN, listASNMax)
 		if key == "" {
 			key = "(unknown)"
 		}
@@ -265,7 +298,8 @@ func printByASN(cmd *cobra.Command, entries []daemon.BanEntry) error {
 		fmt.Fprintf(w, "ASN: %s (%d ban(s))\n", asn, len(groups[asn])) //nolint:errcheck
 		fmt.Fprintln(w, "  IP\tSTRIKE\tTTL\tREASON")                   //nolint:errcheck
 		for _, e := range groups[asn] {
-			fmt.Fprintf(w, "  %s\t%d\t%s\t%s\n", e.IP, e.Strike, e.TTL, e.Reason) //nolint:errcheck
+			fmt.Fprintf(w, "  %s\t%d\t%s\t%s\n", e.IP, e.Strike, e.TTL, //nolint:errcheck
+				sanitizeField(e.Reason, auditReasonMax))
 		}
 		fmt.Fprintln(w) //nolint:errcheck
 	}

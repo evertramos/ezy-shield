@@ -19,7 +19,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/evertramos/ezy-shield/configs"
 	"github.com/evertramos/ezy-shield/internal/config"
 	"github.com/evertramos/ezy-shield/internal/decision"
 	"github.com/evertramos/ezy-shield/internal/ownership"
@@ -44,11 +43,6 @@ const (
 	// equivalent to "unset" so a stale placeholder never gets forwarded to a
 	// real AI provider (issue #13 §5, §6).
 	envAPIKeyPlaceholder = "YOUR_API_KEY_HERE" //nolint:gosec // G101: literal placeholder, deliberately public — the loader (SecretRef.Resolve) treats this exact string as "unset" so a stale placeholder never reaches a real AI provider.
-
-	// systemdDropInDir is the per-unit drop-in override directory. The init
-	// wizard writes env.conf here so EnvironmentFile= is active even on hosts
-	// with an older embedded service file that predates issue #22.
-	systemdDropInDir = defaultSystemdDir + "/ezyshield.service.d"
 )
 
 func newInitCmd() *cobra.Command {
@@ -65,7 +59,8 @@ func newInitCmd() *cobra.Command {
 		Use:   "init",
 		Short: "Interactive setup wizard (or scripted with --non-interactive)",
 		Long: `Detect the environment, ask a few questions, write config files,
-install systemd units, and start EzyShield in dry-run mode.
+install systemd units (skipped when the OS package already provides them),
+and start EzyShield in dry-run mode.
 
 Pass --yes to accept all smart defaults without prompting.
 Pass --config-dir to write files elsewhere (skips systemd/service steps — useful for testing).
@@ -390,12 +385,6 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 
 	if err := installSystemdUnits(p.w); err != nil {
 		return err
-	}
-
-	if wrote, err := writeSystemdEnvDropIn(); err != nil {
-		p.printf("  warning: could not write systemd drop-in: %v\n", err)
-	} else if wrote {
-		p.printf("  wrote %s/env.conf (EnvironmentFile drop-in)\n", systemdDropInDir)
 	}
 
 	if err := runSysCmd("systemctl", "daemon-reload"); err != nil {
@@ -747,25 +736,6 @@ func askQuestions(out io.Writer, sc *bufio.Scanner, state *wizardState, yes bool
 	p.println("")
 	p.println(st.header("Policy"))
 	state.armed = askBool("Start in armed mode? (no = dry-run, recommended for first run)", false)
-}
-
-// writeSystemdEnvDropIn emits /etc/systemd/system/ezyshield.service.d/env.conf
-// so EnvironmentFile=-/etc/ezyshield/.env is active even on hosts running an
-// older service file that predates this directive (issue #22). Idempotent: if
-// the file already contains the exact content no write occurs.
-func writeSystemdEnvDropIn() (wrote bool, err error) {
-	if err := os.MkdirAll(systemdDropInDir, 0o750); err != nil {
-		return false, fmt.Errorf("creating drop-in dir %s: %w", systemdDropInDir, err)
-	}
-	content := "[Service]\nEnvironmentFile=-" + defaultConfigDir + "/" + envFileName + "\n"
-	dst := filepath.Join(systemdDropInDir, "env.conf")
-	if existing, rerr := os.ReadFile(dst); rerr == nil && string(existing) == content { //nolint:gosec // path is a fixed admin-only constant
-		return false, nil
-	}
-	if err := os.WriteFile(dst, []byte(content), 0o644); err != nil { //nolint:gosec // 0644 is standard for systemd units
-		return false, fmt.Errorf("writing %s: %w", dst, err)
-	}
-	return true, nil
 }
 
 // ── Config file generation ───────────────────────────────────────────────────
@@ -1175,23 +1145,6 @@ func createEzyshieldUser(out io.Writer) error {
 	// best-effort: add to docker and systemd-journal groups for log access
 	_ = runCmdSilent("usermod", "-aG", "docker", "ezyshield")
 	_ = runCmdSilent("usermod", "-aG", "systemd-journal", "ezyshield")
-	return nil
-}
-
-func installSystemdUnits(out io.Writer) error {
-	for _, unit := range []string{"ezyshield.service", "ezyshield-enforcer.service"} {
-		data, err := configs.FS.ReadFile("systemd/" + unit)
-		if err != nil {
-			return fmt.Errorf("reading embedded %s: %w", unit, err)
-		}
-		dst := filepath.Join(defaultSystemdDir, unit)
-		if err := os.WriteFile(dst, data, 0o644); err != nil { //nolint:gosec // 0644 is standard for systemd units
-			return fmt.Errorf("installing %s: %w", dst, err)
-		}
-		if _, err := fmt.Fprintf(out, "  installed %s\n", dst); err != nil {
-			return fmt.Errorf("writing output: %w", err)
-		}
-	}
 	return nil
 }
 

@@ -85,6 +85,11 @@ type daemonStore interface {
 	StrikesForIP(ctx context.Context, ip netip.Addr, limit int) ([]store.StrikeRecord, error)
 	AuditLogForIP(ctx context.Context, ip netip.Addr, limit int) ([]store.AuditEntry, error)
 	ListOffenders(ctx context.Context, permanentOnly bool, limit int) ([]store.OffenderSummary, error)
+	// Persistent hourly counters backing long-window (>1h) rules (issue
+	// #134) — see internal/store/eventsagg.go.
+	IncrEventCount(ctx context.Context, ip netip.Addr, kind string, bucketStart int64) error
+	SumEventCounts(ctx context.Context, ip netip.Addr, kinds []string, since int64) (map[string]int, error)
+	PruneEventCounts(ctx context.Context, before int64) (int, error)
 }
 
 // geoLookup is the minimal interface consumed from *enrich.Enricher.
@@ -181,6 +186,11 @@ type Daemon struct {
 	// re-evaluation (0 = defaults; see sshrecheck.go, issue #420).
 	sshRecheckTick  time.Duration
 	sshRecheckDelay time.Duration
+	// Long-window detection (issue #134): longRuleWindows maps each rule
+	// window >1h to the kinds its rules reference; longKinds is the union.
+	// Empty maps = no long-window rules loaded (feature dormant).
+	longRuleWindows map[time.Duration][]string
+	longKinds       map[string]bool
 
 	// sigCh, when non-nil, replaces the process-signal channel in Run so
 	// tests can drive the SIGTERM drain / SIGINT immediate-exit branches
@@ -291,9 +301,26 @@ func New(dcfg Config) (*Daemon, error) {
 		return nil, fmt.Errorf("daemon: rule engine: %w", err)
 	}
 
-	windows := ruleEng.Windows()
+	// Split rule windows at the long-window cutoff (issue #134): fine
+	// windows stay on the in-memory sliding-window aggregator (they need
+	// Sample for field-level rules); long windows (>1h) are served by the
+	// persistent per-IP hourly counters in the store, so no 24h horizon of
+	// events is ever held in RAM.
+	var windows []time.Duration
+	for _, w := range ruleEng.Windows() {
+		if w <= rules.LongWindowCutoff {
+			windows = append(windows, w)
+		}
+	}
 	if len(windows) == 0 {
 		windows = []time.Duration{time.Minute, 10 * time.Minute}
+	}
+	longRuleWindows := ruleEng.KindsForLongWindows()
+	longKinds := map[string]bool{}
+	for _, kinds := range longRuleWindows {
+		for _, k := range kinds {
+			longKinds[k] = true
+		}
 	}
 
 	maxIPs := dcfg.MaxIPs
@@ -339,6 +366,8 @@ func New(dcfg Config) (*Daemon, error) {
 		expireTick:      dcfg.ExpireTick,
 		sshRecheckTick:  dcfg.SSHRecheckTick,
 		sshRecheckDelay: dcfg.SSHRecheckDelay,
+		longRuleWindows: longRuleWindows,
+		longKinds:       longKinds,
 	}
 
 	// Enforcement-anomaly delivery (ADR-0009 §4, issue #146): the engine
@@ -663,7 +692,19 @@ func (d *Daemon) processRaw(ctx context.Context, raw sdk.RawLine) {
 	for _, ev := range events {
 		d.agg.Add(ev)
 
-		verdicts := d.evaluateRules(ctx, ev.SourceIP)
+		// Long-window kinds (issue #134) are also counted persistently, so
+		// low-and-slow attackers survive LRU eviction and daemon restarts.
+		// Only kinds referenced by long-window rules are ever written —
+		// high-volume HTTP traffic never touches the counter table.
+		longRelevant := d.longKinds[ev.Kind]
+		if longRelevant {
+			if err := d.store.IncrEventCount(ctx, ev.SourceIP, ev.Kind, store.HourBucket(time.Now())); err != nil {
+				slog.WarnContext(ctx, "daemon: event counter increment failed",
+					"ip", ev.SourceIP, "kind", ev.Kind, "err", err)
+			}
+		}
+
+		verdicts := d.evaluateRules(ctx, ev.SourceIP, longRelevant)
 		if len(verdicts) == 0 {
 			continue
 		}
@@ -939,11 +980,50 @@ func (d *Daemon) parse(raw sdk.RawLine) ([]sdk.Event, error) {
 // evaluateRules aggregates all windows for ip and collects triggered verdicts.
 // When an enricher is configured, each aggregate's Enrich field is populated
 // before being passed to the rule engine.
-func (d *Daemon) evaluateRules(ctx context.Context, ip netip.Addr) []sdk.Verdict {
+//
+// withLong additionally evaluates long-window (>1h) rules from the persistent
+// hourly counters (issue #134). Callers pass true only when the triggering
+// context is long-window-relevant (an SSH-kind event, an SSH re-check) so the
+// per-event hot path never runs counter queries for high-volume HTTP kinds.
+func (d *Daemon) evaluateRules(ctx context.Context, ip netip.Addr, withLong bool) []sdk.Verdict {
 	now := time.Now()
 	var verdicts []sdk.Verdict
 	for _, w := range d.agg.Windows() {
 		agg := d.agg.Aggregate(ip, w, now)
+		if d.enricher != nil {
+			agg.Enrich = d.enricher.Lookup(ip)
+		}
+		verdicts = append(verdicts, d.ruleEng.Evaluate(ctx, agg)...)
+	}
+	if withLong {
+		verdicts = append(verdicts, d.evaluateLongRules(ctx, ip, now)...)
+	}
+	return verdicts
+}
+
+// evaluateLongRules builds one aggregate per long window from the persistent
+// counters and hands it to the UNCHANGED rule engine — Evaluate already
+// filters rules by agg.Window, so the long path reuses it as-is (the design
+// constraint of issue #134). Counter buckets are hour-coarse: the window
+// boundary lands on the containing hour, a documented slack long-window
+// thresholds tolerate.
+func (d *Daemon) evaluateLongRules(ctx context.Context, ip netip.Addr, now time.Time) []sdk.Verdict {
+	var verdicts []sdk.Verdict
+	for w, kinds := range d.longRuleWindows {
+		sums, err := d.store.SumEventCounts(ctx, ip, kinds, store.HourBucket(now.Add(-w)))
+		if err != nil {
+			slog.WarnContext(ctx, "daemon: long-window count query failed",
+				"ip", ip, "window", w, "err", err)
+			continue
+		}
+		total := 0
+		for _, n := range sums {
+			total += n
+		}
+		if total == 0 {
+			continue
+		}
+		agg := sdk.Aggregate{IP: ip, Window: w, Count: total, Kinds: sums}
 		if d.enricher != nil {
 			agg.Enrich = d.enricher.Lookup(ip)
 		}
@@ -1197,8 +1277,16 @@ func unionPrefixes(a, b []netip.Prefix) []netip.Prefix {
 	return out
 }
 
-// runFlush periodically removes stale aggregator buckets to bound memory.
+// runFlush periodically removes stale aggregator buckets to bound memory,
+// and prunes persistent long-window counter buckets past the longest long
+// window (issue #134) so events_agg can never grow unbounded.
 func (d *Daemon) runFlush(ctx context.Context) {
+	var longest time.Duration
+	for w := range d.longRuleWindows {
+		if w > longest {
+			longest = w
+		}
+	}
 	t := time.NewTicker(flushInterval)
 	defer t.Stop()
 	for {
@@ -1207,6 +1295,14 @@ func (d *Daemon) runFlush(ctx context.Context) {
 			return
 		case now := <-t.C:
 			d.agg.Flush(ctx, now.Add(-d.agg.Windows()[len(d.agg.Windows())-1]))
+			if longest > 0 {
+				// One extra hour of slack keeps the boundary bucket whole.
+				if n, err := d.store.PruneEventCounts(ctx, store.HourBucket(now.Add(-longest-time.Hour))); err != nil {
+					slog.WarnContext(ctx, "daemon: event counter prune failed", "err", err)
+				} else if n > 0 {
+					slog.DebugContext(ctx, "daemon: pruned event counter buckets", "rows", n)
+				}
+			}
 		}
 	}
 }

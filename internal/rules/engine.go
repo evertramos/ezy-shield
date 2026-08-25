@@ -207,6 +207,39 @@ func applyDropins(base []spec, dir string) ([]spec, map[string]string, error) {
 	return merged, origin, nil
 }
 
+// LongWindowCutoff splits rule windows between the two evaluation paths
+// (issue #134): windows <= cutoff are served by the in-memory sliding-window
+// aggregator (which retains events, enabling field-level rules); windows
+// above it are served by persistent per-IP hourly counters in the store
+// (aggregate integers only — hence the kind-level-only validation below).
+const LongWindowCutoff = time.Hour
+
+// KindsForLongWindows returns, for each distinct rule window strictly
+// greater than LongWindowCutoff, the union of kinds its rules reference.
+// The daemon uses this to know which event kinds to count persistently and
+// which extra windows to evaluate from those counts. Read-only; Evaluate
+// itself is untouched by the long-window path (design constraint of #134).
+func (e *Engine) KindsForLongWindows() map[time.Duration][]string {
+	out := map[time.Duration][]string{}
+	for _, r := range e.rules {
+		w := time.Duration(r.Window)
+		if w <= LongWindowCutoff {
+			continue
+		}
+		seen := make(map[string]bool, len(out[w]))
+		for _, k := range out[w] {
+			seen[k] = true
+		}
+		for _, k := range r.Kinds {
+			if !seen[k] {
+				out[w] = append(out[w], k)
+				seen[k] = true
+			}
+		}
+	}
+	return out
+}
+
 // Windows returns the unique window durations referenced by the loaded rules.
 // The aggregator should produce an sdk.Aggregate for each of these windows so
 // that Evaluate can match every rule.
@@ -377,6 +410,14 @@ func validateRule(i int, r spec) error {
 	}
 	if r.Category == "" {
 		return fmt.Errorf("rule %q: category is required", r.Name)
+	}
+	// Long-window rules (issue #134) are evaluated from persistent per-IP
+	// hourly counters, which retain kind counts only — no field values. A
+	// field-level matcher on such a window could never fire, so it fails
+	// closed at load time like the field/matcher pairing above.
+	if time.Duration(r.Window) > LongWindowCutoff && r.Field != "" {
+		return fmt.Errorf("rule %q: windows above %s are served by persistent counters that keep no field values; field/value/contains/contains_any require window <= %s",
+			r.Name, LongWindowCutoff, LongWindowCutoff)
 	}
 	return nil
 }

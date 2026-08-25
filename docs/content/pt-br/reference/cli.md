@@ -33,7 +33,7 @@ seguros para scripts:
 | Comando | Formato |
 |---------|---------|
 | `status` | Objeto: `daemon`, `enforcer`, `mode`, `uptime`, `version`, `active_bans`, `bans_by_strike`, `message` |
-| `list` | Envelope: `ok`, `error`, `data` (linhas dentro de `data`) |
+| `list` | Array de linhas — bans ativos, entradas de `--allow` ou eventos de `--audit` (`[]` quando vazio) |
 | `report <ip>` | Objeto: relatório de abuso versionado (`schema_version`, `ip`, `country`, `asn`, `current_ban`, `strikes`, `actions`, mais `evidence` com `--evidence`) |
 | `report` | Array de resumos de ofensores (`ip`, `first_seen`, `last_seen`, `total_strikes`, `banned`, `permanent`, `country`, `asn`) |
 | `watch` | NDJSON: um objeto de evento por linha |
@@ -227,6 +227,13 @@ Saída:
 - Modo (enforce / dry-run), uptime, versão
 - Total de banimentos ativos e distribuição por strike
 
+Campos estáveis do `--json` além desses: `enforcement_state` /
+`enforcement_detail` (a saúde real do enforcement, mesmo vocabulário do
+doctor), `collectors_state` / `collectors_detail`, `simulated_bans`
+(bans simulados do dry-run que seriam aplicados se armado) e
+`armed_until` (o prazo de auto-reversão enquanto uma janela `arm --for`
+está ativa).
+
 ## ezyshield list
 
 Lista os banimentos ativos (padrão) ou a allowlist.
@@ -247,7 +254,7 @@ ezyshield list --audit
 ezyshield list --audit --ip 203.0.113.42
 ezyshield list --audit --limit 50
 
-# Saída em JSON (funciona com --audit também)
+# Saída em JSON — sempre um array puro de entradas (funciona com --audit e --allow também)
 ezyshield list --json
 ```
 
@@ -708,7 +715,7 @@ ezyshield version --json
 
 ## ezyshield test
 
-Executa testes de conectividade contra os componentes configurados. Como o `config`, o grupo segue o padrão `<kind> <name>`, então tipos de componente futuros se encaixam nos mesmos verbos.
+Executa testes de conectividade contra os componentes configurados. Como o `config`, o grupo segue o padrão `<kind> <name>`, então tipos de componente futuros se encaixam nos mesmos verbos. Os dois subcomandos aceitam `--config-dir` (padrão `/etc/ezyshield`) para apontar o diretório que contém o `config.yaml`.
 
 ### ezyshield test enforcer `<name>`
 
@@ -753,7 +760,8 @@ Os verbos pré-1.0 `test-enforce <name>` e `test-notify <name>` continuam funcio
 | `-h, --help` | Mostra o texto de ajuda |
 
 `--config` / `--policy` **não** são globais — existem nos comandos que leem
-esses arquivos (`run`, `config show`, `validate`, `dashboard`), com defaults
+esses arquivos (`run`, `config show`, `validate`; o `dashboard` aceita apenas
+`--config` — ele nunca lê policy.yaml), com defaults
 em `/etc/ezyshield`.
 
 ### Flags exclusivas do comando raiz

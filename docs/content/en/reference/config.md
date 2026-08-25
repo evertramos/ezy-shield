@@ -93,7 +93,7 @@ enforce:
   nftables: {}                   # local enforcement on; defaults are fine
 
   cloudflare:
-    api_token: env:CF_API_TOKEN  # secrets are env: references, never inline
+    api_token: env:CLOUDFLARE_API_TOKEN  # secrets are env: references, never inline — this NAME is what init writes
     account_id: "abc123..."      # required in the default "lists" mode
     # mode: lists                # "lists" (default) or "rulesets"
     # list_name: ezyshield_blocked
@@ -158,7 +158,7 @@ notify:
   dedup_window_sec: 600          # default — identical alerts collapsed
 
   telegram:
-    bot_token: env:EZYSHIELD_TELEGRAM_TOKEN
+    bot_token: env:TELEGRAM_BOT_TOKEN
     chat_ids: ["123456789"]
     severity: [warn, critical]   # optional filter: info | warn | critical
 
@@ -166,22 +166,22 @@ notify:
     host: smtp.example.com
     port: 587
     username: alerts@example.com
-    password: env:EZYSHIELD_SMTP_PASSWORD
+    password: env:SMTP_PASSWORD
     tls: starttls                # starttls (default) | tls | none
     from: alerts@example.com
     to: [admin@example.com]
 
   slack:
-    webhook_url: env:EZYSHIELD_SLACK_WEBHOOK
+    webhook_url: env:SLACK_WEBHOOK_URL
     channel: "#security"         # optional override
 
   discord:
-    webhook_url: env:EZYSHIELD_DISCORD_WEBHOOK
+    webhook_url: env:DISCORD_WEBHOOK_URL
 
   webhook:
-    url: env:EZYSHIELD_WEBHOOK_URL
+    url: env:WEBHOOK_URL
     headers:
-      Authorization: env:EZYSHIELD_WEBHOOK_TOKEN   # value must be a full env: reference
+      Authorization: env:WEBHOOK_AUTH_TOKEN   # value must be a full env: reference
 ```
 
 Shared fields: `rate_limit_per_minute` (default 5) and `dedup_window_sec` (default 600) protect against notification storms. Every channel accepts an optional `severity` list (`info` \| `warn` \| `critical`).

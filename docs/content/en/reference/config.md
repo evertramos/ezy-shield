@@ -58,7 +58,7 @@ collectors:
 | `path` | for `file` | file to tail |
 | `unit` | for `journald` | systemd unit to follow |
 | `container` | for `docker` | container name, short ID, or full ID |
-| `parser` | no | force a parser: `nginx` \| `ssh` \| `apache` \| `apache-error` \| `traefik` \| `caddy` (default: routed automatically from the source). `apache` reads the Apache **access** log (combined format, shared with `nginx`); `apache-error` reads the Apache **error_log** (`error.log` / `error_log`). **Honored only for `file` and `docker` collectors** — `journald` ignores it and always routes its parser from the unit. |
+| `parser` | no | force a parser: `nginx` \| `ssh` \| `apache` \| `apache-error` \| `traefik` \| `caddy` \| `postfix` (default: routed automatically from the source). `apache` reads the Apache **access** log (combined format, shared with `nginx`); `apache-error` reads the Apache **error_log** (`error.log` / `error_log`); `postfix` reads Postfix smtpd lines (`mail.log` / `maillog`, or the `postfix` / `postfix@*` journald units — SASL auth failures, relay-denied rejects, and connection-abuse signatures become `smtp_auth_fail` / `smtp_relay_denied` / `smtp_abuse` events). **Honored only for `file` and `docker` collectors** — `journald` ignores it and always routes its parser from the unit. |
 
 ### SSH collector (unit name varies by distro)
 

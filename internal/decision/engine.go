@@ -309,12 +309,17 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 	}
 
 	act := sdk.Action{
-		IP:       ip,
-		Op:       op,
-		TTL:      ttl,
-		Strike:   nextStrike,
-		Reason:   fmt.Sprintf("score=%d category=%s source=%s", score, best.Category, best.Source),
-		Verdicts: verdicts,
+		IP:  ip,
+		Op:  op,
+		TTL: ttl,
+		// A TTL-0 strike rung means "no expiry" — say so explicitly.
+		// Consumers must never have to conflate an expired remaining-time
+		// with a permanent ban (issue #279 semantics; contract ratified by
+		// ADR-0010, issue #315).
+		Permanent: ttl == 0,
+		Strike:    nextStrike,
+		Reason:    fmt.Sprintf("score=%d category=%s source=%s", score, best.Category, best.Source),
+		Verdicts:  verdicts,
 	}
 
 	// ── Safety invariant §1: dry-run must enforce nothing ─────────────────────

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/evertramos/ezy-shield/internal/config"
+	"github.com/evertramos/ezy-shield/internal/decision"
 	"github.com/evertramos/ezy-shield/internal/parser"
 	"github.com/evertramos/ezy-shield/internal/store"
 	"github.com/evertramos/ezy-shield/pkg/sdk"
@@ -153,7 +154,7 @@ func TestSSHRecheck_EvidenceAgedOut_NoBan(t *testing.T) {
 
 	// Manually arm a re-check for an IP with no current aggregates (evidence
 	// already aged out). The re-check must decline to ban.
-	d.sshRecheck.schedule(attacker, time.Now())
+	d.sshRecheck.schedule(attacker, time.Now(), nil)
 	go d.runSSHRecheck(ctx)
 
 	if !waitFor(500*time.Millisecond, func() bool { return d.sshRecheck.len() == 0 }) {
@@ -187,7 +188,7 @@ func TestSSHRecheck_NoDoubleBan(t *testing.T) {
 	first := enf.BanCount()
 
 	// Arm a stray re-check for the now-banned IP; it must not add a strike.
-	d.sshRecheck.schedule(attacker, time.Now())
+	d.sshRecheck.schedule(attacker, time.Now(), nil)
 	if !waitFor(500*time.Millisecond, func() bool { return d.sshRecheck.len() == 0 }) {
 		t.Fatal("stray re-check not consumed")
 	}
@@ -200,11 +201,106 @@ func TestSSHRecheck_NoDoubleBan(t *testing.T) {
 
 // TestSSHRecheckQueue_ScheduleRequeueBudget unit-tests the queue's re-arm
 // budget and dedup semantics without a running daemon.
+// TestSSHRecheck_AIElevatedBan_ReplayedOnRecheck is the issue #442
+// regression: when the original would-be ban existed only because an AI
+// verdict pushed a rules-only ambiguous score over ban_threshold, the
+// deferred re-check must reproduce that ban once the SSH peer is gone —
+// previously it re-derived rules only, got notify_only, and silently
+// dropped the entry.
+func TestSSHRecheck_AIElevatedBan_ReplayedOnRecheck(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	attacker := netip.MustParseAddr("192.0.2.77")
+	enf := &fakeEnforcer{}
+	d, _ := newRecheckDaemon(t, enf, func() []netip.Addr { return nil })
+	// Raise the ban threshold above ssh_bruteforce's rule score (85) so the
+	// rule evidence alone lands in the ambiguous band — the shape where only
+	// the AI push reaches a ban.
+	d.policy.BanThreshold = 90
+
+	// In-window rule evidence exists (peer was present during the burst, so
+	// nothing was banned — scores stayed sub-threshold anyway).
+	feedBurst(ctx, d, attacker, 6)
+
+	// The pipeline's refusal, as it would look with AI enabled: rule verdict
+	// 85 + ai verdict 95 ≥ threshold tripping anti-lockout.
+	aiV := sdk.Verdict{IP: attacker, Score: 95, Category: "bruteforce",
+		Confidence: 0.9, Reason: "ai judged hostile", Source: "ai:test"}
+	refusal := sdk.Action{IP: attacker, Op: "record", Reason: decision.ReasonAntiLockoutSSHPeer}
+	d.maybeScheduleSSHRecheck(ctx, refusal, []sdk.Verdict{
+		{IP: attacker, Score: 85, Source: "rule/ssh_bruteforce"},
+		aiV,
+	})
+	if d.sshRecheck.len() != 1 {
+		t.Fatal("re-check not armed for the AI-elevated refusal")
+	}
+
+	go d.runSSHRecheck(ctx)
+
+	// Peer gone (probe returns nil from the start): the deferred pass must
+	// ban from live rule evidence + the replayed AI verdict.
+	if !waitFor(time.Second, func() bool { return enf.BanCount() >= 1 }) {
+		t.Fatal("AI-elevated ban was not reproduced by the deferred re-check (issue #442)")
+	}
+}
+
+// TestSSHRecheck_AIElevated_PeerStillThere_NeverBanned: the replayed AI
+// verdict must not weaken the anti-lockout invariant — with the peer still
+// ESTABLISHED the re-check keeps refusing.
+func TestSSHRecheck_AIElevated_PeerStillThere_NeverBanned(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	attacker := netip.MustParseAddr("192.0.2.78")
+	enf := &fakeEnforcer{}
+	d, _ := newRecheckDaemon(t, enf, func() []netip.Addr { return []netip.Addr{attacker} })
+	d.policy.BanThreshold = 90
+
+	feedBurst(ctx, d, attacker, 6)
+	aiV := sdk.Verdict{IP: attacker, Score: 95, Source: "ai:test"}
+	d.maybeScheduleSSHRecheck(ctx, sdk.Action{IP: attacker, Op: "record",
+		Reason: decision.ReasonAntiLockoutSSHPeer},
+		[]sdk.Verdict{{IP: attacker, Score: 85, Source: "rule/ssh_bruteforce"}, aiV})
+
+	go d.runSSHRecheck(ctx)
+	time.Sleep(150 * time.Millisecond) // several re-check rounds
+	if enf.BanCount() != 0 {
+		t.Fatalf("banned an IP with a live ESTABLISHED SSH peer — anti-lockout invariant broken")
+	}
+}
+
+// TestElevatedAIVerdict pins the capture rule: carried only when the ban
+// NEEDED the AI push.
+func TestElevatedAIVerdict(t *testing.T) {
+	ip := netip.MustParseAddr("192.0.2.5")
+	rule80 := sdk.Verdict{IP: ip, Score: 80, Source: "rule/ssh_bruteforce"}
+	rule95 := sdk.Verdict{IP: ip, Score: 95, Source: "rule/ssh_bruteforce"}
+	ai92 := sdk.Verdict{IP: ip, Score: 92, Source: "ai:anthropic"}
+	ai97 := sdk.Verdict{IP: ip, Score: 97, Source: "ai:openai"}
+
+	if got := elevatedAIVerdict([]sdk.Verdict{rule80, ai92}, 90); got == nil || got.Score != 92 {
+		t.Errorf("ambiguous rules + elevating AI: got %+v, want the ai:92 verdict", got)
+	}
+	if got := elevatedAIVerdict([]sdk.Verdict{rule80, ai92, ai97}, 90); got == nil || got.Score != 97 {
+		t.Errorf("two AI verdicts: got %+v, want the highest (97)", got)
+	}
+	if got := elevatedAIVerdict([]sdk.Verdict{rule95, ai97}, 90); got != nil {
+		t.Errorf("rules alone over threshold: got %+v, want nil (no replay needed)", got)
+	}
+	if got := elevatedAIVerdict([]sdk.Verdict{rule80}, 90); got != nil {
+		t.Errorf("no AI verdict: got %+v, want nil", got)
+	}
+	if got := elevatedAIVerdict([]sdk.Verdict{rule80, {IP: ip, Score: 85, Source: "ai:x"}}, 90); got != nil {
+		t.Errorf("AI below threshold: got %+v, want nil", got)
+	}
+}
+
 func TestSSHRecheckQueue_ScheduleRequeueBudget(t *testing.T) {
 	var q sshRecheckQueue
 	ip := netip.MustParseAddr("198.51.100.1")
 
-	if !q.schedule(ip, time.Now().Add(-time.Second)) {
+	if !q.schedule(ip, time.Now().Add(-time.Second), nil) {
 		t.Fatal("schedule returned false on empty queue")
 	}
 	if q.len() != 1 {
@@ -220,14 +316,14 @@ func TestSSHRecheckQueue_ScheduleRequeueBudget(t *testing.T) {
 	}
 
 	// requeue honors the attempt budget: at the cap it refuses.
-	if q.requeue(ip, sshRecheckMaxAttempts, time.Now()) {
+	if q.requeue(ip, sshRecheckMaxAttempts, time.Now(), nil) {
 		t.Error("requeue returned true at the attempt cap — retry budget not enforced")
 	}
 	if q.len() != 0 {
 		t.Errorf("len = %d after refused requeue, want 0", q.len())
 	}
 	// Below the cap it re-arms carrying the spent-attempt count.
-	if !q.requeue(ip, 3, time.Now().Add(-time.Second)) {
+	if !q.requeue(ip, 3, time.Now().Add(-time.Second), nil) {
 		t.Fatal("requeue below cap returned false")
 	}
 	due = q.due(time.Now())

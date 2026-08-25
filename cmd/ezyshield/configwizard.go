@@ -21,6 +21,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/evertramos/ezy-shield/internal/config"
+	"github.com/evertramos/ezy-shield/internal/vhostdetect"
 )
 
 // componentWizard drives the interactive prompts for one component and, on
@@ -158,7 +159,7 @@ Available names: ` + strings.Join(sortedWizardKeys(componentWizards[kind]), ", "
 			p := &wPrinter{w: cmd.OutOrStdout()}
 			code := runConfigComponent(cmd.Context(), p,
 				closurePrompter{askFn: ask, askBoolFn: askBool},
-				cdnDeps{}, kind, args[0], configPath)
+				cdnDeps{LocalVHosts: vhostdetect.DetectLocalDefault}, kind, args[0], configPath)
 			if p.err != nil {
 				return fmt.Errorf("writing output: %w", p.err)
 			}

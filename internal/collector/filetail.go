@@ -226,13 +226,18 @@ func drainLines(ctx context.Context, f *os.File, asm *lineAssembler, source stri
 				copy(cp, line)
 				// Send races cancellation (issue #358): after the pipeline
 				// stops reading, a plain blocking send would wedge the
-				// collector goroutine forever during shutdown.
+				// collector goroutine forever during shutdown. The
+				// non-blocking attempt runs FIRST so a graceful SIGTERM
+				// drain (ctx done, pipeline still consuming) never randomly
+				// drops deliverable lines to the select's uniform choice.
+				rl := sdk.RawLine{Source: source, Line: cp, At: time.Now()}
 				select {
-				case out <- sdk.RawLine{
-					Source: source,
-					Line:   cp,
-					At:     time.Now(),
-				}:
+				case out <- rl:
+					return false
+				default:
+				}
+				select {
+				case out <- rl:
 					return false
 				case <-ctx.Done():
 					return true

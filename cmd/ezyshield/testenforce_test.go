@@ -453,24 +453,3 @@ enforce:
 		})
 	}
 }
-
-func TestRepeatStr(t *testing.T) {
-	tests := []struct {
-		s     string
-		count int
-		want  string
-	}{
-		{"─", 5, "─────"},
-		{"x", 3, "xxx"},
-		{"ab", 2, "abab"},
-		{"", 5, ""},
-		{"a", 0, ""},
-	}
-
-	for _, tt := range tests {
-		got := repeatStr(tt.s, tt.count)
-		if got != tt.want {
-			t.Errorf("repeatStr(%q, %d): got %q, want %q", tt.s, tt.count, got, tt.want)
-		}
-	}
-}

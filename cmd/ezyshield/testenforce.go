@@ -499,7 +499,7 @@ func printEnforceResults(w io.Writer, results *testEnforceResults) error {
 			mode = fmt.Sprintf(" (mode: %s)", result.Mode)
 		}
 		_, _ = fmt.Fprintf(w, "\n%s%s: %s\n", backendLabel(name), mode, result.Status)
-		_, _ = fmt.Fprintf(w, "%s\n", repeatStr("─", 40))
+		_, _ = fmt.Fprintf(w, "%s\n", strings.Repeat("─", 40))
 
 		// Message/Notes end THIS backend's section, not the whole report — a
 		// `return` here is how the nftables "not yet implemented" note used to
@@ -549,12 +549,4 @@ func backendLabel(name string) string {
 	default:
 		return fmt.Sprintf("Cloudflare enforcer %q", name)
 	}
-}
-
-func repeatStr(s string, count int) string {
-	result := ""
-	for i := 0; i < count; i++ {
-		result += s
-	}
-	return result
 }

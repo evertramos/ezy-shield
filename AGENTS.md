@@ -58,6 +58,22 @@ addressed. "Looks fine" is not a review — cite file:line, why, and the fix.
 5. **Before opening the PR**: walk `docs/internal/SECURITY-REVIEW.md §10` (code quality self-review) on every function you wrote or modified. This is mandatory — PRs that skip this step will be rejected.
 6. If a task seems to require breaking a Hard Rule, stop and open a discussion issue instead.
 
+## Git Isolation (Worktree Policy)
+
+**Always use `git worktree` when performing git operations** (checkout, commit, rebase, push, etc.) that change HEAD or work with branches. This isolates the agent's work from parallel processes and prevents HEAD conflicts.
+
+**When to enter a worktree:**
+- Before implementing an issue (any `git checkout -b`)
+- Before resolving merge conflicts (`git rebase`)
+- Before committing changes
+- Before force-pushing
+
+**Why:** Multiple agents may work on the same repo in parallel (e.g., one on `feat/issue-77`, another on `feat/issue-56`). Without isolation, HEAD switches silently between branches, corrupting working state and risking lost commits.
+
+**How:** Create an isolated worktree (e.g. under `.claude/worktrees/<id>/` or `git worktree add`), work normally inside it, and clean it up when done. Tools with a built-in worktree feature (such as Claude Code's `EnterWorktree`) should use it.
+
+Applies to: AI coding assistants and any tool that runs `git` commands.
+
 ## Commit / PR Style
 
 - Conventional commits: `feat(enforce): add bunny edge blocker`, `fix(parser): nginx ipv6`

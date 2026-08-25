@@ -90,7 +90,7 @@ enforce:
   nftables: {}                   # enforcement local ligado; os padrões bastam
 
   cloudflare:
-    api_token: env:CF_API_TOKEN  # segredos são referências env:, nunca inline
+    api_token: env:CLOUDFLARE_API_TOKEN  # segredos são referências env:, nunca inline — este NOME é o que o init escreve
     account_id: "abc123..."      # obrigatório no modo padrão "lists"
     # mode: lists                # "lists" (padrão) ou "rulesets"
     # list_name: ezyshield_blocked
@@ -157,7 +157,7 @@ notify:
   notify_only_window_sec: 3600   # padrão — notify_only repetido por (IP, regra) vira um único resumo
 
   telegram:
-    bot_token: env:EZYSHIELD_TELEGRAM_TOKEN
+    bot_token: env:TELEGRAM_BOT_TOKEN
     chat_ids: ["123456789"]
     severity: [warn, critical]   # filtro opcional: info | warn | critical
 
@@ -165,22 +165,22 @@ notify:
     host: smtp.example.com
     port: 587
     username: alerts@example.com
-    password: env:EZYSHIELD_SMTP_PASSWORD
+    password: env:SMTP_PASSWORD
     tls: starttls                # starttls (padrão) | tls | none
     from: alerts@example.com
     to: [admin@example.com]
 
   slack:
-    webhook_url: env:EZYSHIELD_SLACK_WEBHOOK
+    webhook_url: env:SLACK_WEBHOOK_URL
     channel: "#security"         # override opcional
 
   discord:
-    webhook_url: env:EZYSHIELD_DISCORD_WEBHOOK
+    webhook_url: env:DISCORD_WEBHOOK_URL
 
   webhook:
-    url: env:EZYSHIELD_WEBHOOK_URL
+    url: env:WEBHOOK_URL
     headers:
-      Authorization: env:EZYSHIELD_WEBHOOK_TOKEN   # o valor precisa ser uma referência env: completa
+      Authorization: env:WEBHOOK_AUTH_TOKEN   # o valor precisa ser uma referência env: completa
 ```
 
 Campos compartilhados: `rate_limit_per_minute` (padrão 5) e `dedup_window_sec` (padrão 600) protegem contra tempestades de notificação. `notify_only_window_sec` (padrão 3600) adicionalmente janela os eventos `notify_only` abaixo do limiar por (IP, regra): o primeiro evento notifica na hora e as repetições dentro da janela viram um único resumo — valor negativo desativa. Entradas do audit log nunca são suprimidas. Todo canal aceita uma lista `severity` opcional (`info` \| `warn` \| `critical`).

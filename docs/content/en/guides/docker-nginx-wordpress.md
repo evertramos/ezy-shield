@@ -223,7 +223,7 @@ Let this run during real traffic for a day. Confirm:
 
 ## 6. Arm it
 
-Flip `armed: true` in config, then run it for real as a service:
+Flip `armed: true` in `policy.yaml` (NOT config.yaml — the strict loader rejects unknown keys there), then run it for real as a service:
 
 The systemd units are installed by `ezyshield init` (or the deb/rpm package).
 Enable and start:

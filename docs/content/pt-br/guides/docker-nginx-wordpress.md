@@ -229,7 +229,7 @@ Deixe rodando com tráfego real por um dia. Confirme:
 
 ## 6. Arme
 
-Mude para `armed: true` no config e então rode para valer como serviço:
+Mude para `armed: true` no `policy.yaml` (NÃO no config.yaml — o loader estrito rejeita chaves desconhecidas lá) e então rode para valer como serviço:
 
 As units do systemd são instaladas pelo `ezyshield init` (ou pelo pacote
 deb/rpm). Habilite e inicie:

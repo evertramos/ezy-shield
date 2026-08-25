@@ -14,12 +14,13 @@ These CI gates must stay green. A PR that breaks them cannot merge:
 
 | Gate | Location | What it checks |
 |------|----------|---------------|
-| **Fuzz — SSH parser** | `internal/parser/ssh_fuzz_test.go` | No panic on arbitrary/binary/ANSI/CRLF input |
-| **Fuzz — Nginx parser** | `internal/parser/nginx_fuzz_test.go` | No panic on arbitrary/binary/ANSI/CRLF/JSON-injection input |
+| **Fuzz — every parser** | `internal/parser/*_fuzz_test.go` (`FuzzSSHParser`, `FuzzNginxParser`, `FuzzCaddyParser`, `FuzzTraefikParser`, `FuzzApacheErrorParser`) | No panic on arbitrary/binary/ANSI/CRLF/JSON-injection input — every target runs in coverage-guided fuzz mode in CI |
+| **Fuzz — SIEM formatters** | `internal/siem` (`FuzzSIEMFormatters`) | Formatter output can never carry a raw newline or unescaped delimiter, however hostile the event fields |
 | **govulncheck** | CI `govulncheck` job | No Go module with known CVEs |
 | **gosec** | `.golangci.yml` via golangci-lint | Static security linting (hard-coded creds, shell injection, etc.) |
 | **Anti-lockout** | `internal/decision/antilockout_test.go` | Active SSH peer, allowlisted IP, CDN range → Op="record", RecordStrike never called |
 | **Prompt injection** | `internal/ai/prompt_injection_test.go` | Hostile log content excluded from API payload; off-schema verdicts fall back to rules; policy clamps apply |
-| **Secret leak** | `internal/config/secret_leak_test.go`, `internal/ai/secret_leak_test.go` | Tokens never in error strings or request bodies |
+| **Secret leak** | `internal/config/secret_leak_test.go`, `internal/ai/secret_leak_test.go`, `internal/notify/secret_leak_test.go`, `internal/enrich/secret_leak_test.go` | Tokens never in error strings, logs, or request bodies |
+| **IP hygiene** | `scripts/ip-hygiene-gate.sh` (CI `ip-hygiene-gate`) | IP literals added to tests/`fixtures/`/`configs/` must be RFC 5737/3849 documentation ranges (no real personal data in the repo) |
 
 When adding a new parser, add a corresponding `FuzzXxxParser` target and a seed corpus entry for each of: malformed, oversized (>4096 bytes), binary, ANSI/control-char injection, and CRLF injection.

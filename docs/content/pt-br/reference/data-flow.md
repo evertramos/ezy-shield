@@ -61,7 +61,7 @@ Acontecem interativamente, nunca a partir do daemon:
   `nftables` pelo gerenciador de pacotes do sistema se estiver ausente; e,
   apenas se você escolher Cloudflare, verifica o token e configura a
   lista/regra WAF contra `api.cloudflare.com`.
-- **`ezyshield config enforcer cloudflare` / `ezyshield test enforce
+- **`ezyshield config enforcer cloudflare` / `ezyshield test enforcer
   cloudflare`** — verificação de token e checagens de conectividade contra
   `api.cloudflare.com`.
 - **`ezyshield doctor`** — quando um enforcer Cloudflare está configurado, roda

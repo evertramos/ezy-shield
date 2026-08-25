@@ -23,8 +23,9 @@ redaction and multi-user RBAC are out of scope for this release.
 The dashboard binds **exclusively to a loopback address** — `127.0.0.1`,
 `::1` or the literal `localhost`. Any other bind (`0.0.0.0`, a public
 interface, etc.) is refused at startup, both in
-`internal/dashboard.New()` and again in `Server.Run()` — a hard
-invariant, checked twice so a config mistake can't expose it. The
+`internal/dashboard.New()` — `Server.Run()` then binds exactly the
+address `New()` validated and froze (a re-check there would be
+redundant by construction). The
 dashboard is therefore reachable only from the same host, and remote
 access is by design an *operator concern* handled outside the daemon.
 
@@ -175,6 +176,7 @@ inject arbitrary strings into the UI.
 | `missing-ip`     | The `ip` field was empty                                      |
 | `invalid-ip`     | The `ip` field could not be parsed as an IP or CIDR (`netip`) |
 | `bad-form`       | Malformed form submission                                     |
+| `bad-reason`     | Reason contains disallowed characters or exceeds 500 characters |
 | `daemon-error`   | Daemon reachable but returned a non-OK response               |
 | `daemon-offline` | Daemon unix socket did not accept the connection              |
 
@@ -301,7 +303,10 @@ Read-only — no forms.
   `netip.ParsePrefix` (falling back to `netip.ParseAddr` → /32 or
   /128) *before* any daemon RPC — hostnames, oversized strings and
   garbage characters are rejected at the dashboard edge.
-- Operator-supplied reasons are prefixed with `dashboard:admin` so
+- Operator-supplied reasons are validated before use: at most 500
+  characters and no control bytes — a violation redirects with the
+  `bad-reason` flash code and never reaches the daemon.
+- Valid reasons are prefixed with `dashboard:admin` so
   the daemon's `audit_log` distinguishes dashboard writes from CLI
   verbs. Empty reason produces the bare tag; filled reason produces
   `dashboard:admin: <text>`.

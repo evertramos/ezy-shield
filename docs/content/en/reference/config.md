@@ -129,6 +129,8 @@ is written. Two operational notes for custom names:
 | `mode` | no | `lists` (default — account-level IP List + WAF rules) or `rulesets` (per-zone rules) |
 | `account_id` | when `mode: lists` | Cloudflare account ID |
 | `list_name` | no | IP list name (default `ezyshield_blocked`) |
+| `instance` | no | Identity of this server when several servers share one Cloudflare account (the free plan allows a single list): each daemon tags its list items `ezyshield:<instance>` and manages only its own — bans from all servers add up instead of overwriting each other. Defaults to the hostname; must match `[A-Za-z0-9._-]{1,32}` and stay stable across restarts |
+| `adopt_legacy_items` | no | Set on **exactly one** server sharing the account to take ownership of items written by older versions (bare `ezyshield` comment) so they expire again. Remove once those items are gone |
 | `zone_ids` | when `mode: rulesets` | zones to attach rules to |
 | `action` | no | `block` (default), `challenge`, or `js_challenge` |
 | `name` | no | label shown in status/test output |

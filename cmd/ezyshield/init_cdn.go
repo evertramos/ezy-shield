@@ -380,8 +380,9 @@ func printLoudSkipWarning(p *wPrinter, results []cdndetect.DomainResult) {
 			f.domain, strings.Join(f.providers, ", "), addrsList(f.addrs))
 	}
 	p.println("")
-	p.println("      To retry: delete /etc/ezyshield/config.yaml + policy.yaml")
-	p.printf("      and re-run 'sudo %s init'.\n", progName)
+	p.printf("      To configure the edge enforcer later, run:\n")
+	p.printf("        sudo %s config enforcer cloudflare\n", progName)
+	p.println("      (config.yaml is preserved — no need to redo the install.)")
 	p.println("  ─────────────────────────────────────────────────────────────")
 	p.println("")
 }
@@ -405,8 +406,9 @@ func printCFSetupAbortedBanner(p *wPrinter) {
 	p.println("      will NOT contain CLOUDFLARE_API_TOKEN. See the specific")
 	p.println("      reason printed above (invalid input, or token validation).")
 	p.println("")
-	p.println("      To retry: delete /etc/ezyshield/config.yaml + policy.yaml")
-	p.printf("      and re-run 'sudo %s init'.\n", progName)
+	p.printf("      To retry just the Cloudflare setup, run:\n")
+	p.printf("        sudo %s config enforcer cloudflare\n", progName)
+	p.println("      (config.yaml is preserved — no need to delete anything.)")
 	p.println("  ─────────────────────────────────────────────────────────────")
 	p.println("")
 }
@@ -664,12 +666,10 @@ func promptOneCFAccount(
 		cfg.ListName = listName
 		// Which zones should the WAF block rule cover (issue #121)? ENTER
 		// keeps the manual-instructions path; the rollout itself runs after
-		// the preflight below has proven the list exists.
-		var covOK bool
-		coverage, covOK = promptCFZoneCoverage(p, pr)
-		if !covOK {
-			return nil, false
-		}
+		// the preflight below has proven the list exists. Invalid answers
+		// re-prompt and degrade to manual — never discard the account
+		// (issue #489).
+		coverage = promptCFZoneCoverage(p, pr)
 
 	case "rulesets":
 		rawZones := pr.ask("Zone IDs (comma-separated, 32 hex chars each)", "")
@@ -998,7 +998,7 @@ func probeCFTokenScope(ctx context.Context, deps cdnDeps, base string, cfg *conf
 		}
 		return fmt.Errorf("%s (HTTP %d: %s)", reason, status, msg)
 	default:
-		return fmt.Errorf("cloudflare API returned HTTP %d validating %s (transient?) — delete config.yaml and re-run `sudo %s init` to retry",
+		return fmt.Errorf("cloudflare API returned HTTP %d validating %s (transient?) — retry with `sudo %s config enforcer cloudflare`",
 			status, cfg.Mode, progName)
 	}
 }

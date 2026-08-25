@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -48,14 +50,18 @@ type cfListsMock struct {
 	reqCount  atomic.Int32
 	// Test knobs
 	addReturnsAsync bool // true = POST items returns operation_id, no item bodies
-	throttleAdds    int  // next N POST items answer a throttle instead
-	throttleDeletes int  // next N DELETE items answer a throttle instead
-	throttleAs429   bool // throttle as raw HTTP 429 (non-JSON body) instead of JSON code 10040
-	failAddsCode    int  // when non-zero, next POST items fails with this (non-throttle) CF error code
-	opPendingPolls  int  // bulk-operation polls answering "pending" before "completed"
-	addCalls        int  // POST items requests observed (throttled ones included)
-	deleteCalls     int  // DELETE items requests observed (throttled ones included)
-	bulkOpPolls     int  // bulk-operation status requests observed
+	// rejectDuplicates mirrors the real Lists API refusing an add for an IP
+	// already present in the list (issue #486 concurrent-instance race).
+	rejectDuplicates bool
+	throttleAdds     int  // next N POST items answer a throttle instead
+	throttleDeletes  int  // next N DELETE items answer a throttle instead
+	throttleAs429    bool // throttle as raw HTTP 429 (non-JSON body) instead of JSON code 10040
+	failAddsCode     int  // when non-zero, next POST items fails with this (non-throttle) CF error code
+	opPendingPolls   int  // bulk-operation polls answering "pending" before "completed"
+	addCalls         int  // POST items requests observed (throttled ones included)
+	deleteCalls      int  // DELETE items requests observed (throttled ones included)
+	bulkOpPolls      int  // bulk-operation status requests observed
+	getItemsCalls    int  // GET items page requests observed (issue #491)
 }
 
 func newCFListsMock(accountID string) *cfListsMock {
@@ -169,24 +175,59 @@ type cfListsMockItemWire struct {
 	Comment string `json:"comment"`
 }
 
-func (m *cfListsMock) handleGetItems(w http.ResponseWriter, _ *http.Request, listID string) {
+// handleGetItems paginates like the real API (issue #491): per_page
+// DEFAULTS to 25 when the client does not send it — the exact behavior
+// that broke lists past maxPages×25 items before the enforcer started
+// requesting per_page=500 — and cursors walk a deterministic (sorted)
+// item order.
+func (m *cfListsMock) handleGetItems(w http.ResponseWriter, r *http.Request, listID string) {
+	perPage := 25 // mirror the real API default
+	if v := r.URL.Query().Get("per_page"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= 500 {
+			perPage = n
+		}
+	}
+	offset := 0
+	if c := r.URL.Query().Get("cursor"); c != "" {
+		if n, err := strconv.Atoi(c); err == nil && n >= 0 {
+			offset = n
+		}
+	}
 	m.mu.Lock()
+	m.getItemsCalls++
 	l, ok := m.lists[listID]
 	if !ok {
 		m.mu.Unlock()
 		writeJSON(w, cfError(1002, "list not found"))
 		return
 	}
-	wire := make([]cfListsMockItemWire, 0, len(l.items))
-	for _, it := range l.items {
+	ids := make([]string, 0, len(l.items))
+	for id := range l.items {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	if offset > len(ids) {
+		offset = len(ids)
+	}
+	end := offset + perPage
+	if end > len(ids) {
+		end = len(ids)
+	}
+	wire := make([]cfListsMockItemWire, 0, end-offset)
+	for _, id := range ids[offset:end] {
+		it := l.items[id]
 		wire = append(wire, cfListsMockItemWire{ID: it.ID, IP: it.IP, Comment: it.Comment})
+	}
+	after := ""
+	if end < len(ids) {
+		after = strconv.Itoa(end)
 	}
 	m.mu.Unlock()
 	writeJSON(w, map[string]any{
 		"success":     true,
 		"errors":      []any{},
 		"result":      wire,
-		"result_info": map[string]any{"cursors": map[string]any{}},
+		"result_info": map[string]any{"cursors": map[string]any{"after": after}},
 	})
 }
 
@@ -214,6 +255,19 @@ func (m *cfListsMock) handlePostItems(w http.ResponseWriter, r *http.Request, li
 		m.mu.Unlock()
 		writeJSON(w, cfError(code, "invalid add payload"))
 		return
+	}
+	if m.rejectDuplicates {
+		if l, ok := m.lists[listID]; ok {
+			for _, rr := range req {
+				for _, it := range l.items {
+					if it.IP == rr.IP {
+						m.mu.Unlock()
+						writeJSON(w, cfError(10009, "could not create list item: duplicate of existing entry"))
+						return
+					}
+				}
+			}
+		}
 	}
 	if m.throttleAdds > 0 {
 		m.throttleAdds--
@@ -349,8 +403,50 @@ func (m *cfListsMock) hasItem(listName, ip string) bool {
 	return false
 }
 
+// seedTaggedItem adds a pre-existing item with an arbitrary comment tag to
+// the named list (creating the list if needed) — used for legacy bare
+// "ezyshield" items and other instances' "ezyshield:<name>" items (#486).
+func (m *cfListsMock) seedTaggedItem(listName, ip, comment string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	id, ok := m.byName[listName]
+	if !ok {
+		l := &cfListsMockList{
+			ID:    m.genID("list"),
+			Name:  listName,
+			Kind:  "ip",
+			items: make(map[string]*cfListsMockItem),
+		}
+		m.lists[l.ID] = l
+		m.byName[listName] = l.ID
+		id = l.ID
+	}
+	itemID := m.genID("item")
+	m.lists[id].items[itemID] = &cfListsMockItem{ID: itemID, IP: ip, Comment: comment}
+	return itemID
+}
+
+// itemCountFor counts list items carrying the given IP (any owner).
+func (m *cfListsMock) itemCountFor(listName, ip string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	id, ok := m.byName[listName]
+	if !ok {
+		return 0
+	}
+	n := 0
+	for _, it := range m.lists[id].items {
+		if it.IP == ip {
+			n++
+		}
+	}
+	return n
+}
+
 // seedManagedItem adds a pre-existing ezyshield-tagged item to the named list
 // (creating the list if needed). Used to simulate restart-time reconciliation.
+// NOTE: the bare "ezyshield" comment is the pre-#486 LEGACY tag — unowned by
+// default, adopted only via adopt_legacy_items.
 func (m *cfListsMock) seedManagedItem(listName, ip string) string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -615,34 +711,194 @@ func TestCFListsSync_PreservesManualItems(t *testing.T) {
 	}
 }
 
-func TestCFListsSync_AdoptsPreExistingManagedItems(t *testing.T) {
-	// Simulate daemon restart: list and managed item already exist from a
-	// prior run. Sync should reconcile (1.1.1.1 stays, 2.2.2.2 added,
-	// 7.7.7.7 removed, manual 99 untouched).
+// TestCFListsSync_LegacyItemsPreservedByDefault: pre-#486 items (bare
+// "ezyshield" comment) are ownerless — a default instance must NOT remove
+// them (removing them is exactly the multi-server clobber #486 fixes), and
+// must not re-add IPs already present under them.
+func TestCFListsSync_LegacyItemsPreservedByDefault(t *testing.T) {
 	mock, ts := newMockCFListsServer(t)
-	mock.seedManagedItem(testCFListName, "1.1.1.1")
-	mock.seedManagedItem(testCFListName, "7.7.7.7")
-	mock.seedManualItem(testCFListName, "99.99.99.99")
+	mock.seedManagedItem(testCFListName, "203.0.113.10") // legacy, also desired
+	mock.seedManagedItem(testCFListName, "203.0.113.70") // legacy, NOT desired
+	mock.seedManualItem(testCFListName, "203.0.113.99")
 
 	e := enforce.NewCFListsEnforcerForTest("tok", ts.URL, testCFAccount, testCFListName)
 	want := []sdk.Target{
-		{IP: netip.MustParseAddr("1.1.1.1")},
-		{IP: netip.MustParseAddr("2.2.2.2")},
+		{IP: netip.MustParseAddr("203.0.113.10")},
+		{IP: netip.MustParseAddr("203.0.113.20")},
 	}
 	if err := e.Sync(context.Background(), want); err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
-	if !mock.hasItem(testCFListName, "1.1.1.1") {
-		t.Error("1.1.1.1 (pre-existing managed) should remain")
+	if !mock.hasItem(testCFListName, "203.0.113.20") {
+		t.Error("new IP should be added under this instance's tag")
 	}
-	if !mock.hasItem(testCFListName, "2.2.2.2") {
-		t.Error("2.2.2.2 (new) should be added")
+	if !mock.hasItem(testCFListName, "203.0.113.70") {
+		t.Error("legacy item (not desired here) must be preserved — it may belong to another server")
 	}
-	if mock.hasItem(testCFListName, "7.7.7.7") {
-		t.Error("7.7.7.7 (managed, no longer desired) should be removed")
+	if got := mock.itemCountFor(testCFListName, "203.0.113.10"); got != 1 {
+		t.Errorf("desired IP already present as legacy: %d items, want 1 (no duplicate add)", got)
 	}
-	if !mock.hasItem(testCFListName, "99.99.99.99") {
+	if !mock.hasItem(testCFListName, "203.0.113.99") {
 		t.Error("manual item must not be removed")
+	}
+}
+
+// TestCFListsSync_AdoptsLegacyItemsWithOptIn: with adopt_legacy_items the
+// pre-#486 items are owned again — reconciled and expirable — restoring the
+// old single-server behavior for the one migrating instance.
+func TestCFListsSync_AdoptsLegacyItemsWithOptIn(t *testing.T) {
+	mock, ts := newMockCFListsServer(t)
+	mock.seedManagedItem(testCFListName, "203.0.113.10")
+	mock.seedManagedItem(testCFListName, "203.0.113.70")
+	mock.seedManualItem(testCFListName, "203.0.113.99")
+
+	e := enforce.NewCFListsEnforcerWithInstance("tok", ts.URL, testCFAccount, testCFListName, "web-a", true)
+	want := []sdk.Target{
+		{IP: netip.MustParseAddr("203.0.113.10")},
+		{IP: netip.MustParseAddr("203.0.113.20")},
+	}
+	if err := e.Sync(context.Background(), want); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if !mock.hasItem(testCFListName, "203.0.113.10") {
+		t.Error("adopted legacy item (still desired) should remain")
+	}
+	if !mock.hasItem(testCFListName, "203.0.113.20") {
+		t.Error("new IP should be added")
+	}
+	if mock.hasItem(testCFListName, "203.0.113.70") {
+		t.Error("adopted legacy item no longer desired should be removed")
+	}
+	if !mock.hasItem(testCFListName, "203.0.113.99") {
+		t.Error("manual item must not be removed")
+	}
+}
+
+// TestCFListsSync_TwoInstancesShareOneList is the issue #486 regression:
+// two daemons (different servers) sharing one account/list must each
+// reconcile only their own subset — before the fix, each Sync deleted the
+// other server's bans.
+func TestCFListsSync_TwoInstancesShareOneList(t *testing.T) {
+	mock, ts := newMockCFListsServer(t)
+	ctx := context.Background()
+
+	a := enforce.NewCFListsEnforcerWithInstance("tok", ts.URL, testCFAccount, testCFListName, "web-a", false)
+	b := enforce.NewCFListsEnforcerWithInstance("tok", ts.URL, testCFAccount, testCFListName, "web-b", false)
+
+	ipA := "203.0.113.1"
+	ipB := "203.0.113.2"
+
+	if err := a.Sync(ctx, []sdk.Target{{IP: netip.MustParseAddr(ipA)}}); err != nil {
+		t.Fatalf("A Sync: %v", err)
+	}
+	if err := b.Sync(ctx, []sdk.Target{{IP: netip.MustParseAddr(ipB)}}); err != nil {
+		t.Fatalf("B Sync: %v", err)
+	}
+	if !mock.hasItem(testCFListName, ipA) || !mock.hasItem(testCFListName, ipB) {
+		t.Fatal("both servers' bans must coexist in the shared list")
+	}
+
+	// A re-syncs its unchanged set: B's ban must survive (the old code
+	// deleted it here).
+	if err := a.Sync(ctx, []sdk.Target{{IP: netip.MustParseAddr(ipA)}}); err != nil {
+		t.Fatalf("A re-Sync: %v", err)
+	}
+	if !mock.hasItem(testCFListName, ipB) {
+		t.Fatal("server A's sync removed server B's ban — issue #486 clobber")
+	}
+
+	// A's ban expires (empty desired): only A's item goes; B's stays.
+	if err := a.Sync(ctx, nil); err != nil {
+		t.Fatalf("A empty Sync: %v", err)
+	}
+	if mock.hasItem(testCFListName, ipA) {
+		t.Error("A's expired ban should be removed by A")
+	}
+	if !mock.hasItem(testCFListName, ipB) {
+		t.Error("B's ban must survive A's expiry sync")
+	}
+}
+
+// TestCFListsSync_LargeListPagination is the issue #491 regression (ovh1
+// field report): a list with more items than maxPages × the API's DEFAULT
+// page size (50×25 = 1,250) failed every Sync with "pagination exceeded 50
+// pages" and flipped enforcement DEGRADED, because fetchAllItems never sent
+// per_page. With per_page=500 the same list reads in a handful of pages and
+// reconciles normally.
+func TestCFListsSync_LargeListPagination(t *testing.T) {
+	mock, ts := newMockCFListsServer(t)
+	ctx := context.Background()
+
+	// 1,300 items owned by this instance — past the old 1,250 ceiling.
+	const n = 1300
+	for i := 0; i < n; i++ {
+		mock.seedTaggedItem(testCFListName, fmt.Sprintf("2001:db8::%x", i+1), "ezyshield:test-instance")
+	}
+
+	e := enforce.NewCFListsEnforcerForTest("tok", ts.URL, testCFAccount, testCFListName)
+	// Empty desired set: discovery must read ALL 1,300 items (old code
+	// errors here), then reconcile removes every owned item.
+	if err := e.Sync(ctx, nil); err != nil {
+		t.Fatalf("Sync on a %d-item list: %v", n, err)
+	}
+	if got := mock.itemCount(testCFListName); got != 0 {
+		t.Errorf("items after full reconcile = %d, want 0", got)
+	}
+	mock.mu.Lock()
+	pages := mock.getItemsCalls
+	mock.mu.Unlock()
+	if pages > 5 {
+		t.Errorf("GET items pages = %d — per_page=500 not honored (1,300 items should read in ≤3 pages)", pages)
+	}
+}
+
+// TestCFListsSync_DuplicateAddFallsBackToForeign: another instance adds an
+// IP between this instance's discovery and its push; the API refuses the
+// duplicate. The push must succeed by marking the IP foreign and adding
+// only the rest — and must not retry the foreign IP on the next push.
+func TestCFListsSync_DuplicateAddFallsBackToForeign(t *testing.T) {
+	mock, ts := newMockCFListsServer(t)
+	ctx := context.Background()
+	mock.mu.Lock()
+	mock.rejectDuplicates = true
+	mock.mu.Unlock()
+
+	a := enforce.NewCFListsEnforcerWithInstance("tok", ts.URL, testCFAccount, testCFListName, "web-a", false)
+	b := enforce.NewCFListsEnforcerWithInstance("tok", ts.URL, testCFAccount, testCFListName, "web-b", false)
+
+	shared := "203.0.113.5"
+	own := "203.0.113.6"
+
+	// A discovers (creates) the list first with an unrelated ban.
+	if err := a.Sync(ctx, []sdk.Target{{IP: netip.MustParseAddr(own)}}); err != nil {
+		t.Fatalf("A initial Sync: %v", err)
+	}
+	// B bans the shared IP after A's discovery — invisible to A's state.
+	if err := b.Sync(ctx, []sdk.Target{{IP: netip.MustParseAddr(shared)}}); err != nil {
+		t.Fatalf("B Sync: %v", err)
+	}
+
+	// A now wants the shared IP too; its add hits the duplicate refusal and
+	// must fall back instead of failing the push.
+	if err := a.Sync(ctx, []sdk.Target{
+		{IP: netip.MustParseAddr(own)},
+		{IP: netip.MustParseAddr(shared)},
+	}); err != nil {
+		t.Fatalf("A Sync with duplicate: %v", err)
+	}
+	if got := mock.itemCountFor(testCFListName, shared); got != 1 {
+		t.Errorf("shared IP items = %d, want 1 (owned by B alone)", got)
+	}
+
+	// Next identical push: the foreign IP is cached, no failing re-add.
+	if err := a.Sync(ctx, []sdk.Target{
+		{IP: netip.MustParseAddr(own)},
+		{IP: netip.MustParseAddr(shared)},
+	}); err != nil {
+		t.Fatalf("A repeat Sync: %v", err)
+	}
+	if !mock.hasItem(testCFListName, shared) || !mock.hasItem(testCFListName, own) {
+		t.Error("both IPs must remain blocked at the edge")
 	}
 }
 

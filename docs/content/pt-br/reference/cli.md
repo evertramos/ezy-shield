@@ -34,6 +34,7 @@ seguros para scripts:
 |---------|---------|
 | `status` | Objeto: `daemon`, `enforcer`, `mode`, `uptime`, `version`, `active_bans`, `bans_by_strike`, `message` |
 | `list` | Array de linhas — bans ativos, entradas de `--allow` ou eventos de `--audit` (`[]` quando vazio) |
+| `rule test` | Objeto: array `results` (`rule`, `since`, `detections`, `unique_ips`, `allowlisted_hits`, `ips`, `per_day`, `upper_bound`, `warnings`, `limitation`) |
 | `report <ip>` | Objeto: relatório de abuso versionado (`schema_version`, `ip`, `country`, `asn`, `current_ban`, `strikes`, `actions`, mais `evidence` com `--evidence`) |
 | `report` | Array de resumos de ofensores (`ip`, `first_seen`, `last_seen`, `total_strikes`, `banned`, `permanent`, `country`, `asn`) |
 | `watch` | NDJSON: um objeto de evento por linha |
@@ -385,6 +386,45 @@ hostil de logs não possa forjar saída no seu terminal nem quebrar o documento.
 Os trechos de evidência são renderizados como blocos de código indentados no
 markdown, então uma linha de log não consegue injetar formatação no relatório.
 Timestamps são UTC (RFC 3339).
+
+## ezyshield rule test
+
+Avalia uma regra a seco contra o histórico de eventos armazenado, antes de
+habilitá-la. Estritamente read-only: sem strikes, sem bans, sem escrita de
+auditoria — e o daemon não precisa estar rodando.
+
+```bash
+# Uma regra carregada, pelo nome (embutida, drop-in do rules.d ou rules_path)
+ezyshield rule test ssh_bruteforce_daily --since 7d
+
+# Um arquivo YAML avulso — teste um drop-in ANTES de copiá-lo para o rules.d
+ezyshield rule test ./60-admin-panel.yaml --since 24h
+
+# Legível por máquina
+ezyshield rule test ssh_bruteforce_daily --json
+```
+
+A regra passa primeiro pela mesma validação fail-closed do loader do
+daemon; uma regra inválida é um erro claro e exit não-zero. Saída: quantas
+vezes a regra teria disparado (contagem por borda de subida — horas
+saturadas consecutivas são um único incidente), IPs únicos (amostrados),
+distribuição por dia e o alerta antecipado de falso positivo de
+**allowlisted hits** (detecções que cairiam em endereços do
+`allowlist`/`admin_cidrs` ou da allowlist de runtime).
+
+Flags:
+- `--since` — janela de histórico a avaliar (duração Go, sufixo `d`
+  permitido; default `24h`)
+- `--db` — caminho do banco SQLite (default `/var/lib/ezyshield/ezyshield.db`)
+- `--config` — caminho do config.yaml, usado para resolver `rules.d`/`rules_path`
+- `--policy` — caminho do policy.yaml, usado para a checagem de allowlist
+
+Limitação honesta (também impressa em toda execução): a avaliação usa os
+agregados horários armazenados, então a granularidade é limitada pelos
+buckets de 1 hora e pela retenção; só kinds referenciados por regras de
+janela longa (>1h) são persistidos, e matchers de campo não se aplicam a
+contagens — essas regras são reportadas como um teto (upper bound) em nível
+de kind, marcado de forma bem visível.
 
 ## ezyshield ban
 

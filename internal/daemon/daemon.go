@@ -151,6 +151,11 @@ type Config struct {
 	// observation. Injected by run.go so the daemon never imports the
 	// linux-only collector package. See execactivity.go.
 	ExecActivity func(ctx context.Context, report func(ExecActivityReport))
+	// WebshellActivity, when non-nil, is started by Run to watch web roots
+	// for webshell drops (issue #221); it must honor ctx and call report
+	// for each observation. Injected by run.go so the daemon stays
+	// decoupled from the watcher package. See webshellactivity.go.
+	WebshellActivity func(ctx context.Context, report func(WebshellReport))
 }
 
 // enricherFrom converts a *enrich.Enricher into the geoLookup interface, or
@@ -221,6 +226,9 @@ type Daemon struct {
 	// execActivity is the injected docker exec watcher (issue #220);
 	// nil = disabled. See execactivity.go.
 	execActivity func(ctx context.Context, report func(ExecActivityReport))
+	// webshellActivity is the injected web-root tripwire (issue #221);
+	// nil = disabled. See webshellactivity.go.
+	webshellActivity func(ctx context.Context, report func(WebshellReport))
 
 	// sigCh, when non-nil, replaces the process-signal channel in Run so
 	// tests can drive the SIGTERM drain / SIGINT immediate-exit branches
@@ -371,35 +379,36 @@ func New(dcfg Config) (*Daemon, error) {
 	}
 
 	d := &Daemon{
-		cfg:             dcfg.Cfg,
-		policy:          dcfg.Policy,
-		store:           dcfg.Store,
-		agg:             agg,
-		ruleEng:         ruleEng,
-		decEng:          decEng,
-		parsers:         dcfg.Parsers,
-		collectors:      dcfg.Collectors,
-		enforcer:        dcfg.Enforcer,
-		notifier:        dcfg.Notifier,
-		aiProvider:      dcfg.AIProvider,
-		aiBudget:        dcfg.AIBudget,
-		aiCache:         dcfg.AICache,
-		enricher:        enricherFrom(dcfg.Enricher),
-		staticAllowlist: staticAllowlistFromPolicy(dcfg.Policy),
-		events:          newEventBus(),
-		socketPath:      socketPath,
-		version:         dcfg.Version,
-		startTime:       time.Now(),
-		policyPath:      dcfg.PolicyPath,
-		armWindowTick:   dcfg.ArmWindowTick,
-		enfProbeTick:    dcfg.EnfProbeTick,
-		expireTick:      dcfg.ExpireTick,
-		sshRecheckTick:  dcfg.SSHRecheckTick,
-		sshRecheckDelay: dcfg.SSHRecheckDelay,
-		longRuleWindows: longRuleWindows,
-		longKinds:       longKinds,
-		maintenanceTick: dcfg.MaintenanceTick,
-		execActivity:    dcfg.ExecActivity,
+		cfg:              dcfg.Cfg,
+		policy:           dcfg.Policy,
+		store:            dcfg.Store,
+		agg:              agg,
+		ruleEng:          ruleEng,
+		decEng:           decEng,
+		parsers:          dcfg.Parsers,
+		collectors:       dcfg.Collectors,
+		enforcer:         dcfg.Enforcer,
+		notifier:         dcfg.Notifier,
+		aiProvider:       dcfg.AIProvider,
+		aiBudget:         dcfg.AIBudget,
+		aiCache:          dcfg.AICache,
+		enricher:         enricherFrom(dcfg.Enricher),
+		staticAllowlist:  staticAllowlistFromPolicy(dcfg.Policy),
+		events:           newEventBus(),
+		socketPath:       socketPath,
+		version:          dcfg.Version,
+		startTime:        time.Now(),
+		policyPath:       dcfg.PolicyPath,
+		armWindowTick:    dcfg.ArmWindowTick,
+		enfProbeTick:     dcfg.EnfProbeTick,
+		expireTick:       dcfg.ExpireTick,
+		sshRecheckTick:   dcfg.SSHRecheckTick,
+		sshRecheckDelay:  dcfg.SSHRecheckDelay,
+		longRuleWindows:  longRuleWindows,
+		longKinds:        longKinds,
+		maintenanceTick:  dcfg.MaintenanceTick,
+		execActivity:     dcfg.ExecActivity,
+		webshellActivity: dcfg.WebshellActivity,
 	}
 
 	// Retention pruning (issue #184): opt-in via the retention: section.
@@ -573,6 +582,8 @@ func (d *Daemon) Run(parentCtx context.Context) error {
 	go d.runMaintenance(ctx)
 	// Docker exec activity watcher, when injected (issue #220).
 	go d.runExecActivity(ctx)
+	// Webshell-drop tripwire, when injected (issue #221).
+	go d.runWebshellActivity(ctx)
 
 	// Signal handling. Tests inject d.sigCh to drive the SIGTERM/SIGINT
 	// branches without raising real process signals (which would leak into

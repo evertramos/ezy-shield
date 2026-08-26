@@ -279,6 +279,18 @@ A chave é um segredo como qualquer outro: coloque `MAXMIND_LICENSE_KEY=...` em 
 | `addr` | `127.0.0.1:9090` | Endereço de bind — **somente loopback**; binds fora do loopback são recusados no startup |
 | `auth_db_path` | `<data_dir>/dashboard.db` | Banco de autenticação do dashboard |
 
+## webshell_watch
+
+Tripwire de webshell (opt-in): varre web roots por arquivos web executáveis novos ou modificados. Puramente observacional — audit + notificação, nunca ban. Veja o [guia Tripwire de Webshell](../guides/webshell-tripwire.md).
+
+| Campo | Padrão | Descrição |
+|-------|--------|-----------|
+| `enabled` | `false` | Chave de opt-in |
+| `roots` | — | Diretórios web-root absolutos a varrer (**obrigatório** quando habilitado) |
+| `extensions` | `.php, .phtml, .php5, .php7, .phar` | Extensões vigiadas (com ponto inicial) |
+| `ignore` | `[]` | Padrões de caminho a ignorar — globs `path.Match`, ou substring quando o padrão não tem metacaracteres de glob |
+| `interval_sec` | `10` | Cadência da varredura em segundos (mínimo 5) |
+
 ## Exemplo mínimo
 
 ```yaml

@@ -426,6 +426,22 @@
           "description": "Acknowledge that audit_log rows will be deleted with no export archiving them. Audit pruning refuses to run while false."
         }
       }
+    },
+    "docker_exec": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Docker exec activity watcher (issue #220): observational post-exploitation signal from the docker events API. Opt-in; NEVER a ban source — observations are audited, streamed to `watch`, and notified only.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Subscribe to exec_start events on the docker socket."
+        },
+        "ignore": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Container-name or image patterns to skip (path.Match globs; plain text matches as substring) — legitimate cron/health tooling."
+        }
+      }
     }
   }
 }

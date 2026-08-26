@@ -116,3 +116,12 @@ collectors: []
 #   ai_usage: 90d              # AI cost accounting (floor 7d)
 #   i_understand_the_risks: false      # allow windows below the floors (never below 24h)
 #   audit_export_not_required: false   # acknowledge audit rows are deleted with no export
+# Docker exec activity watcher (issue #220) — post-exploitation visibility.
+# Observational ONLY: a `docker exec` into a container is audited, shown in
+# `ezyshield watch`, and notified (warn) — never a ban source (there is
+# usually no remote IP to ban). Docs: guides/docker-exec-watch.
+# docker_exec:
+#   enabled: true
+#   ignore:                    # legitimate tooling (globs or substrings)
+#     - "healthcheck*"
+#     - cron

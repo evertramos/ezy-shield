@@ -280,21 +280,43 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 		}
 	}
 
+	// Docker exec activity watcher (issue #220): opt-in, observational only.
+	// Wired here (not inside the daemon) so the daemon package never imports
+	// the linux-only collector package.
+	var execActivity func(ctx context.Context, report func(daemon.ExecActivityReport))
+	if cfg.DockerExec != nil && cfg.DockerExec.Enabled {
+		watcher := &collector.DockerExecWatcher{Ignore: cfg.DockerExec.Ignore, Logger: logger}
+		execActivity = func(ctx context.Context, report func(daemon.ExecActivityReport)) {
+			err := watcher.Run(ctx, func(ev collector.ExecEvent) {
+				report(daemon.ExecActivityReport{
+					Container: ev.Container,
+					Image:     ev.Image,
+					Command:   ev.Command,
+					User:      ev.User,
+				})
+			})
+			if err != nil && ctx.Err() == nil {
+				slog.Error("run: docker exec watcher stopped", "err", err)
+			}
+		}
+	}
+
 	d, err := daemon.New(daemon.Config{
-		Cfg:        cfg,
-		Policy:     policy,
-		Store:      db,
-		Parsers:    parsers,
-		Collectors: collectors,
-		Enforcer:   enf,
-		Notifier:   disp,
-		AIProvider: aiProvider,
-		AIBudget:   aiBudget,
-		AICache:    aiCache,
-		Enricher:   enricher,
-		SocketPath: socketPath,
-		Version:    version,
-		PolicyPath: policyPath,
+		Cfg:          cfg,
+		Policy:       policy,
+		Store:        db,
+		Parsers:      parsers,
+		Collectors:   collectors,
+		Enforcer:     enf,
+		Notifier:     disp,
+		AIProvider:   aiProvider,
+		AIBudget:     aiBudget,
+		AICache:      aiCache,
+		Enricher:     enricher,
+		SocketPath:   socketPath,
+		Version:      version,
+		PolicyPath:   policyPath,
+		ExecActivity: execActivity,
 	})
 	if err != nil {
 		return fmt.Errorf("run: create daemon: %w", err)

@@ -628,6 +628,26 @@ func (e *Engine) trackSuppressedEvent(ctx context.Context, ip netip.Addr, banned
 // buildAllowlist parses policy.Allowlist, policy.AdminCIDRs, and the SSH peer
 // from SSH_CLIENT into a slice of netip.Prefix used for allowlist lookup.
 func buildAllowlist(policy *config.Policy) ([]netip.Prefix, error) {
+	prefixes, err := StaticAllowlist(policy)
+	if err != nil {
+		return nil, err
+	}
+
+	// Anti-lockout: add the SSH peer present at daemon startup.
+	if peer := sshClientIP(); peer.IsValid() {
+		prefixes = append(prefixes, netip.PrefixFrom(peer, peer.BitLen()))
+	}
+
+	return prefixes, nil
+}
+
+// StaticAllowlist parses policy.Allowlist and policy.AdminCIDRs into
+// prefixes, using the exact parsing/normalization the engine applies at
+// startup. Exported for read-only consumers (`rule test`, issue #224) that
+// need to flag would-be detections on protected addresses; it deliberately
+// EXCLUDES the SSH-peer anti-lockout entry, which is a property of the
+// daemon's own startup environment, not of the policy.
+func StaticAllowlist(policy *config.Policy) ([]netip.Prefix, error) {
 	var prefixes []netip.Prefix
 
 	for _, s := range policy.Allowlist {
@@ -648,11 +668,6 @@ func buildAllowlist(policy *config.Policy) ([]netip.Prefix, error) {
 			return nil, fmt.Errorf("decision: admin_cidrs entry %q: %w", s, err)
 		}
 		prefixes = append(prefixes, p)
-	}
-
-	// Anti-lockout: add the SSH peer present at daemon startup.
-	if peer := sshClientIP(); peer.IsValid() {
-		prefixes = append(prefixes, netip.PrefixFrom(peer, peer.BitLen()))
 	}
 
 	return prefixes, nil

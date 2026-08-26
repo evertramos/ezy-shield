@@ -270,6 +270,35 @@ func TestFetch_RedirectToHTTPRefused(t *testing.T) {
 
 // ── Refresh loop ─────────────────────────────────────────────────────────────
 
+// TestRun_ConcurrentFeedsRaceFree pins that Run's per-feed goroutines and
+// an on-demand Fetch can share one Fetcher (the -race build is the assert).
+func TestRun_ConcurrentFeedsRaceFree(t *testing.T) {
+	fs := &feedServer{body: []byte("192.0.2.1\n")}
+	f, url := newFeedFetcher(t, fs)
+	cfgs := []FeedConfig{}
+	for _, name := range []string{"a", "b", "c"} {
+		c := feedCfg(url, "plain")
+		c.Name = name
+		c.RefreshInterval = MinRefreshInterval
+		cfgs = append(cfgs, c)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		f.Run(ctx, cfgs, func(*Result) {})
+		close(done)
+	}()
+	// Concurrent on-demand refresh against the same feeds.
+	for i := 0; i < 10; i++ {
+		for _, c := range cfgs {
+			_, _ = f.Fetch(ctx, c)
+			_ = f.LastGood(c.Name)
+		}
+	}
+	<-done
+}
+
 func TestRun_HonorsContext(t *testing.T) {
 	fs := &feedServer{body: []byte("192.0.2.1\n")}
 	f, url := newFeedFetcher(t, fs)

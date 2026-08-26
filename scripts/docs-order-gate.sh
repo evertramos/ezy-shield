@@ -24,7 +24,8 @@ for locale_dir in sorted(glob.glob('docs/content/*/')):
             continue
         seen = defaultdict(list)
         for page in pages:
-            text = open(page, encoding='utf-8').read()
+            with open(page, encoding='utf-8') as f:
+                text = f.read()
             m = re.search(r'^order:\s*(\d+)\s*$', text, re.M)
             if not m:
                 bad.append(f"{page}: missing `order:` frontmatter key")

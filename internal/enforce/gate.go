@@ -230,3 +230,12 @@ func gateKey(t sdk.Target) string {
 		return t.Country
 	}
 }
+
+// LastSyncRepairs forwards the optional SyncRepairReporter facet
+// (issue #214) so the daemon can audit reconcile repairs through the Gate.
+func (g *Gate) LastSyncRepairs() (added, removed int, firstSync bool) {
+	if r, ok := g.inner.(SyncRepairReporter); ok {
+		return r.LastSyncRepairs()
+	}
+	return 0, 0, false
+}

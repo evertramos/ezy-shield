@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // bunny.net edge-enforcer subflow for `ezyshield init` (issue #198), the

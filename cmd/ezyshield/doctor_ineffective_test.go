@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // Tests for the ban_ineffective doctor check (issue #146): N/A on a missing

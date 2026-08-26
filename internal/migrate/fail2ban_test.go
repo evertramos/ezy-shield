@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package migrate
 
 // Table-driven tests for the fail2ban configuration reader (issue #181),

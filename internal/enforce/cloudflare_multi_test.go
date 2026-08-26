@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package enforce_test
 
 // Multi-account Cloudflare fan-out tests (issue #90). These exercise the

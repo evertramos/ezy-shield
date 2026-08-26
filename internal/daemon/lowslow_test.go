@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package daemon
 
 // Behavior tests for low-and-slow SSH detection (issue #134): the persistent

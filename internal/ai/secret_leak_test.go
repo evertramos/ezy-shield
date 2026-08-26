@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package ai — AI API-key secret-leak gate tests (SECURITY-REVIEW §4).
 //
 // The Anthropic API key is set in the Authorization-like header and must never

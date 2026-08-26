@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package daemon
 
 import (
@@ -35,7 +37,10 @@ func Call(ctx context.Context, socketPath string, req SocketRequest) (*SocketRes
 	dialer := &net.Dialer{Timeout: DefaultDialTimeout}
 	conn, err := dialer.DialContext(ctx, "unix", socketPath)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %s: %v", ErrDaemonUnreachable, socketPath, err)
+		// Both wrapped: callers match ErrDaemonUnreachable for "daemon is
+		// down" flows AND fs.ErrPermission to fall back to the read-only
+		// socket (issue #212).
+		return nil, fmt.Errorf("%w: %s: %w", ErrDaemonUnreachable, socketPath, err)
 	}
 	defer conn.Close() //nolint:errcheck // best-effort close on RPC completion
 

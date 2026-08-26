@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package decision_test
 
 // Tests for the shared-CDN-range ban guard (issue #178): a shared CDN edge

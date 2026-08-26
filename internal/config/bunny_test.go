@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package config
 
 // Validation tests for the enforce.bunny section (issue #198).

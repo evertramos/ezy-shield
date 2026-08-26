@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package config provides YAML loading and strict validation for ezyshield
 // configuration files. No secret values may appear in config files; use
 // SecretRef for any credential field so the loader rejects inline values.
@@ -187,6 +189,26 @@ type DashboardCfg struct {
 	// false = unauthenticated scrape allowed — safe ONLY because the
 	// listener is loopback-only, and still throttled.
 	MetricsAuth *bool `yaml:"metrics_auth,omitempty"`
+	// Users provisions per-user RBAC access (issue #204): each entry is a
+	// name, a role (viewer|operator|admin), and a per-user token as an
+	// env: reference — inline token literals are rejected like every other
+	// secret. Empty keeps the legacy single-credential model, whose
+	// password admin remains an implicit admin either way.
+	Users []DashboardUserCfg `yaml:"users,omitempty"`
+}
+
+// DashboardUserCfg is one provisioned dashboard user (issue #204).
+type DashboardUserCfg struct {
+	// Name identifies the user in sessions and audit records. Required;
+	// unique; [A-Za-z0-9_-]{1,32}.
+	Name string `yaml:"name"`
+	// Role is viewer (read-only), operator (+ ban/unban), or admin
+	// (+ allowlist mutations, arm/disarm, policy edit).
+	Role string `yaml:"role"`
+	// Token is the user's login token — env-reference only. Generate with
+	// e.g. `openssl rand -hex 32`; doctor warns when the resolved value
+	// is shorter than 32 bytes.
+	Token SecretRef `yaml:"token"`
 }
 
 // EnrichCfg configures GeoIP/ASN enrichment via MaxMind MMDB databases.
@@ -303,6 +325,37 @@ type EnforceCfg struct {
 	NFTables   *NFTablesCfg   `yaml:"nftables"`
 	Cloudflare CloudflareCfgs `yaml:"cloudflare"`
 	Bunny      *BunnyCfg      `yaml:"bunny"`
+	AWSWAF     *AWSWAFCfg     `yaml:"aws_waf"`
+}
+
+// AWSWAFCfg holds AWS WAFv2 edge enforcer settings (issue #201, per
+// ADR-0012). Presence of the section enables the enforcer. Credentials are
+// deliberately ABSENT from this struct: they come from the standard AWS
+// chain (env vars, ~/.aws/credentials, IMDSv2) and must never appear in
+// EzyShield config files — the strict loader rejects any credential-shaped
+// key here as an unknown field, and validation double-checks for pasted
+// key material in the values.
+type AWSWAFCfg struct {
+	// Name is a short operator-chosen label used to disambiguate this
+	// enforcer in logs (surfaces as "awswaf[<name>]"). Optional.
+	Name string `yaml:"name"`
+	// Scope is "regional" (ALB/API Gateway; requires Region) or
+	// "cloudfront" (global; the API pins region us-east-1).
+	Scope string `yaml:"scope"`
+	// Region is the AWS region for scope "regional" (e.g. eu-west-1).
+	Region string `yaml:"region"`
+	// IPSetV4/IPSetV6 designate the IPSets EzyShield maintains. At least
+	// one is required; EzyShield only ever mutates the sets named here and
+	// never touches WebACLs.
+	IPSetV4 *AWSIPSetRefCfg `yaml:"ipset_v4"`
+	IPSetV6 *AWSIPSetRefCfg `yaml:"ipset_v6"`
+}
+
+// AWSIPSetRefCfg identifies one WAFv2 IPSet by its Name and Id (both shown
+// in the AWS console and present in the set's ARN).
+type AWSIPSetRefCfg struct {
+	Name string `yaml:"name"`
+	ID   string `yaml:"id"`
 }
 
 // BunnyCfg holds bunny.net edge enforcer settings (issue #198). Presence of
@@ -606,6 +659,11 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("enforce.bunny: %w", err)
 		}
 	}
+	if c.Enforce != nil && c.Enforce.AWSWAF != nil {
+		if err := validateAWSWAF(c.Enforce.AWSWAF); err != nil {
+			return fmt.Errorf("enforce.aws_waf: %w", err)
+		}
+	}
 	if c.Notify != nil {
 		if err := validateNotify(c.Notify); err != nil {
 			return fmt.Errorf("notify: %w", err)
@@ -624,6 +682,11 @@ func (c *Config) Validate() error {
 	if c.Dashboard != nil && c.Dashboard.Addr != "" {
 		if err := validateLoopbackAddr(c.Dashboard.Addr); err != nil {
 			return fmt.Errorf("dashboard: %w", err)
+		}
+	}
+	if c.Dashboard != nil && len(c.Dashboard.Users) > 0 {
+		if err := validateDashboardUsers(c.Dashboard.Users); err != nil {
+			return fmt.Errorf("dashboard.users: %w", err)
 		}
 	}
 	if c.Plugins != nil {
@@ -791,6 +854,37 @@ func validateWebshellWatch(w *WebshellWatchCfg) error {
 	}
 	if w.IntervalSec != 0 && w.IntervalSec < 5 {
 		return fmt.Errorf("interval_sec: %d is below the 5s floor (a hot sweep loop over web roots)", w.IntervalSec)
+	}
+	return nil
+}
+
+// validDashboardRoles is the RBAC role enum (issue #204).
+var validDashboardRoles = map[string]bool{"viewer": true, "operator": true, "admin": true}
+
+// validateDashboardUsers checks the RBAC user list (issue #204): unique
+// valid names, the role enum, and a token that MUST be an env: reference —
+// the SecretRef loader already rejects inline literals with a redacted
+// error, so here only presence is checked. Token entropy on the RESOLVED
+// value is a doctor warning (config validation never resolves secrets).
+func validateDashboardUsers(users []DashboardUserCfg) error {
+	seen := make(map[string]int, len(users))
+	for i, u := range users {
+		if u.Name == "" {
+			return fmt.Errorf("[%d]: 'name' is required", i)
+		}
+		if err := validateCFInstanceName(u.Name); err != nil {
+			return fmt.Errorf("[%d]: 'name': %w", i, err)
+		}
+		if prev, dup := seen[u.Name]; dup {
+			return fmt.Errorf("[%d]: duplicate name %q (also at [%d])", i, u.Name, prev)
+		}
+		seen[u.Name] = i
+		if !validDashboardRoles[u.Role] {
+			return fmt.Errorf("[%d] (%s): 'role' must be viewer, operator, or admin, got %q", i, u.Name, u.Role)
+		}
+		if !u.Token.IsSet() {
+			return fmt.Errorf("[%d] (%s): 'token' is required (env:VARNAME reference)", i, u.Name)
+		}
 	}
 	return nil
 }
@@ -1030,6 +1124,51 @@ func validateBunny(b *BunnyCfg) error {
 			return fmt.Errorf("'name': %w", err)
 		}
 	}
+	return nil
+}
+
+// validateAWSWAF checks the AWS WAF edge enforcer section (issue #201, per
+// ADR-0012): scope regional|cloudfront (regional requires a region), at
+// least one fully-identified IPSet, and — because AWS credentials must
+// NEVER live in EzyShield config files — a fail-closed refusal of anything
+// that looks like pasted AWS key material in the values.
+func validateAWSWAF(a *AWSWAFCfg) error {
+	switch strings.ToLower(a.Scope) {
+	case "regional":
+		if a.Region == "" {
+			return fmt.Errorf("scope 'regional' requires 'region' (e.g. eu-west-1)")
+		}
+	case "cloudfront":
+		// The WAFv2 API pins CLOUDFRONT calls to us-east-1; a region here
+		// would be ignored, which is operator confusion — reject it.
+		if a.Region != "" && a.Region != "us-east-1" {
+			return fmt.Errorf("scope 'cloudfront' pins region us-east-1; drop 'region' (got %q)", a.Region)
+		}
+	case "":
+		return fmt.Errorf("'scope' is required: regional or cloudfront")
+	default:
+		return fmt.Errorf("'scope' must be regional or cloudfront, got %q", a.Scope)
+	}
+	if a.IPSetV4 == nil && a.IPSetV6 == nil {
+		return fmt.Errorf("at least one of 'ipset_v4'/'ipset_v6' is required")
+	}
+	for label, ref := range map[string]*AWSIPSetRefCfg{"ipset_v4": a.IPSetV4, "ipset_v6": a.IPSetV6} {
+		if ref == nil {
+			continue
+		}
+		if ref.Name == "" || ref.ID == "" {
+			return fmt.Errorf("%s: both 'name' and 'id' are required", label)
+		}
+	}
+	if a.Name != "" {
+		if err := validateCFInstanceName(a.Name); err != nil {
+			return fmt.Errorf("'name': %w", err)
+		}
+	}
+	// No pasted-credential check needed here: the loader's generic
+	// credential scan already rejects AKIA/ASIA-shaped material in ANY
+	// config field, and this struct deliberately has no credential fields
+	// at all (ADR-0012: the standard AWS chain only).
 	return nil
 }
 

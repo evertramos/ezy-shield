@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package daemon
 
 // Regression tests for issue #443: an omitted ambiguous_band follows the

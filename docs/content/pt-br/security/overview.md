@@ -142,6 +142,34 @@ O EzyShield não abre nenhum listener de rede para controle (o dashboard opciona
 - CLI: `ezyshield ban`, `ezyshield list`, etc. (somente local)
 - Unix socket: `/run/ezyshield/ezyshield.sock` (permissões de filesystem)
 
+## Camadas de acesso do socket de controle
+
+O acesso ao socket é imposto pelo kernel via grupo unix; o daemon adiciona
+uma allowlist de verbos por cima (issue #212). Quem pode fazer o quê:
+
+| Camada | Socket | Grupo | Verbos |
+|---|---|---|---|
+| Operador | `ezyshield.sock` | `ezyshield` | tudo: verbos de leitura mais `ban`, `unban`, `allow`, `unallow`, `arm`, `disarm`, `disable_all`, `prune`, `feeds_refresh` |
+| Visualizador | `ezyshield-ro.sock` | `ezyshield-view` | somente leitura: `status`, `list`, `list_allow`, `events`, `report`, `subscribe` (watch), `metrics`, `feeds_status` |
+
+Os dois sockets têm modo `0660` e — como todo unix socket — NÃO são
+listeners de rede. A allowlist do visualizador é **fechada e
+deny-by-default**: um verbo adicionado no futuro é recusado no socket
+read-only até ser classificado deliberadamente como leitura. Pertencer ao
+`ezyshield-view` nunca muta estado — sem unban, sem disarm, sem edição de
+allowlist.
+
+O postinstall dos pacotes cria os dois grupos; adicione um usuário de
+monitoramento com `usermod -aG ezyshield-view <user>`. A CLI recua
+automaticamente para o socket read-only quando o socket de operador nega
+permissão, então usuários da camada de visualização rodam `ezyshield
+status`, `list`, `watch` e `report` sem flags extras.
+
+Toda requisição de verbo mutante — inclusive as recusadas — é registrada no
+audit journal append-only como uma entrada `socket_cmd` com uid/gid do peer
+requisitante (`SO_PEERCRED`), então "quem desarmou o daemon?" sempre tem
+resposta.
+
 ## Fluxo de dados
 
 Toda conexão de saída que o EzyShield pode fazer — providers de AI,

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package decision
 
 // sshpeers.go — SSH peer detection that works under systemd (issue #175).

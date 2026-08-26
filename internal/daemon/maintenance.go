@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package daemon
 
 // Retention maintenance (issue #184): the daily job that prunes aged rows

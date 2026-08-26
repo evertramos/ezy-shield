@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // Watchdog tests for the non-atomic replace path (issue #214): the dispatch

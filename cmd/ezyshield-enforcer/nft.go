@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // Atomicity contract (issue #214). One `nft` invocation applies its whole

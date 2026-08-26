@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package enforce
 
 // bunny.net edge enforcer (issue #197): applies bans at the CDN edge via the

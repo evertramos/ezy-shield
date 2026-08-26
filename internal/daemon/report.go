@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package daemon
 
 // Handlers for the read-only "report" socket verb (issue #54): a per-IP

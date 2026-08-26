@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package daemon
 
 // Tests for ban_ineffective delivery (ADR-0009 §4, issue #146): stream

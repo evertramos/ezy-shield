@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package rules_test
 
 // Tests for the built-in mail rules (issue #190) against synthetic

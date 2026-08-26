@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package config
 
 // Misplaced-credential guard (issue #172). SecretRef fields already reject

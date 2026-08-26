@@ -34,8 +34,10 @@ seguros para scripts:
 |---------|---------|
 | `status` | Objeto: `daemon`, `enforcer`, `mode`, `uptime`, `version`, `active_bans`, `bans_by_strike`, `message` |
 | `list` | Array de linhas — bans ativos, entradas de `--allow` ou eventos de `--audit` (`[]` quando vazio) |
+| `rule test` | Objeto: array `results` (`rule`, `since`, `detections`, `unique_ips`, `allowlisted_hits`, `ips`, `per_day`, `upper_bound`, `warnings`, `limitation`) |
 | `report <ip>` | Objeto: relatório de abuso versionado (`schema_version`, `ip`, `country`, `asn`, `current_ban`, `strikes`, `actions`, mais `evidence` com `--evidence`) |
 | `report` | Array de resumos de ofensores (`ip`, `first_seen`, `last_seen`, `total_strikes`, `banned`, `permanent`, `country`, `asn`) |
+| `report --since` | Objeto: digest versionado (`schema_version`, `since`, `totals`, `events_by_kind`, `categories`, `rules`, `top_offenders`, `patterns`, mais `narrative` com `--narrative`) |
 | `watch` | NDJSON: um objeto de evento por linha |
 | `scan` | Objeto: `listeners`, `new_listeners` (cada socket, todos os campos da struct `scan.Listener`: `Addr`, `Protocol`, `UID`, `Inode`, `PID`, `ExePath`, `UserName`, `IsPublic`, `OwnerType`, `UnitName`, `ContainerID`, `ContainerName`, `ContainerImage`, `LogSource`) |
 | `doctor` | Objeto: `checks` (`name`, `status`, `hint`) e `summary` (`total`, `pass`, `fail`, `warn`) |
@@ -385,6 +387,104 @@ hostil de logs não possa forjar saída no seu terminal nem quebrar o documento.
 Os trechos de evidência são renderizados como blocos de código indentados no
 markdown, então uma linha de log não consegue injetar formatação no relatório.
 Timestamps são UTC (RFC 3339).
+
+### Digest de incidentes (`report --since`)
+
+Sem IP mas com `--since`, o `report` vira o **digest de incidentes do
+servidor inteiro**: "o que aconteceu neste servidor desde ontem?" como um
+documento legível. Ele lê o store diretamente (o daemon não precisa estar
+rodando) e é totalmente offline e determinístico — sem dependência de IA.
+
+```bash
+# Digest das últimas 24 horas no terminal
+ezyshield report --since 24h
+
+# Digest semanal em markdown, pronto para colar num ticket/e-mail
+ezyshield report --since 7d -o md > weekly-digest.md
+
+# Legível por máquina
+ezyshield report --since 24h --json
+
+# Com um resumo em prosa gerado por IA (requer provider configurado)
+ezyshield report --since 24h --narrative
+```
+
+A estrutura do markdown é estável e documentada — as seções sempre aparecem
+nesta ordem (as vazias são omitidas; Totals e Enforcement sempre aparecem):
+**Totals**, **Events by kind**, **Strikes by category**, **Strikes by
+rule**, **Top offenders** (posição na escada de strikes, novo vs
+reincidente), **Enforcement**, **Notable patterns**, **AI narrative** (só
+com `--narrative`). Exemplo:
+
+```markdown
+# EzyShield digest — last 24h0m0s
+
+## Totals
+| Metric | Count |
+|---|---|
+| Strikes | 12 |
+| Dry-run bans | 7 |
+
+## Top offenders
+| IP | Strikes (window) | Max strike | Total strikes | New |
+|---|---|---|---|---|
+| 203.0.113.7 | 4 | 3 | 9 | repeat |
+
+## Notable patterns
+- coordinated bruteforce activity: 5 distinct IPs struck in the window
+- dry-run mode: 7 ban(s) were simulated but not enforced in this window
+```
+
+Flags do modo digest: `--since` (janela; sufixo `d` permitido), `--db`
+(caminho do SQLite), `--narrative`, `--config` (configurações do provider
+de IA para o `--narrative`).
+
+O `--narrative` envia SOMENTE o JSON agregado do digest (contagens,
+categorias, nomes de regra, IPs — nunca linhas de log cruas) ao provider de
+IA configurado, respeita o orçamento diário de tokens e **degrada para o
+digest puro com uma nota em qualquer falha**. A narrativa aparece numa
+seção claramente rotulada como consultiva. Os totais de eventos vêm dos
+contadores horários persistidos, que só cobrem kinds referenciados por
+regras de janela longa.
+
+## ezyshield rule test
+
+Avalia uma regra a seco contra o histórico de eventos armazenado, antes de
+habilitá-la. Estritamente read-only: sem strikes, sem bans, sem escrita de
+auditoria — e o daemon não precisa estar rodando.
+
+```bash
+# Uma regra carregada, pelo nome (embutida, drop-in do rules.d ou rules_path)
+ezyshield rule test ssh_bruteforce_daily --since 7d
+
+# Um arquivo YAML avulso — teste um drop-in ANTES de copiá-lo para o rules.d
+ezyshield rule test ./60-admin-panel.yaml --since 24h
+
+# Legível por máquina
+ezyshield rule test ssh_bruteforce_daily --json
+```
+
+A regra passa primeiro pela mesma validação fail-closed do loader do
+daemon; uma regra inválida é um erro claro e exit não-zero. Saída: quantas
+vezes a regra teria disparado (contagem por borda de subida — horas
+saturadas consecutivas são um único incidente), IPs únicos (amostrados),
+distribuição por dia e o alerta antecipado de falso positivo de
+**allowlisted hits** (detecções que cairiam em endereços do
+`allowlist`/`admin_cidrs` ou da allowlist de runtime).
+
+Flags:
+- `--since` — janela de histórico a avaliar (duração Go, sufixo `d`
+  permitido; default `24h`)
+- `--db` — caminho do banco SQLite (default `/var/lib/ezyshield/ezyshield.db`)
+- `--config` — caminho do config.yaml, usado para resolver `rules.d`/`rules_path`
+- `--policy` — caminho do policy.yaml, usado para a checagem de allowlist
+
+Limitação honesta (também impressa em toda execução): a avaliação usa os
+agregados horários armazenados, então a granularidade é limitada pelos
+buckets de 1 hora e pela retenção; só kinds referenciados por regras de
+janela longa (>1h) são persistidos, e matchers de campo não se aplicam a
+contagens — essas regras são reportadas como um teto (upper bound) em nível
+de kind, marcado de forma bem visível.
 
 ## ezyshield ban
 

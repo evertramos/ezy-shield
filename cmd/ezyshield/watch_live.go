@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // The `watch` command — a live, read-only stream of daemon events over the
@@ -120,6 +122,11 @@ func runWatch(cmd *cobra.Command, socketPath string, kinds []string, ipFilter st
 		}
 		_, _ = fmt.Fprintln(out, formatEventLine(ev, color))
 	}
+
+	// Viewer-tier fallback (issue #212): when the operator socket denies
+	// permission, watch — a read verb — is served on the read-only companion
+	// socket, so ezyshield-view members need no extra flags.
+	socketPath = resolveReadSocket(ctx, socketPath)
 
 	backoff := time.Second
 	connectedOnce := false

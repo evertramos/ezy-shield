@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 import (
@@ -96,7 +98,17 @@ func runDashboard(ctx context.Context, stderr io.Writer, configPath, addrOverrid
 	// (loopback-only listener; still throttled) — issue #183.
 	metricsOpen := cfg.Dashboard != nil && cfg.Dashboard.MetricsAuth != nil && !*cfg.Dashboard.MetricsAuth
 
+	// RBAC users (issue #204): resolve each token env-reference now, fail
+	// closed on any unresolvable one — silently starting without a
+	// configured user would grant less access than the operator intended
+	// at best, and mask a typo'd env var at worst.
+	users, err := resolveDashboardUsers(cfg)
+	if err != nil {
+		return err
+	}
+
 	srv, err := dashboard.New(dashboard.Config{
+		Users:            users,
 		Addr:             addr,
 		AuthDBPath:       authDB,
 		DaemonSocketPath: daemonSock,
@@ -187,4 +199,23 @@ func printBootstrapCredentials(w io.Writer, password, authDBPath string) {
 	fmt.Fprintln(w, "To rotate the password, delete the auth DB and restart:")                //nolint:errcheck // stderr banner
 	fmt.Fprintln(w, "  rm", authDBPath)                                                       //nolint:errcheck // stderr banner
 	fmt.Fprintln(w, "======================================================================") //nolint:errcheck // stderr banner
+}
+
+// resolveDashboardUsers maps config RBAC users (issue #204) to the
+// dashboard's resolved form, resolving each token env-reference. Fails on
+// the first unresolvable token, naming the user and the env var — never
+// the value.
+func resolveDashboardUsers(cfg *config.Config) ([]dashboard.AuthUser, error) {
+	if cfg.Dashboard == nil || len(cfg.Dashboard.Users) == 0 {
+		return nil, nil
+	}
+	out := make([]dashboard.AuthUser, 0, len(cfg.Dashboard.Users))
+	for _, u := range cfg.Dashboard.Users {
+		token, err := u.Token.Resolve()
+		if err != nil {
+			return nil, fmt.Errorf("dashboard user %q: token: %w", u.Name, err)
+		}
+		out = append(out, dashboard.AuthUser{Name: u.Name, Role: u.Role, Token: token})
+	}
+	return out, nil
 }

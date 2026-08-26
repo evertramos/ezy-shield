@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package decision_test
 
 // Integration tests for issue #175: the anti-lockout guards consume

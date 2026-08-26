@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package daemon
 
 // arm.go implements the explicit arm/disarm socket verbs (issue #228):

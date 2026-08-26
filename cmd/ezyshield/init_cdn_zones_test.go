@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // Tests for the zone-coverage prompt + WAF rule rollout (issue #121).

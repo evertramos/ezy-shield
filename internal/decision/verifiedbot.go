@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package decision
 
 // Verified-bot guard (issue #215): forward-confirmed reverse DNS protection

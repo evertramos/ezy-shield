@@ -16,6 +16,16 @@
       "items": {"type": "string", "enum": ["info", "warn", "critical"]},
       "description": "Severity levels to forward on this channel. Empty/omitted means all severities."
     },
+    "awsIPSetRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "id"],
+      "description": "One WAFv2 IPSet EzyShield maintains, identified by Name and Id (both shown in the AWS console and present in the set's ARN).",
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "id": {"type": "string", "minLength": 1}
+      }
+    },
     "cloudflareAccount": {
       "type": "object",
       "additionalProperties": false,
@@ -187,6 +197,30 @@
               "items": {"type": "integer", "minimum": 1},
               "description": "Numeric pull zone IDs the blocklist applies to."
             }
+          }
+        },
+        "aws_waf": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "AWS WAFv2 edge enforcement via dedicated IPSets referenced from the operator's WebACL rules (ADR-0012). EzyShield only mutates the member addresses of the IPSets designated here and never touches WebACLs. Credentials come from the standard AWS chain (env vars, ~/.aws/credentials, IMDSv2) and must never appear in this file.",
+          "required": ["scope"],
+          "properties": {
+            "name": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,32}$",
+              "description": "Optional operator label; surfaces as awswaf[<name>] in logs."
+            },
+            "scope": {
+              "type": "string",
+              "enum": ["regional", "cloudfront"],
+              "description": "regional (ALB/API Gateway; requires region) or cloudfront (global; the API pins us-east-1)."
+            },
+            "region": {
+              "type": "string",
+              "description": "AWS region of the IPSets for scope regional (e.g. eu-west-1)."
+            },
+            "ipset_v4": {"$ref": "#/$defs/awsIPSetRef"},
+            "ipset_v6": {"$ref": "#/$defs/awsIPSetRef"}
           }
         }
       }
@@ -376,6 +410,29 @@
         "auth_db_path": {
           "type": "string",
           "description": "SQLite file storing the admin password hash. Defaults to <data_dir>/dashboard.db."
+        },
+        "users": {
+          "type": "array",
+          "minItems": 1,
+          "description": "RBAC users (issue #204): per-user tokens with roles, enforced server-side on every mutating dashboard action. Empty keeps the legacy single-credential model; the password admin remains an implicit admin either way.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "role", "token"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,32}$",
+                "description": "Unique user name; recorded as the actor in audit entries."
+              },
+              "role": {
+                "type": "string",
+                "enum": ["viewer", "operator", "admin"],
+                "description": "viewer (read-only), operator (+ ban/unban), admin (+ allowlist mutations, arm/disarm, policy edit)."
+              },
+              "token": {"$ref": "#/$defs/secretRef"}
+            }
+          }
         },
         "metrics_auth": {
           "type": "boolean",

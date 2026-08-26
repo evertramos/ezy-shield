@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package ai
 
 // retry.go — one retry policy for every AI provider (issue #313).

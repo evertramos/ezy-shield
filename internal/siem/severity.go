@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package siem
 
 // sevTier is EzyShield's internal, format-independent notion of "how serious

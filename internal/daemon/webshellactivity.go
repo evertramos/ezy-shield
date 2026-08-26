@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package daemon
 
 // Webshell-drop tripwire delivery (issue #221): the watcher (wired by

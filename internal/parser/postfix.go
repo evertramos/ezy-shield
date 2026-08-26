@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package parser
 
 // Postfix smtpd parser (issue #188): mail servers are among the most

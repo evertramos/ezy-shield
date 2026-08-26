@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // Post-install notifier wizards for `config notifier <name>` (issue #103,

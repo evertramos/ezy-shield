@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package daemon
 
 // Verified-bot wiring (issue #215): the daemon owns UA-claim extraction

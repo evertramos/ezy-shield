@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package store
 
 // UnbanAll backs the panic button (`ezyshield disable --all`, issue #176):

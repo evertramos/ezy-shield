@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // Tests for `config ai <provider>` (issue #103 slice 3): the post-install AI

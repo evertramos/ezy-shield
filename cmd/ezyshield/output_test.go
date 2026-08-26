@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // Tests for the shared color gate (issue #106): --no-color flag, NO_COLOR

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 import "github.com/spf13/cobra"
@@ -60,6 +62,7 @@ Commands read as:  ` + progName + ` VERB   (equivalent to: ezy shield VERB)`,
 		newListCmd(),
 		newFeedsCmd(),
 		newReportCmd(),
+		newRuleCmd(),
 		newAllowCmd(),
 		newUnallowCmd(),
 		newScanCmd(),

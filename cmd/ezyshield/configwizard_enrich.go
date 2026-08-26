@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // Post-install wizard for `config enrich maxmind` (issue #168). Enrichment

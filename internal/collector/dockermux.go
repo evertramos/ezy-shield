@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package collector
 
 // Docker Engine API multiplexed log stream demultiplexer. Shared by the

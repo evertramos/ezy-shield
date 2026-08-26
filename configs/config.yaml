@@ -110,6 +110,15 @@ collectors: []
 #   #                       # session auth — safe ONLY because the listener is
 #   #                       # loopback-only; the route stays throttled.
 #   #                       # See docs reference/metrics.
+#   # RBAC users (issue #204): per-user tokens with roles, enforced
+#   # server-side. Roles: viewer (read-only) < operator (+ ban/unban)
+#   # < admin (+ allowlist, arm/disarm, policy). Tokens are env: references
+#   # only — generate strong values with: openssl rand -hex 32
+#   # The password admin from first-run bootstrap remains an implicit admin.
+#   # users:
+#   #   - {name: vera, role: viewer,   token: env:EZYSHIELD_DASH_VERA_TOKEN}
+#   #   - {name: omar, role: operator, token: env:EZYSHIELD_DASH_OMAR_TOKEN}
+#   #   - {name: ada,  role: admin,    token: env:EZYSHIELD_DASH_ADA_TOKEN}
 # SIEM forwarding (issue #203) — push every audited action (bans, unbans,
 # strikes, arm/disarm, daemon start/stop) to your SIEM. Outbound only, async
 # with a bounded queue (a dead SIEM never blocks the pipeline; when the queue

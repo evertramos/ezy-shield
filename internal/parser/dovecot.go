@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package parser
 
 // Dovecot IMAP/POP3 parser (issue #189): Dovecot exposes login brute force

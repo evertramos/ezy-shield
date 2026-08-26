@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package collector
 
 // Regression test for issue #358 item 1: collector channel sends must race

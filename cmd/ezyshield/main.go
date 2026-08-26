@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Command ezyshield is the EzyShield CLI and daemon.
 // It is part of the `ezy` tool family: `ezyshield <verb>` == `ezy shield <verb>`.
 package main

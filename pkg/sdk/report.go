@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package sdk
 
 // AbuseReportSchemaVersion is the schema_version emitted in every AbuseReport.

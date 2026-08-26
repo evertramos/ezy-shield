@@ -12,7 +12,8 @@ package migrate
 //	sshd                  → journald/ssh collector + built-in ssh rules
 //	nginx-*               → nginx parser file collectors + built-in http rules
 //	apache-*              → apache parser file collectors
-//	postfix*, dovecot     → reported: parser planned (issues #188/#189)
+//	postfix*, dovecot*    → postfix/dovecot parser file collectors + built-in
+//	                        mail rules (parsers shipped with issues #188/#189)
 //	recidive              → covered natively by strike escalation
 //	ignoreip              → allowlist entries (validated prefixes)
 //	maxretry/findtime     → report note (rules.d tuning, thresholds differ)
@@ -126,12 +127,12 @@ func mapJail(m *Migration, seen map[string]bool, j Jail) {
 		mapWebJail(m, seen, j, "apache")
 
 	case strings.HasPrefix(name, "postfix"):
-		m.Unmapped = append(m.Unmapped, UnmappedJail{Jail: j,
-			Reason: "postfix parser is planned (issue #188) — keep this jail on fail2ban until it ships (filter: " + filterName(j) + ")"})
+		mapMailJail(m, seen, j, "postfix",
+			"postfix parser file collector(s) + built-in mail rule family (smtp_auth_fail / relay / abuse rules)")
 
 	case strings.HasPrefix(name, "dovecot"):
-		m.Unmapped = append(m.Unmapped, UnmappedJail{Jail: j,
-			Reason: "dovecot parser is planned (issue #189) — keep this jail on fail2ban until it ships (filter: " + filterName(j) + ")"})
+		mapMailJail(m, seen, j, "dovecot",
+			"dovecot parser file collector(s) + built-in mail rule family (imap_auth_fail / imap_probe rules)")
 
 	default:
 		m.Unmapped = append(m.Unmapped, UnmappedJail{Jail: j,
@@ -155,6 +156,25 @@ func mapWebJail(m *Migration, seen map[string]bool, j Jail, parser string) {
 	how := fmt.Sprintf("%s parser file collector(s) + built-in http rule family", parser)
 	if strings.Contains(strings.Join(j.LogPaths, " "), "error") {
 		how += " (note: EzyShield's http rules read ACCESS logs; an error-log jail's signal is covered by the access-log rules instead)"
+	}
+	m.Mapped = append(m.Mapped, MappedJail{Jail: j, How: how})
+}
+
+// mapMailJail emits file collectors for a mail jail's log paths — the
+// postfix/dovecot parsers shipped with issues #188/#189, so these jails
+// migrate exactly like the web ones. Without a usable logpath the jail is
+// reported with the manual fix (mail logs commonly live in journald).
+func mapMailJail(m *Migration, seen map[string]bool, j Jail, parser, how string) {
+	if len(j.LogPaths) == 0 {
+		reason := "logpath is empty — add the collector manually: a file collector on your mail log (e.g. /var/log/mail.log, parser " + parser + ") or a journald collector on the " + parser + " unit"
+		if raw, ok := j.Unresolved["logpath"]; ok {
+			reason = fmt.Sprintf("logpath uses fail2ban interpolation (%s) — set the real path and re-run, or add the collector manually (file mail log with parser %s, or a journald collector on the %s unit)", raw, parser, parser)
+		}
+		m.Unmapped = append(m.Unmapped, UnmappedJail{Jail: j, Reason: reason})
+		return
+	}
+	for _, p := range j.LogPaths {
+		addCollector(m, seen, MappedCollector{Kind: "file", Path: p, Parser: parser, FromJail: j.Name})
 	}
 	m.Mapped = append(m.Mapped, MappedJail{Jail: j, How: how})
 }

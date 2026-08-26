@@ -16,6 +16,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -34,6 +35,9 @@ type daemonMetrics struct {
 	bansApplied    *metrics.LabeledCounter
 	aiRequests     *metrics.LabeledCounter
 	aiTokens       *metrics.LabeledCounter
+	// Async second layer (issue #222).
+	aiQueueDropped *metrics.Gauge
+	aiAgreement    *metrics.LabeledCounter
 }
 
 // newDaemonMetrics registers the metric families on a fresh registry.
@@ -56,7 +60,21 @@ func newDaemonMetrics(version string) *daemonMetrics {
 			"AI analyze calls per provider.", "provider"),
 		aiTokens: reg.LabeledCounter("ezyshield_ai_tokens_total",
 			"AI tokens consumed (input+output) per provider.", "provider"),
+		aiQueueDropped: reg.Gauge("ezyshield_ai_queue_dropped_total",
+			"Grey-zone episodes dropped by the bounded async AI queue (drop-oldest, issue #222)."),
+		aiAgreement: reg.LabeledCounter("ezyshield_ai_agreement_total",
+			"Async AI verdicts vs the rule engine, per <provider>_<agree|disagree> — issue #222.", "outcome"),
 	}
+}
+
+// registerAICleanerGauge exports the Log Cleaner reduction ratio (issue
+// #222) in permille — the token-frugality claim as a scrapeable number.
+func (d *Daemon) registerAICleanerGauge() {
+	d.metrics.reg.GaugeFunc("ezyshield_ai_cleaner_reduction_permille",
+		"Fraction (x1000) of sampled event volume removed by the AI Log Cleaner on the last async analysis.",
+		func() int64 {
+			return int64(math.Float64frombits(d.aiCleanReduction.Load()) * 1000)
+		})
 }
 
 // registerActiveBansGauge wires the store-sourced gauge; called from New

@@ -518,6 +518,14 @@ type AICfg struct {
 	TokenBudgetDaily int           `yaml:"token_budget_daily"`
 	CacheTTL         Duration      `yaml:"cache_ttl"`
 	Providers        []ProviderCfg `yaml:"providers"`
+	// Async enables the second-layer analysis worker (issue #222):
+	// grey-zone episodes are queued and analyzed in the background —
+	// the pipeline never blocks on a provider; a dead provider degrades
+	// to rules-only detection.
+	Async bool `yaml:"async"`
+	// AsyncQueueSize bounds the grey-zone queue (default 256, max 65536).
+	// On overflow the OLDEST episode is dropped and counted.
+	AsyncQueueSize int `yaml:"async_queue_size"`
 }
 
 // LoadConfig reads and strictly validates the config.yaml at path.
@@ -978,6 +986,12 @@ func validateAI(ai *AICfg) error {
 		if lo < 0 || hi > 100 || lo >= hi {
 			return fmt.Errorf("ambiguous_band: want [low, high] with 0 <= low < high <= 100, got [%d, %d] — scores in this band consult the AI; an empty or reversed band silently disables the configured provider", lo, hi)
 		}
+	}
+	if ai.AsyncQueueSize < 0 || ai.AsyncQueueSize > 65536 {
+		return fmt.Errorf("async_queue_size: must be in [0, 65536] (0 = default 256), got %d", ai.AsyncQueueSize)
+	}
+	if ai.Async && ai.Provider == "" && len(ai.Providers) == 0 {
+		return fmt.Errorf("async: true requires a configured provider")
 	}
 	return nil
 }

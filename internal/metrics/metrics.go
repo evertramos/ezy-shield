@@ -29,6 +29,10 @@ import (
 var AllowedLabels = map[string]bool{
 	"parser": true, "collector": true, "enforcer": true,
 	"provider": true, "level": true, "op": true, "version": true,
+	// outcome carries "<provider>_agree" / "<provider>_disagree" for the
+	// async AI agreement-rate metric (issue #222) — bounded by the closed
+	// provider vocabulary times two.
+	"outcome": true,
 }
 
 const (

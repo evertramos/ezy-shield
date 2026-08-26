@@ -230,6 +230,16 @@
       "additionalProperties": false,
       "description": "AI provider settings. Disabled by default. Use the single-provider form (provider + api_key) or the failover form (providers array); providers takes precedence when both are present.",
       "properties": {
+        "async": {
+          "type": "boolean",
+          "description": "Async second-layer analysis (issue #222): grey-zone episodes are queued and analyzed by a background worker — the pipeline never blocks on a provider; a dead provider degrades to rules-only. Requires a configured provider."
+        },
+        "async_queue_size": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65536,
+          "description": "Bound of the grey-zone queue (0 = default 256). On overflow the oldest episode is dropped and counted (ezyshield_ai_queue_dropped_total)."
+        },
         "provider": {
           "type": "string",
           "enum": ["anthropic", "openai", "ollama"],

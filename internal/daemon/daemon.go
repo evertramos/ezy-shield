@@ -12,6 +12,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -222,7 +223,13 @@ type Daemon struct {
 	aiProvider sdk.AIProvider
 	aiBudget   *ai.Budget
 	aiCache    *ai.Cache
-	aiLo, aiHi int // ambiguous band: lo <= score <= hi triggers AI
+	// aiQueue is the async second-layer queue (issue #222); nil = inline
+	// consults (the pre-#222 behavior).
+	aiQueue *aiAsyncQueue
+	// aiCleanReduction holds math.Float64bits of the last Log Cleaner
+	// reduction ratio, exported via registerAICleanerGauge.
+	aiCleanReduction atomic.Uint64
+	aiLo, aiHi       int // ambiguous band: lo <= score <= hi triggers AI
 
 	socketPath string
 	// policyPath is where arm/disarm persist the armed flag ("" = skip).
@@ -515,6 +522,12 @@ func New(dcfg Config) (*Daemon, error) {
 				d.aiHi = hi
 			}
 		}
+		// Async second layer (issue #222): grey-zone episodes go through a
+		// bounded queue + background worker instead of an inline consult.
+		if dcfg.Cfg.AI.Async {
+			d.aiQueue = newAIAsyncQueue(dcfg.Cfg.AI.AsyncQueueSize)
+			d.registerAICleanerGauge()
+		}
 	}
 
 	// notify_only suppression window (issue #421). Only built when a
@@ -634,6 +647,11 @@ func (d *Daemon) Run(parentCtx context.Context) error {
 	// Re-evaluate IPs whose would-be ban was refused because of an
 	// ESTABLISHED SSH connection, once that connection is gone (issue #420).
 	go d.runSSHRecheck(ctx)
+
+	// Async second-layer AI worker (issue #222); no-op when disabled.
+	if d.aiQueue != nil {
+		go d.runAIAsync(ctx)
+	}
 
 	// Trailing notify_only summaries for scanners that stopped (issue #421).
 	go d.runNotifySuppressFlush(ctx)
@@ -884,7 +902,15 @@ func (d *Daemon) processRaw(ctx context.Context, raw sdk.RawLine) {
 			continue
 		}
 
-		verdicts = d.maybeConsultAI(ctx, ev.SourceIP, verdicts)
+		// AI second layer: inline consult (blocking, pre-#222 behavior) or
+		// async enqueue (#222) — the pipeline never waits on a provider in
+		// async mode; verdicts arrive later via runAIAsync and pass through
+		// the identical decision-engine gates.
+		if d.aiQueue != nil {
+			d.maybeEnqueueAI(ctx, ev.SourceIP, highestScore(verdicts))
+		} else {
+			verdicts = d.maybeConsultAI(ctx, ev.SourceIP, verdicts)
+		}
 		verdicts = d.maybeInjectGeoVerdict(ctx, ev.SourceIP, verdicts)
 
 		// Live "detection" events for `watch` subscribers. Published before the
@@ -964,22 +990,42 @@ func bindVerdictsToIP(ctx context.Context, verdicts []sdk.Verdict, ip netip.Addr
 // All returned AI verdicts — fresh or cached — pass through bindVerdictsToIP,
 // and fresh verdicts are bound before the cache Set so a poisoned target can
 // neither act now nor be replayed later.
+//
+// Issue #222 refactor: the gates (aiEligible), aggregate collection
+// (collectAIAggregates) and the provider round trip (consultProvider) are
+// shared with the async second-layer worker — behavior of this inline path
+// is unchanged.
 func (d *Daemon) maybeConsultAI(ctx context.Context, ip netip.Addr, verdicts []sdk.Verdict) []sdk.Verdict {
-	if d.aiProvider == nil || d.aiBudget == nil || d.aiCache == nil {
+	if !d.aiEligible(ctx, ip, highestScore(verdicts)) {
 		return verdicts
 	}
-	if d.aiLo >= d.aiHi {
-		return verdicts
-	}
+	aggs := d.collectAIAggregates(ip)
+	return append(verdicts, d.consultProvider(ctx, ip, aggs)...)
+}
 
-	highScore := 0
+// highestScore returns the max verdict score (0 for none).
+func highestScore(verdicts []sdk.Verdict) int {
+	high := 0
 	for _, v := range verdicts {
-		if v.Score > highScore {
-			highScore = v.Score
+		if v.Score > high {
+			high = v.Score
 		}
 	}
+	return high
+}
+
+// aiEligible applies every pre-aggregate gate for an AI consult: wiring
+// present, band configured, score inside the band, decided-outcome gates
+// (issue #419), and the daily budget.
+func (d *Daemon) aiEligible(ctx context.Context, ip netip.Addr, highScore int) bool {
+	if d.aiProvider == nil || d.aiBudget == nil || d.aiCache == nil {
+		return false
+	}
+	if d.aiLo >= d.aiHi {
+		return false
+	}
 	if highScore < d.aiLo || highScore > d.aiHi {
-		return verdicts
+		return false
 	}
 
 	// ── Decided-outcome gates (issue #419) ──────────────────────────────────
@@ -992,7 +1038,7 @@ func (d *Daemon) maybeConsultAI(ctx context.Context, ip netip.Addr, verdicts []s
 	if highScore >= d.policy.BanThreshold {
 		slog.DebugContext(ctx, "daemon: ai consult skipped — rule score already decisive",
 			"ip", ip, "score", highScore, "ban_threshold", d.policy.BanThreshold)
-		return verdicts
+		return false
 	}
 
 	// Likewise, an actively banned IP is a decided outcome: the engine's
@@ -1009,14 +1055,14 @@ func (d *Daemon) maybeConsultAI(ctx context.Context, ip netip.Addr, verdicts []s
 	} else if banned && (!dryBan || !d.policy.IsArmed()) {
 		slog.DebugContext(ctx, "daemon: ai consult skipped — IP already banned",
 			"ip", ip, "score", highScore, "dry_run", dryBan)
-		return verdicts
+		return false
 	}
 
 	// Budget check — skip and warn once if daily limit is exhausted.
 	exceeded, err := d.aiBudget.Exceeded(ctx)
 	if err != nil {
 		slog.WarnContext(ctx, "daemon: ai budget check failed", "err", err)
-		return verdicts
+		return false
 	}
 	if exceeded {
 		// Once per UTC day (Budget owns the rollover, issue #359) — the old
@@ -1024,10 +1070,14 @@ func (d *Daemon) maybeConsultAI(ctx context.Context, ip netip.Addr, verdicts []s
 		if d.aiBudget.NoteExceededToday() {
 			slog.WarnContext(ctx, "daemon: AI daily token budget exceeded; switching to rules-only")
 		}
-		return verdicts
+		return false
 	}
+	return true
+}
 
-	// Collect aggregates for all windows; populate enrichment when available.
+// collectAIAggregates snapshots the IP's aggregates for all windows, with
+// enrichment when available.
+func (d *Daemon) collectAIAggregates(ip netip.Addr) []sdk.Aggregate {
 	now := time.Now()
 	windows := d.agg.Windows()
 	aggs := make([]sdk.Aggregate, 0, len(windows))
@@ -1038,14 +1088,20 @@ func (d *Daemon) maybeConsultAI(ctx context.Context, ip netip.Addr, verdicts []s
 		}
 		aggs = append(aggs, a)
 	}
+	return aggs
+}
 
+// consultProvider runs the cache → budget → Analyze → consume → bind →
+// cache-set round trip for one IP and returns the bound AI verdicts (an
+// empty slice on any failure — callers degrade to rules-only).
+func (d *Daemon) consultProvider(ctx context.Context, ip netip.Addr, aggs []sdk.Aggregate) []sdk.Verdict {
 	// Cache check — keyed on first (shortest) window aggregate behavior signature.
 	// Cache.Get already re-targets replayed verdicts to the requesting IP
 	// (issue #311); the bind below re-asserts that invariant at the chokepoint.
 	if len(aggs) > 0 {
 		if cached := d.aiCache.Get(aggs[0]); cached != nil {
 			slog.DebugContext(ctx, "daemon: ai cache hit", "ip", ip)
-			return append(verdicts, bindVerdictsToIP(ctx, cached, ip)...)
+			return bindVerdictsToIP(ctx, cached, ip)
 		}
 	}
 
@@ -1053,7 +1109,7 @@ func (d *Daemon) maybeConsultAI(ctx context.Context, ip netip.Addr, verdicts []s
 	budget, err := d.aiBudget.Current(ctx)
 	if err != nil {
 		slog.WarnContext(ctx, "daemon: ai budget query failed", "err", err)
-		return verdicts
+		return nil
 	}
 
 	aiVerdicts, usage, err := d.aiProvider.Analyze(ctx, aggs, budget)
@@ -1062,7 +1118,7 @@ func (d *Daemon) maybeConsultAI(ctx context.Context, ip netip.Addr, verdicts []s
 	}
 	if err != nil {
 		slog.WarnContext(ctx, "daemon: ai analyze failed", "ip", ip, "err", err)
-		return verdicts
+		return nil
 	}
 	if d.metrics != nil {
 		d.metrics.aiTokens.With(d.aiProvider.Name()).Add(int64(usage.InputTokens + usage.OutputTokens))
@@ -1092,7 +1148,7 @@ func (d *Daemon) maybeConsultAI(ctx context.Context, ip netip.Addr, verdicts []s
 		d.aiCache.Set(aggs[0], aiVerdicts)
 	}
 
-	return append(verdicts, aiVerdicts...)
+	return aiVerdicts
 }
 
 // maybeInjectGeoVerdict appends a synthetic "geo_block" verdict when the IP's

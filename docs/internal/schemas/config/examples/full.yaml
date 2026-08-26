@@ -57,6 +57,8 @@ ai:
   ambiguous_band: [30, 69]
   token_budget_daily: 200000
   cache_ttl: 15m
+  async: true
+  async_queue_size: 256
   providers:
     - name: anthropic
       priority: 0

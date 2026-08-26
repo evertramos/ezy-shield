@@ -174,7 +174,11 @@ dockers_v2:
     ids: [ezyshield, ezyshield-enforcer]
     dockerfile: Dockerfile
     images:
+      # One build, two registries (issue #289): the identical multi-arch
+      # manifest is pushed to GHCR and Docker Hub — same tag templates, so
+      # prereleases never take `latest` on either.
       - ghcr.io/evertramos/ezyshield
+      - docker.io/evertramos/ezyshield
     platforms:
       - linux/amd64
       - linux/arm64

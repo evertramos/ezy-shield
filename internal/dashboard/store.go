@@ -27,6 +27,13 @@ CREATE TABLE IF NOT EXISTS dashboard_admin (
     password_hash TEXT NOT NULL,
     created_at    INTEGER NOT NULL DEFAULT (strftime('%s','now')),
     updated_at    INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+);
+CREATE TABLE IF NOT EXISTS rbac_denials (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    recorded_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    actor       TEXT NOT NULL,
+    action      TEXT NOT NULL,
+    held_role   TEXT NOT NULL
 );`
 
 func openAuthStore(path string) (*authStore, error) {
@@ -101,6 +108,47 @@ func (s *authStore) getAdminHash(ctx context.Context, username string) (string, 
 		return "", fmt.Errorf("get admin hash: %w", err)
 	}
 	return h, nil
+}
+
+// auditRBACDenial appends one 403 record (issue #204): who tried what with
+// which role. Actor and action only — tokens never reach this table.
+func (s *authStore) auditRBACDenial(ctx context.Context, actor, action, heldRole string) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO rbac_denials (actor, action, held_role) VALUES (?, ?, ?)`,
+		actor, action, heldRole)
+	if err != nil {
+		return fmt.Errorf("insert rbac denial: %w", err)
+	}
+	return nil
+}
+
+// rbacDenial is one audited 403 row.
+type rbacDenial struct {
+	Actor    string
+	Action   string
+	HeldRole string
+}
+
+// listRBACDenials returns the most recent denials, newest first.
+func (s *authStore) listRBACDenials(ctx context.Context, limit int) ([]rbacDenial, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT actor, action, held_role FROM rbac_denials ORDER BY id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list rbac denials: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+	var out []rbacDenial
+	for rows.Next() {
+		var d rbacDenial
+		if err := rows.Scan(&d.Actor, &d.Action, &d.HeldRole); err != nil {
+			return nil, fmt.Errorf("scan rbac denial: %w", err)
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
 }
 
 func (s *authStore) close() error {

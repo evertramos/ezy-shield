@@ -335,10 +335,10 @@ func TestBuildTimeline_MergesAuditAndActive(t *testing.T) {
 }
 
 func TestDashboardActionReason(t *testing.T) {
-	if got := dashboardActionReason(""); got != "dashboard:admin" {
+	if got := dashboardActionReason("", ""); got != "dashboard:admin" {
 		t.Errorf("empty case = %q, want dashboard:admin", got)
 	}
-	if got := dashboardActionReason("office egress"); got != "dashboard:admin: office egress" {
+	if got := dashboardActionReason("", "office egress"); got != "dashboard:admin: office egress" {
 		t.Errorf("with reason = %q, want dashboard:admin: office egress", got)
 	}
 }

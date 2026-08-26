@@ -306,7 +306,7 @@ func (s *Server) handleBanPost(w http.ResponseWriter, r *http.Request) {
 		redirectFlash(w, r, "/dashboard/bans", "err", code)
 		return
 	}
-	tagged := dashboardActionReason(reason)
+	tagged := dashboardActionReason(actorFrom(r), reason)
 	code = s.doWrite(r.Context(), func(ctx context.Context) error {
 		return s.callBan(ctx, target, tagged)
 	})
@@ -345,7 +345,7 @@ func (s *Server) handleAllowPost(w http.ResponseWriter, r *http.Request) {
 		redirectFlash(w, r, "/dashboard/allowlist", "err", code)
 		return
 	}
-	tagged := dashboardActionReason(reason)
+	tagged := dashboardActionReason(actorFrom(r), reason)
 	code = s.doWrite(r.Context(), func(ctx context.Context) error {
 		return s.callAllow(ctx, target, tagged)
 	})
@@ -372,11 +372,25 @@ func (s *Server) requireCSRF(w http.ResponseWriter, r *http.Request) bool {
 // consumers can tell dashboard writes apart from CLI verbs. When the
 // operator left the field blank the tag stands alone; otherwise operator
 // text is preserved after the tag for the paper trail.
-func dashboardActionReason(userReason string) string {
-	if userReason == "" {
-		return "dashboard:admin"
+// dashboardActionReason tags a mutation's reason with the acting user's
+// NAME (issue #204 — never any token or credential), so the daemon's
+// audit_log records who acted through the dashboard.
+func dashboardActionReason(actor, userReason string) string {
+	if actor == "" {
+		actor = "admin"
 	}
-	return "dashboard:admin: " + userReason
+	if userReason == "" {
+		return "dashboard:" + actor
+	}
+	return "dashboard:" + actor + ": " + userReason
+}
+
+// actorFrom returns the session's username for audit tagging.
+func actorFrom(r *http.Request) string {
+	if info, ok := sessionFromContext(r.Context()); ok {
+		return info.Username
+	}
+	return ""
 }
 
 // parseTargetForm parses a POST form and returns the canonicalised target

@@ -53,6 +53,11 @@ type Config struct {
 	// The zero value keeps auth required; opening is safe only because the
 	// listener is loopback-only, and the route stays throttled either way.
 	MetricsOpen bool
+	// Users are the config-provisioned RBAC users (issue #204), tokens
+	// already resolved from their env references by the caller. Empty
+	// keeps the legacy model: the auth-DB password admin only, which
+	// remains an implicit admin either way (backwards compatibility).
+	Users []AuthUser
 }
 
 // Server is a localhost-only HTTP server for the EzyShield dashboard.
@@ -79,6 +84,10 @@ type Server struct {
 	// the same ~300 ms PBKDF2 cost — the enumeration guard becomes
 	// constant-time (CWE-208).
 	decoyHash string
+	// users holds the config-provisioned RBAC users (issue #204). The
+	// auth-DB password admin remains an implicit RoleAdmin outside this
+	// set (backwards compatibility with the single-credential model).
+	users *userSet
 }
 
 // New constructs a Server and opens the auth store. It rejects non-loopback
@@ -123,10 +132,19 @@ func New(cfg Config) (*Server, error) {
 		throttle:     newLoginThrottle(),
 		metricsLimit: newMetricsThrottle(),
 		decoyHash:    decoyHash,
+		users:        newUserSet(cfg.Users),
 	}
 	s.bus = newEventBus(s.fetchEvents, cfg.Logger)
 	s.mux = s.routes()
 	return s, nil
+}
+
+// ReloadUsers swaps the config-provisioned RBAC user set (issue #204).
+// Roles are looked up per request, so the swap re-evaluates every live
+// session immediately: a demoted user loses the privilege on their next
+// request, and a removed user's sessions stop authorizing anything.
+func (s *Server) ReloadUsers(users []AuthUser) {
+	s.users.replace(users)
 }
 
 // EnsureAdmin creates the default "admin" account when the store is empty and

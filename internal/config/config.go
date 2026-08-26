@@ -170,6 +170,26 @@ type DashboardCfg struct {
 	// false = unauthenticated scrape allowed — safe ONLY because the
 	// listener is loopback-only, and still throttled.
 	MetricsAuth *bool `yaml:"metrics_auth,omitempty"`
+	// Users provisions per-user RBAC access (issue #204): each entry is a
+	// name, a role (viewer|operator|admin), and a per-user token as an
+	// env: reference — inline token literals are rejected like every other
+	// secret. Empty keeps the legacy single-credential model, whose
+	// password admin remains an implicit admin either way.
+	Users []DashboardUserCfg `yaml:"users,omitempty"`
+}
+
+// DashboardUserCfg is one provisioned dashboard user (issue #204).
+type DashboardUserCfg struct {
+	// Name identifies the user in sessions and audit records. Required;
+	// unique; [A-Za-z0-9_-]{1,32}.
+	Name string `yaml:"name"`
+	// Role is viewer (read-only), operator (+ ban/unban), or admin
+	// (+ allowlist mutations, arm/disarm, policy edit).
+	Role string `yaml:"role"`
+	// Token is the user's login token — env-reference only. Generate with
+	// e.g. `openssl rand -hex 32`; doctor warns when the resolved value
+	// is shorter than 32 bytes.
+	Token SecretRef `yaml:"token"`
 }
 
 // EnrichCfg configures GeoIP/ASN enrichment via MaxMind MMDB databases.
@@ -609,6 +629,11 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("dashboard: %w", err)
 		}
 	}
+	if c.Dashboard != nil && len(c.Dashboard.Users) > 0 {
+		if err := validateDashboardUsers(c.Dashboard.Users); err != nil {
+			return fmt.Errorf("dashboard.users: %w", err)
+		}
+	}
 	if len(c.SIEM) > 0 {
 		if err := validateSIEM(c.SIEM); err != nil {
 			return fmt.Errorf("siem: %w", err)
@@ -769,6 +794,37 @@ func validateWebshellWatch(w *WebshellWatchCfg) error {
 	}
 	if w.IntervalSec != 0 && w.IntervalSec < 5 {
 		return fmt.Errorf("interval_sec: %d is below the 5s floor (a hot sweep loop over web roots)", w.IntervalSec)
+	}
+	return nil
+}
+
+// validDashboardRoles is the RBAC role enum (issue #204).
+var validDashboardRoles = map[string]bool{"viewer": true, "operator": true, "admin": true}
+
+// validateDashboardUsers checks the RBAC user list (issue #204): unique
+// valid names, the role enum, and a token that MUST be an env: reference —
+// the SecretRef loader already rejects inline literals with a redacted
+// error, so here only presence is checked. Token entropy on the RESOLVED
+// value is a doctor warning (config validation never resolves secrets).
+func validateDashboardUsers(users []DashboardUserCfg) error {
+	seen := make(map[string]int, len(users))
+	for i, u := range users {
+		if u.Name == "" {
+			return fmt.Errorf("[%d]: 'name' is required", i)
+		}
+		if err := validateCFInstanceName(u.Name); err != nil {
+			return fmt.Errorf("[%d]: 'name': %w", i, err)
+		}
+		if prev, dup := seen[u.Name]; dup {
+			return fmt.Errorf("[%d]: duplicate name %q (also at [%d])", i, u.Name, prev)
+		}
+		seen[u.Name] = i
+		if !validDashboardRoles[u.Role] {
+			return fmt.Errorf("[%d] (%s): 'role' must be viewer, operator, or admin, got %q", i, u.Name, u.Role)
+		}
+		if !u.Token.IsSet() {
+			return fmt.Errorf("[%d] (%s): 'token' is required (env:VARNAME reference)", i, u.Name)
+		}
 	}
 	return nil
 }

@@ -92,3 +92,7 @@ enrich:
 dashboard:
   addr: 127.0.0.1:9090
   auth_db_path: /var/lib/ezyshield/dashboard.db
+  users:
+    - {name: vera, role: viewer, token: env:EZYSHIELD_DASH_VERA_TOKEN}
+    - {name: omar, role: operator, token: env:EZYSHIELD_DASH_OMAR_TOKEN}
+    - {name: ada, role: admin, token: env:EZYSHIELD_DASH_ADA_TOKEN}

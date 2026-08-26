@@ -274,6 +274,11 @@ jobs:
         run: |
           set -o pipefail
           go test -fuzz=FuzzParseProcNetTCP -fuzztime=10s ./internal/scan/ | tee fuzz-scan.txt
+      - name: Fuzz reputation-feed parser (10s)
+        id: ffeeds
+        run: |
+          set -o pipefail
+          go test -fuzz=FuzzFeedParser -fuzztime=10s ./internal/feeds/ | tee fuzz-feeds.txt
       - name: Job summary
         if: always()
         run: |
@@ -297,6 +302,7 @@ jobs:
             echo "| FuzzProcTCPPeers | $(execs fuzz-proc.txt) | ${{ steps.fproc.outcome }} |"
             echo "| FuzzSIEMFormatters | $(execs fuzz-siem.txt) | ${{ steps.fsiem.outcome }} |"
             echo "| FuzzParseProcNetTCP | $(execs fuzz-scan.txt) | ${{ steps.fscan.outcome }} |"
+            echo "| FuzzFeedParser | $(execs fuzz-feeds.txt) | ${{ steps.ffeeds.outcome }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   govulncheck:

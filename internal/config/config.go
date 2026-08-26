@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -58,6 +59,32 @@ type Config struct {
 	// WebshellWatch enables the webshell-drop tripwire (issue #221) —
 	// observational filesystem watch over web roots; never a ban source.
 	WebshellWatch *WebshellWatchCfg `yaml:"webshell_watch"`
+	// Feeds lists IP reputation feeds to download and parse (issue #194).
+	// Download/parse only for now — enforcement is the follow-up (#195).
+	Feeds []FeedCfg `yaml:"feeds"`
+}
+
+// FeedCfg describes one IP reputation feed (issue #194). The feed body is
+// remote, attacker-adjacent input; internal/feeds enforces the runtime caps
+// (10MiB response, 4KiB lines, reserved-range dropping) — this section only
+// carries the operator's choices, validated strictly at load.
+type FeedCfg struct {
+	// Name identifies the feed in logs and provenance. Required; unique;
+	// [A-Za-z0-9_-]{1,32}.
+	Name string `yaml:"name"`
+	// URL is the feed source. https:// only — http is rejected.
+	URL string `yaml:"url"`
+	// Format is "plain" (one IP per line), "cidr" (IP or prefix per line,
+	// ';'/'#' comments), or "abuseipdb" (plain list export).
+	Format string `yaml:"format"`
+	// RefreshInterval is how often the feed is re-fetched. Required;
+	// minimum 1h (politeness floor).
+	RefreshInterval Duration `yaml:"refresh_interval"`
+	// MaxEntries caps parsed entries per feed. 0 = 100k default; values
+	// above the 500k hard cap are rejected.
+	MaxEntries int `yaml:"max_entries"`
+	// Timeout bounds one fetch (default 30s).
+	Timeout Duration `yaml:"timeout,omitempty"`
 }
 
 // DockerExecCfg configures the docker exec activity watcher (issue #220).
@@ -556,6 +583,66 @@ func (c *Config) Validate() error {
 	if c.WebshellWatch != nil {
 		if err := validateWebshellWatch(c.WebshellWatch); err != nil {
 			return fmt.Errorf("webshell_watch: %w", err)
+		}
+	}
+	if len(c.Feeds) > 0 {
+		if err := validateFeeds(c.Feeds); err != nil {
+			return fmt.Errorf("feeds: %w", err)
+		}
+	}
+	return nil
+}
+
+// Feed validation constants mirror internal/feeds (kept literal here so the
+// config package stays dependency-light; the feeds package re-checks its own
+// caps at runtime).
+const (
+	feedHardMaxEntries    = 500_000
+	feedMinRefreshSeconds = 3600
+)
+
+var validFeedFormats = map[string]bool{"plain": true, "cidr": true, "abuseipdb": true}
+
+// validateFeeds checks the reputation-feed list (issue #194): https-only
+// URLs, known formats, a 1h refresh floor, sane entry caps, unique names.
+func validateFeeds(list []FeedCfg) error {
+	seen := make(map[string]int, len(list))
+	for i, f := range list {
+		if f.Name == "" {
+			return fmt.Errorf("[%d]: 'name' is required", i)
+		}
+		if err := validateCFInstanceName(f.Name); err != nil {
+			return fmt.Errorf("[%d]: 'name': %w", i, err)
+		}
+		if prev, dup := seen[f.Name]; dup {
+			return fmt.Errorf("[%d]: duplicate 'name' %q (also used by [%d])", i, f.Name, prev)
+		}
+		seen[f.Name] = i
+		u, err := url.Parse(f.URL)
+		if err != nil || u.Host == "" {
+			return fmt.Errorf("[%d] %s: 'url' is not a valid URL", i, f.Name)
+		}
+		if u.Scheme != "https" {
+			return fmt.Errorf("[%d] %s: 'url' must be https:// — a reputation feed fetched over http can be tampered in transit", i, f.Name)
+		}
+		if !validFeedFormats[f.Format] {
+			return fmt.Errorf("[%d] %s: 'format' must be plain|cidr|abuseipdb, got %q", i, f.Name, f.Format)
+		}
+		ri := f.RefreshInterval.AsDuration()
+		if ri <= 0 {
+			return fmt.Errorf("[%d] %s: 'refresh_interval' is required (minimum 1h)", i, f.Name)
+		}
+		if ri < feedMinRefreshSeconds*time.Second {
+			return fmt.Errorf("[%d] %s: 'refresh_interval' %s is below the 1h politeness floor", i, f.Name, ri)
+		}
+		if f.MaxEntries < 0 {
+			return fmt.Errorf("[%d] %s: 'max_entries' must not be negative", i, f.Name)
+		}
+		if f.MaxEntries > feedHardMaxEntries {
+			return fmt.Errorf("[%d] %s: 'max_entries' %d exceeds the %d hard cap", i, f.Name, f.MaxEntries, feedHardMaxEntries)
+		}
+		if f.Timeout.AsDuration() < 0 {
+			return fmt.Errorf("[%d] %s: 'timeout' must not be negative", i, f.Name)
 		}
 	}
 	return nil

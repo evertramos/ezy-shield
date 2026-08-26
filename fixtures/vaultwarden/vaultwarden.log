@@ -1,0 +1,7 @@
+[2026-08-25 14:00:00.101][vaultwarden::api::identity][ERROR] Username or password is incorrect. Try again. IP: 203.0.113.100. Username: admin@example.com.
+[2026-08-25 14:00:02.202][vaultwarden::api::identity][ERROR] Username or password is incorrect. Try again. IP: 203.0.113.100. Username: root@example.com.
+[2026-08-25 14:00:04.303][vaultwarden::api::identity][ERROR] Username or password is incorrect. Try again. IP: 2001:db8::aa. Username: user@example.com.
+[2026-08-25 14:00:06.404][vaultwarden::api::identity][ERROR] Invalid TOTP code! Server time: 2026-08-25 14:00:06 UTC IP: 203.0.113.101
+[2026-08-25 14:00:08.505][vaultwarden::api::core][INFO] Websocket connected
+[2026-08-25 14:00:09.606][request][INFO] POST /identity/connect/token
+[2026-08-25 14:00:10.707][response][INFO] (login) POST /identity/connect/token => 200 OK

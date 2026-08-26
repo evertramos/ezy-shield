@@ -1,0 +1,3 @@
+[nginx-http-auth]
+enabled = true
+maxretry = 6

@@ -1,0 +1,14 @@
+Aug 25 12:00:01 mail postfix/smtpd[3121]: connect from unknown[203.0.113.50]
+Aug 25 12:00:02 mail postfix/smtpd[3121]: warning: unknown[203.0.113.50]: SASL LOGIN authentication failed: UGFzc3dvcmQ6
+Aug 25 12:00:04 mail postfix/smtpd[3121]: warning: unknown[203.0.113.50]: SASL PLAIN authentication failed: authentication failure
+Aug 25 12:00:06 mail postfix/smtpd[3121]: warning: host50.example.net[203.0.113.50]: SASL CRAM-MD5 authentication failed: authentication failure
+Aug 25 12:00:08 mail postfix/smtpd[3121]: NOQUEUE: reject: RCPT from unknown[203.0.113.51]: 554 5.7.1 <spam@victim.example>: Relay access denied; from=<bounce@evil.example> to=<spam@victim.example> proto=ESMTP helo=<evil.example>
+Aug 25 12:00:09 mail postfix/smtpd[3121]: NOQUEUE: reject: RCPT from relay51.example[203.0.113.51]: 554 5.7.1 <x@y.example>: Relay access denied; from=<a@b.example> to=<x@y.example> proto=ESMTP helo=<zzz>, sasl_username=admin
+Aug 25 12:00:11 mail postfix/smtpd[3121]: too many errors after RCPT from unknown[203.0.113.52]
+Aug 25 12:00:12 mail postfix/smtpd[3121]: lost connection after AUTH from unknown[203.0.113.53]
+Aug 25 12:00:13 mail postfix/smtpd[3121]: warning: unknown[2001:db8::66]: SASL LOGIN authentication failed: UGFzc3dvcmQ6
+Aug 25 12:00:14 mail postfix/smtpd[3121]: warning: unknown[IPv6:2001:db8::67]: SASL PLAIN authentication failed: authentication failure
+Aug 25 12:00:15 mail postfix/smtpd[3121]: disconnect from unknown[203.0.113.50] ehlo=1 auth=0/3 quit=1 commands=2/5
+Aug 25 12:00:16 mail postfix/qmgr[712]: 4XYZ: removed
+Aug 25 12:00:17 mail postfix/smtpd[3121]: connect from mail.legit.example[198.51.100.9]
+Aug 25 12:00:18 mail postfix/smtpd[3121]: 5ABC: client=mail.legit.example[198.51.100.9]

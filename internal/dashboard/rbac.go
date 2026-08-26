@@ -12,13 +12,15 @@ package dashboard
 //
 // Authentication: config-provisioned users carry a per-user token
 // (env-reference resolved outside this package). Token comparison is
-// constant-time over fixed-size SHA-256 digests — the compare cost is
+// constant-time over fixed-size PBKDF2 digests — the compare cost is
 // independent of both the token content and its length, and every stored
 // user is compared on every attempt (no early exit on name match), so
 // timing does not leak which usernames exist (CWE-208 discipline mirrors
 // the login decoy hash).
 
 import (
+	"crypto/pbkdf2"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"sync"
@@ -101,26 +103,55 @@ type AuthUser struct {
 	Token string
 }
 
-// rbacUser is the internal form: the token survives only as a SHA-256
-// digest, so neither the user set nor any accidental dump can reveal it.
+// rbacUser is the internal form: the token survives only as a PBKDF2
+// digest, so neither the user set nor any accidental dump can reveal it,
+// and even a weak (doctor-warned) token resists offline brute force of a
+// leaked digest.
 type rbacUser struct {
-	name      string
-	role      Role
-	tokenHash [sha256.Size]byte
+	name        string
+	role        Role
+	tokenDigest []byte
 }
 
 // userSet holds the current config-provisioned users. Replaceable at
 // runtime (ReloadUsers), and roles are looked up per request — a reload
 // re-evaluates every live session's role immediately.
+//
+// Token digests are PBKDF2-SHA256 (same iteration count as the password
+// admin) under one random per-boot salt: a single expensive derivation of
+// the SUBMITTED token per login attempt, then a constant-time compare
+// against every user — the per-attempt cost matches the auth-DB path, and
+// the salt never leaves process memory.
 type userSet struct {
 	mu    sync.RWMutex
+	salt  []byte
 	users []rbacUser
 }
 
 func newUserSet(users []AuthUser) *userSet {
-	s := &userSet{}
+	salt := make([]byte, pbkdf2SaltLen)
+	if _, err := rand.Read(salt); err != nil {
+		// Without entropy no config-user can ever authenticate — fail
+		// toward the password-admin path rather than weak hashing.
+		salt = nil
+	}
+	s := &userSet{salt: salt}
 	s.replace(users)
 	return s
+}
+
+// deriveTokenDigest is the single hashing boundary for RBAC tokens:
+// PBKDF2-SHA256 with the set's per-boot salt (CodeQL: computationally
+// expensive by design — tokens are credentials).
+func (s *userSet) deriveTokenDigest(token string) []byte {
+	if s.salt == nil {
+		return nil
+	}
+	key, err := pbkdf2.Key(sha256.New, token, s.salt, pbkdf2Iterations, pbkdf2KeyLen)
+	if err != nil {
+		return nil
+	}
+	return key
 }
 
 func (s *userSet) replace(users []AuthUser) {
@@ -133,9 +164,9 @@ func (s *userSet) replace(users []AuthUser) {
 			role = RoleViewer
 		}
 		next = append(next, rbacUser{
-			name:      u.Name,
-			role:      role,
-			tokenHash: sha256.Sum256([]byte(u.Token)),
+			name:        u.Name,
+			role:        role,
+			tokenDigest: s.deriveTokenDigest(u.Token),
 		})
 	}
 	s.mu.Lock()
@@ -143,21 +174,27 @@ func (s *userSet) replace(users []AuthUser) {
 	s.mu.Unlock()
 }
 
-// authenticate resolves (name, token) to a user. Constant-time: the token
-// compare runs over fixed-size digests for EVERY stored user regardless of
-// name matches, and the result is accumulated without branching, so
-// response timing does not reveal which names exist or where a mismatch
-// happened.
+// authenticate resolves (name, token) to a user. The submitted token is
+// derived ONCE through PBKDF2 (fixed per-attempt cost), then compared in
+// constant time against EVERY stored user regardless of name matches, so
+// response timing reveals neither which usernames exist nor where a
+// mismatch happened.
 func (s *userSet) authenticate(name, token string) (rbacUser, bool) {
-	digest := sha256.Sum256([]byte(token))
+	digest := s.deriveTokenDigest(token)
+	if digest == nil {
+		return rbacUser{}, false
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	var matched rbacUser
 	found := 0
 	for _, u := range s.users {
+		if u.tokenDigest == nil {
+			continue
+		}
 		nameOK := subtle.ConstantTimeCompare([]byte(u.name), []byte(name))
-		tokenOK := subtle.ConstantTimeCompare(u.tokenHash[:], digest[:])
+		tokenOK := subtle.ConstantTimeCompare(u.tokenDigest, digest)
 		if nameOK&tokenOK == 1 {
 			matched = u
 			found = 1

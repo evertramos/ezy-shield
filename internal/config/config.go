@@ -567,6 +567,7 @@ var validParserNames = map[string]bool{
 	"postfix":      true,
 	"dovecot":      true,
 	"vaultwarden":  true,
+	"nextcloud":    true,
 }
 
 // ValidParserNames returns the set of collector parser names accepted by config

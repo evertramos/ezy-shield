@@ -249,6 +249,11 @@ jobs:
         run: |
           set -o pipefail
           go test -fuzz=FuzzVaultwardenParser -fuzztime=10s ./internal/parser/ | tee fuzz-vaultwarden.txt
+      - name: Fuzz Nextcloud parser (10s)
+        id: fnextcloud
+        run: |
+          set -o pipefail
+          go test -fuzz=FuzzNextcloudParser -fuzztime=10s ./internal/parser/ | tee fuzz-nextcloud.txt
       - name: Fuzz proc SSH-peer parser (10s)
         id: fproc
         run: |
@@ -282,6 +287,7 @@ jobs:
             echo "| FuzzPostfixParser | $(execs fuzz-postfix.txt) | ${{ steps.fpostfix.outcome }} |"
             echo "| FuzzDovecotParser | $(execs fuzz-dovecot.txt) | ${{ steps.fdovecot.outcome }} |"
             echo "| FuzzVaultwardenParser | $(execs fuzz-vaultwarden.txt) | ${{ steps.fvaultwarden.outcome }} |"
+            echo "| FuzzNextcloudParser | $(execs fuzz-nextcloud.txt) | ${{ steps.fnextcloud.outcome }} |"
             echo "| FuzzProcTCPPeers | $(execs fuzz-proc.txt) | ${{ steps.fproc.outcome }} |"
             echo "| FuzzSIEMFormatters | $(execs fuzz-siem.txt) | ${{ steps.fsiem.outcome }} |"
             echo "| FuzzParseProcNetTCP | $(execs fuzz-scan.txt) | ${{ steps.fscan.outcome }} |"

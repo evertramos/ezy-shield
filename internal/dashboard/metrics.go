@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package dashboard
 
 // GET /metrics (issue #183): Prometheus text exposition, proxied from the

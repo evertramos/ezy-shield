@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //go:build linux && integration
 
 // Integration test for killSocketsForIP that invokes the real iproute2 `ss`

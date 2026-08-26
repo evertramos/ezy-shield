@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package parser
 
 // Tests for the Keycloak parser (issue #193).

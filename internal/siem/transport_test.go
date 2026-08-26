@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package siem
 
 // Transport tests (issue #203): in-test TCP/UDS/UDP/TLS servers asserting

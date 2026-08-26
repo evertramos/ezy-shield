@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package store provides the SQLite persistence layer for EzyShield.
 //
 // All SQL uses parameterized queries; log-derived data is never interpolated

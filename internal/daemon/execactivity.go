@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package daemon
 
 // Docker exec activity delivery (issue #220): the watcher (wired by run.go

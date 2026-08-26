@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // The AI-provider sub-flow shared by the init wizard (askQuestions in

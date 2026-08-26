@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package store
 
 // Retention pruning (issue #184): window-bounded, batched deletion of aged

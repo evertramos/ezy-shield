@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package enrich provides O(1) GeoIP/ASN lookups via MaxMind MMDB files.
 // When no databases are loaded, Lookup returns empty Enrichment — the daemon
 // never crashes due to missing or corrupt DB files.

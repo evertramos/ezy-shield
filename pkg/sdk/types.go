@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package sdk is the public API surface for EzyShield native modules.
 // All types here are stable contracts; changes require an ADR in docs/internal/adr/.
 package sdk

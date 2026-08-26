@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package daemon
 
 // Tests for the panic button (issue #176): disable_all disarms, clears every

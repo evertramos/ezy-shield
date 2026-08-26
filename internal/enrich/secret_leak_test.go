@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package enrich — secret-leak gate tests (SECURITY-REVIEW §4, Hard Rule 3).
 //
 // Issue #294: the MaxMind license key is carried in the download URL's

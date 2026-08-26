@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package parser
 
 // Nextcloud parser (issue #192): Nextcloud writes structured JSON to

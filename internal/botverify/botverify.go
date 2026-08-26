@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package botverify implements forward-confirmed reverse DNS (FCrDNS)
 // validation for well-known crawlers (issue #215).
 //

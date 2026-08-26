@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // doctor_enfstate.go — doctor check for the honest enforcement state

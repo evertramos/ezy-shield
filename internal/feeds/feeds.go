@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package feeds downloads and parses IP reputation feeds (issue #194):
 // Spamhaus DROP, FireHOL, AbuseIPDB plain exports, and anything else that
 // is one IP or CIDR per line over HTTPS.

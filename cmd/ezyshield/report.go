@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // The report command renders the daemon's read-only "report" verb (issue

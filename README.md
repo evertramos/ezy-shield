@@ -358,4 +358,12 @@ the open, independently.
 
 ## License
 
-EzyShield is released under **AGPL-3.0** — see [LICENSE](LICENSE).
+EzyShield is released under **AGPL-3.0-only** — see [LICENSE](LICENSE) —
+with one deliberate exception: the public SDK package
+[`pkg/sdk`](pkg/sdk) is **Apache-2.0** (its own
+[LICENSE](pkg/sdk/LICENSE)), so plugin and module authors can build
+proprietary or differently-licensed integrations against the SDK types
+without AGPL obligations. The boundary is documented in
+[pkg/sdk/README.md](pkg/sdk/README.md); every `.go` file carries an
+`SPDX-License-Identifier` header stating which side it is on, enforced in
+CI by `scripts/spdx-gate.sh`.

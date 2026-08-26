@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package scan discovers listening TCP sockets via /proc/net/tcp[6], maps
 // each to its owning process / systemd unit / container, and resolves a log
 // source. Public listeners with no resolvable log source are flagged ⚠ no logs.

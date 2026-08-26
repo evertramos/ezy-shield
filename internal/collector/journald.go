@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package collector provides log collectors that implement sdk.Collector.
 // (build tag is absent so this file compiles on all platforms)
 package collector

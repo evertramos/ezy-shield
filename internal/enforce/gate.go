@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package enforce
 
 // gate.go — centralized allowlist / anti-lockout gate ahead of the enforcer

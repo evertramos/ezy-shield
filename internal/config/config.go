@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package config provides YAML loading and strict validation for ezyshield
 // configuration files. No secret values may appear in config files; use
 // SecretRef for any credential field so the loader rejects inline values.

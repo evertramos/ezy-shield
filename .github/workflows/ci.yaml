@@ -45,18 +45,24 @@ jobs:
         uses: golangci/golangci-lint-action@v9
         with:
           version: "v2.12"
+      # issue #187: every .go file must carry the correct SPDX header for
+      # its tree (Apache-2.0 for pkg/sdk, AGPL-3.0-only elsewhere).
+      - name: SPDX headers
+        id: spdx
+        run: bash scripts/spdx-gate.sh
       - name: Job summary
         if: always()
         run: |
           {
             echo "### 🧹 Lint — $(go version | awk '{print $3}')"
-            echo "_Guards code style and static-analysis health: gofmt, go vet, golangci-lint (includes gosec security linting)._"
+            echo "_Guards code style and static-analysis health: gofmt, go vet, golangci-lint (includes gosec security linting), SPDX license headers._"
             echo ""
             echo "| Check | Result |"
             echo "|---|---|"
             echo "| gofmt | ${{ steps.gofmt.outcome }} |"
             echo "| go vet | ${{ steps.vet.outcome }} |"
             echo "| golangci-lint v2.12 | ${{ steps.golangci.outcome }} |"
+            echo "| SPDX headers | ${{ steps.spdx.outcome }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   test:

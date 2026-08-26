@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package config
 
 // RedactedMarker replaces any value that could hold a credential when the

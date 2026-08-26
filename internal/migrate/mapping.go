@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package migrate
 
 // Second half of the fail2ban migration (issue #182): map the modeled

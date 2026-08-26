@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package daemon
 
 // Tests for the manual-ban guard wiring in handleBan (issue #211): refusals

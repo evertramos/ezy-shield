@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package parser provides log parsers that convert raw log lines into structured Events.
 package parser
 

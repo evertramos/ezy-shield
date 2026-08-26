@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // SIEM sink doctor checks (issue #203): endpoint reachability (non-fatal —

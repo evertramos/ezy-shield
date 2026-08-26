@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // ── Systemd unit hardening checks (issue #213) ──────────────────────────────

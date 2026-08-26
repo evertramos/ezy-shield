@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package dashboard implements the localhost-only web UI for EzyShield.
 //
 // The dashboard binds exclusively to loopback addresses (127.0.0.1 or ::1).

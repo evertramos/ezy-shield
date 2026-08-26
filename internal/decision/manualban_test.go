@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package decision_test
 
 // Tests for AuthorizeManualBan (issue #211): manual bans pass the exact

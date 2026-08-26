@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package ownership centralizes the EzyShield daemon's unix group and the
 // socket group-ownership logic shared by the daemon and the privileged
 // enforcer. Keeping this security-sensitive behavior in one place stops the two

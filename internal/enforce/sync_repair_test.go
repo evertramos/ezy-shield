@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package enforce_test
 
 // Tests for the reconcile repair reporting (issue #214): Sync counts what it

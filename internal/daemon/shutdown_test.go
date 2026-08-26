@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package daemon
 
 // Regression tests for issue #361 item 5: the production shutdown paths —

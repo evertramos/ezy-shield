@@ -56,6 +56,11 @@ type DashboardCfg struct {
 	// AuthDBPath is the SQLite file storing the admin password hash.
 	// Defaults to <data_dir>/dashboard.db when empty.
 	AuthDBPath string `yaml:"auth_db_path"`
+	// MetricsAuth controls whether GET /metrics requires the dashboard
+	// session auth (issue #183). nil/true (default) = auth required;
+	// false = unauthenticated scrape allowed — safe ONLY because the
+	// listener is loopback-only, and still throttled.
+	MetricsAuth *bool `yaml:"metrics_auth,omitempty"`
 }
 
 // EnrichCfg configures GeoIP/ASN enrichment via MaxMind MMDB databases.

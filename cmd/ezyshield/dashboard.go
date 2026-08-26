@@ -92,11 +92,16 @@ func runDashboard(ctx context.Context, stderr io.Writer, configPath, addrOverrid
 		daemonSock = daemonSockOverride
 	}
 
+	// metrics_auth: false opens GET /metrics for unauthenticated scrapes
+	// (loopback-only listener; still throttled) — issue #183.
+	metricsOpen := cfg.Dashboard != nil && cfg.Dashboard.MetricsAuth != nil && !*cfg.Dashboard.MetricsAuth
+
 	srv, err := dashboard.New(dashboard.Config{
 		Addr:             addr,
 		AuthDBPath:       authDB,
 		DaemonSocketPath: daemonSock,
 		Logger:           slog.Default(),
+		MetricsOpen:      metricsOpen,
 	})
 	if err != nil {
 		return err

@@ -196,8 +196,10 @@ func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
 		resp = d.handleAllow(ctx, req)
 	case "unallow":
 		resp = d.handleUnallow(ctx, req)
+	case "metrics":
+		resp = d.handleMetrics(ctx)
 	default:
-		resp = SocketResponse{Error: fmt.Sprintf("unknown verb %q; valid: status list list_allow events subscribe report arm arm_keep disarm ban unban allow unallow", req.Verb)}
+		resp = SocketResponse{Error: fmt.Sprintf("unknown verb %q; valid: status list list_allow events subscribe report arm arm_keep disarm ban unban allow unallow metrics", req.Verb)}
 	}
 
 	writeResponse(conn, resp)

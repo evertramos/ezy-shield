@@ -162,7 +162,12 @@ func TestFetch_OversizedTruncatedSafely(t *testing.T) {
 		fmt.Fprintf(&b, "192.0.2.%d\n198.51.100.%d\n203.0.113.%d\n", i%256, i%256, i%256)
 	}
 	f, url := newFeedFetcher(t, &feedServer{body: []byte(b.String())})
-	res, err := f.Fetch(context.Background(), feedCfg(url, "plain"))
+	cfg := feedCfg(url, "plain")
+	// Streaming >10MiB through the race-instrumented TLS test server can
+	// exceed the 5s default on a slow CI runner — the cap under test is the
+	// SIZE cap, not the timeout.
+	cfg.Timeout = 2 * time.Minute
+	res, err := f.Fetch(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}

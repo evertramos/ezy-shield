@@ -129,6 +129,60 @@ data.
 
 ---
 
+## Users and roles (RBAC)
+
+Teams can provision per-user tokens with server-enforced roles
+(issue #204). Roles are ordered — each includes everything below it:
+
+| Role | Can do |
+|------|--------|
+| `viewer` | Read everything: status, bans, allowlist, events, timeline, live stream, metrics |
+| `operator` | viewer + manual **ban** and **unban** |
+| `admin` | operator + **allowlist mutations**, arm/disarm, policy edits — and any future, not-yet-classified action (deny by default) |
+
+Provision users in `config.yaml` — tokens are env references, never
+inline values:
+
+```yaml
+dashboard:
+  users:
+    - {name: vera, role: viewer,   token: env:EZYSHIELD_DASH_VERA_TOKEN}
+    - {name: omar, role: operator, token: env:EZYSHIELD_DASH_OMAR_TOKEN}
+    - {name: ada,  role: admin,    token: env:EZYSHIELD_DASH_ADA_TOKEN}
+```
+
+Generate a strong token per user and export it in the environment the
+dashboard runs with (for systemd, `/etc/ezyshield/ezyshield.env`, mode
+0600):
+
+```bash
+openssl rand -hex 32
+```
+
+Users sign in on the normal login form with their **name** as the user
+and their **token** as the password. The header shows who is signed in
+and with which role; action forms are hidden for roles that lack the
+permission — but hiding is cosmetic only: every mutating request is
+re-checked server-side against the permission table, denials are
+answered 403 and **audited** (actor + action, never any token), and
+every allowed action records the actor's name in the daemon's audit log
+(`dashboard:<name>: reason`), which the Events and Timeline views
+display in their reason columns.
+
+Notes:
+
+- The password admin from the first-run bootstrap keeps working as an
+  **implicit admin** — existing single-credential setups need no change.
+- Roles are re-evaluated live: demoting or removing a user applies to
+  their open sessions on the next request.
+- `ezyshield doctor` warns on resolved tokens shorter than 32 bytes and
+  on two users sharing a token.
+- RBAC covers the **dashboard only**. The unix control socket remains
+  local-admin by file permission (`ezyshield` group; read-only tier via
+  `ezyshield-view`, issue #212), not by these roles.
+
+---
+
 ## Pages and features
 
 | Method | Path                     | Auth       | Notes                                                        |

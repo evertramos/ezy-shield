@@ -50,6 +50,33 @@ type NftablesEnforcer struct {
 	// every RPC instead: the enforcer refuses to operate rather than
 	// silently enforcing into the wrong table.
 	initErr error
+
+	// repairMu guards the last-Sync repair counters (issue #214): how many
+	// elements the most recent reconcile had to re-add / remove to converge
+	// store and kernel. The daemon audits non-boot repairs — a mid-write
+	// interruption (crash, OOM-kill) shows up here on the next reconcile
+	// instead of staying silent.
+	repairMu      sync.Mutex
+	lastAdded     int
+	lastRemoved   int
+	firstSyncDone bool
+	lastWasFirst  bool
+}
+
+// SyncRepairReporter is the optional sdk.Enforcer facet exposing the most
+// recent Sync's drift repairs (issue #214). firstSync marks the boot
+// reconcile, where re-adding every persisted ban is the EXPECTED restart
+// recovery, not drift. Implemented by the nftables enforcer and forwarded by
+// the Gate / MultiEnforcer wrappers (compile-time guards below).
+type SyncRepairReporter interface {
+	LastSyncRepairs() (added, removed int, firstSync bool)
+}
+
+// LastSyncRepairs implements SyncRepairReporter.
+func (e *NftablesEnforcer) LastSyncRepairs() (added, removed int, firstSync bool) {
+	e.repairMu.Lock()
+	defer e.repairMu.Unlock()
+	return e.lastAdded, e.lastRemoved, e.lastWasFirst
 }
 
 // Option configures a NftablesEnforcer.
@@ -149,12 +176,14 @@ func (e *NftablesEnforcer) Sync(ctx context.Context, want []sdk.Target) error {
 	}
 
 	// Add entries missing from nftables.
+	added, removed := 0, 0
 	for k, t := range wantSet {
 		if !currentSet[k] {
 			slog.InfoContext(ctx, "enforce/nftables Sync: adding", "ip", k)
 			if err := e.rpc(ctx, Request{Verb: "add", IP: k, TTLSeconds: int64(t.TTL.Seconds())}); err != nil {
 				return fmt.Errorf("enforce/nftables Sync add %s: %w", k, err)
 			}
+			added++
 		}
 	}
 
@@ -175,8 +204,26 @@ func (e *NftablesEnforcer) Sync(ctx context.Context, want []sdk.Target) error {
 			if resp.Code == CodeAlreadyAbsent {
 				slog.DebugContext(ctx, "enforce/nftables Sync: element already absent (nft-native timeout)",
 					"ip", k)
+			} else {
+				removed++
 			}
 		}
+	}
+
+	// Repair accounting (issue #214). The boot reconcile re-adds every
+	// persisted ban into a possibly fresh kernel — expected restart
+	// recovery. AFTER boot, any non-zero repair means the kernel diverged
+	// from the store between reconciles (mid-write interruption, external
+	// flush, helper restart): say so loudly; the daemon audits it.
+	e.repairMu.Lock()
+	first := !e.firstSyncDone
+	e.firstSyncDone = true
+	e.lastWasFirst = first
+	e.lastAdded, e.lastRemoved = added, removed
+	e.repairMu.Unlock()
+	if (added > 0 || removed > 0) && !first {
+		slog.WarnContext(ctx, "enforce/nftables Sync: repaired store↔kernel drift",
+			"re_added", added, "removed", removed)
 	}
 
 	return nil
@@ -418,3 +465,11 @@ func sendRequest(conn net.Conn, req Request) error {
 	}
 	return nil
 }
+
+// Compile-time guards: the wrappers must keep forwarding the repair facet
+// (issue #214) — mirrors the AllowlistSyncer guard discipline (issue #317).
+var (
+	_ SyncRepairReporter = (*NftablesEnforcer)(nil)
+	_ SyncRepairReporter = (*Gate)(nil)
+	_ SyncRepairReporter = (*MultiEnforcer)(nil)
+)

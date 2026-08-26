@@ -91,3 +91,17 @@ collectors: []
 #     password: env:SMTP_PASSWORD
 #     tls: starttls            # starttls | tls | none
 #     severity: []             # empty = all severities; or: [critical]
+
+# Webshell-drop tripwire (opt-in) — sweeps web roots for new or modified
+# executable web files (.php etc.). Purely observational: audit trail +
+# notification (critical when content heuristics flag the file). It NEVER
+# bans — a filesystem event has no remote IP. A tripwire, not an antivirus.
+# webshell_watch:
+#   enabled: true
+#   roots:
+#     - /var/www/html
+#   ignore:
+#     - cache            # substring match anywhere in the path
+#     - "*.bak.php"      # or path.Match glob
+#   # extensions: [".php", ".phtml", ".php5", ".php7", ".phar"]  # default
+#   # interval_sec: 10   # sweep cadence (floor 5)

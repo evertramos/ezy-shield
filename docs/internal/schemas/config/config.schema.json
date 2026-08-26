@@ -358,6 +358,37 @@
           "description": "SQLite file storing the admin password hash. Defaults to <data_dir>/dashboard.db."
         }
       }
+    },
+    "webshell_watch": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Webshell-drop tripwire (issue #221): polling watch over web roots for new/modified executable web files. Purely observational — audit + notification, never a ban.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Opt-in switch; false or absent means no filesystem is swept."
+        },
+        "roots": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Absolute web-root directories to sweep (e.g. /var/www/html). Required when enabled."
+        },
+        "extensions": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Watched extensions with leading dot. Default: .php, .phtml, .php5, .php7, .phar."
+        },
+        "ignore": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Path patterns to skip — path.Match globs, or substrings when the pattern has no glob metacharacters (cache/upload dirs that legitimately churn)."
+        },
+        "interval_sec": {
+          "type": "integer",
+          "minimum": 5,
+          "description": "Sweep cadence in seconds. Default 10; floor 5."
+        }
+      }
     }
   }
 }

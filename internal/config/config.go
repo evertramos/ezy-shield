@@ -9,7 +9,10 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"path"
+	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -43,6 +46,25 @@ type Config struct {
 	Notify     *NotifyCfg     `yaml:"notify"`
 	Enrich     *EnrichCfg     `yaml:"enrich"`
 	Dashboard  *DashboardCfg  `yaml:"dashboard"`
+	// WebshellWatch enables the webshell-drop tripwire (issue #221) —
+	// observational filesystem watch over web roots; never a ban source.
+	WebshellWatch *WebshellWatchCfg `yaml:"webshell_watch"`
+}
+
+// WebshellWatchCfg configures the webshell-drop tripwire (issue #221).
+// Opt-in: absent or enabled=false means no filesystem is ever swept.
+type WebshellWatchCfg struct {
+	Enabled bool `yaml:"enabled"`
+	// Roots are the web-root directories to sweep (required when enabled).
+	Roots []string `yaml:"roots"`
+	// Extensions overrides the default executable web extensions
+	// (.php, .phtml, .php5, .php7, .phar). Leading dot required.
+	Extensions []string `yaml:"extensions"`
+	// Ignore lists path patterns to skip (path.Match globs or substrings)
+	// — cache/upload dirs that legitimately churn.
+	Ignore []string `yaml:"ignore"`
+	// IntervalSec overrides the 10s sweep cadence (floor 5s).
+	IntervalSec int `yaml:"interval_sec"`
 }
 
 // DashboardCfg configures the localhost-only web UI (see docs/dashboard.md).
@@ -467,6 +489,36 @@ func (c *Config) Validate() error {
 		if err := validateLoopbackAddr(c.Dashboard.Addr); err != nil {
 			return fmt.Errorf("dashboard: %w", err)
 		}
+	}
+	if c.WebshellWatch != nil {
+		if err := validateWebshellWatch(c.WebshellWatch); err != nil {
+			return fmt.Errorf("webshell_watch: %w", err)
+		}
+	}
+	return nil
+}
+
+func validateWebshellWatch(w *WebshellWatchCfg) error {
+	if w.Enabled && len(w.Roots) == 0 {
+		return fmt.Errorf("'roots' is required when enabled (the web directories to sweep)")
+	}
+	for i, r := range w.Roots {
+		if !filepath.IsAbs(r) {
+			return fmt.Errorf("roots[%d]: %q must be an absolute path", i, r)
+		}
+	}
+	for i, e := range w.Extensions {
+		if !strings.HasPrefix(e, ".") || len(e) < 2 {
+			return fmt.Errorf("extensions[%d]: %q must start with a dot (e.g. \".php\")", i, e)
+		}
+	}
+	for i, pat := range w.Ignore {
+		if _, err := path.Match(pat, "probe"); err != nil {
+			return fmt.Errorf("ignore[%d]: invalid pattern %q: %w", i, pat, err)
+		}
+	}
+	if w.IntervalSec != 0 && w.IntervalSec < 5 {
+		return fmt.Errorf("interval_sec: %d is below the 5s floor (a hot sweep loop over web roots)", w.IntervalSec)
 	}
 	return nil
 }

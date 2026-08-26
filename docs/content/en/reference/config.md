@@ -281,6 +281,18 @@ The key is a secret like any other: put `MAXMIND_LICENSE_KEY=...` in `/etc/ezysh
 | `addr` | `127.0.0.1:9090` | Bind address — **loopback only**; non-loopback binds are refused at startup |
 | `auth_db_path` | `<data_dir>/dashboard.db` | Dashboard auth database |
 
+## webshell_watch
+
+Opt-in webshell-drop tripwire: sweeps web roots for new or modified executable web files. Purely observational — audit + notification, never a ban. See the [Webshell Tripwire guide](../guides/webshell-tripwire.md).
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `false` | Opt-in switch |
+| `roots` | — | Absolute web-root directories to sweep (**required** when enabled) |
+| `extensions` | `.php, .phtml, .php5, .php7, .phar` | Watched extensions (leading dot) |
+| `ignore` | `[]` | Path patterns to skip — `path.Match` globs, or substring when the pattern has no glob metacharacters |
+| `interval_sec` | `10` | Sweep cadence in seconds (floor 5) |
+
 ## Minimal example
 
 ```yaml

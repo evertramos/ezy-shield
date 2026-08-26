@@ -21,6 +21,7 @@ import (
 	"github.com/evertramos/ezy-shield/internal/notify"
 	"github.com/evertramos/ezy-shield/internal/parser"
 	"github.com/evertramos/ezy-shield/internal/store"
+	"github.com/evertramos/ezy-shield/internal/webshell"
 	"github.com/evertramos/ezy-shield/pkg/sdk"
 )
 
@@ -276,26 +277,61 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 	}
 
 	d, err := daemon.New(daemon.Config{
-		Cfg:        cfg,
-		Policy:     policy,
-		Store:      db,
-		Parsers:    parsers,
-		Collectors: collectors,
-		Enforcer:   enf,
-		Notifier:   disp,
-		AIProvider: aiProvider,
-		AIBudget:   aiBudget,
-		AICache:    aiCache,
-		Enricher:   enricher,
-		SocketPath: socketPath,
-		Version:    version,
-		PolicyPath: policyPath,
+		Cfg:              cfg,
+		Policy:           policy,
+		Store:            db,
+		Parsers:          parsers,
+		Collectors:       collectors,
+		Enforcer:         enf,
+		Notifier:         disp,
+		AIProvider:       aiProvider,
+		AIBudget:         aiBudget,
+		AICache:          aiCache,
+		Enricher:         enricher,
+		SocketPath:       socketPath,
+		Version:          version,
+		PolicyPath:       policyPath,
+		WebshellActivity: buildWebshellActivity(cfg),
 	})
 	if err != nil {
 		return fmt.Errorf("run: create daemon: %w", err)
 	}
 
 	return d.Run(ctx)
+}
+
+// buildWebshellActivity wires the opt-in webshell-drop tripwire (issue
+// #221) into the daemon via injection — the daemon package never imports
+// internal/webshell. Returns nil (feature off) unless enabled in config.
+func buildWebshellActivity(cfg *config.Config) func(context.Context, func(daemon.WebshellReport)) {
+	wcfg := cfg.WebshellWatch
+	if wcfg == nil || !wcfg.Enabled {
+		return nil
+	}
+	return func(ctx context.Context, report func(daemon.WebshellReport)) {
+		w, err := webshell.New(webshell.Config{
+			Roots:      wcfg.Roots,
+			Extensions: wcfg.Extensions,
+			Ignore:     wcfg.Ignore,
+			Interval:   time.Duration(wcfg.IntervalSec) * time.Second,
+		})
+		if err != nil {
+			slog.Error("run: webshell watcher disabled", "err", err)
+			return
+		}
+		slog.Info("run: webshell tripwire active", "roots", wcfg.Roots)
+		_ = w.Run(ctx, func(ev webshell.Event) {
+			report(daemon.WebshellReport{
+				Path:       ev.Path,
+				Op:         ev.Op,
+				Owner:      ev.Owner,
+				Size:       ev.Size,
+				Suspicious: ev.Suspicious,
+				Markers:    ev.Markers,
+				Count:      ev.Count,
+			})
+		})
+	}
 }
 
 // buildCollectors creates sdk.Collector instances from the config slice.

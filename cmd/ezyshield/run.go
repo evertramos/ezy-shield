@@ -49,6 +49,7 @@ func defaultParsers(logger *slog.Logger) []sdk.Parser {
 		parser.NewDovecotParser(logger),
 		parser.NewVaultwardenParser(logger),
 		parser.NewNextcloudParser(logger),
+		parser.NewKeycloakParser(logger),
 	}
 }
 

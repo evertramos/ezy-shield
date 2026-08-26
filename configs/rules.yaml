@@ -265,3 +265,21 @@ rules:
     threshold: 10
     score: 80
     category: bruteforce
+
+  # ── Keycloak (issue #193) ────────────────────────────────────────────────
+
+  - name: keycloak_bruteforce
+    description: "Keycloak login brute force (LOGIN_ERROR events)"
+    kinds: [keycloak_auth_fail]
+    window: 300s
+    threshold: 5
+    score: 85
+    category: bruteforce
+
+  - name: keycloak_bruteforce_sustained
+    description: "Sustained Keycloak brute force (low & slow)"
+    kinds: [keycloak_auth_fail]
+    window: 3600s
+    threshold: 10
+    score: 80
+    category: bruteforce

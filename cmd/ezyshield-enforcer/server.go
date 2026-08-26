@@ -24,6 +24,7 @@ import (
 var validVerbs = map[string]bool{
 	"add": true, "del": true, "flush": true, "list": true, "ping": true, "caps": true,
 	"allow_add": true, "allow_del": true, "allow_list": true, "allow_flush": true,
+	"netcheck": true,
 }
 
 // Server is the enforcer unix-socket server.
@@ -221,6 +222,18 @@ func (s *Server) dispatch(ctx context.Context, req enforce.Request) enforce.Resp
 
 	case "caps":
 		return enforce.Response{OK: true, Features: []string{enforce.FeatureCustomNames}}
+
+	case "netcheck":
+		// Functional netlink probe (issue #213): one read-only `nft list set`
+		// executed INSIDE this sandboxed process proves the unit still grants
+		// what enforcement depends on (AF_NETLINK in RestrictAddressFamilies,
+		// CAP_NET_ADMIN) — testing effect, not unit-file text. "ping" cannot
+		// stand in for this: it never touches netlink. No arguments, no
+		// mutation, no cache access.
+		if _, err := s.listFn(ctx, names); err != nil {
+			return enforce.Response{OK: false, Error: "netlink probe failed: " + err.Error()}
+		}
+		return enforce.Response{OK: true}
 
 	case "list":
 		// Entries past their deadline were already removed by the KERNEL's

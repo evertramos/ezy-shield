@@ -153,6 +153,20 @@ sudo ezyshield unban 203.0.113.42        # Desbanir
 sudo ezyshield allow 198.51.100.0/24     # Adicionar um CIDR à allowlist
 ```
 
+**P: O doctor reporta `AF_NETLINK allowed: FAIL` ou `runtime directory: FAIL`**
+
+R: Sua unit do systemd (ou um drop-in de override) perdeu uma configuração da qual o enforcement depende. O enforcer precisa de `AF_NETLINK` em `RestrictAddressFamilies` para programar o nftables — sem isso, os bans são registrados mas **nunca aplicados**. Cada serviço também precisa do seu `RuntimeDirectory`, ou o diretório do socket de controle em `/run` nunca é criado. O `ezyshield doctor` verifica a configuração *efetiva* (drop-ins incluídos) e, em caso de falha, imprime o snippet de drop-in exato para restaurar a configuração:
+
+```bash
+sudo systemctl edit ezyshield-enforcer   # abre um editor de drop-in; cole o
+                                         # snippet [Service] da dica do doctor
+sudo systemctl daemon-reload && sudo systemctl restart ezyshield-enforcer
+sudo ezyshield doctor                    # re-verifica; também executa um probe
+                                         # funcional de netlink via helper ativo
+```
+
+O doctor nunca edita units — apenas reporta e sugere. O check `enforcer: netlink probe` vai além de ler configuração: pede ao helper em execução que faça uma operação nftables somente-leitura dentro do próprio sandbox, então um probe que passa significa que o netlink funciona de verdade, não só que o arquivo da unit parece correto.
+
 ## Próximos passos
 
 - Leia a [Referência de Config](../reference/config.md) para ajustar os thresholds

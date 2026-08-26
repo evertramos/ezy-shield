@@ -43,6 +43,9 @@ type Config struct {
 	Notify     *NotifyCfg     `yaml:"notify"`
 	Enrich     *EnrichCfg     `yaml:"enrich"`
 	Dashboard  *DashboardCfg  `yaml:"dashboard"`
+	// Retention configures data-retention pruning (issue #184). Absent =
+	// never prune anything. See internal/config/retention.go.
+	Retention *RetentionCfg `yaml:"retention"`
 }
 
 // DashboardCfg configures the localhost-only web UI (see docs/dashboard.md).
@@ -466,6 +469,11 @@ func (c *Config) Validate() error {
 	if c.Dashboard != nil && c.Dashboard.Addr != "" {
 		if err := validateLoopbackAddr(c.Dashboard.Addr); err != nil {
 			return fmt.Errorf("dashboard: %w", err)
+		}
+	}
+	if c.Retention != nil {
+		if err := validateRetention(c.Retention); err != nil {
+			return fmt.Errorf("retention: %w", err)
 		}
 	}
 	return nil

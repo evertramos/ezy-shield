@@ -18,6 +18,7 @@ import (
 	"github.com/evertramos/ezy-shield/internal/cdndetect"
 	"github.com/evertramos/ezy-shield/internal/config"
 	"github.com/evertramos/ezy-shield/internal/decision"
+	"github.com/evertramos/ezy-shield/internal/enforce"
 	"github.com/evertramos/ezy-shield/internal/enrich"
 	"github.com/evertramos/ezy-shield/internal/notify"
 	"github.com/evertramos/ezy-shield/internal/rules"
@@ -90,6 +91,10 @@ type daemonStore interface {
 	IncrEventCount(ctx context.Context, ip netip.Addr, kind string, bucketStart int64) error
 	SumEventCounts(ctx context.Context, ip netip.Addr, kinds []string, since int64) (map[string]int, error)
 	PruneEventCounts(ctx context.Context, before int64) (int, error)
+	// Retention pruning (issue #184) — see internal/store/retention.go.
+	CountPruneCandidates(ctx context.Context, pol store.RetentionPolicy, now time.Time) ([]store.PruneStat, error)
+	PruneRetention(ctx context.Context, pol store.RetentionPolicy, now time.Time) ([]store.PruneStat, bool, error)
+	ReclaimSpace(ctx context.Context, threshold float64) (bool, int64, error)
 }
 
 // geoLookup is the minimal interface consumed from *enrich.Enricher.
@@ -129,6 +134,10 @@ type Config struct {
 	// ExpireTick overrides the ban/allow expiry poll interval (tests only;
 	// 0 = default 1m). See runExpireBans / runExpireAllows (issue #327).
 	ExpireTick time.Duration
+	// MaintenanceTick overrides the retention-prune interval (tests only;
+	// 0 = default 24h with a jittered first run). See maintenance.go
+	// (issue #184).
+	MaintenanceTick time.Duration
 	// SSHRecheckTick / SSHRecheckDelay override the deferred anti-lockout
 	// re-evaluation poll interval and refusal→re-check delay (tests only;
 	// 0 = defaults). See sshrecheck.go (issue #420).
@@ -191,6 +200,11 @@ type Daemon struct {
 	// Empty maps = no long-window rules loaded (feature dormant).
 	longRuleWindows map[time.Duration][]string
 	longKinds       map[string]bool
+	// retention, when non-nil, enables the daily prune job (issue #184;
+	// built in New from cfg.Retention). maintenanceTick overrides the
+	// interval in tests (0 = default 24h, jittered first run).
+	retention       *store.RetentionPolicy
+	maintenanceTick time.Duration
 
 	// sigCh, when non-nil, replaces the process-signal channel in Run so
 	// tests can drive the SIGTERM drain / SIGINT immediate-exit branches
@@ -368,6 +382,21 @@ func New(dcfg Config) (*Daemon, error) {
 		sshRecheckDelay: dcfg.SSHRecheckDelay,
 		longRuleWindows: longRuleWindows,
 		longKinds:       longKinds,
+		maintenanceTick: dcfg.MaintenanceTick,
+	}
+
+	// Retention pruning (issue #184): opt-in via the retention: section.
+	// Windows() cannot fail on a config that passed Validate; a nil result
+	// simply leaves the maintenance job disabled.
+	if dcfg.Cfg != nil && dcfg.Cfg.Retention != nil {
+		if w, err := dcfg.Cfg.Retention.Windows(); err == nil {
+			d.retention = &store.RetentionPolicy{
+				Strikes:                w.Strikes,
+				Audit:                  w.Audit,
+				AIUsage:                w.AIUsage,
+				AuditPruneAcknowledged: dcfg.Cfg.Retention.AuditExportNotRequired,
+			}
+		}
 	}
 
 	// Enforcement-anomaly delivery (ADR-0009 §4, issue #146): the engine
@@ -517,6 +546,9 @@ func (d *Daemon) Run(parentCtx context.Context) error {
 
 	// Trailing notify_only summaries for scanners that stopped (issue #421).
 	go d.runNotifySuppressFlush(ctx)
+
+	// Daily retention pruning, when configured (issue #184).
+	go d.runMaintenance(ctx)
 
 	// Signal handling. Tests inject d.sigCh to drive the SIGTERM/SIGINT
 	// branches without raising real process signals (which would leak into
@@ -1161,6 +1193,22 @@ func (d *Daemon) syncEnforcer(ctx context.Context) error {
 	// signal that flips DEGRADED→ACTIVE on recovery (and ACTIVE→DEGRADED if
 	// the firewall backend went away between bans).
 	d.recordEnforceResult(ctx, "sync", err)
+
+	// Reconcile-repair audit (issue #214): a mid-write interruption (crash,
+	// OOM-kill, external flush) surfaces as drift the next reconcile has to
+	// repair — record it in the append-only audit_log so the incident is
+	// traceable, not just a transient WARN. The boot reconcile is exempt:
+	// re-adding every persisted ban after a restart is expected recovery.
+	if err == nil {
+		if rep, ok := d.enforcer.(enforce.SyncRepairReporter); ok {
+			if a, r, first := rep.LastSyncRepairs(); (a > 0 || r > 0) && !first {
+				reason := fmt.Sprintf("reconcile repaired store↔kernel drift: re-added %d, removed %d", a, r)
+				if aerr := d.store.AuditSystem(ctx, "enforce_reconcile", reason); aerr != nil {
+					slog.ErrorContext(ctx, "daemon: audit enforce_reconcile", "err", aerr)
+				}
+			}
+		}
+	}
 	return err
 }
 

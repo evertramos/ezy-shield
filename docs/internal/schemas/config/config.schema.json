@@ -376,6 +376,10 @@
         "auth_db_path": {
           "type": "string",
           "description": "SQLite file storing the admin password hash. Defaults to <data_dir>/dashboard.db."
+        },
+        "metrics_auth": {
+          "type": "boolean",
+          "description": "Whether GET /metrics requires dashboard session auth (default true). false allows unauthenticated Prometheus scrapes — safe only because the listener is loopback-only; the route stays throttled."
         }
       }
     },

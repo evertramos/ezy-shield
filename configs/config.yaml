@@ -102,6 +102,14 @@ collectors: []
 #     tls: starttls            # starttls | tls | none
 #     severity: []             # empty = all severities; or: [critical]
 
+# Dashboard (localhost-only web UI) — optional; safe defaults are
+# 127.0.0.1:9090 and <data_dir>/dashboard.db.
+# dashboard:
+#   addr: 127.0.0.1:9090
+#   # metrics_auth: false   # open GET /metrics for Prometheus scrapes without
+#   #                       # session auth — safe ONLY because the listener is
+#   #                       # loopback-only; the route stays throttled.
+#   #                       # See docs reference/metrics.
 # SIEM forwarding (issue #203) — push every audited action (bans, unbans,
 # strikes, arm/disarm, daemon start/stop) to your SIEM. Outbound only, async
 # with a bounded queue (a dead SIEM never blocks the pipeline; when the queue

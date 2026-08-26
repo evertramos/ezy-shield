@@ -288,8 +288,11 @@ type Daemon struct {
 	// observation-state reporting in status (issue #456; see collhealth.go).
 	// Fed by the runCollector supervisor (issue #305).
 	collHealth collHealth
-	startTime  time.Time
-	version    string
+	// metrics is the per-daemon Prometheus registry (issue #183; see
+	// metrics.go). Always non-nil after New.
+	metrics   *daemonMetrics
+	startTime time.Time
+	version   string
 
 	// evidenceJournalctl and evidenceDockerSocket override the journalctl
 	// binary and Docker engine socket used by on-demand evidence extraction
@@ -445,6 +448,7 @@ func New(dcfg Config) (*Daemon, error) {
 		expireTick:      dcfg.ExpireTick,
 		sshRecheckTick:  dcfg.SSHRecheckTick,
 		sshRecheckDelay: dcfg.SSHRecheckDelay,
+		metrics:         newDaemonMetrics(dcfg.Version),
 		siemEmit:        dcfg.SIEMEmit,
 		siemTailTick:    dcfg.SIEMTailTick,
 
@@ -475,6 +479,9 @@ func New(dcfg Config) (*Daemon, error) {
 			}
 		}
 	}
+	// The store-sourced active-bans gauge (issue #183) — evaluated only at
+	// scrape time, never on the hot path.
+	d.registerActiveBansGauge()
 
 	// Enforcement-anomaly delivery (ADR-0009 §4, issue #146): the engine
 	// detects, the daemon delivers. Injected before any goroutine starts.
@@ -766,7 +773,39 @@ func (d *Daemon) runCollectorOnce(ctx context.Context, c sdk.Collector, out chan
 			err = fmt.Errorf("collector panic: %v", r)
 		}
 	}()
-	return c.Run(ctx, out)
+	// Per-collector line counter (issue #183): a small forwarding stage so
+	// the shared pipeline channel stays untouched. The label is the
+	// collector's TYPE (filetail/journald/docker...), never a path.
+	// (d.metrics is nil only in tests that build a bare Daemon literal.)
+	if d.metrics == nil {
+		return c.Run(ctx, out)
+	}
+	ctr := d.metrics.collectorLines.With(metricCollectorType(c))
+	mid := make(chan sdk.RawLine, 64)
+	fwdDone := make(chan struct{})
+	go func() {
+		defer close(fwdDone)
+		for l := range mid {
+			ctr.Inc()
+			out <- l
+		}
+	}()
+	err = c.Run(ctx, mid)
+	close(mid)
+	<-fwdDone
+	return err
+}
+
+// metricCollectorType derives the bounded collector label from the Go type
+// ("*collector.FileTailCollector" → "filetail") — operator paths/units never
+// become label values.
+func metricCollectorType(c sdk.Collector) string {
+	name := fmt.Sprintf("%T", c)
+	if i := strings.LastIndex(name, "."); i >= 0 {
+		name = name[i+1:]
+	}
+	name = strings.TrimSuffix(name, "Collector")
+	return strings.ToLower(name)
 }
 
 // collectorName derives a stable, human-readable identity for logs and alerts.
@@ -1016,9 +1055,15 @@ func (d *Daemon) maybeConsultAI(ctx context.Context, ip netip.Addr, verdicts []s
 	}
 
 	aiVerdicts, usage, err := d.aiProvider.Analyze(ctx, aggs, budget)
+	if d.metrics != nil {
+		d.metrics.aiRequests.With(d.aiProvider.Name()).Inc()
+	}
 	if err != nil {
 		slog.WarnContext(ctx, "daemon: ai analyze failed", "ip", ip, "err", err)
 		return verdicts
+	}
+	if d.metrics != nil {
+		d.metrics.aiTokens.With(d.aiProvider.Name()).Add(int64(usage.InputTokens + usage.OutputTokens))
 	}
 
 	slog.InfoContext(ctx, "daemon: ai analyzed",
@@ -1105,7 +1150,11 @@ func (d *Daemon) maybeInjectGeoVerdict(ctx context.Context, ip netip.Addr, verdi
 func (d *Daemon) parse(raw sdk.RawLine) ([]sdk.Event, error) {
 	for _, p := range d.parsers {
 		if p.Matches(raw.Source) {
-			return p.Parse(raw)
+			events, err := p.Parse(raw)
+			if len(events) > 0 && d.metrics != nil {
+				d.metrics.parserEvents.With(metricParserName(p)).Add(int64(len(events)))
+			}
+			return events, err
 		}
 	}
 	return nil, nil // no matching parser → silently ignore
@@ -1200,17 +1249,21 @@ func (d *Daemon) dispatch(ctx context.Context, action sdk.Action) {
 	d.publishActionEvent(action.Op, action.IP.String(), action.Strike,
 		action.TTL, action.Reason, "pipeline")
 
+	banApplied := false
 	if action.Op == "ban" && d.enforcer != nil {
 		t := sdk.Target{IP: action.IP, TTL: action.TTL}
 		err := d.enforcer.Ban(ctx, t)
 		if err != nil {
 			slog.ErrorContext(ctx, "daemon: enforcer ban failed", "ip", action.IP, "err", err)
 			d.notifyCritical(ctx, fmt.Sprintf("enforcer ban failed for %s: %v", action.IP, err))
+		} else {
+			banApplied = true
 		}
 		// Enforcement-state health (issue #174): a failed ban flips the
 		// daemon to DEGRADED so status/doctor stop claiming protection.
 		d.recordEnforceResult(ctx, "ban", err)
 	}
+	d.recordActionMetrics(action, banApplied)
 
 	if d.notifier != nil && (action.Op == "ban" || action.Op == "dry_ban" || action.Op == "notify_only") {
 		// notify_only streams are windowed per (IP, rule): the first event

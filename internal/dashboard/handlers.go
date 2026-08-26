@@ -37,6 +37,15 @@ func (s *Server) routes() *http.ServeMux {
 	// gated by the same session cookie check as every /dashboard route,
 	// so an unauthenticated browser cannot open the socket.
 	mux.HandleFunc("GET /dashboard/ws", s.requireAuth(s.handleWebSocket))
+	// Prometheus exposition (issue #183): session auth by default;
+	// dashboard.metrics_auth: false opens it for scrapers — acceptable
+	// only because the listener is loopback-only. Throttled either way
+	// inside handleMetrics.
+	if s.cfg.MetricsOpen {
+		mux.HandleFunc("GET /metrics", s.handleMetrics)
+	} else {
+		mux.HandleFunc("GET /metrics", s.requireAuth(s.handleMetrics))
+	}
 	return mux
 }
 

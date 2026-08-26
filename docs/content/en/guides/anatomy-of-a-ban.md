@@ -1,7 +1,7 @@
 ---
 title: Anatomy of a Ban
 description: An SSH brute force end-to-end — every pipeline stage, in dry-run and armed
-order: 11
+order: 13
 ---
 
 # Anatomy of a Ban

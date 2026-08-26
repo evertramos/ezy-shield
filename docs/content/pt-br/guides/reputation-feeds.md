@@ -1,7 +1,7 @@
 ---
 title: Feeds de Reputação
 description: Use blocklists públicas de IP como sinal extra ou fonte de bloqueio
-order: 13
+order: 16
 ---
 
 # Feeds de Reputação

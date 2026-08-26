@@ -154,6 +154,9 @@ jobs:
       - name: No raw placeholder tags in docs markdown (VitePress-safe)
         id: placeholders
         run: bash scripts/docs-placeholder-gate.sh
+      - name: No duplicate/missing order: frontmatter (sidebar ordering)
+        id: docsorder
+        run: bash scripts/docs-order-gate.sh
       - name: get.sh no-stable-release message path (mocked GitHub API)
         id: getsh
         run: bash scripts/get-sh-message-test.sh

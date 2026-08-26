@@ -1,7 +1,7 @@
 ---
 title: Detection Benchmark
 description: Reproducible detection-rate and false-positive numbers on a labeled corpus
-order: 8
+order: 9
 ---
 
 # Detection Benchmark

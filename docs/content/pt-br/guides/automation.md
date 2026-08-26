@@ -1,7 +1,7 @@
 ---
 title: Instalação não-interativa (Ansible, cloud-init)
 description: Provisione o EzyShield sem interação usando um arquivo de respostas
-order: 6
+order: 8
 ---
 
 # Instalação não-interativa (automação)

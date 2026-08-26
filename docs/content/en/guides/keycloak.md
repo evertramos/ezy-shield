@@ -1,7 +1,7 @@
 ---
 title: Keycloak
 description: Banning Keycloak login brute force via LOGIN_ERROR events
-order: 16
+order: 21
 ---
 
 # Protecting Keycloak

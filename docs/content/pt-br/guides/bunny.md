@@ -1,7 +1,7 @@
 ---
 title: Implantando na bunny.net
 description: Bloqueie IPs na borda com pull zones da bunny.net
-order: 1
+order: 2
 ---
 
 # Enforcement de Borda bunny.net

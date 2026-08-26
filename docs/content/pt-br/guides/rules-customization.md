@@ -1,7 +1,7 @@
 ---
 title: Customizando Regras de Detecção
 description: Ajuste ou adicione regras com drop-ins em rules.d que sobrevivem a updates
-order: 5
+order: 7
 ---
 
 # Customizando Regras de Detecção

@@ -1,7 +1,7 @@
 ---
 title: Deploy no AWS WAF
 description: Bloqueie IPs na edge da AWS com IPSets do WAFv2 (CloudFront/ALB)
-order: 1
+order: 3
 ---
 
 # Enforcement de Edge no AWS WAF

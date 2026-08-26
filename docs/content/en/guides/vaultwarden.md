@@ -1,7 +1,7 @@
 ---
 title: Vaultwarden
 description: Protecting a Vaultwarden password vault from brute force
-order: 14
+order: 19
 ---
 
 # Protecting Vaultwarden

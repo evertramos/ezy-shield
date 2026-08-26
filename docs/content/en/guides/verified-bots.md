@@ -1,7 +1,7 @@
 ---
 title: Verified Bots
 description: Protecting legitimate crawlers with forward-confirmed reverse DNS
-order: 9
+order: 11
 ---
 
 # Verified-Bot Protection

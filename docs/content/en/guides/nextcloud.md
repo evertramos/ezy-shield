@@ -1,7 +1,7 @@
 ---
 title: Nextcloud
 description: Protecting Nextcloud logins via the structured nextcloud.log
-order: 15
+order: 20
 ---
 
 # Protecting Nextcloud

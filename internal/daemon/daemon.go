@@ -86,6 +86,10 @@ type daemonStore interface {
 	StrikesForIP(ctx context.Context, ip netip.Addr, limit int) ([]store.StrikeRecord, error)
 	AuditLogForIP(ctx context.Context, ip netip.Addr, limit int) ([]store.AuditEntry, error)
 	ListOffenders(ctx context.Context, permanentOnly bool, limit int) ([]store.OffenderSummary, error)
+	// Retention pruning (issue #184) — see internal/store/retention.go.
+	CountPruneCandidates(ctx context.Context, pol store.RetentionPolicy, now time.Time) ([]store.PruneStat, error)
+	PruneRetention(ctx context.Context, pol store.RetentionPolicy, now time.Time) ([]store.PruneStat, bool, error)
+	ReclaimSpace(ctx context.Context, threshold float64) (bool, int64, error)
 }
 
 // geoLookup is the minimal interface consumed from *enrich.Enricher.
@@ -125,6 +129,10 @@ type Config struct {
 	// ExpireTick overrides the ban/allow expiry poll interval (tests only;
 	// 0 = default 1m). See runExpireBans / runExpireAllows (issue #327).
 	ExpireTick time.Duration
+	// MaintenanceTick overrides the retention-prune interval (tests only;
+	// 0 = default 24h with a jittered first run). See maintenance.go
+	// (issue #184).
+	MaintenanceTick time.Duration
 	// SSHRecheckTick / SSHRecheckDelay override the deferred anti-lockout
 	// re-evaluation poll interval and refusal→re-check delay (tests only;
 	// 0 = defaults). See sshrecheck.go (issue #420).
@@ -182,6 +190,11 @@ type Daemon struct {
 	// re-evaluation (0 = defaults; see sshrecheck.go, issue #420).
 	sshRecheckTick  time.Duration
 	sshRecheckDelay time.Duration
+	// retention, when non-nil, enables the daily prune job (issue #184;
+	// built in New from cfg.Retention). maintenanceTick overrides the
+	// interval in tests (0 = default 24h, jittered first run).
+	retention       *store.RetentionPolicy
+	maintenanceTick time.Duration
 
 	// sigCh, when non-nil, replaces the process-signal channel in Run so
 	// tests can drive the SIGTERM drain / SIGINT immediate-exit branches
@@ -340,6 +353,21 @@ func New(dcfg Config) (*Daemon, error) {
 		expireTick:      dcfg.ExpireTick,
 		sshRecheckTick:  dcfg.SSHRecheckTick,
 		sshRecheckDelay: dcfg.SSHRecheckDelay,
+		maintenanceTick: dcfg.MaintenanceTick,
+	}
+
+	// Retention pruning (issue #184): opt-in via the retention: section.
+	// Windows() cannot fail on a config that passed Validate; a nil result
+	// simply leaves the maintenance job disabled.
+	if dcfg.Cfg != nil && dcfg.Cfg.Retention != nil {
+		if w, err := dcfg.Cfg.Retention.Windows(); err == nil {
+			d.retention = &store.RetentionPolicy{
+				Strikes:                w.Strikes,
+				Audit:                  w.Audit,
+				AIUsage:                w.AIUsage,
+				AuditPruneAcknowledged: dcfg.Cfg.Retention.AuditExportNotRequired,
+			}
+		}
 	}
 
 	// Enforcement-anomaly delivery (ADR-0009 §4, issue #146): the engine
@@ -489,6 +517,9 @@ func (d *Daemon) Run(parentCtx context.Context) error {
 
 	// Trailing notify_only summaries for scanners that stopped (issue #421).
 	go d.runNotifySuppressFlush(ctx)
+
+	// Daily retention pruning, when configured (issue #184).
+	go d.runMaintenance(ctx)
 
 	// Signal handling. Tests inject d.sigCh to drive the SIGTERM/SIGINT
 	// branches without raising real process signals (which would leak into

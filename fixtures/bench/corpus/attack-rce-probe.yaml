@@ -1,0 +1,8 @@
+name: attack-rce-probe
+description: Known RCE exploit path — phpunit eval-stdin
+label: attack
+source: "file:/var/log/nginx/access.log"
+attacker_ips: ["203.0.113.14"]
+interval_ms: 1000
+lines:
+    - '203.0.113.14 - - [01/Jan/2026:12:00:00 +0000] "GET /vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php HTTP/1.1" 404 162 "-" "curl/8.0"'

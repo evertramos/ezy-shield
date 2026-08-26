@@ -71,6 +71,12 @@ type AbuseReportVerdict struct {
 	Confidence float64 `json:"confidence,omitempty"`
 	Reason     string  `json:"reason,omitempty"`
 	Source     string  `json:"source,omitempty"`
+	// Evidence is the captured-at-detection raw lines that produced this
+	// verdict (ADR-0011, issue #127) — authoritative, unlike the on-demand
+	// AbuseReportEvidence excerpts. Hostile input: same sanitization rules
+	// as AbuseReportEvidence.Lines. Absent for pre-#127 strikes and for
+	// AI/geo verdicts.
+	Evidence []string `json:"evidence,omitempty"`
 }
 
 // AbuseReportEvidence is one log source's excerpt in an AbuseReport. Lines

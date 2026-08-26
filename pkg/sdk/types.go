@@ -32,7 +32,20 @@ type Event struct {
 	Kind     string            // "ssh_fail", "http_request", "port_probe", ...
 	Fields   map[string]string // method, path, status, ua, port, ...
 	Origin   string            // collector id
+	// Raw is a bounded copy of the originating log line (ADR-0011, issue
+	// #127), attached by the daemon after parsing — parsers never set or
+	// read it. Capped at EvidenceRawCap bytes; may be nil (synthetic
+	// events, tests). Hostile input: sanitize at render time only.
+	Raw []byte
 }
+
+// Evidence bounds (ADR-0011): the per-event raw-line cap applied at attach
+// time, and the maximum triggering lines a firing rule attaches to its
+// verdict.
+const (
+	EvidenceRawCap   = 512
+	EvidenceMaxLines = 5
+)
 
 // Aggregate is the per-IP summary produced by the Aggregator over a time window.
 type Aggregate struct {
@@ -54,6 +67,12 @@ type Verdict struct {
 	Reason     string
 	Source     string        // "rules", "ai:anthropic", "ai:ollama", ...
 	SuggestTTL time.Duration // suggestion only; policy decides
+	// Evidence holds up to EvidenceMaxLines raw log lines that produced
+	// this verdict, captured at detection time (ADR-0011, issue #127).
+	// Only rule verdicts carry it; persisted with the strike via the
+	// strikes.verdicts JSON column. Hostile input — render-time sanitizing
+	// only.
+	Evidence []string `json:"evidence,omitempty"`
 }
 
 // Action is what the decision engine decides to do about an IP.

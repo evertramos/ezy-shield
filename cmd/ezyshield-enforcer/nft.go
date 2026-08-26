@@ -1,5 +1,29 @@
 package main
 
+// Atomicity contract (issue #214). One `nft` invocation applies its whole
+// script as a single kernel transaction, so a crash/OOM-kill of this helper
+// can never leave a PARTIAL nft script applied. Per logical operation:
+//
+//   - initTable, add element, delete element, flush, and every allow_* verb:
+//     one nft invocation each → atomic. Interrupting the helper between the
+//     kernel write and the cache write only stales the in-memory cache, which
+//     init() rebuilds from the kernel (with per-element `expires`, issue
+//     #383) on the next start.
+//   - replace-on-re-add (dispatch "add" when the cache holds the element):
+//     TWO invocations (delete, then add) — NOT atomic. Recovery: on a failed
+//     add the previous element is restored with its remaining lifetime; if
+//     the rollback also fails, the cache is made to agree with the empty
+//     kernel so the daemon's periodic reconcile re-adds from the store.
+//   - name switch (switchNamesLocked): multi-step but idempotent — initTable
+//     is create-if-absent and nothing is deleted until the new table is live;
+//     a failure mid-switch leaves the old table untouched and a retry
+//     converges. No destructive rollback is attempted: the target table may
+//     have pre-existed with operator state we must not delete.
+//
+// The store↔kernel backstop for every non-atomic window is the daemon's
+// reconcile (startup + periodic Sync), which repairs both directions and now
+// reports repair counts for auditing (issue #214).
+
 import (
 	"bytes"
 	"context"

@@ -31,6 +31,7 @@ import (
 	"net/netip"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -132,12 +133,15 @@ type feedState struct {
 	lastGood     []netip.Prefix
 }
 
-// Fetcher downloads and parses feeds. Safe for use from one goroutine per
-// Fetcher (the refresh loop); construct one per daemon.
+// Fetcher downloads and parses feeds. Safe for concurrent use: Run spawns
+// one goroutine per feed and on-demand refreshes may race with them, so the
+// per-feed cache map is mutex-guarded. Construct one per daemon.
 type Fetcher struct {
 	client *http.Client
 	logger *slog.Logger
-	state  map[string]*feedState
+
+	mu    sync.Mutex
+	state map[string]*feedState
 }
 
 // New builds a Fetcher. client may be nil (a default HTTPS client with
@@ -180,22 +184,25 @@ func (f *Fetcher) Fetch(ctx context.Context, cfg FeedConfig) (*Result, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	f.mu.Lock()
 	st, ok := f.state[cfg.Name]
 	if !ok {
 		st = &feedState{}
 		f.state[cfg.Name] = st
 	}
+	etag, lastMod := st.etag, st.lastModified
+	f.mu.Unlock()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.URL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("feeds %s: build request: %w", cfg.Name, err)
 	}
 	req.Header.Set("User-Agent", "ezyshield-feeds/1")
-	if st.etag != "" {
-		req.Header.Set("If-None-Match", st.etag)
+	if etag != "" {
+		req.Header.Set("If-None-Match", etag)
 	}
-	if st.lastModified != "" {
-		req.Header.Set("If-Modified-Since", st.lastModified)
+	if lastMod != "" {
+		req.Header.Set("If-Modified-Since", lastMod)
 	}
 
 	resp, err := f.client.Do(req)
@@ -206,9 +213,12 @@ func (f *Fetcher) Fetch(ctx context.Context, cfg FeedConfig) (*Result, error) {
 
 	switch {
 	case resp.StatusCode == http.StatusNotModified:
+		f.mu.Lock()
+		lastGood := st.lastGood
+		f.mu.Unlock()
 		return &Result{
 			Name:        cfg.Name,
-			Prefixes:    st.lastGood,
+			Prefixes:    lastGood,
 			FetchedAt:   time.Now(),
 			NotModified: true,
 		}, nil
@@ -226,15 +236,19 @@ func (f *Fetcher) Fetch(ctx context.Context, cfg FeedConfig) (*Result, error) {
 			cfg.Name, res.Invalid)
 	}
 
+	f.mu.Lock()
 	st.etag = resp.Header.Get("ETag")
 	st.lastModified = resp.Header.Get("Last-Modified")
 	st.lastGood = res.Prefixes
+	f.mu.Unlock()
 	return res, nil
 }
 
 // LastGood returns the cached last-known-good set for a feed (nil when the
 // feed never fetched successfully).
 func (f *Fetcher) LastGood(name string) []netip.Prefix {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if st, ok := f.state[name]; ok {
 		return st.lastGood
 	}

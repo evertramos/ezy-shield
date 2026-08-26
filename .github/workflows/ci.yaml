@@ -239,6 +239,11 @@ jobs:
         run: |
           set -o pipefail
           go test -fuzz=FuzzPostfixParser -fuzztime=10s ./internal/parser/ | tee fuzz-postfix.txt
+      - name: Fuzz Dovecot parser (10s)
+        id: fdovecot
+        run: |
+          set -o pipefail
+          go test -fuzz=FuzzDovecotParser -fuzztime=10s ./internal/parser/ | tee fuzz-dovecot.txt
       - name: Fuzz proc SSH-peer parser (10s)
         id: fproc
         run: |
@@ -270,6 +275,7 @@ jobs:
             echo "| FuzzTraefikParser | $(execs fuzz-traefik.txt) | ${{ steps.ftraefik.outcome }} |"
             echo "| FuzzApacheErrorParser | $(execs fuzz-apache-error.txt) | ${{ steps.fapacheerr.outcome }} |"
             echo "| FuzzPostfixParser | $(execs fuzz-postfix.txt) | ${{ steps.fpostfix.outcome }} |"
+            echo "| FuzzDovecotParser | $(execs fuzz-dovecot.txt) | ${{ steps.fdovecot.outcome }} |"
             echo "| FuzzProcTCPPeers | $(execs fuzz-proc.txt) | ${{ steps.fproc.outcome }} |"
             echo "| FuzzSIEMFormatters | $(execs fuzz-siem.txt) | ${{ steps.fsiem.outcome }} |"
             echo "| FuzzParseProcNetTCP | $(execs fuzz-scan.txt) | ${{ steps.fscan.outcome }} |"

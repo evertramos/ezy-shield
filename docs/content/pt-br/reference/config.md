@@ -324,6 +324,43 @@ sudo sqlite3 /var/lib/ezyshield/ezyshield.db \
    GROUP BY ip ORDER BY usd DESC LIMIT 10;"
 ```
 
+## self_check
+
+Self-check periódico de hardening — **ligado por padrão, sem precisar de
+seção**. A cada 6 horas o daemon re-executa as checagens read-only de
+systemd do `ezyshield doctor` (o `RestrictAddressFamilies`/`AF_NETLINK`
+efetivo do enforcer e o `RuntimeDirectory` dos dois serviços — ciente de
+drop-ins, via `systemctl show`) mais o probe funcional de netlink contra
+o helper em execução. Isso pega o drift de não-enforcement silencioso
+(uma unit editada à mão) **antes** de o próximo restart do serviço
+morder — sem você precisar lembrar de rodar o doctor.
+
+Semântica de notificação — só transições:
+
+- saudável → degradado: **um CRITICAL** nomeando a checagem que falhou
+  (mais uma entrada append-only `selfcheck_degraded` na auditoria);
+- degradado → saudável: **um INFO** (`selfcheck_recovered`);
+- estado estável: silêncio.
+
+Hosts sem systemd, units não instaladas ou helper antigo: essas checagens
+retornam N/A e contam como saudáveis — instalações via script/manuais
+ficam quietas. O self-check é estritamente read-only: nunca edita units
+nem reinicia serviços; a correção continua sendo uma dica copy-paste.
+
+**Para desativar** (instalações mínimas, ou hosts onde chamadas
+periódicas de `systemctl show` são indesejadas):
+
+```yaml
+self_check:
+  enabled: false     # desliga por completo — o doctor continua disponível sob demanda
+  # interval: 6h     # cadência quando ligado; default 6h, piso 10m
+```
+
+| Campo | Descrição |
+|-------|-----------|
+| `enabled` | omitido = `true`; `false` desliga o self-check periódico por completo |
+| `interval` | duração Go entre execuções; default `6h`, piso `10m` |
+
 ## enrich (GeoIP/ASN)
 
 Enriquecimento GeoIP/ASN — habilita `block_countries` / `block_asns` no policy e as colunas de país/ASN em `list` e `report`. Opcional: sem a seção `enrich:` o daemon roda normalmente com enriquecimento vazio (sem país/ASN em lugar nenhum, e essas chaves de policy nunca casam).

@@ -450,6 +450,21 @@
         }
       }
     },
+    "self_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Periodic hardening self-check (issue #563): the read-only systemd unit checks from doctor (AF_NETLINK for the enforcer, RuntimeDirectory for both units) plus the functional netlink probe, run on a timer. ON BY DEFAULT; notifies CRITICAL only on the healthy→degraded transition and INFO on recovery — steady state is silent. Set enabled: false to opt out entirely (minimal installs, or hosts where periodic systemctl calls are undesirable). Never edits units or restarts services.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Omitted = true. false disables the periodic self-check entirely (documented opt-out)."
+        },
+        "interval": {
+          "type": "string",
+          "description": "Cadence as a Go duration string (e.g. '6h'). Default 6h; floor 10m."
+        }
+      }
+    },
     "plugins": {
       "type": "object",
       "additionalProperties": false,

@@ -542,6 +542,51 @@
           "description": "Sweep cadence in seconds. Default 10; floor 5."
         }
       }
+    },
+    "siem": {
+      "type": "array",
+      "description": "Outbound SIEM event forwarding (issue #203). Async with a bounded queue — a slow or dead SIEM never back-pressures the pipeline. No listener is ever created.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "address"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,32}$",
+            "description": "Unique sink identifier used in logs/doctor."
+          },
+          "address": {
+            "type": "string",
+            "pattern": "^(udp|tcp|tls|uds|file)://",
+            "description": "scheme://target: udp://host:port, tcp://host:port, tls://host:port, uds:///path, file:///path. Plaintext tcp/udp require allow_insecure_transport."
+          },
+          "format": {
+            "type": "string",
+            "enum": ["json", "cef", "rfc5424"],
+            "description": "Event format. Default json. rfc5424 over stream transports uses RFC 6587 octet-counting framing."
+          },
+          "events": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Audit ops to forward (empty = all). See the SIEM guide for the documented kinds."
+          },
+          "ca_file": {
+            "type": "string",
+            "description": "PEM CA bundle path pinning the tls:// server chain. Verification is never disabled; this only replaces the system roots."
+          },
+          "queue_size": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65536,
+            "description": "Bounded in-memory queue per sink (default 1024). When full, the OLDEST event is dropped and counted."
+          },
+          "allow_insecure_transport": {
+            "type": "boolean",
+            "description": "Explicit opt-in required for plaintext tcp:// or udp:// — audit events cross the wire unencrypted. doctor warns loudly when set."
+          }
+        }
+      }
     }
   }
 }

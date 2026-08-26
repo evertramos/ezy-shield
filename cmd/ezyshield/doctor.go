@@ -102,6 +102,8 @@ func runDoctor(cmd *cobra.Command, configDir, dbPath, socketPath string, jsonOut
 	checks = append(checks, checkCDNRanges())
 	checks = append(checks, checkAllowlistBreadth(configDir)...)
 	checks = append(checks, checkCloudflareEnforcers(configDir)...)
+	// issue #203: SIEM sink reachability (non-fatal) + plaintext warning.
+	checks = append(checks, checkSIEMSinks(configDir)...)
 	// issue #198: bunny.net enforcer credentials/connectivity (read-only).
 	checks = append(checks, checkBunnyEnforcer(configDir)...)
 	// issue #240: PATH/systemd shadowing between a script install and a

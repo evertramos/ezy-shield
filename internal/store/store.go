@@ -739,6 +739,40 @@ func (s *DB) ListAuditLog(ctx context.Context, limit int) ([]AuditEntry, error) 
 	return out, rows.Err()
 }
 
+// AuditLogAfter returns up to limit audit_log rows with id > afterID, in
+// ascending id order. Read-only; backs the SIEM forwarding tail (issue
+// #203), which follows the audit log as the single choke point through
+// which every audited action passes.
+func (s *DB) AuditLogAfter(ctx context.Context, afterID int64, limit int) ([]AuditEntry, error) {
+	switch {
+	case limit <= 0:
+		limit = 100
+	case limit > 1000:
+		limit = 1000
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, recorded_at, op, ip, ttl_seconds, strike_num, reason
+		FROM audit_log
+		WHERE id > ?
+		ORDER BY id ASC
+		LIMIT ?
+	`, afterID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: AuditLogAfter: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make([]AuditEntry, 0, limit)
+	for rows.Next() {
+		var e AuditEntry
+		if err := rows.Scan(&e.ID, &e.RecordedAt, &e.Op, &e.IP, &e.TTLSeconds, &e.Strike, &e.Reason); err != nil {
+			return nil, fmt.Errorf("store: AuditLogAfter scan: %w", err)
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 // AllowEntry is one row of the allowlist table.
 type AllowEntry struct {
 	Prefix    netip.Prefix

@@ -37,3 +37,12 @@ allowlist: []
 
 # Admin CIDRs merged into the runtime allowlist at startup and before each ban
 admin_cidrs: []
+
+# SSH anti-lockout tuning (ADR-0013). By default any ESTABLISHED connection
+# to the sshd port grants ban immunity. With require_authenticated: true,
+# immunity also requires an active systemd-logind session for that IP (real
+# logins — interactive or ssh-exec/automation); a connection parked before
+# authentication becomes bannable after a 10s grace. Fails OPEN: any logind
+# problem reverts to the default behavior. See the policy reference.
+# anti_lockout:
+#   require_authenticated: true

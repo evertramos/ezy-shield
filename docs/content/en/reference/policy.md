@@ -193,6 +193,40 @@ is **not** rejected. Defaults are applied *before* the range check, so a `0`
 `30` respectively — and then passes. `observe_threshold` is the exception: it
 has no default, so `0` stays `0`.
 
+## anti_lockout (ADR-0013)
+
+By default, any IP with an **ESTABLISHED** TCP connection to the sshd
+port is immune to bans — the guarantee that you can never lock yourself
+out. The kernel, however, cannot tell a *logged-in session* from a
+*connection parked before authentication* (sshd's `Timeout before
+authentication`), so an attacker holding sockets open borrows the same
+immunity (the #559 incident).
+
+```yaml
+anti_lockout:
+  require_authenticated: true   # default: false
+```
+
+With `require_authenticated: true`, immunity additionally requires an
+**active systemd-logind session** for that IP — which covers both your
+interactive shells and non-interactive automation (`ssh host 'cmd'`,
+agents), since logind registers PAM sessions with or without a TTY. A
+connection that never authenticates becomes bannable after a **10s
+grace window** (covers the just-logged-in race).
+
+Safety properties (the reason this is opt-in and safe to try):
+
+- **Fail-open** — if `loginctl` is missing, errors, or times out, or a
+  session's `RemoteHost` is a hostname (`UseDNS yes`), narrowing is
+  disabled entirely and behavior reverts to ESTABLISHED-only. No logind
+  failure can enable a ban today's code would refuse.
+- `allowlist` / `admin_cidrs` are checked **before** any of this and
+  remain your durable protection — put your fixed IPs there.
+- Known limitation: an **idle** `ControlPersist` master (no open
+  channel) has no logind session and loses immunity while idle; active
+  work always has a channel. `ezyshield doctor` reports the effective
+  mode and whether logind answers.
+
 ## SSH probe / aggressive tier
 
 The SSH parser recognises far more line variants than it bans on. Every SSH

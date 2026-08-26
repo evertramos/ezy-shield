@@ -198,6 +198,41 @@ então um `0` (indistinguível de um campo omitido) é substituído pelo default
 `70` e `30` respectivamente — e então passa. `observe_threshold` é a exceção:
 como não tem default, `0` permanece `0`.
 
+## anti_lockout (ADR-0013)
+
+Por padrão, qualquer IP com uma conexão TCP **ESTABLISHED** na porta do
+sshd é imune a bans — a garantia de que você nunca se tranca para fora.
+O kernel, porém, não distingue uma *sessão logada* de uma *conexão
+parada antes da autenticação* (o `Timeout before authentication` do
+sshd), então um atacante segurando sockets abertos pega emprestada a
+mesma imunidade (o incidente #559).
+
+```yaml
+anti_lockout:
+  require_authenticated: true   # padrão: false
+```
+
+Com `require_authenticated: true`, a imunidade passa a exigir também uma
+**sessão ativa no systemd-logind** para aquele IP — o que cobre tanto
+seus shells interativos quanto a automação não-interativa
+(`ssh host 'cmd'`, agentes), já que o logind registra sessões PAM com ou
+sem terminal. Uma conexão que nunca autentica vira banível após uma
+**janela de graça de 10s** (cobre a corrida do login recém-completado).
+
+Propriedades de segurança (o motivo de ser opt-in e seguro de testar):
+
+- **Fail-open** — se o `loginctl` estiver ausente, com erro ou timeout,
+  ou se o `RemoteHost` de uma sessão for hostname (`UseDNS yes`), o
+  estreitamento é desligado por inteiro e o comportamento volta ao
+  ESTABLISHED-only. Nenhuma falha do logind pode habilitar um ban que o
+  código de hoje recusaria.
+- `allowlist` / `admin_cidrs` são checadas **antes** de tudo isso e
+  continuam sendo sua proteção durável — coloque seus IPs fixos lá.
+- Limitação conhecida: um master `ControlPersist` **ocioso** (sem canal
+  aberto) não tem sessão logind e perde a imunidade enquanto parado;
+  trabalho ativo sempre tem canal. O `ezyshield doctor` reporta o modo
+  efetivo e se o logind responde.
+
 ## Tier SSH probe / agressivo
 
 O parser de SSH reconhece muito mais variantes de linha do que aquelas que geram ban. Todo evento SSH carrega um de quatro kinds:

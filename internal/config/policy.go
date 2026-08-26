@@ -95,6 +95,25 @@ type Policy struct {
 	// ban ended within this window. Defaults to 24h if omitted or <= 0;
 	// values above 7d are clamped down (widening weakens the safety cap).
 	EscalationExemptWindow Duration `yaml:"escalation_exempt_window"`
+
+	// AntiLockout tunes the SSH anti-lockout (ADR-0013). Absent = defaults.
+	AntiLockout *AntiLockoutCfg `yaml:"anti_lockout"`
+}
+
+// AntiLockoutCfg holds the ADR-0013 knobs.
+type AntiLockoutCfg struct {
+	// RequireAuthenticated narrows SSH-peer immunity to peers with an
+	// active systemd-logind session (someone actually logged in): a
+	// connection parked before authentication — the #559 attack — becomes
+	// bannable after a short grace window. Default FALSE (today's
+	// behavior); every logind failure mode falls back to it too (fail
+	// open, Hard Rule 1). Flip only after reading the policy reference.
+	RequireAuthenticated bool `yaml:"require_authenticated"`
+}
+
+// RequireAuthenticatedPeer resolves the ADR-0013 flag (default false).
+func (p *Policy) RequireAuthenticatedPeer() bool {
+	return p.AntiLockout != nil && p.AntiLockout.RequireAuthenticated
 }
 
 // IsArmed reports whether enforcement is live. It is the required accessor

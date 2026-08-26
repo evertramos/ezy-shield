@@ -64,6 +64,12 @@ type cdnStep struct {
 	bunnyEnabled   bool
 	bunnyAttempted bool
 	bunny          *bunnySetup
+	// awsWAF* mirror the same pattern for the AWS WAF subflow (issue
+	// #201). No secret material exists in awsWAFSetup — AWS credentials
+	// come from the standard chain, never from EzyShield files.
+	awsWAFEnabled   bool
+	awsWAFAttempted bool
+	awsWAF          *awsWAFSetup
 }
 
 // cfAccountSetup is one configured Cloudflare account: the config.yaml entry
@@ -159,6 +165,9 @@ type cdnDeps struct {
 	// BunnyAPIBaseURL overrides https://api.bunny.net for tests. Empty
 	// means the real endpoint (issue #198).
 	BunnyAPIBaseURL string
+	// AWSWAFEndpoint overrides the wafv2 API endpoint for tests. Empty
+	// means the real per-region endpoint (issue #201).
+	AWSWAFEndpoint string
 	// Yes mirrors the wizard's --yes flag: when true, prompts are skipped
 	// entirely (the whole CDN subflow becomes a no-op, since we cannot
 	// safely make firewall + secret decisions without operator input).
@@ -281,6 +290,9 @@ func runGenericEdgeSubflows(
 	}
 	if pr.askBool("Configure the bunny.net edge enforcer (pull-zone blocklist)?", false) {
 		runBunnySubflow(ctx, p, pr, step, deps)
+	}
+	if pr.askBool("Configure the AWS WAF edge enforcer (WAFv2 IPSets, CloudFront/ALB)?", false) {
+		runAWSWAFSubflow(ctx, p, pr, step, deps)
 	}
 }
 

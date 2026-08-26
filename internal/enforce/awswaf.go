@@ -31,6 +31,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/netip"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -506,6 +507,37 @@ func awsStatusErr(status int, body []byte) error {
 	}
 	return &awsAPIError{Status: status, Message: string(snippet)}
 }
+
+// PreflightResult is one read-only check outcome for doctor (#201).
+type PreflightResult struct {
+	Label string // "credentials", "ipset_v4:<name>", "ipset_v6:<name>"
+	Err   error  // nil = pass
+}
+
+// Preflight verifies, read-only, what `ezyshield doctor` needs: the AWS
+// credential chain resolves, and GetIPSet succeeds on every designated set
+// (which proves both the wafv2:GetIPSet permission and the set identity).
+// Never mutates anything.
+func (e *AWSWAFEnforcer) Preflight(ctx context.Context) []PreflightResult {
+	var out []PreflightResult
+	if _, err := e.creds.credentials(ctx); err != nil {
+		return append(out, PreflightResult{Label: "credentials", Err: err})
+	}
+	out = append(out, PreflightResult{Label: "credentials"})
+	for label, rt := range map[string]*awsIPSetRuntime{"ipset_v4": e.v4, "ipset_v6": e.v6} {
+		if rt == nil {
+			continue
+		}
+		_, _, err := e.getIPSet(ctx, rt.ref)
+		out = append(out, PreflightResult{Label: label + ":" + rt.ref.Name, Err: err})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Label < out[j].Label })
+	return out
+}
+
+// SetEndpointForTest overrides the API endpoint (mock servers in doctor
+// and wizard tests).
+func (e *AWSWAFEnforcer) SetEndpointForTest(url string) { e.endpoint = url }
 
 // isAllowlisted reports whether the target's address falls inside any
 // allowlist prefix (Hard Rule §1 belt-and-braces; the gate is

@@ -288,6 +288,37 @@ type EnforceCfg struct {
 	NFTables   *NFTablesCfg   `yaml:"nftables"`
 	Cloudflare CloudflareCfgs `yaml:"cloudflare"`
 	Bunny      *BunnyCfg      `yaml:"bunny"`
+	AWSWAF     *AWSWAFCfg     `yaml:"aws_waf"`
+}
+
+// AWSWAFCfg holds AWS WAFv2 edge enforcer settings (issue #201, per
+// ADR-0012). Presence of the section enables the enforcer. Credentials are
+// deliberately ABSENT from this struct: they come from the standard AWS
+// chain (env vars, ~/.aws/credentials, IMDSv2) and must never appear in
+// EzyShield config files — the strict loader rejects any credential-shaped
+// key here as an unknown field, and validation double-checks for pasted
+// key material in the values.
+type AWSWAFCfg struct {
+	// Name is a short operator-chosen label used to disambiguate this
+	// enforcer in logs (surfaces as "awswaf[<name>]"). Optional.
+	Name string `yaml:"name"`
+	// Scope is "regional" (ALB/API Gateway; requires Region) or
+	// "cloudfront" (global; the API pins region us-east-1).
+	Scope string `yaml:"scope"`
+	// Region is the AWS region for scope "regional" (e.g. eu-west-1).
+	Region string `yaml:"region"`
+	// IPSetV4/IPSetV6 designate the IPSets EzyShield maintains. At least
+	// one is required; EzyShield only ever mutates the sets named here and
+	// never touches WebACLs.
+	IPSetV4 *AWSIPSetRefCfg `yaml:"ipset_v4"`
+	IPSetV6 *AWSIPSetRefCfg `yaml:"ipset_v6"`
+}
+
+// AWSIPSetRefCfg identifies one WAFv2 IPSet by its Name and Id (both shown
+// in the AWS console and present in the set's ARN).
+type AWSIPSetRefCfg struct {
+	Name string `yaml:"name"`
+	ID   string `yaml:"id"`
 }
 
 // BunnyCfg holds bunny.net edge enforcer settings (issue #198). Presence of
@@ -589,6 +620,11 @@ func (c *Config) Validate() error {
 	if c.Enforce != nil && c.Enforce.Bunny != nil {
 		if err := validateBunny(c.Enforce.Bunny); err != nil {
 			return fmt.Errorf("enforce.bunny: %w", err)
+		}
+	}
+	if c.Enforce != nil && c.Enforce.AWSWAF != nil {
+		if err := validateAWSWAF(c.Enforce.AWSWAF); err != nil {
+			return fmt.Errorf("enforce.aws_waf: %w", err)
 		}
 	}
 	if c.Notify != nil {
@@ -987,6 +1023,51 @@ func validateBunny(b *BunnyCfg) error {
 			return fmt.Errorf("'name': %w", err)
 		}
 	}
+	return nil
+}
+
+// validateAWSWAF checks the AWS WAF edge enforcer section (issue #201, per
+// ADR-0012): scope regional|cloudfront (regional requires a region), at
+// least one fully-identified IPSet, and — because AWS credentials must
+// NEVER live in EzyShield config files — a fail-closed refusal of anything
+// that looks like pasted AWS key material in the values.
+func validateAWSWAF(a *AWSWAFCfg) error {
+	switch strings.ToLower(a.Scope) {
+	case "regional":
+		if a.Region == "" {
+			return fmt.Errorf("scope 'regional' requires 'region' (e.g. eu-west-1)")
+		}
+	case "cloudfront":
+		// The WAFv2 API pins CLOUDFRONT calls to us-east-1; a region here
+		// would be ignored, which is operator confusion — reject it.
+		if a.Region != "" && a.Region != "us-east-1" {
+			return fmt.Errorf("scope 'cloudfront' pins region us-east-1; drop 'region' (got %q)", a.Region)
+		}
+	case "":
+		return fmt.Errorf("'scope' is required: regional or cloudfront")
+	default:
+		return fmt.Errorf("'scope' must be regional or cloudfront, got %q", a.Scope)
+	}
+	if a.IPSetV4 == nil && a.IPSetV6 == nil {
+		return fmt.Errorf("at least one of 'ipset_v4'/'ipset_v6' is required")
+	}
+	for label, ref := range map[string]*AWSIPSetRefCfg{"ipset_v4": a.IPSetV4, "ipset_v6": a.IPSetV6} {
+		if ref == nil {
+			continue
+		}
+		if ref.Name == "" || ref.ID == "" {
+			return fmt.Errorf("%s: both 'name' and 'id' are required", label)
+		}
+	}
+	if a.Name != "" {
+		if err := validateCFInstanceName(a.Name); err != nil {
+			return fmt.Errorf("'name': %w", err)
+		}
+	}
+	// No pasted-credential check needed here: the loader's generic
+	// credential scan already rejects AKIA/ASIA-shaped material in ANY
+	// config field, and this struct deliberately has no credential fields
+	// at all (ADR-0012: the standard AWS chain only).
 	return nil
 }
 

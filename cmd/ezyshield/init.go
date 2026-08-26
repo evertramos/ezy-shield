@@ -927,7 +927,8 @@ func renderGeneratedConfig(state *wizardState) ([]byte, error) {
 
 	hasCF := state.cdn != nil && state.cdn.cfEnabled && len(state.cdn.cfAccounts) > 0
 	hasBunny := state.cdn != nil && state.cdn.bunnyEnabled && state.cdn.bunny != nil
-	if state.nftPath != "" || hasCF || hasBunny {
+	hasAWSWAF := state.cdn != nil && state.cdn.awsWAFEnabled && state.cdn.awsWAF != nil
+	if state.nftPath != "" || hasCF || hasBunny || hasAWSWAF {
 		b.WriteString("enforce:\n")
 		if state.nftPath != "" {
 			// The empty mapping is the whole configuration (issue #268): its
@@ -942,6 +943,9 @@ func renderGeneratedConfig(state *wizardState) ([]byte, error) {
 		}
 		if hasBunny {
 			emitBunnyYAML(&b, state.cdn)
+		}
+		if hasAWSWAF {
+			emitAWSWAFYAML(&b, state.cdn)
 		}
 	}
 

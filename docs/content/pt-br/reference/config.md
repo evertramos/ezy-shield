@@ -58,7 +58,7 @@ collectors:
 | `path` | para `file` | arquivo a acompanhar |
 | `unit` | para `journald` | unit systemd a acompanhar |
 | `container` | para `docker` | nome do container, ID curto ou ID completo |
-| `parser` | não | força um parser: `nginx` \| `ssh` \| `apache` \| `apache-error` \| `traefik` \| `caddy` (padrão: roteado automaticamente a partir da fonte). `apache` lê o log de **acesso** do Apache (formato combined, compartilhado com `nginx`); `apache-error` lê o **error_log** do Apache (`error.log` / `error_log`). **Honrado apenas para coletores `file` e `docker`** — o `journald` o ignora e sempre roteia o parser a partir da unidade. |
+| `parser` | não | força um parser: `nginx` \| `ssh` \| `apache` \| `apache-error` \| `traefik` \| `caddy` \| `postfix` \| `dovecot` (padrão: roteado automaticamente a partir da fonte). `apache` lê o log de **acesso** do Apache (formato combined, compartilhado com `nginx`); `apache-error` lê o **error_log** do Apache (`error.log` / `error_log`); `postfix` lê linhas do smtpd do Postfix (`mail.log` / `maillog`, ou as units journald `postfix` / `postfix@*` — falhas de auth SASL, rejects de relay e assinaturas de abuso de conexão viram eventos `smtp_auth_fail` / `smtp_relay_denied` / `smtp_abuse`); `dovecot` lê linhas dos processos de login do Dovecot (`dovecot.log`, ou a unit journald `dovecot` — falhas de auth IMAP/POP3 viram `imap_auth_fail` e sondas sem credenciais `imap_probe`; em setups com `mail.log` compartilhado, que roteia primeiro para `postfix`, use a unit journald ou este override explícito). **Honrado apenas para coletores `file` e `docker`** — o `journald` o ignora e sempre roteia o parser a partir da unidade. |
 
 ### Coletor SSH (nome do unit varia por distro)
 
@@ -147,6 +147,25 @@ enquanto um *ban* atrasado é exposição real — por isso bans seguem o
 `debounce` e apenas remoções esperam o intervalo de flush. O `ezyshield
 unban` manual também propaga ao edge na cadência do flush (o unban local no
 nftables é imediato).
+
+### bunny
+
+Enforcement de borda bunny.net via a lista de IPs bloqueados de cada pull zone. A presença da seção o habilita. **O EzyShield assume a propriedade da lista de IPs bloqueados** nas zonas configuradas — entradas adicionadas manualmente no painel da bunny são removidas no reconcile. Veja o [guia bunny.net](../guides/bunny.md).
+
+```yaml
+enforce:
+  bunny:
+    api_key: env:BUNNY_API_KEY   # segredos são referências env:, nunca inline
+    pull_zones: [123456, 234567] # IDs numéricos das pull zones
+```
+
+| Campo | Obrigatório | Descrição |
+|-------|-------------|-----------|
+| `api_key` | sim | referência `env:VARNAME` para a API key de conta da bunny.net |
+| `pull_zones` | sim | IDs numéricos de pull zone (ao menos um, positivos, únicos) |
+| `name` | não | rótulo mostrado nos logs como `bunny[<nome>]` |
+
+O enforcer limita cada zona a 500 IPs bloqueados (a bunny não documenta um limite do provider); acima disso os bans mais recentes vencem, com warning.
 
 ## notify
 
@@ -278,6 +297,18 @@ A chave é um segredo como qualquer outro: coloque `MAXMIND_LICENSE_KEY=...` em 
 |-------|--------|-----------|
 | `addr` | `127.0.0.1:9090` | Endereço de bind — **somente loopback**; binds fora do loopback são recusados no startup |
 | `auth_db_path` | `<data_dir>/dashboard.db` | Banco de autenticação do dashboard |
+
+## webshell_watch
+
+Tripwire de webshell (opt-in): varre web roots por arquivos web executáveis novos ou modificados. Puramente observacional — audit + notificação, nunca ban. Veja o [guia Tripwire de Webshell](../guides/webshell-tripwire.md).
+
+| Campo | Padrão | Descrição |
+|-------|--------|-----------|
+| `enabled` | `false` | Chave de opt-in |
+| `roots` | — | Diretórios web-root absolutos a varrer (**obrigatório** quando habilitado) |
+| `extensions` | `.php, .phtml, .php5, .php7, .phar` | Extensões vigiadas (com ponto inicial) |
+| `ignore` | `[]` | Padrões de caminho a ignorar — globs `path.Match`, ou substring quando o padrão não tem metacaracteres de glob |
+| `interval_sec` | `10` | Cadência da varredura em segundos (mínimo 5) |
 
 ## Exemplo mínimo
 

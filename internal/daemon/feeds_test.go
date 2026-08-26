@@ -207,7 +207,7 @@ func TestFeedReputation_ObserveBoost(t *testing.T) {
 
 	// Local events + reputation → boosted verdicts. Without local events
 	// the feed alone produces nothing.
-	if v := d.evaluateRules(ctx, attacker); len(v) != 0 {
+	if v := d.evaluateRules(ctx, attacker, false); len(v) != 0 {
 		t.Fatalf("feed alone produced verdicts: %+v", v)
 	}
 	now := time.Now()
@@ -218,7 +218,7 @@ func TestFeedReputation_ObserveBoost(t *testing.T) {
 			Kind:     "ssh_fail",
 		})
 	}
-	verdicts := d.evaluateRules(ctx, attacker)
+	verdicts := d.evaluateRules(ctx, attacker, false)
 	if len(verdicts) == 0 {
 		t.Fatal("expected rule verdicts after 10 ssh_auth_fail events")
 	}

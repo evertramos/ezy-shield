@@ -23,6 +23,7 @@ import (
 	"github.com/evertramos/ezy-shield/internal/notify"
 	"github.com/evertramos/ezy-shield/internal/parser"
 	"github.com/evertramos/ezy-shield/internal/store"
+	"github.com/evertramos/ezy-shield/internal/webshell"
 	"github.com/evertramos/ezy-shield/pkg/sdk"
 )
 
@@ -47,6 +48,11 @@ func defaultParsers(logger *slog.Logger) []sdk.Parser {
 		parser.NewApacheErrorParser(logger),
 		parser.NewCaddyParser(logger, parser.CaddyConfig{}),
 		parser.NewTraefikParser(logger, parser.TraefikConfig{}),
+		parser.NewPostfixParser(logger),
+		parser.NewDovecotParser(logger),
+		parser.NewVaultwardenParser(logger),
+		parser.NewNextcloudParser(logger),
+		parser.NewKeycloakParser(logger),
 	}
 }
 
@@ -162,8 +168,8 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 		enf = nftEnf
 	}
 
+	var edgeEnforcers []sdk.Enforcer
 	if cfg.Enforce != nil && len(cfg.Enforce.Cloudflare) > 0 {
-		cfEnforcers := make([]sdk.Enforcer, 0, len(cfg.Enforce.Cloudflare))
 		for i := range cfg.Enforce.Cloudflare {
 			cf := cfg.Enforce.Cloudflare[i]
 			cfEnf, cfErr := enforce.NewCloudflareEnforcer(ctx, &cf, parseAllowlist(policy))
@@ -174,19 +180,32 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 					"cloudflare_name", cf.Name, "err", cfErr)
 				continue
 			}
-			cfEnforcers = append(cfEnforcers, cfEnf)
+			edgeEnforcers = append(edgeEnforcers, cfEnf)
 		}
-		all := make([]sdk.Enforcer, 0, len(cfEnforcers)+1)
+	}
+	if cfg.Enforce != nil && cfg.Enforce.Bunny != nil {
+		bunnyEnf, bErr := enforce.NewBunnyEnforcer(&enforce.BunnyConfig{
+			AccessKey:   cfg.Enforce.Bunny.APIKey,
+			PullZoneIDs: cfg.Enforce.Bunny.PullZones,
+			Name:        cfg.Enforce.Bunny.Name,
+		}, parseAllowlist(policy))
+		if bErr != nil {
+			// Same isolation as cloudflare: a missing key disables only bunny.
+			slog.Warn("run: bunny enforcer unavailable; continuing without it",
+				"bunny_name", cfg.Enforce.Bunny.Name, "err", bErr)
+		} else {
+			edgeEnforcers = append(edgeEnforcers, bunnyEnf)
+		}
+	}
+	if len(edgeEnforcers) > 0 {
+		all := make([]sdk.Enforcer, 0, len(edgeEnforcers)+1)
 		if enf != nil {
 			all = append(all, enf)
 		}
-		all = append(all, cfEnforcers...)
-		switch len(all) {
-		case 0:
-			// nothing wired up
-		case 1:
+		all = append(all, edgeEnforcers...)
+		if len(all) == 1 {
 			enf = all[0]
-		default:
+		} else {
 			enf = enforce.NewMulti(all...)
 		}
 	}
@@ -284,21 +303,44 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 		}
 	}
 
+	// Docker exec activity watcher (issue #220): opt-in, observational only.
+	// Wired here (not inside the daemon) so the daemon package never imports
+	// the linux-only collector package.
+	var execActivity func(ctx context.Context, report func(daemon.ExecActivityReport))
+	if cfg.DockerExec != nil && cfg.DockerExec.Enabled {
+		watcher := &collector.DockerExecWatcher{Ignore: cfg.DockerExec.Ignore, Logger: logger}
+		execActivity = func(ctx context.Context, report func(daemon.ExecActivityReport)) {
+			err := watcher.Run(ctx, func(ev collector.ExecEvent) {
+				report(daemon.ExecActivityReport{
+					Container: ev.Container,
+					Image:     ev.Image,
+					Command:   ev.Command,
+					User:      ev.User,
+				})
+			})
+			if err != nil && ctx.Err() == nil {
+				slog.Error("run: docker exec watcher stopped", "err", err)
+			}
+		}
+	}
+
 	dcfg := daemon.Config{
-		Cfg:        cfg,
-		Policy:     policy,
-		Store:      db,
-		Parsers:    parsers,
-		Collectors: collectors,
-		Enforcer:   enf,
-		Notifier:   disp,
-		AIProvider: aiProvider,
-		AIBudget:   aiBudget,
-		AICache:    aiCache,
-		Enricher:   enricher,
-		SocketPath: socketPath,
-		Version:    version,
-		PolicyPath: policyPath,
+		Cfg:              cfg,
+		Policy:           policy,
+		Store:            db,
+		Parsers:          parsers,
+		Collectors:       collectors,
+		Enforcer:         enf,
+		Notifier:         disp,
+		AIProvider:       aiProvider,
+		AIBudget:         aiBudget,
+		AICache:          aiCache,
+		Enricher:         enricher,
+		SocketPath:       socketPath,
+		Version:          version,
+		PolicyPath:       policyPath,
+		ExecActivity:     execActivity,
+		WebshellActivity: buildWebshellActivity(cfg),
 	}
 	dcfg.FeedUpdates, dcfg.FeedRefresh = buildFeedRuntime(cfg)
 	if nftEnf != nil {
@@ -392,6 +434,40 @@ func buildFeedRuntime(cfg *config.Config) (
 		return refreshed, errors.Join(errs...)
 	}
 	return loop, refresh
+}
+
+// buildWebshellActivity wires the opt-in webshell-drop tripwire (issue
+// #221) into the daemon via injection — the daemon package never imports
+// internal/webshell. Returns nil (feature off) unless enabled in config.
+func buildWebshellActivity(cfg *config.Config) func(context.Context, func(daemon.WebshellReport)) {
+	wcfg := cfg.WebshellWatch
+	if wcfg == nil || !wcfg.Enabled {
+		return nil
+	}
+	return func(ctx context.Context, report func(daemon.WebshellReport)) {
+		w, err := webshell.New(webshell.Config{
+			Roots:      wcfg.Roots,
+			Extensions: wcfg.Extensions,
+			Ignore:     wcfg.Ignore,
+			Interval:   time.Duration(wcfg.IntervalSec) * time.Second,
+		})
+		if err != nil {
+			slog.Error("run: webshell watcher disabled", "err", err)
+			return
+		}
+		slog.Info("run: webshell tripwire active", "roots", wcfg.Roots)
+		_ = w.Run(ctx, func(ev webshell.Event) {
+			report(daemon.WebshellReport{
+				Path:       ev.Path,
+				Op:         ev.Op,
+				Owner:      ev.Owner,
+				Size:       ev.Size,
+				Suspicious: ev.Suspicious,
+				Markers:    ev.Markers,
+				Count:      ev.Count,
+			})
+		})
+	}
 }
 
 // buildCollectors creates sdk.Collector instances from the config slice.

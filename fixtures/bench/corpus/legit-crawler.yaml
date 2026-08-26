@@ -1,0 +1,26 @@
+name: legit-crawler
+description: A well-behaved crawler fetching real pages
+label: legit
+source: "file:/var/log/nginx/access.log"
+interval_ms: 3000
+lines:
+    - '198.51.100.21 - - [01/Jan/2026:12:00:00 +0000] "GET /blog/post-1 HTTP/1.1" 200 162 "-" "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"'
+    - '198.51.100.21 - - [01/Jan/2026:12:00:00 +0000] "GET /blog/post-2 HTTP/1.1" 200 162 "-" "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"'
+    - '198.51.100.21 - - [01/Jan/2026:12:00:00 +0000] "GET /blog/post-3 HTTP/1.1" 200 162 "-" "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"'
+    - '198.51.100.21 - - [01/Jan/2026:12:00:00 +0000] "GET /blog/post-4 HTTP/1.1" 200 162 "-" "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"'
+    - '198.51.100.21 - - [01/Jan/2026:12:00:00 +0000] "GET /blog/post-5 HTTP/1.1" 200 162 "-" "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"'
+    - '198.51.100.21 - - [01/Jan/2026:12:00:00 +0000] "GET /blog/post-6 HTTP/1.1" 200 162 "-" "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"'
+    - '198.51.100.21 - - [01/Jan/2026:12:00:00 +0000] "GET /blog/post-7 HTTP/1.1" 200 162 "-" "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"'
+    - '198.51.100.21 - - [01/Jan/2026:12:00:00 +0000] "GET /blog/post-8 HTTP/1.1" 200 162 "-" "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"'
+    - '198.51.100.21 - - [01/Jan/2026:12:00:00 +0000] "GET /blog/post-9 HTTP/1.1" 200 162 "-" "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"'
+    - '198.51.100.21 - - [01/Jan/2026:12:00:00 +0000] "GET /blog/post-10 HTTP/1.1" 200 162 "-" "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"'
+    - '198.51.100.21 - - [01/Jan/2026:12:00:00 +0000] "GET /blog/post-11 HTTP/1.1" 200 162 "-" "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"'
+    - '198.51.100.21 - - [01/Jan/2026:12:00:00 +0000] "GET /blog/post-12 HTTP/1.1" 200 162 "-" "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"'
+    - '198.51.100.21 - - [01/Jan/2026:12:00:00 +0000] "GET /blog/post-13 HTTP/1.1" 200 162 "-" "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"'
+    - '198.51.100.21 - - [01/Jan/2026:12:00:00 +0000] "GET /blog/post-14 HTTP/1.1" 200 162 "-" "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"'
+    - '198.51.100.21 - - [01/Jan/2026:12:00:00 +0000] "GET /blog/post-15 HTTP/1.1" 200 162 "-" "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"'
+    - '198.51.100.21 - - [01/Jan/2026:12:00:00 +0000] "GET /blog/post-16 HTTP/1.1" 200 162 "-" "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"'
+    - '198.51.100.21 - - [01/Jan/2026:12:00:00 +0000] "GET /blog/post-17 HTTP/1.1" 200 162 "-" "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"'
+    - '198.51.100.21 - - [01/Jan/2026:12:00:00 +0000] "GET /blog/post-18 HTTP/1.1" 200 162 "-" "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"'
+    - '198.51.100.21 - - [01/Jan/2026:12:00:00 +0000] "GET /blog/post-19 HTTP/1.1" 200 162 "-" "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"'
+    - '198.51.100.21 - - [01/Jan/2026:12:00:00 +0000] "GET /blog/post-20 HTTP/1.1" 200 162 "-" "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"'

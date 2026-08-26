@@ -52,6 +52,8 @@ Commands read as:  ` + progName + ` VERB   (equivalent to: ezy shield VERB)`,
 		newRunCmd(),
 		newArmCmd(),
 		newDisarmCmd(),
+		newDisableCmd(),
+		newEnableCmd(),
 		newWatchCmd(),
 		newBanCmd(),
 		newUnbanCmd(),
@@ -63,6 +65,8 @@ Commands read as:  ` + progName + ` VERB   (equivalent to: ezy shield VERB)`,
 		newScanCmd(),
 		newUpdateCmd(),
 		newDashboardCmd(),
+		newMigrateCmd(),
+		newMaintenanceCmd(),
 	)
 
 	return root

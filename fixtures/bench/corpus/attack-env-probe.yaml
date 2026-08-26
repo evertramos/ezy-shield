@@ -1,0 +1,8 @@
+name: attack-env-probe
+description: Sensitive-file probe — a single .env request is enough
+label: attack
+source: "file:/var/log/nginx/access.log"
+attacker_ips: ["203.0.113.13"]
+interval_ms: 1000
+lines:
+    - '203.0.113.13 - - [01/Jan/2026:12:00:00 +0000] "GET /.env HTTP/1.1" 404 162 "-" "Mozilla/5.0 zgrab/0.x"'

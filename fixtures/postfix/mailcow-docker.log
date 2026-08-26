@@ -1,0 +1,4 @@
+{"log":"Aug 25 12:10:02 mailcow postfix/smtpd[357]: warning: unknown[203.0.113.60]: SASL LOGIN authentication failed: UGFzc3dvcmQ6\n","stream":"stdout","time":"2026-08-25T12:10:02.000000001Z"}
+{"log":"Aug 25 12:10:05 mailcow postfix/smtpd[357]: NOQUEUE: reject: RCPT from unknown[203.0.113.61]: 554 5.7.1 <relay@victim.example>: Relay access denied; from=<x@evil.example> to=<relay@victim.example> proto=ESMTP helo=<evil>\n","stream":"stdout","time":"2026-08-25T12:10:05.000000001Z"}
+{"log":"Aug 25 12:10:08 mailcow postfix/smtpd[357]: too many errors after RCPT from unknown[203.0.113.62]\n","stream":"stdout","time":"2026-08-25T12:10:08.000000001Z"}
+{"log":"Aug 25 12:10:09 mailcow postfix/smtpd[357]: disconnect from unknown[203.0.113.60] ehlo=1 auth=0/1 commands=1/2\n","stream":"stdout","time":"2026-08-25T12:10:09.000000001Z"}

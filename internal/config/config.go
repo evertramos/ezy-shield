@@ -43,6 +43,12 @@ type Config struct {
 	Notify     *NotifyCfg     `yaml:"notify"`
 	Enrich     *EnrichCfg     `yaml:"enrich"`
 	Dashboard  *DashboardCfg  `yaml:"dashboard"`
+	// VerifiedBots enables FCrDNS protection for well-known crawlers
+	// (issue #215). Absent/disabled = no DNS lookups ever happen.
+	VerifiedBots *VerifiedBotsCfg `yaml:"verified_bots"`
+	// Retention configures data-retention pruning (issue #184). Absent =
+	// never prune anything. See internal/config/retention.go.
+	Retention *RetentionCfg `yaml:"retention"`
 }
 
 // DashboardCfg configures the localhost-only web UI (see docs/dashboard.md).
@@ -466,6 +472,16 @@ func (c *Config) Validate() error {
 	if c.Dashboard != nil && c.Dashboard.Addr != "" {
 		if err := validateLoopbackAddr(c.Dashboard.Addr); err != nil {
 			return fmt.Errorf("dashboard: %w", err)
+		}
+	}
+	if c.VerifiedBots != nil {
+		if err := validateVerifiedBots(c.VerifiedBots); err != nil {
+			return fmt.Errorf("verified_bots: %w", err)
+		}
+	}
+	if c.Retention != nil {
+		if err := validateRetention(c.Retention); err != nil {
+			return fmt.Errorf("retention: %w", err)
 		}
 	}
 	return nil

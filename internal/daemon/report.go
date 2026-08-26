@@ -171,6 +171,7 @@ func reportStrikes(in []store.StrikeRecord) []sdk.AbuseReportStrike {
 				Confidence: v.Confidence,
 				Reason:     v.Reason,
 				Source:     v.Source,
+				Evidence:   v.Evidence,
 			})
 		}
 		out = append(out, ws)

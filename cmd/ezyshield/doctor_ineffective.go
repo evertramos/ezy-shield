@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // doctor_ineffective.go — doctor check for the ban_ineffective diagnostic

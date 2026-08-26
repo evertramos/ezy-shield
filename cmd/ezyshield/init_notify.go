@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // Notifications step for `ezyshield init` (issue #290): configure zero or

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // Zone-coverage prompt + automatic WAF rule rollout for the Cloudflare

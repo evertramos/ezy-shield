@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package daemon
 
 // Tests for the retention maintenance layer (issue #184): the "prune" socket

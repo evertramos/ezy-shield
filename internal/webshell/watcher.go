@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package webshell implements the webshell-drop tripwire (issue #221): a
 // filesystem watch over configured web roots for new or modified files with
 // executable web extensions — the artifact a log parser can never see when

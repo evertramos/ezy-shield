@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package daemon
 
 // On-demand log evidence extraction for the report verb (issues #54, #126).

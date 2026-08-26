@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package vhostdetect enumerates virtual-host domains served by local
 // reverse-proxy setups so the init wizard can offer to configure the
 // matching edge enforcer. It targets the nginx-proxy convention first

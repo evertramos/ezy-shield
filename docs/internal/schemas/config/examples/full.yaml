@@ -39,6 +39,16 @@ enforce:
       mode: rulesets
       zone_ids: [zone-fixture-2]
       action: challenge
+  aws_waf:
+    name: edge
+    scope: regional
+    region: eu-west-1
+    ipset_v4:
+      name: ezyshield-v4
+      id: aaaabbbb-cccc-dddd-eeee-ffff00001111
+    ipset_v6:
+      name: ezyshield-v6
+      id: aaaabbbb-cccc-dddd-eeee-ffff00002222
 
 ai:
   provider: anthropic

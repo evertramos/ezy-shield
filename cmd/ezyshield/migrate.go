@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // `ezyshield migrate fail2ban` (issue #182): read fail2ban's effective jail

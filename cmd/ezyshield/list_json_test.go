@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // Regression tests for issue #301: `list --json` and `list --allow --json`

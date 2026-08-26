@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // Tests for doctor's Cloudflare enforcer checks (issue #234) — the

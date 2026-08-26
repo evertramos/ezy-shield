@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package notify fans-out alert messages to configured notification channels
 // (Telegram, email, ...) with per-channel rate limiting and a global dedup window.
 package notify

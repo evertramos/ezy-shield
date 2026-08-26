@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package daemon
 
 // enfstate.go — honest enforcement-state reporting (issue #174).

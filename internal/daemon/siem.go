@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package daemon
 
 // SIEM forwarding (issue #203): the daemon tails the audit log — the single

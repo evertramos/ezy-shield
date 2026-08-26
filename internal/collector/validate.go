@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package collector provides log collectors that implement sdk.Collector.
 //
 // This file holds the input allowlists shared by the collectors and by the

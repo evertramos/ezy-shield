@@ -107,7 +107,7 @@ flowchart TD
     G1 --> G2{{"anti-lockout: SSH peer / CDN range"}}
     G2 --> G3{{"dry-run by default"}}
     G3 --> G4{{"ban rate limit"}}
-    G4 --> E["Enforcer — nftables (local) + Cloudflare / bunny.net (edge)"]
+    G4 --> E["Enforcer — nftables (local) + Cloudflare / bunny.net / AWS WAF (edge)"]
     G4 --> N["Notifier — Telegram / Email / Slack / Discord / webhook"]
 
     style G1 fill:#f9e79f,stroke:#b7950b
@@ -147,7 +147,7 @@ still escalates today.
 
 - **Escalating bans** — short first ban, permanent after repeated offences
 - **Local enforcement** — nftables, via a privilege-separated enforcer helper
-- **Edge enforcement** — push IP bans to a Cloudflare list and/or bunny.net pull-zone blocklists (see the [Cloudflare](docs/content/en/guides/cloudflare.md) and [bunny.net](docs/content/en/guides/bunny.md) guides)
+- **Edge enforcement** — push IP bans to a Cloudflare list, bunny.net pull-zone blocklists, and/or AWS WAFv2 IPSets for CloudFront/ALB (see the [Cloudflare](docs/content/en/guides/cloudflare.md), [bunny.net](docs/content/en/guides/bunny.md), and [AWS WAF](docs/content/en/guides/aws-waf.md) guides)
 - **SSH, Nginx, Apache, Caddy, Traefik, Postfix & Dovecot parsers** with fuzz-tested, panic-safe parsing of hostile input — web and [mail servers](docs/content/en/guides/mail-server.md) covered out of the box
 - **Deterministic rule engine** — thresholds + scanner signatures; works with zero AI configured; detection quality is measured by a [reproducible benchmark](docs/content/en/reference/benchmark.md) on a labeled corpus (currently 6/6 attacks detected, 0 false positives), regression-guarded in CI
 - **AI-assisted decisions (optional)** — Anthropic, any OpenAI-compatible endpoint, or local Ollama, with provider failover, a token budget, and verdict caching
@@ -358,4 +358,12 @@ the open, independently.
 
 ## License
 
-EzyShield is released under **AGPL-3.0** — see [LICENSE](LICENSE).
+EzyShield is released under **AGPL-3.0-only** — see [LICENSE](LICENSE) —
+with one deliberate exception: the public SDK package
+[`pkg/sdk`](pkg/sdk) is **Apache-2.0** (its own
+[LICENSE](pkg/sdk/LICENSE)), so plugin and module authors can build
+proprietary or differently-licensed integrations against the SDK types
+without AGPL obligations. The boundary is documented in
+[pkg/sdk/README.md](pkg/sdk/README.md); every `.go` file carries an
+`SPDX-License-Identifier` header stating which side it is on, enforced in
+CI by `scripts/spdx-gate.sh`.

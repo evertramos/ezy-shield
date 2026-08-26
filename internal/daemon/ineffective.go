@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package daemon
 
 // ineffective.go — daemon-side delivery of the ban_ineffective diagnostics

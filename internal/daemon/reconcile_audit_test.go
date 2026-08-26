@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package daemon
 
 // Tests for the reconcile-repair audit trail (issue #214): when a periodic

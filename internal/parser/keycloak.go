@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package parser
 
 // Keycloak parser (issue #193): Keycloak (Quarkus) logs login events via

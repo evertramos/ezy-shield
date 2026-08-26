@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package sdk_test
 
 // pkg/sdk is the only public SDK surface and is declarations-only — there are

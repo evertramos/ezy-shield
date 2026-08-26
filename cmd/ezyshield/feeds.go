@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // `ezyshield feeds` — status and on-demand refresh of the reputation feeds

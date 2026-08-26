@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package vhostdetect
 
 // sources.go — detection sources beyond the nginx-proxy VIRTUAL_HOST

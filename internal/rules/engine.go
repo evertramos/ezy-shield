@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package rules provides the always-available rule-based verdict engine.
 // All evaluation logic is pure (no I/O after construction).
 package rules

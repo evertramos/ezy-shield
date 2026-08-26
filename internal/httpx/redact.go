@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package httpx holds small HTTP helpers shared across packages whose
 // behavior is security-sensitive enough that duplication would be a risk.
 //

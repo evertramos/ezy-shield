@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package store
 
 // Persistent per-IP hourly event counters (issue #134) — the storage half of

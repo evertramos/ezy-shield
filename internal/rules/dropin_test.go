@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package rules_test
 
 // Tests for the rules.d drop-in overlay (issue #136): embedded base always

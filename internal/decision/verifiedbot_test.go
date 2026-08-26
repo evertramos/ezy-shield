@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package decision_test
 
 // Tests for the verified-bot guard (issue #215): a forward-confirmed

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package configs provides embedded example configuration files for ezyshield init.
 package configs
 

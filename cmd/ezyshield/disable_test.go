@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // Tests for `ezyshield disable` (issue #176): the --local-only break-glass

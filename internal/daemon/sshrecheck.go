@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package daemon
 
 // sshrecheck.go — deferred re-evaluation after an SSH-peer anti-lockout

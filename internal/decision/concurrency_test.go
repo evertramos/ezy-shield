@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package decision_test
 
 // concurrency_test.go — the deferred SSH re-check (issue #420) made Decide a

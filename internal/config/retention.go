@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package config
 
 // Retention policy (issue #184): how long each unbounded table keeps rows.

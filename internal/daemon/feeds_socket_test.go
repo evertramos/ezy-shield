@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package daemon
 
 // Socket-API tests for the feeds verbs (issue #196), same pattern as the

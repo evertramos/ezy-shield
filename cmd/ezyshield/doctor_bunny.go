@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // bunny.net enforcer doctor checks (issue #198): the post-setup

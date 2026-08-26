@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package dashboard
 
 // Internal-package test: reaches the unexported db handle to verify the

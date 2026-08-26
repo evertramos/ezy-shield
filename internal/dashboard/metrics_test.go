@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package dashboard
 
 // Tests for GET /metrics (issue #183): auth on/off behavior, throttle, and

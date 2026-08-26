@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package parser
 
 // Vaultwarden parser (issue #191): a password vault is a prime brute-force

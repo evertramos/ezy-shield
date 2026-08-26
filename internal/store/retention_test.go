@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package store
 
 // Internal-package tests for retention pruning (issue #184): they reach the

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package enforce
 
 // Regression tests for issue #358 items 6 and 7.

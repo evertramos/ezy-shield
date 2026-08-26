@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package siem renders EzyShield audit events into the wire formats that
 // security information and event management systems (Wazuh, Splunk, generic
 // syslog collectors) ingest natively: JSON, ArcSight CEF, and RFC 5424

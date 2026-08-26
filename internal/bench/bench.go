@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package bench runs the full detection pipeline (parse → aggregate →
 // rules → decision, dry-run) over a labeled corpus of attack and legitimate
 // traffic (issue #216), turning "it detects brute force" into published,

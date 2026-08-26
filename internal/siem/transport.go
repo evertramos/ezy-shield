@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package siem
 
 // Forwarding transports (issue #203): deliver formatted events to SIEM

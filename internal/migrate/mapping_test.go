@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package migrate
 
 // Tests for the fail2ban → EzyShield mapping (issue #182). Pure-function

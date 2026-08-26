@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // Golden-behavior tests for `ezyshield migrate fail2ban` (issue #182),

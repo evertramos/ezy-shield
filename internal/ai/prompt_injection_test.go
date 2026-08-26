@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package ai — dedicated prompt-injection gate tests (SECURITY-REVIEW §5).
 //
 // Log lines are attacker-authored. These tests assert that instruction-like text

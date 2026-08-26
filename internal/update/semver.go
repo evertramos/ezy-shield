@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package update implements EzyShield's self-update logic: fetching releases
 // from GitHub, verifying SHA256 checksums against checksums.txt, and atomically
 // replacing the on-disk binaries.

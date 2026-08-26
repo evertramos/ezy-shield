@@ -169,6 +169,28 @@ enforce:
 
 The enforcer caps each zone at 500 blocked IPs (bunny does not document a provider limit); beyond that the most recent bans win, with a warning.
 
+### aws_waf
+
+AWS WAFv2 edge enforcement via dedicated IPSets referenced from your WebACL rules (ADR-0012). Presence of the section enables it. EzyShield only mutates the member addresses of the IPSets designated here — it **never touches WebACLs**. Credentials come from the standard AWS chain (env vars, `~/.aws/credentials`, IMDSv2) and must never appear in this file; validation rejects pasted key material. See the [AWS WAF guide](../guides/aws-waf.md).
+
+```yaml
+enforce:
+  aws_waf:
+    scope: regional            # regional (needs region) or cloudfront (pins us-east-1)
+    region: eu-west-1
+    ipset_v4: {name: ezyshield-v4, id: aaaabbbb-cccc-dddd-eeee-ffff00001111}
+    ipset_v6: {name: ezyshield-v6, id: aaaabbbb-cccc-dddd-eeee-ffff00002222}
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `scope` | yes | `regional` (ALB/API Gateway) or `cloudfront` (global) |
+| `region` | for `regional` | AWS region of the IPSets |
+| `ipset_v4` / `ipset_v6` | at least one | `name` + `id` of each designated IPSet |
+| `name` | no | label shown in logs as `awswaf[<name>]` |
+
+Each IPSet holds at most 10,000 addresses (AWS limit); beyond that the most recent bans win, with a warning.
+
 ## notify
 
 ```yaml

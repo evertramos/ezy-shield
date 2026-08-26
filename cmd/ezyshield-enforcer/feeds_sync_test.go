@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // Tests for the feeds_sync verb (issue #195): atomic desired-state replace

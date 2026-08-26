@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 import (
@@ -196,6 +198,17 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 				"bunny_name", cfg.Enforce.Bunny.Name, "err", bErr)
 		} else {
 			edgeEnforcers = append(edgeEnforcers, bunnyEnf)
+		}
+	}
+	if cfg.Enforce != nil && cfg.Enforce.AWSWAF != nil {
+		awsEnf, aErr := enforce.NewAWSWAFEnforcer(awsWAFConfigFrom(cfg.Enforce.AWSWAF), parseAllowlist(policy))
+		if aErr != nil {
+			// Same isolation as cloudflare/bunny: a bad section disables
+			// only the AWS WAF enforcer.
+			slog.Warn("run: aws waf enforcer unavailable; continuing without it",
+				"awswaf_name", cfg.Enforce.AWSWAF.Name, "err", aErr)
+		} else {
+			edgeEnforcers = append(edgeEnforcers, awsEnf)
 		}
 	}
 	if len(edgeEnforcers) > 0 {
@@ -739,6 +752,24 @@ func mergeProviderCfg(base *config.AICfg, p config.ProviderCfg) *config.AICfg {
 // entry NormalizePrefix rejects (mapped broader than /96) is kept as parsed:
 // dropping it would remove protection, and the decision layer already fails
 // loud on those.
+// awsWAFConfigFrom maps the config section onto the enforcer's config
+// (issue #201). Credentials are deliberately absent from both shapes —
+// they come from the standard AWS chain per ADR-0012.
+func awsWAFConfigFrom(a *config.AWSWAFCfg) *enforce.AWSWAFConfig {
+	out := &enforce.AWSWAFConfig{
+		Scope:  a.Scope,
+		Region: a.Region,
+		Name:   a.Name,
+	}
+	if a.IPSetV4 != nil {
+		out.IPSetV4 = &enforce.AWSIPSetRef{Name: a.IPSetV4.Name, ID: a.IPSetV4.ID}
+	}
+	if a.IPSetV6 != nil {
+		out.IPSetV6 = &enforce.AWSIPSetRef{Name: a.IPSetV6.Name, ID: a.IPSetV6.ID}
+	}
+	return out
+}
+
 func parseAllowlist(policy *config.Policy) []netip.Prefix {
 	var prefixes []netip.Prefix
 	appendPrefix := func(p netip.Prefix) {

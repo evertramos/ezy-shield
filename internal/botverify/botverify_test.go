@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package botverify
 
 // Tests for FCrDNS verification (issue #215) with a stub resolver: genuine

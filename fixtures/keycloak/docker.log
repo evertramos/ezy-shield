@@ -1,0 +1,2 @@
+{"log":"2026-08-25 16:10:00,101 WARN  [org.keycloak.events] (executor-thread-1) type=LOGIN_ERROR, realmId=master, clientId=account, userId=null, ipAddress=203.0.113.170, error=invalid_user_credentials, username=admin\n","stream":"stdout","time":"2026-08-25T16:10:00.000000001Z"}
+{"log":"2026-08-25 16:10:02,202 INFO  [org.keycloak.events] (executor-thread-2) type=LOGIN, realmId=master, clientId=account, userId=abc-123, ipAddress=198.51.100.9, username=evert\n","stream":"stdout","time":"2026-08-25T16:10:02.000000001Z"}

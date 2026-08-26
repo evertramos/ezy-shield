@@ -1,0 +1,6 @@
+2026-08-25 16:00:00,101 WARN  [org.keycloak.events] (executor-thread-1) type=LOGIN_ERROR, realmId=master, clientId=account-console, userId=null, ipAddress=203.0.113.160, error=invalid_user_credentials, auth_method=openid-connect, username=admin
+2026-08-25 16:00:02,202 WARN  [org.keycloak.events] (executor-thread-2) type=LOGIN_ERROR, realmId=production, clientId=web-app, userId=null, ipAddress=203.0.113.160, error=user_not_found, auth_method=openid-connect, username=root
+2026-08-25 16:00:04,303 WARN  [org.keycloak.events] (executor-thread-1) type=LOGIN_ERROR, realmId=master, clientId=account, userId=abc-123, error=invalid_user_credentials, ipAddress=2001:db8::dd, username=user@example.com
+2026-08-25 16:00:06,404 INFO  [org.keycloak.events] (executor-thread-3) type=LOGIN, realmId=master, clientId=account, userId=abc-123, ipAddress=198.51.100.9, username=evert
+2026-08-25 16:00:08,505 INFO  [org.keycloak.events] (executor-thread-3) type=CODE_TO_TOKEN, realmId=master, clientId=account, userId=abc-123, ipAddress=198.51.100.9
+2026-08-25 16:00:10,606 INFO  [io.quarkus] (main) Keycloak 25.0.0 on JVM started in 8.123s

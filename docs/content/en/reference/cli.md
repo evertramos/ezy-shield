@@ -609,6 +609,40 @@ scan. The command follows the [global exit-code contract](#exit-codes); with
 `--json` it prints only JSON on stdout, with the newly detected sockets also
 collected under `new_listeners`.
 
+## ezyshield plugins
+
+Inspect tier-1 plugins: external executables under
+`/etc/ezyshield/plugins.d/<name>/module.yaml` speaking JSON over stdio.
+Plugins are opt-in **twice**: `plugins.enabled: true` in config.yaml AND
+the plugin's name listed in `plugins.allow[]` — dropping files into
+plugins.d is never enough to execute code.
+
+```bash
+# Every plugins.d entry with name, version, type and status
+# (ready / not-allowed / invalid / disabled). Never executes anything.
+ezyshield plugins list
+
+# Author helper: strict manifest validation (schema, permissions,
+# ownership, exec resolution) plus ONE handshake dry-run, then kill.
+ezyshield plugins validate /etc/ezyshield/plugins.d/my-plugin
+```
+
+Manifest schema: `docs/schemas/plugin/module.schema.json`. The `exec`
+path is relative to the plugin directory only (no PATH lookup, no
+absolute paths, no traversal, no symlinks), must not be world-writable,
+and must belong to root or the plugin dir's owner.
+
+Honest note: the manifest's `network:` declaration is **advisory in v1**
+— EzyShield does not yet isolate plugin network access. The field exists
+so authors declare intent and a future version can enforce it.
+
+```yaml
+plugins:
+  enabled: true
+  allow: [my-plugin]        # explicit by-name allowlist, required
+  # dir: /etc/ezyshield/plugins.d
+```
+
 ## ezyshield doctor
 
 Validate config, permissions, and log sources.

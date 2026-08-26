@@ -106,3 +106,8 @@ dashboard:
     - {name: vera, role: viewer, token: env:EZYSHIELD_DASH_VERA_TOKEN}
     - {name: omar, role: operator, token: env:EZYSHIELD_DASH_OMAR_TOKEN}
     - {name: ada, role: admin, token: env:EZYSHIELD_DASH_ADA_TOKEN}
+
+plugins:
+  enabled: true
+  allow:
+    - example-parser

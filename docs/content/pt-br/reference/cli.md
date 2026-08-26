@@ -631,6 +631,40 @@ falhar o scan. O comando segue o
 apenas JSON no stdout, com os sockets recém-detectados também reunidos em
 `new_listeners`.
 
+## ezyshield plugins
+
+Inspeciona plugins tier-1: executáveis externos em
+`/etc/ezyshield/plugins.d/<name>/module.yaml` falando JSON por stdio.
+Plugins são opt-in **duas vezes**: `plugins.enabled: true` no config.yaml
+E o nome do plugin listado em `plugins.allow[]` — largar arquivos no
+plugins.d nunca é suficiente para executar código.
+
+```bash
+# Toda entrada do plugins.d com name, version, type e status
+# (ready / not-allowed / invalid / disabled). Nunca executa nada.
+ezyshield plugins list
+
+# Auxiliar de autor: validação estrita do manifest (schema, permissões,
+# ownership, resolução do exec) mais UM dry-run de handshake, e mata.
+ezyshield plugins validate /etc/ezyshield/plugins.d/meu-plugin
+```
+
+Schema do manifest: `docs/schemas/plugin/module.schema.json`. O caminho
+`exec` é relativo ao diretório do plugin apenas (sem PATH, sem caminho
+absoluto, sem traversal, sem symlink), não pode ser world-writable e deve
+pertencer ao root ou ao dono do diretório do plugin.
+
+Nota honesta: a declaração `network:` do manifest é **consultiva na v1**
+— o EzyShield ainda não isola o acesso de rede dos plugins. O campo
+existe para o autor declarar a intenção e uma versão futura impor.
+
+```yaml
+plugins:
+  enabled: true
+  allow: [meu-plugin]       # allowlist explícita por nome, obrigatória
+  # dir: /etc/ezyshield/plugins.d
+```
+
 ## ezyshield doctor
 
 Valida a configuração, as permissões e as fontes de log.

@@ -440,6 +440,24 @@
         }
       }
     },
+    "plugins": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Tier-1 plugin system gate (issue #207). Opt-in TWICE: enabled must be true AND every runnable plugin must be named in allow — dropping files into plugins.d never executes code. Manifests are validated per docs/schemas/plugin/module.schema.json.",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "dir": {
+          "type": "string",
+          "description": "Override for /etc/ezyshield/plugins.d."
+        },
+        "allow": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,31}$"},
+          "description": "Explicit by-name allowlist (plugin manifest names)."
+        }
+      }
+    },
     "feeds": {
       "type": "array",
       "description": "IP reputation feeds to download and parse (issue #194). Download/parse only — enforcement is a follow-up. Private/loopback/link-local ranges in a feed are always dropped.",

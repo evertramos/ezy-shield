@@ -113,6 +113,8 @@ func runDoctor(cmd *cobra.Command, configDir, dbPath, socketPath string, jsonOut
 	checks = append(checks, checkAWSWAFEnforcer(configDir)...)
 	// issue #204: dashboard RBAC user token entropy/uniqueness.
 	checks = append(checks, checkDashboardUsers(configDir)...)
+	// issue #207: plugins.d manifests vs the allowlist (never executes).
+	checks = append(checks, checkPlugins(configDir)...)
 	// issue #240: PATH/systemd shadowing between a script install and a
 	// package install. New function + this single registration line only --
 	// see doctor_shadow.go.

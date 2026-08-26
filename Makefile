@@ -1,4 +1,4 @@
-.PHONY: build lint test clean docker-test
+.PHONY: build lint test bench clean docker-test
 
 BINARY_DIR := bin
 GO         := go
@@ -24,6 +24,11 @@ lint:
 
 test:
 	$(GO) test -race -coverprofile=coverage.out -covermode=atomic ./...
+
+# Detection benchmark over the labeled corpus (issue #216) — compares against
+# fixtures/bench/baseline.json and fails on regression.
+bench:
+	$(GO) test -tags bench ./internal/bench/ -v -run TestBenchCorpus
 
 clean:
 	rm -rf $(BINARY_DIR) coverage.out

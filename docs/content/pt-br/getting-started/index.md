@@ -369,3 +369,10 @@ sudo systemctl enable --now ezyshield
 4. ✅ Notificações testadas com `test notifier`
 5. ✅ Rodou em dry-run, revisou os logs
 6. ⬜ Rodar `sudo ezyshield arm --for 1h` (pre-flight + janela de auto-reversão), depois `sudo ezyshield arm --keep` quando estiver confiante
+
+---
+
+## Aprenda mais
+
+- [Anatomia de um Ban](../guides/anatomy-of-a-ban.md) — um brute force SSH acompanhado por cada estágio do pipeline (com o diagrama dos gates de segurança), em dry-run e armado.
+- [Solução de Problemas](../guides/troubleshooting.md) — "nada é detectado", "ban registrado mas não bloqueado", permissões do socket, matching do journald — cada um com o check do doctor que diagnostica.

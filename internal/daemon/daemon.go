@@ -94,6 +94,12 @@ type daemonStore interface {
 	ListOffenders(ctx context.Context, permanentOnly bool, limit int) ([]store.OffenderSummary, error)
 	// Panic button (issue #176) — see internal/store/disableall.go.
 	UnbanAll(ctx context.Context, reason string) (int, error)
+	// BumpLastSeen upserts the offenders row (0 strikes on insert) — the
+	// visibility hook for evidence dropped without a strike (issue #559).
+	BumpLastSeen(ctx context.Context, ip netip.Addr) error
+	// Audit appends one per-IP audit entry (bare-IP row, the form
+	// AuditLogForIP surfaces in reports — unlike AuditOp's prefix rows).
+	Audit(ctx context.Context, a sdk.Action) error
 	// Persistent hourly counters backing long-window (>1h) rules (issue
 	// #134) — see internal/store/eventsagg.go.
 	IncrEventCount(ctx context.Context, ip netip.Addr, kind string, bucketStart int64) error

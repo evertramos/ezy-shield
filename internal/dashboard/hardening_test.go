@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package dashboard
 
 // Tests for the Phase 4 audit launch-blockers: operator reason validation

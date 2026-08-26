@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // Table-driven tests for the firewall coexistence checks (issue #177),

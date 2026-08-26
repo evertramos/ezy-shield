@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package config — secret-leak gate tests (SECURITY-REVIEW §4, AGENTS Hard Rule §3).
 //
 // Tokens must never appear in error strings or any other observable channel.

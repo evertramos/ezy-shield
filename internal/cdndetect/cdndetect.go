@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package cdndetect resolves domain names and classifies the resulting IP
 // addresses against a compile-time embedded table of CDN edge ranges. It is
 // pure logic + one indirected Resolver so the init wizard can decide whether

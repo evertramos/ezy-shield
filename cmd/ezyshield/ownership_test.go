@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // Tests for gidToUint32, the guarded GID narrowing shared by the doctor

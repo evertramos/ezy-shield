@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // ezyshield-enforcer is the privileged helper that applies nftables rules on
 // behalf of the main ezyshield daemon.
 //

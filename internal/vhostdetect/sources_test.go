@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package vhostdetect
 
 // Tests for the issue #488 detection sources: Traefik docker labels, Traefik

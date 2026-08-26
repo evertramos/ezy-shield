@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // Non-interactive driver for `ezyshield init` (issue #231). This is a

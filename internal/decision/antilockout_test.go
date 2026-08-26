@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package decision_test — dedicated anti-lockout gate tests (SECURITY-REVIEW §2).
 //
 // These tests assert the core safety invariant: the engine must never produce a

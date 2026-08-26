@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // Post-install collector wizards for `config collector <name>` (issue #103).

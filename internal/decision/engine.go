@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package decision is the safety-critical policy engine that converts Verdicts
 // into enforceable Actions. It enforces allowlists, anti-lockout checks, strike
 // escalation, global rate limiting, and dry-run mode.

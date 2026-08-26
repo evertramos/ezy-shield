@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // arm.go — explicit arm/disarm commands (issue #228). Arming is the single

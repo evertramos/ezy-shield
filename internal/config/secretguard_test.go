@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package config
 
 // Tests for the misplaced-credential guard (issue #172): credentials pasted

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // The `watch` command — a live, read-only stream of daemon events over the

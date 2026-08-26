@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package decision
 
 // Tests for the /proc-based SSH peer detection (issue #175), exercising the

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package daemon wires all EzyShield subsystems into the long-running watch
 // daemon and exposes a unix-socket control API.
 package daemon

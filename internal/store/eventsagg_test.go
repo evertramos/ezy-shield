@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package store_test
 
 // Tests for the persistent per-IP hourly event counters (issue #134).

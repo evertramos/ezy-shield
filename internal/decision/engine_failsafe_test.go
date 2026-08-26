@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package decision
 
 // Regression tests for issue #361 item 3: three deliberate fail-safe branches

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package parser_test
 
 // Regression tests for issue #358 item 4: Docker json-file unwrapping was

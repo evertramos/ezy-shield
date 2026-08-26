@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // cache_consistency_test.go — regression tests for issue #418 (family: #383,

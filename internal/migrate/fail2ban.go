@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package migrate reads other ban tools' configurations so EzyShield can
 // propose an equivalent setup. This file is the fail2ban half (issue #181):
 // read and model fail2ban's EFFECTIVE jail configuration — layered INI with

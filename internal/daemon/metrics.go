@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package daemon
 
 // Prometheus metrics (issue #183). The daemon owns a per-instance registry

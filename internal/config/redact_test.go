@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package config — redaction gate tests for the `config show` display path
 // (SECURITY-REVIEW §4: secrets never in any observable channel).
 package config_test

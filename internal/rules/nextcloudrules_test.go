@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package rules_test
 
 // Tests for the built-in Nextcloud rules (issue #192).

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package ai implements AI providers for EzyShield's threat analysis pipeline.
 // Aggregates are passed as structured JSON data; AI output is treated as advisory
 // and re-validated by the policy engine before any enforcement action.

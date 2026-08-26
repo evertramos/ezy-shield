@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // Regression tests for the issue #356 CLI-consistency roundup.

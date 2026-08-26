@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package enforce
 
 // allowlist.go — optional allowlist-mirroring side of an Enforcer (issue #317).

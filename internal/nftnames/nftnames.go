@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package nftnames is the single source of truth for the nftables table and
 // set names EzyShield enforces into (issue #268).
 //

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package metrics implements process-lifetime counters/gauges and Prometheus
 // text exposition (issue #183) with zero dependencies — the text format is a
 // few lines of writer code, which is exactly why no client library is worth

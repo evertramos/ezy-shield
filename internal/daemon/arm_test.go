@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package daemon
 
 // Tests for the arm/disarm verbs (issue #228): pre-flight matrix, the

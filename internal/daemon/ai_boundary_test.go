@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // AI-boundary chokepoint tests (issue #402, SECURITY-REVIEW §5).
 //
 // Providers already bound verdicts to the analyzed batch (boundToBatch, #312)

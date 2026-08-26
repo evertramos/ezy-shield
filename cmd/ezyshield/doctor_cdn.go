@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // doctor_cdn.go — health of the shared-CDN-range ban guard's data

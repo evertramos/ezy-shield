@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package enforce_test
 
 // Tests for the bunny.net edge enforcer (issue #197): mock HTTP server

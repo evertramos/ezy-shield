@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package enforce implements sdk.Enforcer backed by nftables.
 //
 // Privilege separation: the NftablesEnforcer (this package) runs inside the

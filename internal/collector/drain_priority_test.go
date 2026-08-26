@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package collector
 
 // Regression test for the graceful-drain half of issue #358's send fix: with

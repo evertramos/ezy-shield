@@ -37,16 +37,6 @@ func flashFor(r *http.Request, key string) (string, bool) {
 	return "", false
 }
 
-// csrfOf returns the CSRF token attached to r by requireAuth. If the
-// middleware chain was misconfigured the empty string is returned — the
-// template still renders but any subsequent POST will fail the CSRF check.
-func csrfOf(r *http.Request) string {
-	if info, ok := sessionFromContext(r.Context()); ok {
-		return info.CSRF
-	}
-	return ""
-}
-
 // statusPageData is the concrete payload rendered by the status template.
 type statusPageData struct {
 	Daemon       string
@@ -97,7 +87,7 @@ func (s *Server) handleStatusPage(w http.ResponseWriter, r *http.Request) {
 		data.Info = flash
 	}
 
-	if err := renderStatusPage(w, csrfOf(r), data); err != nil {
+	if err := renderStatusPage(w, s.identityFrom(r), data); err != nil {
 		s.logger.Error("render status", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
@@ -128,7 +118,7 @@ func (s *Server) handleBansPage(w http.ResponseWriter, r *http.Request) {
 	if flash, ok := flashFor(r, "ok"); ok {
 		data.Info = flash
 	}
-	if err := renderBansPage(w, csrfOf(r), data); err != nil {
+	if err := renderBansPage(w, s.identityFrom(r), data); err != nil {
 		s.logger.Error("render bans", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
@@ -198,7 +188,7 @@ func (s *Server) handleTimelinePage(w http.ResponseWriter, r *http.Request) {
 		}
 		data.Entries = buildTimeline(bans, events)
 	}
-	if err := renderTimelinePage(w, csrfOf(r), data); err != nil {
+	if err := renderTimelinePage(w, s.identityFrom(r), data); err != nil {
 		s.logger.Error("render timeline", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
@@ -261,7 +251,7 @@ func (s *Server) handleEventsPage(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("dashboard events rpc", "err", err)
 		data.Error = "Daemon returned an error. See the daemon log."
 	}
-	if err := renderEventsPage(w, csrfOf(r), data); err != nil {
+	if err := renderEventsPage(w, s.identityFrom(r), data); err != nil {
 		s.logger.Error("render events", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
@@ -285,7 +275,7 @@ func (s *Server) handleAllowlistPage(w http.ResponseWriter, r *http.Request) {
 	if flash, ok := flashFor(r, "ok"); ok {
 		data.Info = flash
 	}
-	if err := renderAllowlistPage(w, csrfOf(r), data); err != nil {
+	if err := renderAllowlistPage(w, s.identityFrom(r), data); err != nil {
 		s.logger.Error("render allowlist", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
@@ -506,3 +496,24 @@ func sortedStrikeCounts(m map[string]int) []strikeCount {
 // isOffline consults, so a future rename in internal/daemon fails loud here
 // rather than silently making every page render as "healthy".
 var _ = errors.Is(daemon.ErrDaemonUnreachable, daemon.ErrDaemonUnreachable)
+
+// identityFrom resolves the request's session into the layout identity
+// (issue #205): actor name, current role (live lookup — reloads apply
+// immediately), and the cosmetic capability flags for the templates.
+func (s *Server) identityFrom(r *http.Request) pageIdentity {
+	info, ok := sessionFromContext(r.Context())
+	if !ok {
+		return pageIdentity{}
+	}
+	role, known := s.roleFor(r.Context(), info.Username)
+	if !known {
+		return pageIdentity{CSRF: info.CSRF, Actor: info.Username, Role: "unknown"}
+	}
+	return pageIdentity{
+		CSRF:     info.CSRF,
+		Actor:    info.Username,
+		Role:     role.String(),
+		CanBan:   role >= RoleOperator,
+		CanAllow: role >= RoleAdmin,
+	}
+}

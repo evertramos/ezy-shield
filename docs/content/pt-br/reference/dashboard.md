@@ -132,6 +132,59 @@ banner "Daemon offline" no lugar dos dados ao vivo.
 
 ---
 
+## Usuários e papéis (RBAC)
+
+Times podem provisionar tokens por usuário com papéis impostos no
+servidor (issue #204). Os papéis são ordenados — cada um inclui tudo do
+anterior:
+
+| Papel | Pode fazer |
+|-------|------------|
+| `viewer` | Ler tudo: status, bans, allowlist, eventos, timeline, stream ao vivo, métricas |
+| `operator` | viewer + **ban** e **unban** manuais |
+| `admin` | operator + **mutações de allowlist**, arm/disarm, edição de policy — e qualquer ação futura ainda não classificada (deny by default) |
+
+Provisione os usuários no `config.yaml` — tokens são referências env,
+nunca valores inline:
+
+```yaml
+dashboard:
+  users:
+    - {name: vera, role: viewer,   token: env:EZYSHIELD_DASH_VERA_TOKEN}
+    - {name: omar, role: operator, token: env:EZYSHIELD_DASH_OMAR_TOKEN}
+    - {name: ada,  role: admin,    token: env:EZYSHIELD_DASH_ADA_TOKEN}
+```
+
+Gere um token forte por usuário e exporte no ambiente em que o dashboard
+roda (no systemd, `/etc/ezyshield/ezyshield.env`, modo 0600):
+
+```bash
+openssl rand -hex 32
+```
+
+O login é no form normal, com o **name** como usuário e o **token** como
+senha. O cabeçalho mostra quem está logado e com qual papel; forms de
+ação ficam ocultos para papéis sem a permissão — mas esconder é só
+cosmético: toda requisição mutante é re-checada no servidor contra a
+tabela de permissões, negações respondem 403 e são **auditadas** (ator +
+ação, nunca token), e toda ação permitida grava o nome do ator no audit
+log do daemon (`dashboard:<name>: motivo`), que as views de Events e
+Timeline exibem nas colunas de reason.
+
+Notas:
+
+- O admin por senha do bootstrap inicial continua funcionando como
+  **admin implícito** — setups de credencial única não mudam nada.
+- Papéis são reavaliados ao vivo: demover ou remover um usuário vale
+  para as sessões abertas já na próxima requisição.
+- O `ezyshield doctor` avisa sobre tokens resolvidos com menos de 32
+  bytes e sobre dois usuários compartilhando um token.
+- O RBAC cobre **apenas o dashboard**. O unix socket de controle segue
+  local-admin por permissão de arquivo (grupo `ezyshield`; camada
+  read-only via `ezyshield-view`, issue #212), não por esses papéis.
+
+---
+
 ## Páginas e funcionalidades
 
 | Método | Path                     | Auth        | Notas                                                          |

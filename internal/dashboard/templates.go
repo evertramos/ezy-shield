@@ -234,6 +234,7 @@ var dashPagesRoot = template.Must(template.New("root").Parse(`
       </nav>
     </div>
     <div class="actions">
+      {{if .Actor}}<span class="live-label" title="Signed in as {{.Actor}} ({{.Role}})">{{.Actor}} ({{.Role}})</span>{{end}}
       <span id="live-dot" title="Live updates" aria-label="Live updates">
         <span class="dot"></span><span class="live-label">live</span>
       </span>
@@ -265,6 +266,13 @@ type pageEnvelope struct {
 	Info    string
 	Offline bool
 	CSRF    string
+	// RBAC identity (issue #205): who is logged in and what the UI may
+	// OFFER. Purely cosmetic — the server-side permission table (#204)
+	// remains the authority on every request.
+	Actor    string
+	Role     string
+	CanBan   bool
+	CanAllow bool
 }
 
 // Compile each page once, at init, so template parse errors surface at
@@ -303,6 +311,7 @@ var (
 
 	bansPage = mustCompilePage(`
 {{define "content"}}
+{{if .CanBan}}
 <div class="card">
   <h2>Manual ban</h2>
   <form class="stacked" method="post" action="/dashboard/ban">
@@ -314,6 +323,7 @@ var (
     <button type="submit">Ban</button>
   </form>
 </div>
+{{end}}
 
 <div class="card">
   <h2>Active bans</h2>
@@ -334,11 +344,13 @@ var (
           <td>{{if .ASN}}{{.ASN}}{{else}}<span class="muted">—</span>{{end}}</td>
           <td>{{if .Reason}}{{.Reason}}{{else}}<span class="muted">—</span>{{end}}</td>
           <td>
+            {{if $.CanBan}}
             <form class="inline" method="post" action="/dashboard/unban">
               <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
               <input type="hidden" name="ip" value="{{.IP}}">
               <button type="submit">Unban</button>
             </form>
+            {{end}}
           </td>
         </tr>
       {{end}}
@@ -365,6 +377,7 @@ var (
 
 	allowlistPage = mustCompilePage(`
 {{define "content"}}
+{{if .CanAllow}}
 <div class="card">
   <h2>Add to allowlist</h2>
   <form class="stacked" method="post" action="/dashboard/allow">
@@ -376,6 +389,7 @@ var (
     <button type="submit">Add</button>
   </form>
 </div>
+{{end}}
 
 <div class="card">
   <h2>Allowlist entries</h2>
@@ -533,53 +547,38 @@ type pageRenderData struct {
 	Data any
 }
 
-func renderStatusPage(w io.Writer, csrf string, data statusPageData) error {
+func renderStatusPage(w io.Writer, ident pageIdentity, data statusPageData) error {
 	return statusPage.Execute(w, pageRenderData{
-		pageEnvelope: pageEnvelope{
-			Title: "Status", Active: "status",
-			Error: data.Error, Info: data.Info, Offline: data.Offline, CSRF: csrf,
-		},
-		Data: data,
+		pageEnvelope: envelopeFor("Status", "status", ident, data.Error, data.Info, data.Offline),
+		Data:         data,
 	})
 }
 
-func renderBansPage(w io.Writer, csrf string, data bansPageData) error {
+func renderBansPage(w io.Writer, ident pageIdentity, data bansPageData) error {
 	return bansPage.Execute(w, pageRenderData{
-		pageEnvelope: pageEnvelope{
-			Title: "Bans", Active: "bans",
-			Error: data.Error, Info: data.Info, Offline: data.Offline, CSRF: csrf,
-		},
-		Data: data,
+		pageEnvelope: envelopeFor("Bans", "bans", ident, data.Error, data.Info, data.Offline),
+		Data:         data,
 	})
 }
 
-func renderEventsPage(w io.Writer, csrf string, data eventsPageData) error {
+func renderEventsPage(w io.Writer, ident pageIdentity, data eventsPageData) error {
 	return eventsPage.Execute(w, pageRenderData{
-		pageEnvelope: pageEnvelope{
-			Title: "Events", Active: "events",
-			Error: data.Error, Info: data.Info, Offline: data.Offline, CSRF: csrf,
-		},
-		Data: data,
+		pageEnvelope: envelopeFor("Events", "events", ident, data.Error, data.Info, data.Offline),
+		Data:         data,
 	})
 }
 
-func renderAllowlistPage(w io.Writer, csrf string, data allowlistPageData) error {
+func renderAllowlistPage(w io.Writer, ident pageIdentity, data allowlistPageData) error {
 	return allowlistPage.Execute(w, pageRenderData{
-		pageEnvelope: pageEnvelope{
-			Title: "Allowlist", Active: "allowlist",
-			Error: data.Error, Info: data.Info, Offline: data.Offline, CSRF: csrf,
-		},
-		Data: data,
+		pageEnvelope: envelopeFor("Allowlist", "allowlist", ident, data.Error, data.Info, data.Offline),
+		Data:         data,
 	})
 }
 
-func renderTimelinePage(w io.Writer, csrf string, data timelinePageData) error {
+func renderTimelinePage(w io.Writer, ident pageIdentity, data timelinePageData) error {
 	return timelinePage.Execute(w, pageRenderData{
-		pageEnvelope: pageEnvelope{
-			Title: "Timeline", Active: "timeline",
-			Error: data.Error, Info: data.Info, Offline: data.Offline, CSRF: csrf,
-		},
-		Data: data,
+		pageEnvelope: envelopeFor("Timeline", "timeline", ident, data.Error, data.Info, data.Offline),
+		Data:         data,
 	})
 }
 
@@ -620,3 +619,25 @@ var loginTpl = template.Must(template.New("login").Parse(`<!doctype html>
   <p class="hint">Dashboard is bound to loopback only. See docs/dashboard.md for remote access via SSH port-forward or Cloudflare Tunnel.</p>
 </body>
 </html>`))
+
+// pageIdentity carries the logged-in identity into the layout (issue
+// #205): the name/role badge and the cosmetic show/hide of action forms.
+// The server-side permission table (#204) stays authoritative regardless.
+type pageIdentity struct {
+	CSRF     string
+	Actor    string
+	Role     string
+	CanBan   bool
+	CanAllow bool
+}
+
+// envelopeFor builds the layout envelope from one identity + page state.
+func envelopeFor(title, active string, ident pageIdentity, errMsg, info string, offline bool) pageEnvelope {
+	return pageEnvelope{
+		Title: title, Active: active,
+		Error: errMsg, Info: info, Offline: offline,
+		CSRF:  ident.CSRF,
+		Actor: ident.Actor, Role: ident.Role,
+		CanBan: ident.CanBan, CanAllow: ident.CanAllow,
+	}
+}

@@ -191,3 +191,41 @@ rules:
     threshold: 5
     score: 75
     category: bruteforce
+
+  # ── Mail rules (postfix smtpd + dovecot imap/pop3, issues #188/#189/#190) ─
+
+  - name: mail_bruteforce
+    description: "SMTP/IMAP/POP3 credential brute force"
+    kinds: [smtp_auth_fail, imap_auth_fail]
+    window: 300s
+    threshold: 5
+    score: 85
+    category: bruteforce
+
+  - name: mail_relay_probe
+    description: "Repeated open-relay probing (Relay access denied)"
+    kinds: [smtp_relay_denied]
+    window: 300s
+    threshold: 3
+    score: 80
+    category: scanner
+
+  - name: mail_bruteforce_sustained
+    description: "Sustained mail abuse (low & slow auth failures + connection abuse)"
+    kinds: [smtp_auth_fail, imap_auth_fail, smtp_abuse]
+    window: 3600s
+    threshold: 10
+    score: 80
+    category: bruteforce
+
+  # Optional aggressive tier — also count credential-less IMAP/POP3 probes
+  # (dovecot's "no auth attempts" disconnects). Higher false-positive risk
+  # on monitoring/scanning-heavy networks, so it ships disabled — enable by
+  # uncommenting. See docs guides/mail-server.
+  # - name: mail_probe_aggressive
+  #   description: "IMAP/POP3 connection probing without credentials (opt-in)"
+  #   kinds: [imap_probe]
+  #   window: 600s
+  #   threshold: 10
+  #   score: 60
+  #   category: scanner

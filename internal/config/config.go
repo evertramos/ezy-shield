@@ -10,11 +10,13 @@ import (
 	"net/netip"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/evertramos/ezy-shield/internal/nftnames"
+	"github.com/evertramos/ezy-shield/internal/siem"
 )
 
 // DefaultRulesDir is the drop-in overlay directory scanned for rule
@@ -43,6 +45,35 @@ type Config struct {
 	Notify     *NotifyCfg     `yaml:"notify"`
 	Enrich     *EnrichCfg     `yaml:"enrich"`
 	Dashboard  *DashboardCfg  `yaml:"dashboard"`
+	// SIEM lists outbound event-forwarding sinks (issue #203).
+	SIEM []SIEMSinkCfg `yaml:"siem"`
+}
+
+// SIEMSinkCfg describes one SIEM forwarding destination (issue #203).
+// Outbound only — no listener is ever created. Delivery is asynchronous
+// with a bounded queue; a slow or dead SIEM can never back-pressure the
+// decision pipeline.
+type SIEMSinkCfg struct {
+	// Name identifies the sink in logs/doctor. Required; unique;
+	// [A-Za-z0-9_-]{1,32}.
+	Name string `yaml:"name"`
+	// Address is scheme://target: udp://host:port, tcp://host:port,
+	// tls://host:port, uds:///path, file:///path.
+	Address string `yaml:"address"`
+	// Format is "json" (default), "cef", or "rfc5424".
+	Format string `yaml:"format"`
+	// Events filters which audit ops are forwarded (empty = all). See the
+	// SIEM guide for the documented kinds.
+	Events []string `yaml:"events"`
+	// CAFile optionally pins the CA bundle for tls:// (PEM path).
+	CAFile string `yaml:"ca_file,omitempty"`
+	// QueueSize bounds the in-memory queue (default 1024, max 65536).
+	QueueSize int `yaml:"queue_size,omitempty"`
+	// AllowInsecureTransport must be set to true to use plaintext tcp://
+	// or udp:// — audit events can carry credentials-adjacent data (IPs,
+	// rule reasons quoting log lines), and plaintext transports expose
+	// them in transit. doctor warns loudly when this is set.
+	AllowInsecureTransport bool `yaml:"allow_insecure_transport,omitempty"`
 }
 
 // DashboardCfg configures the localhost-only web UI (see docs/dashboard.md).
@@ -466,6 +497,54 @@ func (c *Config) Validate() error {
 	if c.Dashboard != nil && c.Dashboard.Addr != "" {
 		if err := validateLoopbackAddr(c.Dashboard.Addr); err != nil {
 			return fmt.Errorf("dashboard: %w", err)
+		}
+	}
+	if len(c.SIEM) > 0 {
+		if err := validateSIEM(c.SIEM); err != nil {
+			return fmt.Errorf("siem: %w", err)
+		}
+	}
+	return nil
+}
+
+var validSIEMFormats = map[string]bool{"": true, "json": true, "cef": true, "rfc5424": true}
+
+// validateSIEM checks the forwarding sinks (issue #203). Plaintext tcp/udp
+// is rejected unless the operator explicitly opts in — audit events cross
+// the wire and can quote hostile-but-sensitive log content.
+func validateSIEM(list []SIEMSinkCfg) error {
+	seen := make(map[string]int, len(list))
+	for i, s := range list {
+		if s.Name == "" {
+			return fmt.Errorf("[%d]: 'name' is required", i)
+		}
+		if err := validateCFInstanceName(s.Name); err != nil {
+			return fmt.Errorf("[%d]: 'name': %w", i, err)
+		}
+		if prev, dup := seen[s.Name]; dup {
+			return fmt.Errorf("[%d]: duplicate 'name' %q (also used by [%d])", i, s.Name, prev)
+		}
+		seen[s.Name] = i
+		scheme, _, err := siem.ParseAddress(s.Address)
+		if err != nil {
+			return fmt.Errorf("[%d] %s: 'address': %w", i, s.Name, err)
+		}
+		if (scheme == "tcp" || scheme == "udp") && !s.AllowInsecureTransport {
+			return fmt.Errorf("[%d] %s: plaintext %s:// sends audit events unencrypted — use tls://, or set allow_insecure_transport: true if the network is trusted", i, s.Name, scheme)
+		}
+		if !validSIEMFormats[s.Format] {
+			return fmt.Errorf("[%d] %s: 'format' must be json|cef|rfc5424, got %q", i, s.Name, s.Format)
+		}
+		if s.CAFile != "" && scheme != "tls" {
+			return fmt.Errorf("[%d] %s: 'ca_file' only applies to tls:// addresses", i, s.Name)
+		}
+		if s.QueueSize < 0 || s.QueueSize > 65536 {
+			return fmt.Errorf("[%d] %s: 'queue_size' must be 0..65536, got %d", i, s.Name, s.QueueSize)
+		}
+		for j, ev := range s.Events {
+			if strings.TrimSpace(ev) == "" {
+				return fmt.Errorf("[%d] %s: events[%d] must not be empty", i, s.Name, j)
+			}
 		}
 	}
 	return nil

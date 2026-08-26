@@ -20,6 +20,7 @@ import (
 	"github.com/evertramos/ezy-shield/internal/enrich"
 	"github.com/evertramos/ezy-shield/internal/notify"
 	"github.com/evertramos/ezy-shield/internal/parser"
+	"github.com/evertramos/ezy-shield/internal/siem"
 	"github.com/evertramos/ezy-shield/internal/store"
 	"github.com/evertramos/ezy-shield/pkg/sdk"
 )
@@ -275,7 +276,7 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 		}
 	}
 
-	d, err := daemon.New(daemon.Config{
+	dcfg := daemon.Config{
 		Cfg:        cfg,
 		Policy:     policy,
 		Store:      db,
@@ -290,12 +291,62 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 		SocketPath: socketPath,
 		Version:    version,
 		PolicyPath: policyPath,
-	})
+	}
+
+	// SIEM forwarding (issue #203): outbound-only transports fed from the
+	// daemon's audit tail. Delivery is async and bounded — a dead SIEM can
+	// never block the pipeline.
+	var siemFwd *siem.Forwarder
+	if len(cfg.SIEM) > 0 {
+		sinks := make([]siem.SinkConfig, 0, len(cfg.SIEM))
+		for _, s := range cfg.SIEM {
+			sinks = append(sinks, siem.SinkConfig{
+				Name:      s.Name,
+				Address:   s.Address,
+				Format:    s.Format,
+				Events:    s.Events,
+				CAFile:    s.CAFile,
+				QueueSize: s.QueueSize,
+			})
+		}
+		hostname, _ := os.Hostname()
+		fwd, ferr := siem.NewForwarder(sinks, siem.Identity{
+			Node:    hostname,
+			Vendor:  "ezy",
+			Product: "EzyShield",
+			Version: version,
+		}, slog.Default())
+		if ferr != nil {
+			return fmt.Errorf("run: siem forwarder: %w", ferr)
+		}
+		siemFwd = fwd
+		dcfg.SIEMEmit = fwd.Emit
+		slog.Info("run: siem forwarding active", "sinks", len(sinks))
+	}
+
+	d, err := daemon.New(dcfg)
 	if err != nil {
 		return fmt.Errorf("run: create daemon: %w", err)
 	}
 
-	return d.Run(ctx)
+	if siemFwd == nil {
+		return d.Run(ctx)
+	}
+	fctx, fcancel := context.WithCancel(ctx)
+	fwdDone := make(chan struct{})
+	go func() {
+		siemFwd.Run(fctx)
+		close(fwdDone)
+	}()
+	runErr := d.Run(ctx)
+	fcancel()
+	// Give the forwarder its bounded shutdown flush before exiting.
+	select {
+	case <-fwdDone:
+	case <-time.After(10 * time.Second):
+		slog.Warn("run: siem forwarder did not finish flushing before exit")
+	}
+	return runErr
 }
 
 // buildCollectors creates sdk.Collector instances from the config slice.

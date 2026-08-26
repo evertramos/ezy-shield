@@ -91,3 +91,21 @@ collectors: []
 #     password: env:SMTP_PASSWORD
 #     tls: starttls            # starttls | tls | none
 #     severity: []             # empty = all severities; or: [critical]
+
+# SIEM forwarding (issue #203) — push every audited action (bans, unbans,
+# strikes, arm/disarm, daemon start/stop) to your SIEM. Outbound only, async
+# with a bounded queue (a dead SIEM never blocks the pipeline; when the queue
+# fills, the OLDEST events are dropped and counted). Formats: json (default),
+# cef, rfc5424 (octet-counted per RFC 6587 on stream transports).
+# Plaintext tcp:// / udp:// require allow_insecure_transport: true — audit
+# events can quote log content; prefer tls://.
+# siem:
+#   - name: wazuh
+#     address: tls://siem.example.com:6514
+#     format: rfc5424
+#     # ca_file: /etc/ezyshield/siem-ca.pem   # optional CA pin (PEM)
+#     # events: [ban, dry_ban, unban, expire, arm, disarm]  # empty = all
+#     # queue_size: 1024
+#   - name: local-audit-copy
+#     address: file:///var/log/ezyshield-forward.log
+#     format: json

@@ -21,6 +21,7 @@ import (
 	"github.com/evertramos/ezy-shield/internal/enrich"
 	"github.com/evertramos/ezy-shield/internal/notify"
 	"github.com/evertramos/ezy-shield/internal/rules"
+	"github.com/evertramos/ezy-shield/internal/siem"
 	"github.com/evertramos/ezy-shield/internal/store"
 	"github.com/evertramos/ezy-shield/pkg/sdk"
 )
@@ -79,6 +80,7 @@ type daemonStore interface {
 	ListAllow(ctx context.Context) ([]store.AllowEntry, error)
 	ExpireAllows(ctx context.Context, now time.Time) (int, error)
 	ListAuditLog(ctx context.Context, limit int) ([]store.AuditEntry, error)
+	AuditLogAfter(ctx context.Context, afterID int64, limit int) ([]store.AuditEntry, error)
 	// Read-only queries backing the "report" verb (issue #54).
 	GetOffender(ctx context.Context, ip netip.Addr) (*store.OffenderRecord, error)
 	ActiveBanForIP(ctx context.Context, ip netip.Addr) (*store.BanRecord, error)
@@ -129,6 +131,13 @@ type Config struct {
 	// 0 = defaults). See sshrecheck.go (issue #420).
 	SSHRecheckTick  time.Duration
 	SSHRecheckDelay time.Duration
+	// SIEMEmit, when non-nil, receives every audited action plus daemon
+	// lifecycle events for SIEM forwarding (issue #203). Injected by
+	// run.go (the transports live in internal/siem); must be non-blocking.
+	SIEMEmit func(siem.Event)
+	// SIEMTailTick overrides the audit-tail poll interval (tests only;
+	// 0 = default 2s).
+	SIEMTailTick time.Duration
 }
 
 // enricherFrom converts a *enrich.Enricher into the geoLookup interface, or
@@ -181,6 +190,10 @@ type Daemon struct {
 	// re-evaluation (0 = defaults; see sshrecheck.go, issue #420).
 	sshRecheckTick  time.Duration
 	sshRecheckDelay time.Duration
+	// siemEmit / siemTailTick drive the SIEM audit tail (issue #203;
+	// see siem.go). siemEmit nil = forwarding disabled.
+	siemEmit     func(siem.Event)
+	siemTailTick time.Duration
 
 	// sigCh, when non-nil, replaces the process-signal channel in Run so
 	// tests can drive the SIGTERM drain / SIGINT immediate-exit branches
@@ -339,6 +352,8 @@ func New(dcfg Config) (*Daemon, error) {
 		expireTick:      dcfg.ExpireTick,
 		sshRecheckTick:  dcfg.SSHRecheckTick,
 		sshRecheckDelay: dcfg.SSHRecheckDelay,
+		siemEmit:        dcfg.SIEMEmit,
+		siemTailTick:    dcfg.SIEMTailTick,
 	}
 
 	// Enforcement-anomaly delivery (ADR-0009 §4, issue #146): the engine
@@ -488,6 +503,9 @@ func (d *Daemon) Run(parentCtx context.Context) error {
 
 	// Trailing notify_only summaries for scanners that stopped (issue #421).
 	go d.runNotifySuppressFlush(ctx)
+
+	// SIEM audit-tail forwarding, when injected (issue #203).
+	go d.runSIEMTail(ctx)
 
 	// Signal handling. Tests inject d.sigCh to drive the SIGTERM/SIGINT
 	// branches without raising real process signals (which would leak into

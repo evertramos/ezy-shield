@@ -87,6 +87,8 @@ type daemonStore interface {
 	StrikesForIP(ctx context.Context, ip netip.Addr, limit int) ([]store.StrikeRecord, error)
 	AuditLogForIP(ctx context.Context, ip netip.Addr, limit int) ([]store.AuditEntry, error)
 	ListOffenders(ctx context.Context, permanentOnly bool, limit int) ([]store.OffenderSummary, error)
+	// Panic button (issue #176) — see internal/store/disableall.go.
+	UnbanAll(ctx context.Context, reason string) (int, error)
 	// Persistent hourly counters backing long-window (>1h) rules (issue
 	// #134) — see internal/store/eventsagg.go.
 	IncrEventCount(ctx context.Context, ip netip.Addr, kind string, bucketStart int64) error

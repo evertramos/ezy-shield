@@ -13,8 +13,9 @@ import "encoding/json"
 type SocketRequest struct {
 	// Verb selects the operation: "status", "list", "list_allow", "events",
 	// "subscribe", "report", "ban", "unban", "allow", "unallow", "arm",
-	// "arm_keep", "disarm", "prune" — the complete set handleConn dispatches
-	// (issue #357: the arm family and "unallow" were missing here).
+	// "arm_keep", "disarm", "disable_all", "prune" — the complete set
+	// handleConn dispatches (issue #357: the arm family and "unallow" were
+	// missing here).
 	Verb string `json:"verb"`
 	// IP is the target for ban/unban/allow/report. ban/unban/allow accept
 	// either a bare address ("1.2.3.4") or a CIDR ("203.0.113.0/24"); a bare

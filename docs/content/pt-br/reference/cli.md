@@ -208,6 +208,43 @@ a direção segura. Persistido no `policy.yaml` e auditado.
 sudo ezyshield disarm
 ```
 
+## ezyshield disable / enable
+
+O botão de pânico. **Quando usar**: falsos positivos banindo usuários reais,
+um colega trancado para fora, uma regra quebrada bloqueando tráfego de
+produção — qualquer momento em que "pare tudo, agora" vale mais que
+correções cirúrgicas.
+
+```bash
+sudo ezyshield disable --all          # desarma + remove TODOS os bloqueios ativos
+sudo ezyshield disable --local-only   # flush só do nftables local (funciona com o daemon fora)
+sudo ezyshield disable                # só desarma (igual a 'disarm')
+sudo ezyshield enable                 # re-arma (alias de 'arm', pre-flight completo)
+```
+
+`--all` desarma o daemon (sem novos bans), limpa todos os bans ativos do
+store e reconcilia os enforcers contra o estado agora vazio — os sets
+nftables locais são esvaziados via helper e os enforcers de edge
+(Cloudflare) esvaziam pelo caminho normal de reconcile. **Histórico de bans
+e strikes são preservados** — é um reset de enforcement, não uma limpeza de
+dados — e o `enable` re-arma depois **sem re-aplicar nada**. Um prompt de
+confirmação protege o comando (`--yes` pula); o disarm e uma linha-resumo
+(`disable_all`, com a contagem) vão para o audit log.
+
+`--local-only` é a variante quebra-vidro: fala **direto com o socket do
+helper enforcer** e faz flush dos sets locais de bloqueio, então funciona
+mesmo com o daemon doente. Bloqueios de edge ficam como estão, e um daemon
+*rodando* re-aplica os bans ativos no próximo reconcile (~1 min) — siga com
+`allow <seu-ip>`, `unban <ip>` ou `disable --all`.
+
+Se nenhum socket responder, o comando imprime no stderr os passos exatos de
+recuperação manual (`systemctl stop ezyshield`, `nft flush set inet
+ezyshield blocked` / `blocked6`, e a nota da lista do Cloudflare).
+
+As duas variantes honram `--json` e os exit codes padrão. Deliberadamente
+**não existe flag de config** para nada disso — só um operador com acesso
+ao socket (root ou grupo `ezyshield`) pode disparar.
+
 ## ezyshield status
 
 Mostra o status do daemon e do enforcer.

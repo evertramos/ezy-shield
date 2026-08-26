@@ -104,10 +104,28 @@ func runDoctor(cmd *cobra.Command, configDir, dbPath, socketPath string, jsonOut
 	checks = append(checks, checkCloudflareEnforcers(configDir)...)
 	// issue #203: SIEM sink reachability (non-fatal) + plaintext warning.
 	checks = append(checks, checkSIEMSinks(configDir)...)
+	// issue #198: bunny.net enforcer credentials/connectivity (read-only).
+	checks = append(checks, checkBunnyEnforcer(configDir)...)
 	// issue #240: PATH/systemd shadowing between a script install and a
 	// package install. New function + this single registration line only --
 	// see doctor_shadow.go.
 	checks = append(checks, checkInstallShadowing(os.Getenv("PATH"))...)
+	// cmd.Context() is nil when the command was built but not Executed
+	// (tests call runDoctor directly). One shared context for the checks
+	// below that take one.
+	doctorCtx := cmd.Context()
+	if doctorCtx == nil {
+		doctorCtx = context.Background()
+	}
+	// issue #213: the systemd units still carry the hardening enforcement
+	// depends on (AF_NETLINK, RuntimeDirectory), plus a functional netlink
+	// probe through the running helper. Read-only; see doctor_units.go.
+	checks = append(checks, checkUnitHardening(doctorCtx)...)
+	checks = append(checks, checkEnforcerNetlinkProbe(enforcerSockPath))
+	// issue #177: ufw/firewalld coexistence + the table-gone-with-active-bans
+	// conflict. Read-only (never execs the managers' own CLIs); see
+	// doctor_firewall.go.
+	checks = append(checks, checkFirewallCoexistence(doctorCtx, dbPath)...)
 	// issue #146: fired ban_ineffective diagnostics (read-only DB query).
 	checks = append(checks, checkBanIneffective(dbPath))
 	// issue #174: honest enforcement state from the running daemon.

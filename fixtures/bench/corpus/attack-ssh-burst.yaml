@@ -1,0 +1,15 @@
+name: attack-ssh-burst
+description: Classic SSH brute force — 8 failures in ~16s from one IP
+label: attack
+source: "journald:sshd"
+attacker_ips: ["203.0.113.10"]
+interval_ms: 2000
+lines:
+    - 'Failed password for root from 203.0.113.10 port 41001 ssh2'
+    - 'Failed password for root from 203.0.113.10 port 41002 ssh2'
+    - 'Failed password for root from 203.0.113.10 port 41003 ssh2'
+    - 'Failed password for root from 203.0.113.10 port 41004 ssh2'
+    - 'Failed password for root from 203.0.113.10 port 41005 ssh2'
+    - 'Failed password for root from 203.0.113.10 port 41006 ssh2'
+    - 'Failed password for root from 203.0.113.10 port 41007 ssh2'
+    - 'Failed password for root from 203.0.113.10 port 41008 ssh2'

@@ -1,0 +1,3 @@
+{"log":"Aug 25 13:10:02 mailcow dovecot: imap-login: Aborted login (auth failed, 2 attempts in 4 secs): user=<postmaster>, method=PLAIN, rip=203.0.113.80, lip=172.22.1.250, TLS, session=<d1>\n","stream":"stdout","time":"2026-08-25T13:10:02.000000001Z"}
+{"log":"Aug 25 13:10:05 mailcow dovecot: pop3-login: Disconnected (no auth attempts in 3 secs): rip=203.0.113.81, lip=172.22.1.250, session=<d2>\n","stream":"stdout","time":"2026-08-25T13:10:05.000000001Z"}
+{"log":"Aug 25 13:10:07 mailcow dovecot: imap-login: Login: user=<evert>, method=PLAIN, rip=198.51.100.9, lip=172.22.1.250, TLS, session=<d3>\n","stream":"stdout","time":"2026-08-25T13:10:07.000000001Z"}

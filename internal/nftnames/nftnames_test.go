@@ -16,23 +16,23 @@ func TestResolve(t *testing.T) {
 	}{
 		{
 			name: "empty means defaults",
-			want: Names{Table: "inet ezyshield", Set4: "blocked", Set6: "blocked6", Allow4: "allowed", Allow6: "allowed6"},
+			want: Names{Table: "inet ezyshield", Set4: "blocked", Set6: "blocked6", Allow4: "allowed", Allow6: "allowed6", Feeds4: "blocked_feeds", Feeds6: "blocked_feeds6"},
 		},
 		{
 			name:  "bare table name gets inet family",
 			table: "mytable",
-			want:  Names{Table: "inet mytable", Set4: "blocked", Set6: "blocked6", Allow4: "allowed", Allow6: "allowed6"},
+			want:  Names{Table: "inet mytable", Set4: "blocked", Set6: "blocked6", Allow4: "allowed", Allow6: "allowed6", Feeds4: "blocked_feeds", Feeds6: "blocked_feeds6"},
 		},
 		{
 			name:  "explicit inet family",
 			table: "inet mytable",
 			set:   "myblocked",
-			want:  Names{Table: "inet mytable", Set4: "myblocked", Set6: "myblocked6", Allow4: "allowed", Allow6: "allowed6"},
+			want:  Names{Table: "inet mytable", Set4: "myblocked", Set6: "myblocked6", Allow4: "allowed", Allow6: "allowed6", Feeds4: "blocked_feeds", Feeds6: "blocked_feeds6"},
 		},
 		{
 			name:  "whitespace trimmed",
 			table: "  inet mytable  ",
-			want:  Names{Table: "inet mytable", Set4: "blocked", Set6: "blocked6", Allow4: "allowed", Allow6: "allowed6"},
+			want:  Names{Table: "inet mytable", Set4: "blocked", Set6: "blocked6", Allow4: "allowed", Allow6: "allowed6", Feeds4: "blocked_feeds", Feeds6: "blocked_feeds6"},
 		},
 		{name: "non-inet family rejected", table: "ip mytable", wantErr: "family must be 'inet'"},
 		{name: "ip6 family rejected", table: "ip6 mytable", wantErr: "family must be 'inet'"},
@@ -44,6 +44,8 @@ func TestResolve(t *testing.T) {
 		{name: "newline in set rejected", set: "a\nb", wantErr: "letters, digits and underscore"},
 		{name: "reserved allowed", set: "allowed", wantErr: "reserved allowlist sets"},
 		{name: "reserved allowed6", set: "allowed6", wantErr: "reserved allowlist sets"},
+		{name: "reserved blocked_feeds", set: "blocked_feeds", wantErr: "reserved feed sets"},
+		{name: "reserved blocked_feeds6", set: "blocked_feeds6", wantErr: "reserved feed sets"},
 		{name: "table too long", table: strings.Repeat("a", 33), wantErr: "longer than 32"},
 		{name: "set too long for v6 twin", set: strings.Repeat("a", 32), wantErr: "longer than 31"},
 	}

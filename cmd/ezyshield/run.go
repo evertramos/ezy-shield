@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/netip"
@@ -18,10 +19,12 @@ import (
 	"github.com/evertramos/ezy-shield/internal/decision"
 	"github.com/evertramos/ezy-shield/internal/enforce"
 	"github.com/evertramos/ezy-shield/internal/enrich"
+	"github.com/evertramos/ezy-shield/internal/feeds"
 	"github.com/evertramos/ezy-shield/internal/notify"
 	"github.com/evertramos/ezy-shield/internal/parser"
 	"github.com/evertramos/ezy-shield/internal/siem"
 	"github.com/evertramos/ezy-shield/internal/store"
+	"github.com/evertramos/ezy-shield/internal/webshell"
 	"github.com/evertramos/ezy-shield/pkg/sdk"
 )
 
@@ -46,6 +49,11 @@ func defaultParsers(logger *slog.Logger) []sdk.Parser {
 		parser.NewApacheErrorParser(logger),
 		parser.NewCaddyParser(logger, parser.CaddyConfig{}),
 		parser.NewTraefikParser(logger, parser.TraefikConfig{}),
+		parser.NewPostfixParser(logger),
+		parser.NewDovecotParser(logger),
+		parser.NewVaultwardenParser(logger),
+		parser.NewNextcloudParser(logger),
+		parser.NewKeycloakParser(logger),
 	}
 }
 
@@ -136,7 +144,13 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 
 	collectors := buildCollectors(cfg, logger)
 
-	var enf sdk.Enforcer
+	var (
+		enf sdk.Enforcer
+		// nftEnf keeps the concrete nftables enforcer for the reputation-
+		// feed sets (issue #195): feed entries travel their own SyncFeeds
+		// path, never the Ban/Sync fan-out the gate wraps below.
+		nftEnf *enforce.NftablesEnforcer
+	)
 	if cfg.Enforce != nil && cfg.Enforce.NFTables != nil {
 		sockPath := cfg.Enforce.NFTables.Socket
 		if sockPath == "" {
@@ -150,12 +164,13 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 		// Table/set come from config (issue #268): empty means the enforcer
 		// defaults; non-default names are validated at config load and the
 		// helper is capability-probed before first use.
-		enf = enforce.New(sockPath, allowlist,
+		nftEnf = enforce.New(sockPath, allowlist,
 			enforce.WithNames(cfg.Enforce.NFTables.Table, cfg.Enforce.NFTables.Set))
+		enf = nftEnf
 	}
 
+	var edgeEnforcers []sdk.Enforcer
 	if cfg.Enforce != nil && len(cfg.Enforce.Cloudflare) > 0 {
-		cfEnforcers := make([]sdk.Enforcer, 0, len(cfg.Enforce.Cloudflare))
 		for i := range cfg.Enforce.Cloudflare {
 			cf := cfg.Enforce.Cloudflare[i]
 			cfEnf, cfErr := enforce.NewCloudflareEnforcer(ctx, &cf, parseAllowlist(policy))
@@ -166,19 +181,32 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 					"cloudflare_name", cf.Name, "err", cfErr)
 				continue
 			}
-			cfEnforcers = append(cfEnforcers, cfEnf)
+			edgeEnforcers = append(edgeEnforcers, cfEnf)
 		}
-		all := make([]sdk.Enforcer, 0, len(cfEnforcers)+1)
+	}
+	if cfg.Enforce != nil && cfg.Enforce.Bunny != nil {
+		bunnyEnf, bErr := enforce.NewBunnyEnforcer(&enforce.BunnyConfig{
+			AccessKey:   cfg.Enforce.Bunny.APIKey,
+			PullZoneIDs: cfg.Enforce.Bunny.PullZones,
+			Name:        cfg.Enforce.Bunny.Name,
+		}, parseAllowlist(policy))
+		if bErr != nil {
+			// Same isolation as cloudflare: a missing key disables only bunny.
+			slog.Warn("run: bunny enforcer unavailable; continuing without it",
+				"bunny_name", cfg.Enforce.Bunny.Name, "err", bErr)
+		} else {
+			edgeEnforcers = append(edgeEnforcers, bunnyEnf)
+		}
+	}
+	if len(edgeEnforcers) > 0 {
+		all := make([]sdk.Enforcer, 0, len(edgeEnforcers)+1)
 		if enf != nil {
 			all = append(all, enf)
 		}
-		all = append(all, cfEnforcers...)
-		switch len(all) {
-		case 0:
-			// nothing wired up
-		case 1:
+		all = append(all, edgeEnforcers...)
+		if len(all) == 1 {
 			enf = all[0]
-		default:
+		} else {
 			enf = enforce.NewMulti(all...)
 		}
 	}
@@ -276,21 +304,48 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 		}
 	}
 
+	// Docker exec activity watcher (issue #220): opt-in, observational only.
+	// Wired here (not inside the daemon) so the daemon package never imports
+	// the linux-only collector package.
+	var execActivity func(ctx context.Context, report func(daemon.ExecActivityReport))
+	if cfg.DockerExec != nil && cfg.DockerExec.Enabled {
+		watcher := &collector.DockerExecWatcher{Ignore: cfg.DockerExec.Ignore, Logger: logger}
+		execActivity = func(ctx context.Context, report func(daemon.ExecActivityReport)) {
+			err := watcher.Run(ctx, func(ev collector.ExecEvent) {
+				report(daemon.ExecActivityReport{
+					Container: ev.Container,
+					Image:     ev.Image,
+					Command:   ev.Command,
+					User:      ev.User,
+				})
+			})
+			if err != nil && ctx.Err() == nil {
+				slog.Error("run: docker exec watcher stopped", "err", err)
+			}
+		}
+	}
+
 	dcfg := daemon.Config{
-		Cfg:        cfg,
-		Policy:     policy,
-		Store:      db,
-		Parsers:    parsers,
-		Collectors: collectors,
-		Enforcer:   enf,
-		Notifier:   disp,
-		AIProvider: aiProvider,
-		AIBudget:   aiBudget,
-		AICache:    aiCache,
-		Enricher:   enricher,
-		SocketPath: socketPath,
-		Version:    version,
-		PolicyPath: policyPath,
+		Cfg:              cfg,
+		Policy:           policy,
+		Store:            db,
+		Parsers:          parsers,
+		Collectors:       collectors,
+		Enforcer:         enf,
+		Notifier:         disp,
+		AIProvider:       aiProvider,
+		AIBudget:         aiBudget,
+		AICache:          aiCache,
+		Enricher:         enricher,
+		SocketPath:       socketPath,
+		Version:          version,
+		PolicyPath:       policyPath,
+		ExecActivity:     execActivity,
+		WebshellActivity: buildWebshellActivity(cfg),
+	}
+	dcfg.FeedUpdates, dcfg.FeedRefresh = buildFeedRuntime(cfg)
+	if nftEnf != nil {
+		dcfg.FeedSyncer = nftEnf
 	}
 
 	// SIEM forwarding (issue #203): outbound-only transports fed from the
@@ -347,6 +402,122 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 		slog.Warn("run: siem forwarder did not finish flushing before exit")
 	}
 	return runErr
+}
+
+// buildFeedRuntime wires the reputation feeds (issues #194/#195/#196) into
+// the daemon via injection — the daemon package never imports internal/feeds.
+// Returns the refresh loop and the on-demand refresh function (both nil when
+// no feeds are configured); they share one concurrency-safe Fetcher, so an
+// on-demand refresh benefits from and updates the same ETag/last-known-good
+// cache the loop uses.
+func buildFeedRuntime(cfg *config.Config) (
+	func(context.Context, func(daemon.FeedUpdate)),
+	func(context.Context, string, func(daemon.FeedUpdate)) (int, error),
+) {
+	if len(cfg.Feeds) == 0 {
+		return nil, nil
+	}
+	fcfgs := make([]feeds.FeedConfig, 0, len(cfg.Feeds))
+	meta := make(map[string]config.FeedCfg, len(cfg.Feeds))
+	for _, f := range cfg.Feeds {
+		fcfgs = append(fcfgs, feeds.FeedConfig{
+			Name:            f.Name,
+			URL:             f.URL,
+			Format:          f.Format,
+			RefreshInterval: f.RefreshInterval.AsDuration(),
+			MaxEntries:      f.MaxEntries,
+			Timeout:         f.Timeout.AsDuration(),
+		})
+		meta[f.Name] = f
+	}
+	fetcher := feeds.New(nil, slog.Default())
+
+	toUpdate := func(res *feeds.Result) daemon.FeedUpdate {
+		m := meta[res.Name]
+		action := m.Action
+		if action == "" {
+			action = "observe"
+		}
+		ttl := m.TTL.AsDuration()
+		if ttl <= 0 {
+			// Twice the refresh interval: survives one missed refresh,
+			// drains on its own when the feed dies.
+			ttl = 2 * m.RefreshInterval.AsDuration()
+		}
+		return daemon.FeedUpdate{
+			Name:     res.Name,
+			Action:   action,
+			TTL:      ttl,
+			Interval: m.RefreshInterval.AsDuration(),
+			Prefixes: res.Prefixes,
+		}
+	}
+
+	loop := func(ctx context.Context, report func(daemon.FeedUpdate)) {
+		slog.Info("run: reputation feeds active", "feeds", len(fcfgs))
+		fetcher.Run(ctx, fcfgs, func(res *feeds.Result) {
+			report(toUpdate(res))
+		})
+	}
+	refresh := func(ctx context.Context, name string, report func(daemon.FeedUpdate)) (int, error) {
+		var (
+			refreshed int
+			errs      []error
+			found     bool
+		)
+		for _, fc := range fcfgs {
+			if name != "" && fc.Name != name {
+				continue
+			}
+			found = true
+			res, err := fetcher.Fetch(ctx, fc)
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			report(toUpdate(res))
+			refreshed++
+		}
+		if !found {
+			return 0, fmt.Errorf("no configured feed named %q", name)
+		}
+		return refreshed, errors.Join(errs...)
+	}
+	return loop, refresh
+}
+
+// buildWebshellActivity wires the opt-in webshell-drop tripwire (issue
+// #221) into the daemon via injection — the daemon package never imports
+// internal/webshell. Returns nil (feature off) unless enabled in config.
+func buildWebshellActivity(cfg *config.Config) func(context.Context, func(daemon.WebshellReport)) {
+	wcfg := cfg.WebshellWatch
+	if wcfg == nil || !wcfg.Enabled {
+		return nil
+	}
+	return func(ctx context.Context, report func(daemon.WebshellReport)) {
+		w, err := webshell.New(webshell.Config{
+			Roots:      wcfg.Roots,
+			Extensions: wcfg.Extensions,
+			Ignore:     wcfg.Ignore,
+			Interval:   time.Duration(wcfg.IntervalSec) * time.Second,
+		})
+		if err != nil {
+			slog.Error("run: webshell watcher disabled", "err", err)
+			return
+		}
+		slog.Info("run: webshell tripwire active", "roots", wcfg.Roots)
+		_ = w.Run(ctx, func(ev webshell.Event) {
+			report(daemon.WebshellReport{
+				Path:       ev.Path,
+				Op:         ev.Op,
+				Owner:      ev.Owner,
+				Size:       ev.Size,
+				Suspicious: ev.Suspicious,
+				Markers:    ev.Markers,
+				Count:      ev.Count,
+			})
+		})
+	}
 }
 
 // buildCollectors creates sdk.Collector instances from the config slice.

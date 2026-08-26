@@ -1299,8 +1299,9 @@ func TestRunCDNStep_MultiAccount(t *testing.T) {
 		},
 		bools: []bool{
 			true, // Does this server sit behind a CDN?
+			true, // Configure the Cloudflare edge enforcer?
 			true, // Add another Cloudflare account?
-			// exhausted → default false: stop after the second account
+			// exhausted → defaults: stop after the second account, skip bunny
 		},
 	}
 	step := &cdnStep{}
@@ -1377,7 +1378,8 @@ func TestRunCDNStep_MultiAccount_SecondFails(t *testing.T) {
 			"rulesets", "block",
 			"not-a-zone-id", // invalid → second account fails
 		},
-		bools: []bool{true, true},
+		// behind CDN? / configure cloudflare? / add another account?
+		bools: []bool{true, true, true},
 	}
 	step := &cdnStep{}
 	out := captureStep(t, func(p *wPrinter) {
@@ -1419,7 +1421,8 @@ func TestRunCDNStep_MultiAccount_DuplicateNameRejected(t *testing.T) {
 			"main", // name for the first account
 			"main", // duplicate name for the second → rejected
 		},
-		bools: []bool{true, true},
+		// behind CDN? / configure cloudflare? / add another account?
+		bools: []bool{true, true, true},
 	}
 	step := &cdnStep{}
 	out := captureStep(t, func(p *wPrinter) {

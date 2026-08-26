@@ -24,7 +24,14 @@ import (
 var validVerbs = map[string]bool{
 	"add": true, "del": true, "flush": true, "list": true, "ping": true, "caps": true,
 	"allow_add": true, "allow_del": true, "allow_list": true, "allow_flush": true,
+	"feeds_sync": true,
 }
+
+// maxRequestBytes bounds one request line. Everything except feeds_sync fits
+// in a few hundred bytes; feeds_sync carries up to enforce.MaxFeedElements
+// entries (~45 bytes each on the wire), so 8MiB gives comfortable headroom
+// while still bounding a hostile writer on the socket.
+const maxRequestBytes = 8 << 20
 
 // Server is the enforcer unix-socket server.
 // It maintains an in-memory copy of the blocked set so that "list" is fast
@@ -183,6 +190,9 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	defer conn.Close() //nolint:errcheck
 
 	sc := bufio.NewScanner(conn)
+	// feeds_sync requests carry a full desired-state batch — raise the line
+	// cap above the Scanner default (64KiB) while keeping a hard bound.
+	sc.Buffer(make([]byte, 64*1024), maxRequestBytes)
 	for sc.Scan() {
 		var req enforce.Request
 		if err := json.Unmarshal(sc.Bytes(), &req); err != nil {
@@ -220,7 +230,37 @@ func (s *Server) dispatch(ctx context.Context, req enforce.Request) enforce.Resp
 		return enforce.Response{OK: true}
 
 	case "caps":
-		return enforce.Response{OK: true, Features: []string{enforce.FeatureCustomNames}}
+		return enforce.Response{OK: true, Features: []string{
+			enforce.FeatureCustomNames, enforce.FeatureFeedsSync,
+		}}
+
+	case "feeds_sync":
+		// Full desired-state replace of the reputation-feed sets (issue
+		// #195). Every element is re-validated in THIS process (§3) and
+		// must carry a positive TTL — feed entries are never permanent.
+		// The cap is a hard reject, not a truncation: silently dropping
+		// entries the daemon thinks are applied would be a lie.
+		if len(req.Elements) > enforce.MaxFeedElements {
+			return enforce.Response{OK: false, Error: fmt.Sprintf(
+				"feeds_sync: %d elements exceeds the %d cap", len(req.Elements), enforce.MaxFeedElements)}
+		}
+		for _, e := range req.Elements {
+			if err := validateIP(e.IP); err != nil {
+				return enforce.Response{OK: false, Error: fmt.Sprintf("feeds_sync: %v", err)}
+			}
+			if e.TTLSeconds <= 0 {
+				return enforce.Response{OK: false, Error: fmt.Sprintf(
+					"feeds_sync: element %s: ttl must be positive (feed entries are never permanent)", e.IP)}
+			}
+		}
+		// The feed sets are separate from the ban sets and cache, but the
+		// mutation still serializes with other nft writes.
+		s.mutateMu.Lock()
+		defer s.mutateMu.Unlock()
+		if err := nftFeedsSync(ctx, s.run, names, req.Elements); err != nil {
+			return enforce.Response{OK: false, Error: err.Error()}
+		}
+		return enforce.Response{OK: true}
 
 	case "list":
 		// Entries past their deadline were already removed by the KERNEL's

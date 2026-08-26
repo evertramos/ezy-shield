@@ -18,6 +18,7 @@ import (
 	"github.com/evertramos/ezy-shield/internal/cdndetect"
 	"github.com/evertramos/ezy-shield/internal/config"
 	"github.com/evertramos/ezy-shield/internal/decision"
+	"github.com/evertramos/ezy-shield/internal/enforce"
 	"github.com/evertramos/ezy-shield/internal/enrich"
 	"github.com/evertramos/ezy-shield/internal/notify"
 	"github.com/evertramos/ezy-shield/internal/rules"
@@ -129,6 +130,14 @@ type Config struct {
 	// 0 = defaults). See sshrecheck.go (issue #420).
 	SSHRecheckTick  time.Duration
 	SSHRecheckDelay time.Duration
+	// FeedUpdates, when non-nil, is started by Run to deliver reputation-
+	// feed refreshes (issue #195); it must honor ctx and call report per
+	// sanitized feed result. Injected by run.go so the daemon stays
+	// decoupled from internal/feeds. See feeds.go.
+	FeedUpdates func(ctx context.Context, report func(FeedUpdate))
+	// FeedSyncer applies action:block feed entries to the dedicated
+	// nftables feed sets (nil = no local enforcement backend). See feeds.go.
+	FeedSyncer enforce.FeedSyncer
 }
 
 // enricherFrom converts a *enrich.Enricher into the geoLookup interface, or
@@ -181,6 +190,19 @@ type Daemon struct {
 	// re-evaluation (0 = defaults; see sshrecheck.go, issue #420).
 	sshRecheckTick  time.Duration
 	sshRecheckDelay time.Duration
+
+	// Reputation-feed state (issue #195; see feeds.go). feedUpdates is the
+	// injected refresh loop; feedSyncer the nftables feed-set backend;
+	// feedRep the observe-mode lookup; feedBlockDesired the per-feed
+	// desired block state; feedObserved per-feed observe entry counts;
+	// feedSSHPeersFn overrides decision.ProcSSHPeers in tests.
+	feedUpdates      func(ctx context.Context, report func(FeedUpdate))
+	feedSyncer       enforce.FeedSyncer
+	feedRep          *feedReputation
+	feedMu           sync.Mutex
+	feedBlockDesired map[string][]enforce.FeedElement
+	feedObserved     map[string]int
+	feedSSHPeersFn   func() []netip.Addr
 
 	// sigCh, when non-nil, replaces the process-signal channel in Run so
 	// tests can drive the SIGTERM drain / SIGINT immediate-exit branches
@@ -339,6 +361,12 @@ func New(dcfg Config) (*Daemon, error) {
 		expireTick:      dcfg.ExpireTick,
 		sshRecheckTick:  dcfg.SSHRecheckTick,
 		sshRecheckDelay: dcfg.SSHRecheckDelay,
+
+		feedUpdates:      dcfg.FeedUpdates,
+		feedSyncer:       dcfg.FeedSyncer,
+		feedRep:          newFeedReputation(),
+		feedBlockDesired: map[string][]enforce.FeedElement{},
+		feedObserved:     map[string]int{},
 	}
 
 	// Enforcement-anomaly delivery (ADR-0009 §4, issue #146): the engine
@@ -488,6 +516,9 @@ func (d *Daemon) Run(parentCtx context.Context) error {
 
 	// Trailing notify_only summaries for scanners that stopped (issue #421).
 	go d.runNotifySuppressFlush(ctx)
+
+	// Reputation-feed refresh delivery, when injected (issue #195).
+	go d.runFeeds(ctx)
 
 	// Signal handling. Tests inject d.sigCh to drive the SIGTERM/SIGINT
 	// branches without raising real process signals (which would leak into
@@ -948,6 +979,18 @@ func (d *Daemon) evaluateRules(ctx context.Context, ip netip.Addr) []sdk.Verdict
 			agg.Enrich = d.enricher.Lookup(ip)
 		}
 		verdicts = append(verdicts, d.ruleEng.Evaluate(ctx, agg)...)
+	}
+	// Reputation boost (issue #195): an IP flagged by an observe-mode feed
+	// gets a score bump — but only when it is ALREADY tripping local rules
+	// (len(verdicts) > 0). A feed alone never creates a verdict, a strike,
+	// or a ban.
+	if len(verdicts) > 0 && d.feedRep != nil {
+		if feed, ok := d.feedRep.Lookup(ip); ok {
+			for i := range verdicts {
+				verdicts[i].Score = min(100, verdicts[i].Score+feedReputationBoost)
+				verdicts[i].Reason += " [reputation:" + feed + "]"
+			}
+		}
 	}
 	return verdicts
 }

@@ -258,6 +258,36 @@ func (e *NftablesEnforcer) SyncAllowlist(ctx context.Context, want []netip.Prefi
 	return nil
 }
 
+// FeedSyncer is the narrow surface the daemon's feed manager needs: an
+// atomic desired-state replace of the reputation-feed sets (issue #195).
+// Kept apart from sdk.Enforcer on purpose — feed entries are not bans and
+// must never travel the strike-driven Ban/Unban/Sync paths.
+type FeedSyncer interface {
+	SyncFeeds(ctx context.Context, elems []FeedElement) error
+}
+
+// SyncFeeds atomically replaces the helper's reputation-feed sets
+// (blocked_feeds/blocked_feeds6) with exactly elems — the helper applies one
+// nft -f script (flush + re-add), so the kernel never sees partial state.
+// The caller is responsible for allowlist/anti-lockout filtering BEFORE this
+// point (the daemon's feed manager does; the helper additionally re-validates
+// every IP). Desired sets beyond MaxFeedElements are truncated with a
+// warning — the helper hard-rejects anything larger.
+func (e *NftablesEnforcer) SyncFeeds(ctx context.Context, elems []FeedElement) error {
+	if len(elems) > MaxFeedElements {
+		slog.WarnContext(ctx, "enforce/nftables SyncFeeds: desired set exceeds cap; truncating",
+			"cap", MaxFeedElements, "dropped", len(elems)-MaxFeedElements)
+		elems = elems[:MaxFeedElements]
+	}
+	if err := e.rpc(ctx, Request{Verb: "feeds_sync", Elements: elems}); err != nil {
+		if strings.Contains(err.Error(), "unknown verb") {
+			return fmt.Errorf("enforce/nftables: the enforcer helper does not support feeds_sync — update ezyshield-enforcer to the same version as ezyshield: %w", err)
+		}
+		return fmt.Errorf("enforce/nftables SyncFeeds: %w", err)
+	}
+	return nil
+}
+
 // rpc sends a request and returns nil on OK, else a wrapped error. Callers
 // that need to inspect Response.Code (e.g. the Sync loops, to distinguish
 // "already absent" from a real success) should use rpcResp instead.

@@ -358,6 +358,46 @@
           "description": "SQLite file storing the admin password hash. Defaults to <data_dir>/dashboard.db."
         }
       }
+    },
+    "feeds": {
+      "type": "array",
+      "description": "IP reputation feeds to download and parse (issue #194). Download/parse only — enforcement is a follow-up. Private/loopback/link-local ranges in a feed are always dropped.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "url", "format", "refresh_interval"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,32}$",
+            "description": "Unique feed identifier used in logs and provenance."
+          },
+          "url": {
+            "type": "string",
+            "pattern": "^https://",
+            "description": "Feed source. https:// only — http is rejected at load."
+          },
+          "format": {
+            "type": "string",
+            "enum": ["plain", "cidr", "abuseipdb"],
+            "description": "plain = one IP per line; cidr = IP or prefix per line with ';'/'#' comments (Spamhaus DROP / FireHOL); abuseipdb = plain list export."
+          },
+          "refresh_interval": {
+            "type": "string",
+            "description": "Re-fetch cadence (Go duration). Minimum 1h."
+          },
+          "max_entries": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 500000,
+            "description": "Per-feed entry cap. 0 = 100k default; hard cap 500k."
+          },
+          "timeout": {
+            "type": "string",
+            "description": "Single-fetch timeout (Go duration). Default 30s."
+          }
+        }
+      }
     }
   }
 }

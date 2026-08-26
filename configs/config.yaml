@@ -91,3 +91,16 @@ collectors: []
 #     password: env:SMTP_PASSWORD
 #     tls: starttls            # starttls | tls | none
 #     severity: []             # empty = all severities; or: [critical]
+
+# IP reputation feeds (issue #194) — download + parse only for now; applying
+# them to enforcement is a follow-up. Feeds are remote input that will
+# influence blocking, so they are heavily sanitized: https only, 10MiB/4KiB
+# caps, and private/loopback/link-local ranges are ALWAYS dropped (a feed can
+# never smuggle 10.0.0.0/8).
+# feeds:
+#   - name: spamhaus-drop
+#     url: https://www.spamhaus.org/drop/drop.txt
+#     format: cidr             # plain | cidr | abuseipdb
+#     refresh_interval: 12h    # minimum 1h
+#     # max_entries: 100000    # default 100k; hard cap 500k
+#     # timeout: 30s

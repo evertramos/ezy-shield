@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"path"
 	"sort"
 	"time"
 
@@ -43,6 +44,19 @@ type Config struct {
 	Notify     *NotifyCfg     `yaml:"notify"`
 	Enrich     *EnrichCfg     `yaml:"enrich"`
 	Dashboard  *DashboardCfg  `yaml:"dashboard"`
+	// DockerExec enables the docker exec activity watcher (issue #220) —
+	// observational post-exploitation signal; never a ban source.
+	DockerExec *DockerExecCfg `yaml:"docker_exec"`
+}
+
+// DockerExecCfg configures the docker exec activity watcher (issue #220).
+// Opt-in: absent or enabled=false means the events API is never touched.
+type DockerExecCfg struct {
+	Enabled bool `yaml:"enabled"`
+	// Ignore lists container-name or image patterns to skip (glob syntax
+	// per path.Match; a pattern without glob metacharacters matches as a
+	// substring) — legitimate cron/health tooling.
+	Ignore []string `yaml:"ignore"`
 }
 
 // DashboardCfg configures the localhost-only web UI (see docs/dashboard.md).
@@ -466,6 +480,13 @@ func (c *Config) Validate() error {
 	if c.Dashboard != nil && c.Dashboard.Addr != "" {
 		if err := validateLoopbackAddr(c.Dashboard.Addr); err != nil {
 			return fmt.Errorf("dashboard: %w", err)
+		}
+	}
+	if c.DockerExec != nil {
+		for i, pat := range c.DockerExec.Ignore {
+			if _, err := path.Match(pat, "probe"); err != nil {
+				return fmt.Errorf("docker_exec.ignore[%d]: invalid pattern %q: %w", i, pat, err)
+			}
 		}
 	}
 	return nil

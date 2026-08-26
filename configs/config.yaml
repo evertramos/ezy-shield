@@ -91,3 +91,13 @@ collectors: []
 #     password: env:SMTP_PASSWORD
 #     tls: starttls            # starttls | tls | none
 #     severity: []             # empty = all severities; or: [critical]
+
+# Docker exec activity watcher (issue #220) — post-exploitation visibility.
+# Observational ONLY: a `docker exec` into a container is audited, shown in
+# `ezyshield watch`, and notified (warn) — never a ban source (there is
+# usually no remote IP to ban). Docs: guides/docker-exec-watch.
+# docker_exec:
+#   enabled: true
+#   ignore:                    # legitimate tooling (globs or substrings)
+#     - "healthcheck*"
+#     - cron

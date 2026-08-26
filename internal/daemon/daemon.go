@@ -129,6 +129,11 @@ type Config struct {
 	// 0 = defaults). See sshrecheck.go (issue #420).
 	SSHRecheckTick  time.Duration
 	SSHRecheckDelay time.Duration
+	// ExecActivity, when non-nil, is started by Run to watch docker exec
+	// events (issue #220); it must honor ctx and call report for each
+	// observation. Injected by run.go so the daemon never imports the
+	// linux-only collector package. See execactivity.go.
+	ExecActivity func(ctx context.Context, report func(ExecActivityReport))
 }
 
 // enricherFrom converts a *enrich.Enricher into the geoLookup interface, or
@@ -181,6 +186,9 @@ type Daemon struct {
 	// re-evaluation (0 = defaults; see sshrecheck.go, issue #420).
 	sshRecheckTick  time.Duration
 	sshRecheckDelay time.Duration
+	// execActivity is the injected docker exec watcher (issue #220);
+	// nil = disabled. See execactivity.go.
+	execActivity func(ctx context.Context, report func(ExecActivityReport))
 
 	// sigCh, when non-nil, replaces the process-signal channel in Run so
 	// tests can drive the SIGTERM drain / SIGINT immediate-exit branches
@@ -339,6 +347,7 @@ func New(dcfg Config) (*Daemon, error) {
 		expireTick:      dcfg.ExpireTick,
 		sshRecheckTick:  dcfg.SSHRecheckTick,
 		sshRecheckDelay: dcfg.SSHRecheckDelay,
+		execActivity:    dcfg.ExecActivity,
 	}
 
 	// Enforcement-anomaly delivery (ADR-0009 §4, issue #146): the engine
@@ -488,6 +497,9 @@ func (d *Daemon) Run(parentCtx context.Context) error {
 
 	// Trailing notify_only summaries for scanners that stopped (issue #421).
 	go d.runNotifySuppressFlush(ctx)
+
+	// Docker exec activity watcher, when injected (issue #220).
+	go d.runExecActivity(ctx)
 
 	// Signal handling. Tests inject d.sigCh to drive the SIGTERM/SIGINT
 	// branches without raising real process signals (which would leak into

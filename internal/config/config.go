@@ -10,7 +10,10 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"path"
+	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -44,22 +47,21 @@ type Config struct {
 	Notify     *NotifyCfg     `yaml:"notify"`
 	Enrich     *EnrichCfg     `yaml:"enrich"`
 	Dashboard  *DashboardCfg  `yaml:"dashboard"`
+	// VerifiedBots enables FCrDNS protection for well-known crawlers
+	// (issue #215). Absent/disabled = no DNS lookups ever happen.
+	VerifiedBots *VerifiedBotsCfg `yaml:"verified_bots"`
+	// Retention configures data-retention pruning (issue #184). Absent =
+	// never prune anything. See internal/config/retention.go.
+	Retention *RetentionCfg `yaml:"retention"`
+	// DockerExec enables the docker exec activity watcher (issue #220) —
+	// observational post-exploitation signal; never a ban source.
+	DockerExec *DockerExecCfg `yaml:"docker_exec"`
+	// WebshellWatch enables the webshell-drop tripwire (issue #221) —
+	// observational filesystem watch over web roots; never a ban source.
+	WebshellWatch *WebshellWatchCfg `yaml:"webshell_watch"`
 	// Feeds lists IP reputation feeds to download and parse (issue #194).
 	// Download/parse only for now — enforcement is the follow-up (#195).
 	Feeds []FeedCfg `yaml:"feeds"`
-}
-
-// DashboardCfg configures the localhost-only web UI (see docs/dashboard.md).
-// Both fields are optional; the dashboard command falls back to safe defaults
-// (127.0.0.1:9090 and <data_dir>/dashboard.db).
-type DashboardCfg struct {
-	// Addr is the "host:port" the dashboard binds to. Must resolve to a
-	// loopback address (127.0.0.1, ::1, or the literal "localhost").
-	// Any other value is refused at startup — no 0.0.0.0 escape hatch.
-	Addr string `yaml:"addr"`
-	// AuthDBPath is the SQLite file storing the admin password hash.
-	// Defaults to <data_dir>/dashboard.db when empty.
-	AuthDBPath string `yaml:"auth_db_path"`
 }
 
 // FeedCfg describes one IP reputation feed (issue #194). The feed body is
@@ -83,6 +85,45 @@ type FeedCfg struct {
 	MaxEntries int `yaml:"max_entries"`
 	// Timeout bounds one fetch (default 30s).
 	Timeout Duration `yaml:"timeout,omitempty"`
+}
+
+// DockerExecCfg configures the docker exec activity watcher (issue #220).
+// Opt-in: absent or enabled=false means the events API is never touched.
+type DockerExecCfg struct {
+	Enabled bool `yaml:"enabled"`
+	// Ignore lists container-name or image patterns to skip (glob syntax
+	// per path.Match; a pattern without glob metacharacters matches as a
+	// substring) — legitimate cron/health tooling.
+	Ignore []string `yaml:"ignore"`
+}
+
+// WebshellWatchCfg configures the webshell-drop tripwire (issue #221).
+// Opt-in: absent or enabled=false means no filesystem is ever swept.
+type WebshellWatchCfg struct {
+	Enabled bool `yaml:"enabled"`
+	// Roots are the web-root directories to sweep (required when enabled).
+	Roots []string `yaml:"roots"`
+	// Extensions overrides the default executable web extensions
+	// (.php, .phtml, .php5, .php7, .phar). Leading dot required.
+	Extensions []string `yaml:"extensions"`
+	// Ignore lists path patterns to skip (path.Match globs or substrings)
+	// — cache/upload dirs that legitimately churn.
+	Ignore []string `yaml:"ignore"`
+	// IntervalSec overrides the 10s sweep cadence (floor 5s).
+	IntervalSec int `yaml:"interval_sec"`
+}
+
+// DashboardCfg configures the localhost-only web UI (see docs/dashboard.md).
+// Both fields are optional; the dashboard command falls back to safe defaults
+// (127.0.0.1:9090 and <data_dir>/dashboard.db).
+type DashboardCfg struct {
+	// Addr is the "host:port" the dashboard binds to. Must resolve to a
+	// loopback address (127.0.0.1, ::1, or the literal "localhost").
+	// Any other value is refused at startup — no 0.0.0.0 escape hatch.
+	Addr string `yaml:"addr"`
+	// AuthDBPath is the SQLite file storing the admin password hash.
+	// Defaults to <data_dir>/dashboard.db when empty.
+	AuthDBPath string `yaml:"auth_db_path"`
 }
 
 // EnrichCfg configures GeoIP/ASN enrichment via MaxMind MMDB databases.
@@ -198,6 +239,28 @@ type CollectorCfg struct {
 type EnforceCfg struct {
 	NFTables   *NFTablesCfg   `yaml:"nftables"`
 	Cloudflare CloudflareCfgs `yaml:"cloudflare"`
+	Bunny      *BunnyCfg      `yaml:"bunny"`
+}
+
+// BunnyCfg holds bunny.net edge enforcer settings (issue #198). Presence of
+// the section enables the enforcer, matching the cloudflare convention.
+// APIKey must be an "env:VARNAME" reference; inline values are rejected at
+// load time like every other secret.
+//
+// The enforcer manages each configured pull zone's BlockedIps list via the
+// bunny.net pull-zone API. That list is flat (no per-entry tagging), so
+// EzyShield takes ownership of the whole list on the configured zones —
+// entries added by hand in the bunny panel are removed on reconcile.
+type BunnyCfg struct {
+	// Name is a short operator-chosen label used to disambiguate this
+	// enforcer in logs (surfaces as "bunny[<name>]"). Optional. Must match
+	// [A-Za-z0-9_-]+ and be 1..32 characters when set.
+	Name string `yaml:"name"`
+	// APIKey is the bunny.net account API key — env-reference only.
+	APIKey SecretRef `yaml:"api_key"`
+	// PullZones are the numeric pull zone IDs the blocklist applies to.
+	// At least one is required.
+	PullZones []int64 `yaml:"pull_zones"`
 }
 
 // CloudflareCfgs is a list of Cloudflare account configurations. The YAML form
@@ -475,6 +538,11 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("enforce.cloudflare: %w", err)
 		}
 	}
+	if c.Enforce != nil && c.Enforce.Bunny != nil {
+		if err := validateBunny(c.Enforce.Bunny); err != nil {
+			return fmt.Errorf("enforce.bunny: %w", err)
+		}
+	}
 	if c.Notify != nil {
 		if err := validateNotify(c.Notify); err != nil {
 			return fmt.Errorf("notify: %w", err)
@@ -493,6 +561,28 @@ func (c *Config) Validate() error {
 	if c.Dashboard != nil && c.Dashboard.Addr != "" {
 		if err := validateLoopbackAddr(c.Dashboard.Addr); err != nil {
 			return fmt.Errorf("dashboard: %w", err)
+		}
+	}
+	if c.VerifiedBots != nil {
+		if err := validateVerifiedBots(c.VerifiedBots); err != nil {
+			return fmt.Errorf("verified_bots: %w", err)
+		}
+	}
+	if c.Retention != nil {
+		if err := validateRetention(c.Retention); err != nil {
+			return fmt.Errorf("retention: %w", err)
+		}
+	}
+	if c.DockerExec != nil {
+		for i, pat := range c.DockerExec.Ignore {
+			if _, err := path.Match(pat, "probe"); err != nil {
+				return fmt.Errorf("docker_exec.ignore[%d]: invalid pattern %q: %w", i, pat, err)
+			}
+		}
+	}
+	if c.WebshellWatch != nil {
+		if err := validateWebshellWatch(c.WebshellWatch); err != nil {
+			return fmt.Errorf("webshell_watch: %w", err)
 		}
 	}
 	if len(c.Feeds) > 0 {
@@ -554,6 +644,31 @@ func validateFeeds(list []FeedCfg) error {
 		if f.Timeout.AsDuration() < 0 {
 			return fmt.Errorf("[%d] %s: 'timeout' must not be negative", i, f.Name)
 		}
+	}
+	return nil
+}
+
+func validateWebshellWatch(w *WebshellWatchCfg) error {
+	if w.Enabled && len(w.Roots) == 0 {
+		return fmt.Errorf("'roots' is required when enabled (the web directories to sweep)")
+	}
+	for i, r := range w.Roots {
+		if !filepath.IsAbs(r) {
+			return fmt.Errorf("roots[%d]: %q must be an absolute path", i, r)
+		}
+	}
+	for i, e := range w.Extensions {
+		if !strings.HasPrefix(e, ".") || len(e) < 2 {
+			return fmt.Errorf("extensions[%d]: %q must start with a dot (e.g. \".php\")", i, e)
+		}
+	}
+	for i, pat := range w.Ignore {
+		if _, err := path.Match(pat, "probe"); err != nil {
+			return fmt.Errorf("ignore[%d]: invalid pattern %q: %w", i, pat, err)
+		}
+	}
+	if w.IntervalSec != 0 && w.IntervalSec < 5 {
+		return fmt.Errorf("interval_sec: %d is below the 5s floor (a hot sweep loop over web roots)", w.IntervalSec)
 	}
 	return nil
 }
@@ -635,6 +750,11 @@ var validParserNames = map[string]bool{
 	"apache-error": true,
 	"traefik":      true,
 	"caddy":        true,
+	"postfix":      true,
+	"dovecot":      true,
+	"vaultwarden":  true,
+	"nextcloud":    true,
+	"keycloak":     true,
 }
 
 // ValidParserNames returns the set of collector parser names accepted by config
@@ -734,6 +854,35 @@ func validateCFInstanceName(name string) error {
 		case r == '_', r == '-':
 		default:
 			return fmt.Errorf("must match [A-Za-z0-9_-]+")
+		}
+	}
+	return nil
+}
+
+// validateBunny checks the bunny.net edge enforcer section (issue #198):
+// the API key must be configured (env-reference only — the SecretRef loader
+// already rejects inline literals with a redacted error) and at least one
+// positive pull zone ID is required.
+func validateBunny(b *BunnyCfg) error {
+	if !b.APIKey.IsSet() {
+		return fmt.Errorf("'api_key' is required")
+	}
+	if len(b.PullZones) == 0 {
+		return fmt.Errorf("at least one 'pull_zones' entry is required")
+	}
+	seen := make(map[int64]int, len(b.PullZones))
+	for i, z := range b.PullZones {
+		if z <= 0 {
+			return fmt.Errorf("pull_zones[%d]: must be a positive pull zone ID, got %d", i, z)
+		}
+		if prev, dup := seen[z]; dup {
+			return fmt.Errorf("pull_zones[%d]: duplicate zone %d (also at [%d])", i, z, prev)
+		}
+		seen[z] = i
+	}
+	if b.Name != "" {
+		if err := validateCFInstanceName(b.Name); err != nil {
+			return fmt.Errorf("'name': %w", err)
 		}
 	}
 	return nil

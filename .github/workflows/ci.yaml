@@ -181,6 +181,22 @@ jobs:
             echo "| VitePress-safe placeholders | ${{ steps.placeholders.outcome }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # Detection benchmark (issue #216): runs the full pipeline over the labeled
+  # corpus and fails on regression vs fixtures/bench/baseline.json. NOT in the
+  # required-checks set initially — promote once the corpus stabilizes.
+  bench:
+    needs: detect
+    if: needs.detect.outputs.has_go == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Detection benchmark vs baseline
+        run: go test -tags bench ./internal/bench/ -v -run TestBenchCorpus
+
   fuzz:
     needs: detect
     if: needs.detect.outputs.has_go == 'true'
@@ -218,6 +234,31 @@ jobs:
         run: |
           set -o pipefail
           go test -fuzz=FuzzApacheErrorParser -fuzztime=10s ./internal/parser/ | tee fuzz-apache-error.txt
+      - name: Fuzz Postfix parser (10s)
+        id: fpostfix
+        run: |
+          set -o pipefail
+          go test -fuzz=FuzzPostfixParser -fuzztime=10s ./internal/parser/ | tee fuzz-postfix.txt
+      - name: Fuzz Dovecot parser (10s)
+        id: fdovecot
+        run: |
+          set -o pipefail
+          go test -fuzz=FuzzDovecotParser -fuzztime=10s ./internal/parser/ | tee fuzz-dovecot.txt
+      - name: Fuzz Vaultwarden parser (10s)
+        id: fvaultwarden
+        run: |
+          set -o pipefail
+          go test -fuzz=FuzzVaultwardenParser -fuzztime=10s ./internal/parser/ | tee fuzz-vaultwarden.txt
+      - name: Fuzz Nextcloud parser (10s)
+        id: fnextcloud
+        run: |
+          set -o pipefail
+          go test -fuzz=FuzzNextcloudParser -fuzztime=10s ./internal/parser/ | tee fuzz-nextcloud.txt
+      - name: Fuzz Keycloak parser (10s)
+        id: fkeycloak
+        run: |
+          set -o pipefail
+          go test -fuzz=FuzzKeycloakParser -fuzztime=10s ./internal/parser/ | tee fuzz-keycloak.txt
       - name: Fuzz proc SSH-peer parser (10s)
         id: fproc
         run: |
@@ -253,6 +294,11 @@ jobs:
             echo "| FuzzCaddyParser | $(execs fuzz-caddy.txt) | ${{ steps.fcaddy.outcome }} |"
             echo "| FuzzTraefikParser | $(execs fuzz-traefik.txt) | ${{ steps.ftraefik.outcome }} |"
             echo "| FuzzApacheErrorParser | $(execs fuzz-apache-error.txt) | ${{ steps.fapacheerr.outcome }} |"
+            echo "| FuzzPostfixParser | $(execs fuzz-postfix.txt) | ${{ steps.fpostfix.outcome }} |"
+            echo "| FuzzDovecotParser | $(execs fuzz-dovecot.txt) | ${{ steps.fdovecot.outcome }} |"
+            echo "| FuzzVaultwardenParser | $(execs fuzz-vaultwarden.txt) | ${{ steps.fvaultwarden.outcome }} |"
+            echo "| FuzzNextcloudParser | $(execs fuzz-nextcloud.txt) | ${{ steps.fnextcloud.outcome }} |"
+            echo "| FuzzKeycloakParser | $(execs fuzz-keycloak.txt) | ${{ steps.fkeycloak.outcome }} |"
             echo "| FuzzProcTCPPeers | $(execs fuzz-proc.txt) | ${{ steps.fproc.outcome }} |"
             echo "| FuzzSIEMFormatters | $(execs fuzz-siem.txt) | ${{ steps.fsiem.outcome }} |"
             echo "| FuzzParseProcNetTCP | $(execs fuzz-scan.txt) | ${{ steps.fscan.outcome }} |"

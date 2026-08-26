@@ -218,6 +218,11 @@ jobs:
         run: |
           set -o pipefail
           go test -fuzz=FuzzApacheErrorParser -fuzztime=10s ./internal/parser/ | tee fuzz-apache-error.txt
+      - name: Fuzz Keycloak parser (10s)
+        id: fkeycloak
+        run: |
+          set -o pipefail
+          go test -fuzz=FuzzKeycloakParser -fuzztime=10s ./internal/parser/ | tee fuzz-keycloak.txt
       - name: Fuzz proc SSH-peer parser (10s)
         id: fproc
         run: |
@@ -248,6 +253,7 @@ jobs:
             echo "| FuzzCaddyParser | $(execs fuzz-caddy.txt) | ${{ steps.fcaddy.outcome }} |"
             echo "| FuzzTraefikParser | $(execs fuzz-traefik.txt) | ${{ steps.ftraefik.outcome }} |"
             echo "| FuzzApacheErrorParser | $(execs fuzz-apache-error.txt) | ${{ steps.fapacheerr.outcome }} |"
+            echo "| FuzzKeycloakParser | $(execs fuzz-keycloak.txt) | ${{ steps.fkeycloak.outcome }} |"
             echo "| FuzzProcTCPPeers | $(execs fuzz-proc.txt) | ${{ steps.fproc.outcome }} |"
             echo "| FuzzSIEMFormatters | $(execs fuzz-siem.txt) | ${{ steps.fsiem.outcome }} |"
             echo "| FuzzParseProcNetTCP | $(execs fuzz-scan.txt) | ${{ steps.fscan.outcome }} |"

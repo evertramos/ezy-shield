@@ -45,6 +45,7 @@ func defaultParsers(logger *slog.Logger) []sdk.Parser {
 		parser.NewApacheErrorParser(logger),
 		parser.NewCaddyParser(logger, parser.CaddyConfig{}),
 		parser.NewTraefikParser(logger, parser.TraefikConfig{}),
+		parser.NewKeycloakParser(logger),
 	}
 }
 

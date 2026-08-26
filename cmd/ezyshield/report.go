@@ -57,6 +57,10 @@ a file and attach when reporting the address to the operator's abuse contact:
 
   ` + progName + ` report 203.0.113.7 -o md > abuse-203.0.113.7.md
 
+Strikes recorded since ADR-0011 carry captured-at-detection evidence: the
+exact log lines that fired the rule, persisted with the strike and immune
+to log rotation. They render under each strike's verdict automatically.
+
 With --evidence the report additionally includes raw log excerpts mentioning
 the address, extracted on demand from the daemon's configured log sources
 (never persisted; sources that rotated away are noted honestly).
@@ -176,6 +180,11 @@ func printReportText(cmd *cobra.Command, rep sdk.AbuseReport) error {
 				sanitizeField(st.Reason, reportReasonMax))
 			for _, v := range st.Verdicts {
 				fmt.Fprintf(w, "      %s\n", verdictString(v)) //nolint:errcheck
+				// Captured-at-detection evidence (ADR-0011): the exact
+				// lines that produced this verdict, survives log rotation.
+				for _, line := range v.Evidence {
+					fmt.Fprintf(w, "        | %s\n", sanitizeField(line, reportLineMax)) //nolint:errcheck
+				}
 			}
 		}
 	}
@@ -257,6 +266,25 @@ func renderReportMarkdown(rep sdk.AbuseReport, footer bool) string {
 				st.RecordedAt, st.Strike, ttlString(st.TTLSeconds),
 				mdCell(st.Reason, reportReasonMax),
 				mdCell(strings.Join(verdicts, "; "), 2*reportReasonMax))
+		}
+		// Captured-at-detection evidence (ADR-0011): authoritative — the
+		// exact lines that fired each strike's rule, immune to log rotation.
+		// Indented code blocks for the same injection reason as below.
+		var wrote bool
+		for _, st := range rep.Strikes {
+			for _, v := range st.Verdicts {
+				if len(v.Evidence) == 0 {
+					continue
+				}
+				if !wrote {
+					b.WriteString("\n### Captured evidence per strike\n")
+					wrote = true
+				}
+				fmt.Fprintf(&b, "\n_Strike %d — %s:_\n\n", st.Strike, st.RecordedAt)
+				for _, line := range v.Evidence {
+					fmt.Fprintf(&b, "    %s\n", sanitizeField(line, reportLineMax))
+				}
+			}
 		}
 	}
 

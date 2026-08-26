@@ -1,0 +1,32 @@
+name: attack-404-scan
+description: Directory/endpoint enumeration — 25 sequential 404s
+label: attack
+source: "file:/var/log/nginx/access.log"
+attacker_ips: ["203.0.113.15"]
+interval_ms: 1000
+lines:
+    - '203.0.113.15 - - [01/Jan/2026:12:00:00 +0000] "GET /backup1.zip HTTP/1.1" 404 162 "-" "Mozilla/5.0 dirbuster"'
+    - '203.0.113.15 - - [01/Jan/2026:12:00:00 +0000] "GET /backup2.zip HTTP/1.1" 404 162 "-" "Mozilla/5.0 dirbuster"'
+    - '203.0.113.15 - - [01/Jan/2026:12:00:00 +0000] "GET /backup3.zip HTTP/1.1" 404 162 "-" "Mozilla/5.0 dirbuster"'
+    - '203.0.113.15 - - [01/Jan/2026:12:00:00 +0000] "GET /backup4.zip HTTP/1.1" 404 162 "-" "Mozilla/5.0 dirbuster"'
+    - '203.0.113.15 - - [01/Jan/2026:12:00:00 +0000] "GET /backup5.zip HTTP/1.1" 404 162 "-" "Mozilla/5.0 dirbuster"'
+    - '203.0.113.15 - - [01/Jan/2026:12:00:00 +0000] "GET /backup6.zip HTTP/1.1" 404 162 "-" "Mozilla/5.0 dirbuster"'
+    - '203.0.113.15 - - [01/Jan/2026:12:00:00 +0000] "GET /backup7.zip HTTP/1.1" 404 162 "-" "Mozilla/5.0 dirbuster"'
+    - '203.0.113.15 - - [01/Jan/2026:12:00:00 +0000] "GET /backup8.zip HTTP/1.1" 404 162 "-" "Mozilla/5.0 dirbuster"'
+    - '203.0.113.15 - - [01/Jan/2026:12:00:00 +0000] "GET /backup9.zip HTTP/1.1" 404 162 "-" "Mozilla/5.0 dirbuster"'
+    - '203.0.113.15 - - [01/Jan/2026:12:00:00 +0000] "GET /backup10.zip HTTP/1.1" 404 162 "-" "Mozilla/5.0 dirbuster"'
+    - '203.0.113.15 - - [01/Jan/2026:12:00:00 +0000] "GET /backup11.zip HTTP/1.1" 404 162 "-" "Mozilla/5.0 dirbuster"'
+    - '203.0.113.15 - - [01/Jan/2026:12:00:00 +0000] "GET /backup12.zip HTTP/1.1" 404 162 "-" "Mozilla/5.0 dirbuster"'
+    - '203.0.113.15 - - [01/Jan/2026:12:00:00 +0000] "GET /backup13.zip HTTP/1.1" 404 162 "-" "Mozilla/5.0 dirbuster"'
+    - '203.0.113.15 - - [01/Jan/2026:12:00:00 +0000] "GET /backup14.zip HTTP/1.1" 404 162 "-" "Mozilla/5.0 dirbuster"'
+    - '203.0.113.15 - - [01/Jan/2026:12:00:00 +0000] "GET /backup15.zip HTTP/1.1" 404 162 "-" "Mozilla/5.0 dirbuster"'
+    - '203.0.113.15 - - [01/Jan/2026:12:00:00 +0000] "GET /backup16.zip HTTP/1.1" 404 162 "-" "Mozilla/5.0 dirbuster"'
+    - '203.0.113.15 - - [01/Jan/2026:12:00:00 +0000] "GET /backup17.zip HTTP/1.1" 404 162 "-" "Mozilla/5.0 dirbuster"'
+    - '203.0.113.15 - - [01/Jan/2026:12:00:00 +0000] "GET /backup18.zip HTTP/1.1" 404 162 "-" "Mozilla/5.0 dirbuster"'
+    - '203.0.113.15 - - [01/Jan/2026:12:00:00 +0000] "GET /backup19.zip HTTP/1.1" 404 162 "-" "Mozilla/5.0 dirbuster"'
+    - '203.0.113.15 - - [01/Jan/2026:12:00:00 +0000] "GET /backup20.zip HTTP/1.1" 404 162 "-" "Mozilla/5.0 dirbuster"'
+    - '203.0.113.15 - - [01/Jan/2026:12:00:00 +0000] "GET /backup21.zip HTTP/1.1" 404 162 "-" "Mozilla/5.0 dirbuster"'
+    - '203.0.113.15 - - [01/Jan/2026:12:00:00 +0000] "GET /backup22.zip HTTP/1.1" 404 162 "-" "Mozilla/5.0 dirbuster"'
+    - '203.0.113.15 - - [01/Jan/2026:12:00:00 +0000] "GET /backup23.zip HTTP/1.1" 404 162 "-" "Mozilla/5.0 dirbuster"'
+    - '203.0.113.15 - - [01/Jan/2026:12:00:00 +0000] "GET /backup24.zip HTTP/1.1" 404 162 "-" "Mozilla/5.0 dirbuster"'
+    - '203.0.113.15 - - [01/Jan/2026:12:00:00 +0000] "GET /backup25.zip HTTP/1.1" 404 162 "-" "Mozilla/5.0 dirbuster"'

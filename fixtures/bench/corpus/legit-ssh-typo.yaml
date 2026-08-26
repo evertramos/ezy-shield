@@ -1,0 +1,9 @@
+name: legit-ssh-typo
+description: A human mistypes twice, then logs in — must never be actioned
+label: legit
+source: "journald:sshd"
+interval_ms: 5000
+lines:
+    - 'Failed password for evert from 198.51.100.20 port 51000 ssh2'
+    - 'Failed password for evert from 198.51.100.20 port 51001 ssh2'
+    - 'Accepted password for evert from 198.51.100.20 port 51002 ssh2'

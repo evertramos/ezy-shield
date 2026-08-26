@@ -46,6 +46,11 @@ func defaultParsers(logger *slog.Logger) []sdk.Parser {
 		parser.NewApacheErrorParser(logger),
 		parser.NewCaddyParser(logger, parser.CaddyConfig{}),
 		parser.NewTraefikParser(logger, parser.TraefikConfig{}),
+		parser.NewPostfixParser(logger),
+		parser.NewDovecotParser(logger),
+		parser.NewVaultwardenParser(logger),
+		parser.NewNextcloudParser(logger),
+		parser.NewKeycloakParser(logger),
 	}
 }
 
@@ -276,6 +281,27 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 		}
 	}
 
+	// Docker exec activity watcher (issue #220): opt-in, observational only.
+	// Wired here (not inside the daemon) so the daemon package never imports
+	// the linux-only collector package.
+	var execActivity func(ctx context.Context, report func(daemon.ExecActivityReport))
+	if cfg.DockerExec != nil && cfg.DockerExec.Enabled {
+		watcher := &collector.DockerExecWatcher{Ignore: cfg.DockerExec.Ignore, Logger: logger}
+		execActivity = func(ctx context.Context, report func(daemon.ExecActivityReport)) {
+			err := watcher.Run(ctx, func(ev collector.ExecEvent) {
+				report(daemon.ExecActivityReport{
+					Container: ev.Container,
+					Image:     ev.Image,
+					Command:   ev.Command,
+					User:      ev.User,
+				})
+			})
+			if err != nil && ctx.Err() == nil {
+				slog.Error("run: docker exec watcher stopped", "err", err)
+			}
+		}
+	}
+
 	d, err := daemon.New(daemon.Config{
 		Cfg:              cfg,
 		Policy:           policy,
@@ -291,6 +317,7 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 		SocketPath:       socketPath,
 		Version:          version,
 		PolicyPath:       policyPath,
+		ExecActivity:     execActivity,
 		WebshellActivity: buildWebshellActivity(cfg),
 	})
 	if err != nil {

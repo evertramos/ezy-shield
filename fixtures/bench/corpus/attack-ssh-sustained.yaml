@@ -1,0 +1,19 @@
+name: attack-ssh-sustained
+description: Sustained brute force pacing under the 60s rule — 12 failures at 1/4min
+label: attack
+source: "journald:sshd"
+attacker_ips: ["203.0.113.11"]
+interval_ms: 240000
+lines:
+    - 'Failed password for invalid user admin from 203.0.113.11 port 42001 ssh2'
+    - 'Failed password for invalid user admin from 203.0.113.11 port 42002 ssh2'
+    - 'Failed password for invalid user admin from 203.0.113.11 port 42003 ssh2'
+    - 'Failed password for invalid user admin from 203.0.113.11 port 42004 ssh2'
+    - 'Failed password for invalid user admin from 203.0.113.11 port 42005 ssh2'
+    - 'Failed password for invalid user admin from 203.0.113.11 port 42006 ssh2'
+    - 'Failed password for invalid user admin from 203.0.113.11 port 42007 ssh2'
+    - 'Failed password for invalid user admin from 203.0.113.11 port 42008 ssh2'
+    - 'Failed password for invalid user admin from 203.0.113.11 port 42009 ssh2'
+    - 'Failed password for invalid user admin from 203.0.113.11 port 42010 ssh2'
+    - 'Failed password for invalid user admin from 203.0.113.11 port 42011 ssh2'
+    - 'Failed password for invalid user admin from 203.0.113.11 port 42012 ssh2'

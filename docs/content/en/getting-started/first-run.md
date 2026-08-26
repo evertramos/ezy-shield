@@ -151,6 +151,20 @@ sudo ezyshield unban 203.0.113.42        # Unban
 sudo ezyshield allow 198.51.100.0/24     # Allowlist a CIDR
 ```
 
+**Q: doctor reports `AF_NETLINK allowed: FAIL` or `runtime directory: FAIL`**
+
+A: Your systemd unit (or a drop-in override) lost a setting enforcement depends on. The enforcer needs `AF_NETLINK` in `RestrictAddressFamilies` to program nftables — without it, bans are recorded but **never applied**. Each service also needs its `RuntimeDirectory` or its control socket directory under `/run` is never created. `ezyshield doctor` checks the *effective* configuration (drop-ins included) and, on failure, prints the exact drop-in snippet to restore the setting:
+
+```bash
+sudo systemctl edit ezyshield-enforcer   # opens a drop-in editor; paste the
+                                         # [Service] snippet from the doctor hint
+sudo systemctl daemon-reload && sudo systemctl restart ezyshield-enforcer
+sudo ezyshield doctor                    # re-check; also runs a functional
+                                         # netlink probe through the live helper
+```
+
+Doctor never edits units itself — it only reports and suggests. The `enforcer: netlink probe` check goes one step further than reading configuration: it asks the running helper to execute a read-only nftables operation inside its own sandbox, so a passing probe means netlink genuinely works, not just that the unit file looks right.
+
 ## Next steps
 
 - Read the [Config Reference](../reference/config.md) to tune thresholds

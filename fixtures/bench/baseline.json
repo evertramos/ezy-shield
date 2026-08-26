@@ -1,0 +1,16 @@
+{
+  "detection_rate": 1.0,
+  "false_positives": 0,
+  "detected": {
+    "attack-ssh-burst": true,
+    "attack-ssh-sustained": true,
+    "attack-wp-scan": true,
+    "attack-env-probe": true,
+    "attack-rce-probe": true,
+    "attack-404-scan": true,
+    "legit-ssh-typo": false,
+    "legit-crawler": false,
+    "legit-api-client": false,
+    "legit-admin-wp": false
+  }
+}

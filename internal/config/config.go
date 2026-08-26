@@ -9,7 +9,10 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"path"
+	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -43,6 +46,44 @@ type Config struct {
 	Notify     *NotifyCfg     `yaml:"notify"`
 	Enrich     *EnrichCfg     `yaml:"enrich"`
 	Dashboard  *DashboardCfg  `yaml:"dashboard"`
+	// VerifiedBots enables FCrDNS protection for well-known crawlers
+	// (issue #215). Absent/disabled = no DNS lookups ever happen.
+	VerifiedBots *VerifiedBotsCfg `yaml:"verified_bots"`
+	// Retention configures data-retention pruning (issue #184). Absent =
+	// never prune anything. See internal/config/retention.go.
+	Retention *RetentionCfg `yaml:"retention"`
+	// DockerExec enables the docker exec activity watcher (issue #220) —
+	// observational post-exploitation signal; never a ban source.
+	DockerExec *DockerExecCfg `yaml:"docker_exec"`
+	// WebshellWatch enables the webshell-drop tripwire (issue #221) —
+	// observational filesystem watch over web roots; never a ban source.
+	WebshellWatch *WebshellWatchCfg `yaml:"webshell_watch"`
+}
+
+// DockerExecCfg configures the docker exec activity watcher (issue #220).
+// Opt-in: absent or enabled=false means the events API is never touched.
+type DockerExecCfg struct {
+	Enabled bool `yaml:"enabled"`
+	// Ignore lists container-name or image patterns to skip (glob syntax
+	// per path.Match; a pattern without glob metacharacters matches as a
+	// substring) — legitimate cron/health tooling.
+	Ignore []string `yaml:"ignore"`
+}
+
+// WebshellWatchCfg configures the webshell-drop tripwire (issue #221).
+// Opt-in: absent or enabled=false means no filesystem is ever swept.
+type WebshellWatchCfg struct {
+	Enabled bool `yaml:"enabled"`
+	// Roots are the web-root directories to sweep (required when enabled).
+	Roots []string `yaml:"roots"`
+	// Extensions overrides the default executable web extensions
+	// (.php, .phtml, .php5, .php7, .phar). Leading dot required.
+	Extensions []string `yaml:"extensions"`
+	// Ignore lists path patterns to skip (path.Match globs or substrings)
+	// — cache/upload dirs that legitimately churn.
+	Ignore []string `yaml:"ignore"`
+	// IntervalSec overrides the 10s sweep cadence (floor 5s).
+	IntervalSec int `yaml:"interval_sec"`
 }
 
 // DashboardCfg configures the localhost-only web UI (see docs/dashboard.md).
@@ -495,6 +536,53 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("dashboard: %w", err)
 		}
 	}
+	if c.VerifiedBots != nil {
+		if err := validateVerifiedBots(c.VerifiedBots); err != nil {
+			return fmt.Errorf("verified_bots: %w", err)
+		}
+	}
+	if c.Retention != nil {
+		if err := validateRetention(c.Retention); err != nil {
+			return fmt.Errorf("retention: %w", err)
+		}
+	}
+	if c.DockerExec != nil {
+		for i, pat := range c.DockerExec.Ignore {
+			if _, err := path.Match(pat, "probe"); err != nil {
+				return fmt.Errorf("docker_exec.ignore[%d]: invalid pattern %q: %w", i, pat, err)
+			}
+		}
+	}
+	if c.WebshellWatch != nil {
+		if err := validateWebshellWatch(c.WebshellWatch); err != nil {
+			return fmt.Errorf("webshell_watch: %w", err)
+		}
+	}
+	return nil
+}
+
+func validateWebshellWatch(w *WebshellWatchCfg) error {
+	if w.Enabled && len(w.Roots) == 0 {
+		return fmt.Errorf("'roots' is required when enabled (the web directories to sweep)")
+	}
+	for i, r := range w.Roots {
+		if !filepath.IsAbs(r) {
+			return fmt.Errorf("roots[%d]: %q must be an absolute path", i, r)
+		}
+	}
+	for i, e := range w.Extensions {
+		if !strings.HasPrefix(e, ".") || len(e) < 2 {
+			return fmt.Errorf("extensions[%d]: %q must start with a dot (e.g. \".php\")", i, e)
+		}
+	}
+	for i, pat := range w.Ignore {
+		if _, err := path.Match(pat, "probe"); err != nil {
+			return fmt.Errorf("ignore[%d]: invalid pattern %q: %w", i, pat, err)
+		}
+	}
+	if w.IntervalSec != 0 && w.IntervalSec < 5 {
+		return fmt.Errorf("interval_sec: %d is below the 5s floor (a hot sweep loop over web roots)", w.IntervalSec)
+	}
 	return nil
 }
 
@@ -575,6 +663,11 @@ var validParserNames = map[string]bool{
 	"apache-error": true,
 	"traefik":      true,
 	"caddy":        true,
+	"postfix":      true,
+	"dovecot":      true,
+	"vaultwarden":  true,
+	"nextcloud":    true,
+	"keycloak":     true,
 }
 
 // ValidParserNames returns the set of collector parser names accepted by config

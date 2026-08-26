@@ -58,7 +58,7 @@ collectors:
 | `path` | for `file` | file to tail |
 | `unit` | for `journald` | systemd unit to follow |
 | `container` | for `docker` | container name, short ID, or full ID |
-| `parser` | no | force a parser: `nginx` \| `ssh` \| `apache` \| `apache-error` \| `traefik` \| `caddy` (default: routed automatically from the source). `apache` reads the Apache **access** log (combined format, shared with `nginx`); `apache-error` reads the Apache **error_log** (`error.log` / `error_log`). **Honored only for `file` and `docker` collectors** — `journald` ignores it and always routes its parser from the unit. |
+| `parser` | no | force a parser: `nginx` \| `ssh` \| `apache` \| `apache-error` \| `traefik` \| `caddy` \| `postfix` \| `dovecot` (default: routed automatically from the source). `apache` reads the Apache **access** log (combined format, shared with `nginx`); `apache-error` reads the Apache **error_log** (`error.log` / `error_log`); `postfix` reads Postfix smtpd lines (`mail.log` / `maillog`, or the `postfix` / `postfix@*` journald units — SASL auth failures, relay-denied rejects, and connection-abuse signatures become `smtp_auth_fail` / `smtp_relay_denied` / `smtp_abuse` events); `dovecot` reads Dovecot login-process lines (`dovecot.log`, or the `dovecot` journald unit — IMAP/POP3 auth failures become `imap_auth_fail` and credential-less probes `imap_probe`; on shared `mail.log` setups, which route to `postfix` first, use the journald unit or this explicit override). **Honored only for `file` and `docker` collectors** — `journald` ignores it and always routes its parser from the unit. |
 
 ### SSH collector (unit name varies by distro)
 
@@ -299,6 +299,18 @@ The key is a secret like any other: put `MAXMIND_LICENSE_KEY=...` in `/etc/ezysh
 |-------|---------|-------------|
 | `addr` | `127.0.0.1:9090` | Bind address — **loopback only**; non-loopback binds are refused at startup |
 | `auth_db_path` | `<data_dir>/dashboard.db` | Dashboard auth database |
+
+## webshell_watch
+
+Opt-in webshell-drop tripwire: sweeps web roots for new or modified executable web files. Purely observational — audit + notification, never a ban. See the [Webshell Tripwire guide](../guides/webshell-tripwire.md).
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `false` | Opt-in switch |
+| `roots` | — | Absolute web-root directories to sweep (**required** when enabled) |
+| `extensions` | `.php, .phtml, .php5, .php7, .phar` | Watched extensions (leading dot) |
+| `ignore` | `[]` | Path patterns to skip — `path.Match` globs, or substring when the pattern has no glob metacharacters |
+| `interval_sec` | `10` | Sweep cadence in seconds (floor 5) |
 
 ## Minimal example
 

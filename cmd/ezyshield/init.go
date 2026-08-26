@@ -194,6 +194,13 @@ type wizardState struct {
 	// returns so downstream writers can rely on len(cdn.cfAccounts) checks
 	// alone. Its String() masks every CF token.
 	cdn *cdnStep
+
+	// notify holds the channels configured by the Notifications step
+	// (issue #290); nil = none. Secrets are env: references only — pasted
+	// values live inside notifyPostSave closures (run after config.yaml is
+	// committed, same discipline as the channel wizards) and never here.
+	notify         *config.NotifyCfg
+	notifyPostSave func() error
 }
 
 // String on *wizardState prints every field EXCEPT aiToken, which is masked.
@@ -263,7 +270,7 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 	}
 
 	// ── Questions (sectioned sub-flows) ───────────────────────────────────
-	askQuestions(p.w, sc, state, yes, st)
+	askQuestions(p.w, sc, state, yes, st, configDir)
 
 	// Distill the operator's answers for the final Summary section. Runs
 	// before the writers so a skipped/aborted component is reported even
@@ -380,6 +387,14 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 			p.println(st.ok("wrote " + envPath + " (chmod 600, " + state.cdn.bunny.keyEnvVar + " merged)"))
 		}
 		envTouched = envTouched || wrote || kept
+	}
+	// Notifier channel secrets (issue #290): the post-save hooks the channel
+	// flows built — same merge/rotation semantics as `config notifier`.
+	if state.notifyPostSave != nil {
+		if err := state.notifyPostSave(); err != nil {
+			return err
+		}
+		envTouched = true
 	}
 	if envTouched {
 		sum.files = append(sum.files, envPath+" (mode 0600 — secret tokens live here, never in config.yaml)")
@@ -706,7 +721,7 @@ func renderInitSummary(p *wPrinter, st styler, state *wizardState, sum *initSumm
 // The ask/askBool closures are shared with the `config <kind> <name>`
 // wizards (see newAskFuncs in configwizard.go). Prompts and section
 // headers are written to out (the wizard's stdout).
-func askQuestions(out io.Writer, sc *bufio.Scanner, state *wizardState, yes bool, st styler) {
+func askQuestions(out io.Writer, sc *bufio.Scanner, state *wizardState, yes bool, st styler, configDir string) {
 	p := &wPrinter{w: out}
 	ask, askBool := newAskFuncs(sc, out, yes)
 
@@ -800,6 +815,13 @@ func askQuestions(out io.Writer, sc *bufio.Scanner, state *wizardState, yes bool
 		state.aiToken = step.token
 		state.aiExternalKey = step.externalKey
 	}
+
+	// Notifications (issue #290) — dispatches to the same per-channel flows
+	// `config notifier <name>` uses; see init_notify.go.
+	p.println("")
+	p.println(st.header("Notifications"))
+	runNotifyStep(p, closurePrompter{askFn: ask, askBoolFn: askBool},
+		cdnDeps{Yes: yes}, state, configDir, yes)
 
 	// Dry-run vs armed
 	p.println("")
@@ -933,6 +955,12 @@ func renderGeneratedConfig(state *wizardState) ([]byte, error) {
 		fmt.Fprintf(&b, "  ambiguous_band: [%d, %d]\n",
 			config.DefaultAmbiguousBand[0], config.DefaultAmbiguousBand[1])
 		b.WriteString("  token_budget_daily: 100000\n")
+	}
+
+	// Notification channels (issue #290) — serialized from the same
+	// config.NotifyCfg shape both init modes build (see init_notify.go).
+	if err := renderNotifyYAML(&b, state.notify); err != nil {
+		return nil, err
 	}
 
 	data := []byte(b.String())

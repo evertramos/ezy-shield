@@ -1,0 +1,36 @@
+name: legit-api-client
+description: A busy but well-behaved API client — high rate, all 200s
+label: legit
+source: "file:/var/log/nginx/access.log"
+interval_ms: 500
+lines:
+    - '198.51.100.22 - - [01/Jan/2026:12:00:00 +0000] "GET /api/v1/items?page=1 HTTP/1.1" 200 162 "-" "my-service/1.4 (+ops@example.com)"'
+    - '198.51.100.22 - - [01/Jan/2026:12:00:00 +0000] "GET /api/v1/items?page=2 HTTP/1.1" 200 162 "-" "my-service/1.4 (+ops@example.com)"'
+    - '198.51.100.22 - - [01/Jan/2026:12:00:00 +0000] "GET /api/v1/items?page=3 HTTP/1.1" 200 162 "-" "my-service/1.4 (+ops@example.com)"'
+    - '198.51.100.22 - - [01/Jan/2026:12:00:00 +0000] "GET /api/v1/items?page=4 HTTP/1.1" 200 162 "-" "my-service/1.4 (+ops@example.com)"'
+    - '198.51.100.22 - - [01/Jan/2026:12:00:00 +0000] "GET /api/v1/items?page=5 HTTP/1.1" 200 162 "-" "my-service/1.4 (+ops@example.com)"'
+    - '198.51.100.22 - - [01/Jan/2026:12:00:00 +0000] "GET /api/v1/items?page=6 HTTP/1.1" 200 162 "-" "my-service/1.4 (+ops@example.com)"'
+    - '198.51.100.22 - - [01/Jan/2026:12:00:00 +0000] "GET /api/v1/items?page=7 HTTP/1.1" 200 162 "-" "my-service/1.4 (+ops@example.com)"'
+    - '198.51.100.22 - - [01/Jan/2026:12:00:00 +0000] "GET /api/v1/items?page=8 HTTP/1.1" 200 162 "-" "my-service/1.4 (+ops@example.com)"'
+    - '198.51.100.22 - - [01/Jan/2026:12:00:00 +0000] "GET /api/v1/items?page=9 HTTP/1.1" 200 162 "-" "my-service/1.4 (+ops@example.com)"'
+    - '198.51.100.22 - - [01/Jan/2026:12:00:00 +0000] "GET /api/v1/items?page=10 HTTP/1.1" 200 162 "-" "my-service/1.4 (+ops@example.com)"'
+    - '198.51.100.22 - - [01/Jan/2026:12:00:00 +0000] "GET /api/v1/items?page=11 HTTP/1.1" 200 162 "-" "my-service/1.4 (+ops@example.com)"'
+    - '198.51.100.22 - - [01/Jan/2026:12:00:00 +0000] "GET /api/v1/items?page=12 HTTP/1.1" 200 162 "-" "my-service/1.4 (+ops@example.com)"'
+    - '198.51.100.22 - - [01/Jan/2026:12:00:00 +0000] "GET /api/v1/items?page=13 HTTP/1.1" 200 162 "-" "my-service/1.4 (+ops@example.com)"'
+    - '198.51.100.22 - - [01/Jan/2026:12:00:00 +0000] "GET /api/v1/items?page=14 HTTP/1.1" 200 162 "-" "my-service/1.4 (+ops@example.com)"'
+    - '198.51.100.22 - - [01/Jan/2026:12:00:00 +0000] "GET /api/v1/items?page=15 HTTP/1.1" 200 162 "-" "my-service/1.4 (+ops@example.com)"'
+    - '198.51.100.22 - - [01/Jan/2026:12:00:00 +0000] "GET /api/v1/items?page=16 HTTP/1.1" 200 162 "-" "my-service/1.4 (+ops@example.com)"'
+    - '198.51.100.22 - - [01/Jan/2026:12:00:00 +0000] "GET /api/v1/items?page=17 HTTP/1.1" 200 162 "-" "my-service/1.4 (+ops@example.com)"'
+    - '198.51.100.22 - - [01/Jan/2026:12:00:00 +0000] "GET /api/v1/items?page=18 HTTP/1.1" 200 162 "-" "my-service/1.4 (+ops@example.com)"'
+    - '198.51.100.22 - - [01/Jan/2026:12:00:00 +0000] "GET /api/v1/items?page=19 HTTP/1.1" 200 162 "-" "my-service/1.4 (+ops@example.com)"'
+    - '198.51.100.22 - - [01/Jan/2026:12:00:00 +0000] "GET /api/v1/items?page=20 HTTP/1.1" 200 162 "-" "my-service/1.4 (+ops@example.com)"'
+    - '198.51.100.22 - - [01/Jan/2026:12:00:00 +0000] "GET /api/v1/items?page=21 HTTP/1.1" 200 162 "-" "my-service/1.4 (+ops@example.com)"'
+    - '198.51.100.22 - - [01/Jan/2026:12:00:00 +0000] "GET /api/v1/items?page=22 HTTP/1.1" 200 162 "-" "my-service/1.4 (+ops@example.com)"'
+    - '198.51.100.22 - - [01/Jan/2026:12:00:00 +0000] "GET /api/v1/items?page=23 HTTP/1.1" 200 162 "-" "my-service/1.4 (+ops@example.com)"'
+    - '198.51.100.22 - - [01/Jan/2026:12:00:00 +0000] "GET /api/v1/items?page=24 HTTP/1.1" 200 162 "-" "my-service/1.4 (+ops@example.com)"'
+    - '198.51.100.22 - - [01/Jan/2026:12:00:00 +0000] "GET /api/v1/items?page=25 HTTP/1.1" 200 162 "-" "my-service/1.4 (+ops@example.com)"'
+    - '198.51.100.22 - - [01/Jan/2026:12:00:00 +0000] "GET /api/v1/items?page=26 HTTP/1.1" 200 162 "-" "my-service/1.4 (+ops@example.com)"'
+    - '198.51.100.22 - - [01/Jan/2026:12:00:00 +0000] "GET /api/v1/items?page=27 HTTP/1.1" 200 162 "-" "my-service/1.4 (+ops@example.com)"'
+    - '198.51.100.22 - - [01/Jan/2026:12:00:00 +0000] "GET /api/v1/items?page=28 HTTP/1.1" 200 162 "-" "my-service/1.4 (+ops@example.com)"'
+    - '198.51.100.22 - - [01/Jan/2026:12:00:00 +0000] "GET /api/v1/items?page=29 HTTP/1.1" 200 162 "-" "my-service/1.4 (+ops@example.com)"'
+    - '198.51.100.22 - - [01/Jan/2026:12:00:00 +0000] "GET /api/v1/items?page=30 HTTP/1.1" 200 162 "-" "my-service/1.4 (+ops@example.com)"'

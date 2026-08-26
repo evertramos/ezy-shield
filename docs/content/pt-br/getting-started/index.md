@@ -290,6 +290,13 @@ dispararia.
 
 ## 7. Notificações
 
+> Desde a issue #290, o `ezyshield init` oferece este passo durante o setup —
+> tanto interativamente (a seção **Notifications**) quanto pelo answers file
+> não-interativo (veja o [guia de automação](../guides/automation.md)). As
+> instruções abaixo continuam sendo o caminho pós-instalação para adicionar ou
+> alterar um canal depois (`ezyshield config notifier <name>`, ou o
+> config.yaml direto).
+
 ### Telegram
 
 1. Crie um bot via [@BotFather](https://t.me/BotFather) e obtenha o token.
@@ -362,3 +369,10 @@ sudo systemctl enable --now ezyshield
 4. ✅ Notificações testadas com `test notifier`
 5. ✅ Rodou em dry-run, revisou os logs
 6. ⬜ Rodar `sudo ezyshield arm --for 1h` (pre-flight + janela de auto-reversão), depois `sudo ezyshield arm --keep` quando estiver confiante
+
+---
+
+## Aprenda mais
+
+- [Anatomia de um Ban](../guides/anatomy-of-a-ban.md) — um brute force SSH acompanhado por cada estágio do pipeline (com o diagrama dos gates de segurança), em dry-run e armado.
+- [Solução de Problemas](../guides/troubleshooting.md) — "nada é detectado", "ban registrado mas não bloqueado", permissões do socket, matching do journald — cada um com o check do doctor que diagnostica.

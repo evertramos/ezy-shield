@@ -290,6 +290,13 @@ dispararia.
 
 ## 7. Notificações
 
+> Desde a issue #290, o `ezyshield init` oferece este passo durante o setup —
+> tanto interativamente (a seção **Notifications**) quanto pelo answers file
+> não-interativo (veja o [guia de automação](../guides/automation.md)). As
+> instruções abaixo continuam sendo o caminho pós-instalação para adicionar ou
+> alterar um canal depois (`ezyshield config notifier <name>`, ou o
+> config.yaml direto).
+
 ### Telegram
 
 1. Crie um bot via [@BotFather](https://t.me/BotFather) e obtenha o token.

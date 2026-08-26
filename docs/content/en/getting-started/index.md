@@ -286,6 +286,12 @@ every event of the listed kinds, and a `field` alone would never fire.
 
 ## 7. Notifications
 
+> Since issue #290, `ezyshield init` offers this step during setup — both
+> interactively (the **Notifications** section) and via the non-interactive
+> answers file (see the [automation guide](../guides/automation.md)). The
+> instructions below remain the post-install path for adding or changing a
+> channel later (`ezyshield config notifier <name>`, or config.yaml by hand).
+
 ### Telegram
 
 1. Create a bot via [@BotFather](https://t.me/BotFather) and get the token.

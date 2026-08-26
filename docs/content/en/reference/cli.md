@@ -36,6 +36,7 @@ against:
 | `list` | Array of rows — active bans, `--allow` entries, or `--audit` events (`[]` when empty) |
 | `report <ip>` | Object: versioned abuse report (`schema_version`, `ip`, `country`, `asn`, `current_ban`, `strikes`, `actions`, plus `evidence` with `--evidence`) |
 | `report` | Array of offender summaries (`ip`, `first_seen`, `last_seen`, `total_strikes`, `banned`, `permanent`, `country`, `asn`) |
+| `report --since` | Object: versioned digest (`schema_version`, `since`, `totals`, `events_by_kind`, `categories`, `rules`, `top_offenders`, `patterns`, plus `narrative` with `--narrative`) |
 | `rule test` | Object: `results` array (`rule`, `since`, `detections`, `unique_ips`, `allowlisted_hits`, `ips`, `per_day`, `upper_bound`, `warnings`, `limitation`) |
 | `watch` | NDJSON: one event object per line |
 | `scan` | Object: `listeners`, `new_listeners` (each a socket, all fields of the `scan.Listener` struct: `Addr`, `Protocol`, `UID`, `Inode`, `PID`, `ExePath`, `UserName`, `IsPublic`, `OwnerType`, `UnitName`, `ContainerID`, `ContainerName`, `ContainerImage`, `LogSource`) |
@@ -372,6 +373,63 @@ are escaped — so hostile log content cannot spoof your terminal or break the
 document. Evidence excerpts are rendered as indented code blocks in markdown,
 so a log line cannot inject formatting into the report. Timestamps are UTC
 (RFC 3339).
+
+### Incident digest (`report --since`)
+
+Without an IP but with `--since`, `report` switches to the **server-wide
+incident digest**: "what happened on this server since yesterday?" as one
+readable document. It reads the store directly (the daemon does not need to
+be running) and is fully offline and deterministic — no AI dependency.
+
+```bash
+# Terminal digest of the last 24 hours
+ezyshield report --since 24h
+
+# Weekly digest as markdown, ready to paste into a ticket/email
+ezyshield report --since 7d -o md > weekly-digest.md
+
+# Machine-readable
+ezyshield report --since 24h --json
+
+# With a short AI-generated prose summary (requires a configured provider)
+ezyshield report --since 24h --narrative
+```
+
+The markdown structure is stable and documented — sections always appear in
+this order (empty ones are omitted; Totals and Enforcement always render):
+**Totals**, **Events by kind**, **Strikes by category**, **Strikes by
+rule**, **Top offenders** (strike-ladder position, new vs repeat), 
+**Enforcement**, **Notable patterns**, **AI narrative** (only with
+`--narrative`). Sample:
+
+```markdown
+# EzyShield digest — last 24h0m0s
+
+## Totals
+| Metric | Count |
+|---|---|
+| Strikes | 12 |
+| Dry-run bans | 7 |
+
+## Top offenders
+| IP | Strikes (window) | Max strike | Total strikes | New |
+|---|---|---|---|---|
+| 203.0.113.7 | 4 | 3 | 9 | repeat |
+
+## Notable patterns
+- coordinated bruteforce activity: 5 distinct IPs struck in the window
+- dry-run mode: 7 ban(s) were simulated but not enforced in this window
+```
+
+Digest-mode flags: `--since` (window; `d` suffix allowed), `--db` (SQLite
+path), `--narrative`, `--config` (AI provider settings for `--narrative`).
+
+`--narrative` sends ONLY the aggregated digest JSON (counts, categories,
+rule names, IPs — never raw log lines) to the configured AI provider,
+respects the daily token budget, and **degrades to the plain digest with a
+note on any failure**. The narrative renders under a clearly-labeled
+advisory section. Event totals come from the persisted hourly counters,
+which only track kinds referenced by long-window rules.
 
 ## ezyshield rule test
 

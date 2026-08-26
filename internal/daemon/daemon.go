@@ -438,6 +438,15 @@ func New(dcfg Config) (*Daemon, error) {
 	agg := aggregate.New(windows, 0).WithMaxIPs(maxIPs)
 
 	decEng, err := decision.New(dcfg.Policy, dcfg.Store)
+	if err == nil && dcfg.Policy != nil && dcfg.Policy.RequireAuthenticatedPeer() {
+		// ADR-0013 (issue #560): narrow SSH-peer immunity to authenticated
+		// peers (logind-verified, fail-open). Installed at the probe source
+		// so both immunity layers (engine + enforcement gate) see it.
+		filter := decision.NewAuthenticatedPeerFilter(
+			decision.ProcSSHPeers, decision.NewLogindSessionProbe(), decision.AuthPeerGraceWindow)
+		decEng.SetSSHPeerProbe(filter.Peers)
+		slog.Info("daemon: anti-lockout authenticated-peer mode ON (ADR-0013) — logind failures fall back to ESTABLISHED-only immunity")
+	}
 	if err != nil {
 		return nil, fmt.Errorf("daemon: decision engine: %w", err)
 	}

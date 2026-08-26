@@ -124,6 +124,16 @@ collectors: []
 #   #   - {name: vera, role: viewer,   token: env:EZYSHIELD_DASH_VERA_TOKEN}
 #   #   - {name: omar, role: operator, token: env:EZYSHIELD_DASH_OMAR_TOKEN}
 #   #   - {name: ada,  role: admin,    token: env:EZYSHIELD_DASH_ADA_TOKEN}
+# Periodic hardening self-check (issue #563) — ON BY DEFAULT, no section
+# needed. Every 6h the daemon re-runs the read-only systemd unit checks from
+# 'ezyshield doctor' (AF_NETLINK for the enforcer, RuntimeDirectory for both
+# services) plus a functional netlink probe, and notifies CRITICAL only when
+# the state DEGRADES (INFO on recovery; steady state is silent). It never
+# edits units or restarts services. To disable it entirely:
+# self_check:
+#   enabled: false
+#   # interval: 6h            # default 6h; floor 10m
+
 # SIEM forwarding (issue #203) — push every audited action (bans, unbans,
 # strikes, arm/disarm, daemon start/stop) to your SIEM. Outbound only, async
 # with a bounded queue (a dead SIEM never blocks the pipeline; when the queue

@@ -72,6 +72,39 @@ type Config struct {
 	// enabled:false = no plugin executable is ever spawned; even enabled,
 	// only names in Allow may run.
 	Plugins *PluginsCfg `yaml:"plugins"`
+	// SelfCheck configures the periodic hardening self-check (issue #563).
+	// Absent = enabled with defaults; set enabled: false to opt out.
+	SelfCheck *SelfCheckCfg `yaml:"self_check"`
+}
+
+// SelfCheckCfg controls the daemon's periodic hardening self-check (issue
+// #563): the read-only systemd unit checks from `doctor` (AF_NETLINK for
+// the enforcer, RuntimeDirectory for both units) plus the functional
+// netlink probe, run on a timer with a CRITICAL notification when the
+// state degrades and an INFO one when it recovers. Steady state is silent.
+//
+// ON BY DEFAULT — the point is not depending on the operator remembering
+// to run doctor. To disable it entirely (minimal installs, hosts where
+// periodic `systemctl show` calls are undesirable):
+//
+//	self_check:
+//	  enabled: false
+type SelfCheckCfg struct {
+	// Enabled defaults to true when the section is absent or the field is
+	// omitted (pointer distinguishes "omitted" from an explicit false).
+	Enabled *bool `yaml:"enabled"`
+	// Interval between runs. Default 6h; floor 10m (a hot systemctl loop
+	// helps nobody).
+	Interval Duration `yaml:"interval,omitempty"`
+}
+
+// SelfCheckEnabled resolves the tri-state: absent section or omitted field
+// mean enabled.
+func (c *Config) SelfCheckEnabled() bool {
+	if c.SelfCheck == nil || c.SelfCheck.Enabled == nil {
+		return true
+	}
+	return *c.SelfCheck.Enabled
 }
 
 // PluginsCfg configures tier-1 plugin discovery (issue #207). Executing
@@ -700,6 +733,11 @@ func (c *Config) Validate() error {
 	if c.Plugins != nil {
 		if err := validatePlugins(c.Plugins); err != nil {
 			return fmt.Errorf("plugins: %w", err)
+		}
+	}
+	if c.SelfCheck != nil {
+		if iv := time.Duration(c.SelfCheck.Interval); iv != 0 && iv < 10*time.Minute {
+			return fmt.Errorf("self_check: interval %s is below the 10m floor (0/omitted = default 6h)", iv)
 		}
 	}
 	if len(c.SIEM) > 0 {

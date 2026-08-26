@@ -326,6 +326,43 @@ sudo sqlite3 /var/lib/ezyshield/ezyshield.db \
    GROUP BY ip ORDER BY usd DESC LIMIT 10;"
 ```
 
+## self_check
+
+Periodic hardening self-check — **on by default, no section needed**.
+Every 6 hours the daemon re-runs the read-only systemd checks from
+`ezyshield doctor` (effective `RestrictAddressFamilies`/`AF_NETLINK` for
+the enforcer, `RuntimeDirectory` for both services — drop-in aware via
+`systemctl show`) plus the functional netlink probe against the running
+enforcer helper. This catches the silent-non-enforcement drift (a
+hand-edited unit) **before** the next service restart makes it bite,
+without you remembering to run doctor.
+
+Notification semantics — transitions only:
+
+- healthy → degraded: **one CRITICAL** notification naming the failing
+  check (plus an append-only `selfcheck_degraded` audit entry);
+- degraded → healthy: **one INFO** notification (`selfcheck_recovered`);
+- steady state: silence.
+
+Hosts without systemd, units not installed, or an older helper: those
+checks report N/A and count as healthy — script/manual installs stay
+quiet. The self-check is strictly read-only: it never edits units and
+never restarts services; the fix always remains a copy-paste hint.
+
+**Disabling it** (minimal installs, or hosts where periodic
+`systemctl show` calls are undesirable):
+
+```yaml
+self_check:
+  enabled: false     # opt out entirely — doctor remains available on demand
+  # interval: 6h     # cadence when enabled; default 6h, floor 10m
+```
+
+| Field | Description |
+|-------|-------------|
+| `enabled` | omitted = `true`; `false` disables the periodic self-check entirely |
+| `interval` | Go duration between runs; default `6h`, floor `10m` |
+
 ## enrich
 
 GeoIP/ASN enrichment — enables `block_countries` / `block_asns` in policy and the country/ASN columns in `list` and `report`. Optional: without an `enrich:` section the daemon runs normally with empty enrichment (no country/ASN anywhere, and those policy keys never match).

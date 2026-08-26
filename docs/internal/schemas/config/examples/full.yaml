@@ -109,6 +109,10 @@ dashboard:
     - {name: omar, role: operator, token: env:EZYSHIELD_DASH_OMAR_TOKEN}
     - {name: ada, role: admin, token: env:EZYSHIELD_DASH_ADA_TOKEN}
 
+self_check:
+  enabled: true
+  interval: 6h
+
 plugins:
   enabled: true
   allow:

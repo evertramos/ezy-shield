@@ -235,7 +235,17 @@ type Daemon struct {
 	// aiCleanReduction holds math.Float64bits of the last Log Cleaner
 	// reduction ratio, exported via registerAICleanerGauge.
 	aiCleanReduction atomic.Uint64
-	aiLo, aiHi       int // ambiguous band: lo <= score <= hi triggers AI
+
+	// Periodic hardening self-check (issue #563). selfCheckOn gates the
+	// goroutine; interval/initial are test-tunable; enfSocket is the
+	// nftables helper socket for the functional probe ("" = skip probe);
+	// selfCheckHealthy tracks the transition state (starts healthy).
+	selfCheckOn        bool
+	selfCheckInterval  time.Duration
+	selfCheckInitial   time.Duration
+	selfCheckEnfSocket string
+	selfCheckHealthy   atomic.Bool
+	aiLo, aiHi         int // ambiguous band: lo <= score <= hi triggers AI
 
 	socketPath string
 	// policyPath is where arm/disarm persist the armed flag ("" = skip).
@@ -536,6 +546,23 @@ func New(dcfg Config) (*Daemon, error) {
 		}
 	}
 
+	// Periodic hardening self-check (issue #563): on by default, opt-out
+	// via self_check.enabled: false. The functional netlink probe applies
+	// only when a local nftables enforcer is configured.
+	if dcfg.Cfg != nil {
+		d.selfCheckOn = dcfg.Cfg.SelfCheckEnabled()
+		if dcfg.Cfg.SelfCheck != nil {
+			d.selfCheckInterval = time.Duration(dcfg.Cfg.SelfCheck.Interval)
+		}
+		if dcfg.Cfg.Enforce != nil && dcfg.Cfg.Enforce.NFTables != nil {
+			d.selfCheckEnfSocket = dcfg.Cfg.Enforce.NFTables.Socket
+			if d.selfCheckEnfSocket == "" {
+				d.selfCheckEnfSocket = enforce.DefaultSocketPath
+			}
+		}
+	}
+	d.selfCheckHealthy.Store(true)
+
 	// notify_only suppression window (issue #421). Only built when a
 	// notifier exists; window comes from notify.notify_only_window_sec
 	// (0/omitted = 1h default, negative = disabled).
@@ -657,6 +684,11 @@ func (d *Daemon) Run(parentCtx context.Context) error {
 	// Async second-layer AI worker (issue #222); no-op when disabled.
 	if d.aiQueue != nil {
 		go d.runAIAsync(ctx)
+	}
+
+	// Periodic hardening self-check (issue #563); opt-out via config.
+	if d.selfCheckOn {
+		go d.runSelfCheck(ctx)
 	}
 
 	// Trailing notify_only summaries for scanners that stopped (issue #421).
@@ -1682,6 +1714,18 @@ func (d *Daemon) notifyCritical(ctx context.Context, msg string) {
 	}
 	_ = d.notifier.Send(ctx, sdk.Notification{
 		Severity: "critical",
+		Title:    msg,
+		Body:     msg,
+	})
+}
+
+// notifyInfo sends an informational system notification (recoveries).
+func (d *Daemon) notifyInfo(ctx context.Context, msg string) {
+	if d.notifier == nil {
+		return
+	}
+	_ = d.notifier.Send(ctx, sdk.Notification{
+		Severity: "info",
 		Title:    msg,
 		Body:     msg,
 	})

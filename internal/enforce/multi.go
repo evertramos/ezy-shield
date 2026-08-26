@@ -119,3 +119,21 @@ func (m *MultiEnforcer) SyncAllowlist(ctx context.Context, want []netip.Prefix) 
 	}
 	return errors.Join(errs...)
 }
+
+// LastSyncRepairs sums the optional SyncRepairReporter facet across every
+// wrapped enforcer that implements it (issue #214). firstSync is true when
+// ANY reporting child was on its boot reconcile — the daemon then skips the
+// repair audit, since boot re-adds are expected restart recovery, not drift.
+func (m *MultiEnforcer) LastSyncRepairs() (added, removed int, firstSync bool) {
+	for _, e := range m.enforcers {
+		r, ok := e.(SyncRepairReporter)
+		if !ok {
+			continue
+		}
+		a, rm, first := r.LastSyncRepairs()
+		added += a
+		removed += rm
+		firstSync = firstSync || first
+	}
+	return added, removed, firstSync
+}

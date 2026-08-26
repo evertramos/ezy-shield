@@ -74,7 +74,7 @@ func TestUserSet_ConstantTimeAuthenticate(t *testing.T) {
 	if _, ok := newUserSet(nil).authenticate("omar", "anything"); ok {
 		t.Errorf("empty set accepted a login")
 	}
-	// Constant-time note (AC): authenticate compares fixed-size SHA-256
+	// Constant-time note (AC): authenticate compares fixed-size PBKDF2
 	// digests via subtle.ConstantTimeCompare for EVERY stored user with no
 	// early exit; see rbac.go — this test pins behavior, the code review
 	// note pins the mechanism.

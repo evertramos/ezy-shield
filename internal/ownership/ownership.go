@@ -18,6 +18,13 @@ import (
 // ezyshield without sudo, matching the fail2ban/sshguard pattern.
 const Group = "ezyshield"
 
+// ViewGroup is the read-only tier (issue #212): membership grants access to
+// the ezyshield-ro.sock socket, which serves only read verbs (status, list,
+// watch, report, …). It must NEVER be granted write authority — the split
+// exists precisely so monitoring users cannot unban an attacker or disarm
+// the daemon.
+const ViewGroup = "ezyshield-view"
+
 // ChownToGroup sets path's group to group, leaving the owner unchanged (uid
 // -1). Leaving the owner alone is deliberate: the call then never needs
 // CAP_CHOWN — which the enforcer's CapabilityBoundingSet deliberately withholds

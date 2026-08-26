@@ -316,6 +316,24 @@ recentes primeiro; `TTL` é `perm` para ban permanente e `-` para ações sem TT
 strikes, motivos). Para o histórico completo de um ofensor, com vereditos de
 detecção e evidências, use `ezyshield report`.
 
+## ezyshield feeds
+
+Inspeciona e atualiza os feeds de reputação de IP configurados (seção
+`feeds:` do config.yaml) via daemon em execução. Veja o
+[guia de Feeds de Reputação](../guides/reputation-feeds.md).
+
+```bash
+ezyshield feeds status            # por feed: action, entradas, descartadas, último/próximo refresh
+ezyshield feeds status --json
+ezyshield feeds refresh           # re-baixa todos os feeds agora
+ezyshield feeds refresh <nome>    # re-baixa um feed
+```
+
+Entradas de feed nunca criam strikes nem bans e nunca aparecem no
+`ezyshield list` — vivem nos sets nftables dedicados `blocked_feeds`
+(action `block`) ou só em memória como boost de score (action `observe`,
+o padrão).
+
 ## ezyshield report
 
 Gera um relatório de abuso completo para um IP ofensor a partir dos registros

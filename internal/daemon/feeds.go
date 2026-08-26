@@ -21,9 +21,11 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"sort"
 	"sync"
 	"time"
 
@@ -46,8 +48,21 @@ type FeedUpdate struct {
 	Action string
 	// TTL is the nft per-element timeout for block entries.
 	TTL time.Duration
+	// Interval is the feed's refresh cadence (status reporting only).
+	Interval time.Duration
 	// Prefixes is the deduplicated, reserved-range-sanitized entry set.
 	Prefixes []netip.Prefix
+}
+
+// FeedStatusEntry is one feed's state in the "feeds_status" socket response
+// (issue #196).
+type FeedStatusEntry struct {
+	Name        string    `json:"name"`
+	Action      string    `json:"action"`
+	LastRefresh time.Time `json:"last_refresh"`
+	NextRefresh time.Time `json:"next_refresh,omitempty"`
+	Entries     int       `json:"entries"`
+	Skipped     int       `json:"skipped"`
 }
 
 // feedReputation is the in-memory observe-mode lookup: exact map for host
@@ -128,6 +143,24 @@ func (d *Daemon) handleFeedUpdate(ctx context.Context, u FeedUpdate) {
 			removed = prev - applied
 		}
 	}
+
+	// Status for the "feeds_status" socket verb (issue #196).
+	st := FeedStatusEntry{
+		Name:        u.Name,
+		Action:      u.Action,
+		LastRefresh: time.Now(),
+		Entries:     applied,
+		Skipped:     skipped,
+	}
+	if u.Action == "" {
+		st.Action = "observe"
+	}
+	if u.Interval > 0 {
+		st.NextRefresh = st.LastRefresh.Add(u.Interval)
+	}
+	d.feedMu.Lock()
+	d.feedStatus[u.Name] = st
+	d.feedMu.Unlock()
 
 	summary := fmt.Sprintf("feed %s (%s): entries=%d skipped_by_guardrails=%d removed=%d ttl=%s",
 		u.Name, u.Action, applied, skipped, removed, u.TTL)
@@ -242,4 +275,52 @@ func (d *Daemon) runFeeds(ctx context.Context) {
 	d.feedUpdates(ctx, func(u FeedUpdate) {
 		d.handleFeedUpdate(ctx, u)
 	})
+}
+
+// handleFeedsStatus serves the "feeds_status" socket verb (issue #196).
+func (d *Daemon) handleFeedsStatus(_ context.Context) SocketResponse {
+	if d.feedUpdates == nil && d.feedRefresh == nil {
+		return SocketResponse{Error: "no reputation feeds configured (config.yaml 'feeds' section)"}
+	}
+	data, err := json.Marshal(d.feedsStatusSnapshot())
+	if err != nil {
+		return SocketResponse{Error: fmt.Sprintf("encode feeds status: %v", err)}
+	}
+	return SocketResponse{OK: true, Data: data}
+}
+
+// handleFeedsRefresh serves the "feeds_refresh" socket verb (issue #196):
+// a synchronous on-demand re-fetch of one feed (req.Name) or all feeds.
+func (d *Daemon) handleFeedsRefresh(ctx context.Context, req SocketRequest) SocketResponse {
+	if d.feedRefresh == nil {
+		return SocketResponse{Error: "no reputation feeds configured (config.yaml 'feeds' section)"}
+	}
+	n, err := d.feedRefresh(ctx, req.Name, func(u FeedUpdate) {
+		d.handleFeedUpdate(ctx, u)
+	})
+	if err != nil {
+		return SocketResponse{Error: err.Error()}
+	}
+	data, err := json.Marshal(FeedsRefreshData{Refreshed: n})
+	if err != nil {
+		return SocketResponse{Error: fmt.Sprintf("encode refresh result: %v", err)}
+	}
+	return SocketResponse{OK: true, Data: data}
+}
+
+// FeedsRefreshData is the Data payload of a successful "feeds_refresh".
+type FeedsRefreshData struct {
+	Refreshed int `json:"refreshed"`
+}
+
+// feedsStatusSnapshot returns the per-feed status entries, sorted by name.
+func (d *Daemon) feedsStatusSnapshot() []FeedStatusEntry {
+	d.feedMu.Lock()
+	defer d.feedMu.Unlock()
+	out := make([]FeedStatusEntry, 0, len(d.feedStatus))
+	for _, st := range d.feedStatus {
+		out = append(out, st)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }

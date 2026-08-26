@@ -196,12 +196,16 @@ func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
 		resp = d.handleAllow(ctx, req)
 	case "unallow":
 		resp = d.handleUnallow(ctx, req)
+	case "feeds_status":
+		resp = d.handleFeedsStatus(ctx)
+	case "feeds_refresh":
+		resp = d.handleFeedsRefresh(ctx, req)
 	case "disable_all":
 		resp = d.handleDisableAll(ctx)
 	case "prune":
 		resp = d.handlePrune(ctx, req)
 	default:
-		resp = SocketResponse{Error: fmt.Sprintf("unknown verb %q; valid: status list list_allow events subscribe report arm arm_keep disarm ban unban allow unallow disable_all prune", req.Verb)}
+		resp = SocketResponse{Error: fmt.Sprintf("unknown verb %q; valid: status list list_allow events subscribe report arm arm_keep disarm ban unban allow unallow disable_all prune feeds_status feeds_refresh", req.Verb)}
 	}
 
 	writeResponse(conn, resp)

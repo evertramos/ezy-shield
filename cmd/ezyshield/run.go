@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/netip"
@@ -340,8 +341,8 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 		PolicyPath:       policyPath,
 		ExecActivity:     execActivity,
 		WebshellActivity: buildWebshellActivity(cfg),
-		FeedUpdates:      buildFeedUpdates(cfg),
 	}
+	dcfg.FeedUpdates, dcfg.FeedRefresh = buildFeedRuntime(cfg)
 	if nftEnf != nil {
 		dcfg.FeedSyncer = nftEnf
 	}
@@ -353,12 +354,18 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 	return d.Run(ctx)
 }
 
-// buildFeedUpdates wires the reputation-feed refresh loop (issues #194/#195)
-// into the daemon via injection — the daemon package never imports
-// internal/feeds. Returns nil (feature off) when no feeds are configured.
-func buildFeedUpdates(cfg *config.Config) func(context.Context, func(daemon.FeedUpdate)) {
+// buildFeedRuntime wires the reputation feeds (issues #194/#195/#196) into
+// the daemon via injection — the daemon package never imports internal/feeds.
+// Returns the refresh loop and the on-demand refresh function (both nil when
+// no feeds are configured); they share one concurrency-safe Fetcher, so an
+// on-demand refresh benefits from and updates the same ETag/last-known-good
+// cache the loop uses.
+func buildFeedRuntime(cfg *config.Config) (
+	func(context.Context, func(daemon.FeedUpdate)),
+	func(context.Context, string, func(daemon.FeedUpdate)) (int, error),
+) {
 	if len(cfg.Feeds) == 0 {
-		return nil
+		return nil, nil
 	}
 	fcfgs := make([]feeds.FeedConfig, 0, len(cfg.Feeds))
 	meta := make(map[string]config.FeedCfg, len(cfg.Feeds))
@@ -373,29 +380,60 @@ func buildFeedUpdates(cfg *config.Config) func(context.Context, func(daemon.Feed
 		})
 		meta[f.Name] = f
 	}
-	return func(ctx context.Context, report func(daemon.FeedUpdate)) {
-		fetcher := feeds.New(nil, slog.Default())
+	fetcher := feeds.New(nil, slog.Default())
+
+	toUpdate := func(res *feeds.Result) daemon.FeedUpdate {
+		m := meta[res.Name]
+		action := m.Action
+		if action == "" {
+			action = "observe"
+		}
+		ttl := m.TTL.AsDuration()
+		if ttl <= 0 {
+			// Twice the refresh interval: survives one missed refresh,
+			// drains on its own when the feed dies.
+			ttl = 2 * m.RefreshInterval.AsDuration()
+		}
+		return daemon.FeedUpdate{
+			Name:     res.Name,
+			Action:   action,
+			TTL:      ttl,
+			Interval: m.RefreshInterval.AsDuration(),
+			Prefixes: res.Prefixes,
+		}
+	}
+
+	loop := func(ctx context.Context, report func(daemon.FeedUpdate)) {
 		slog.Info("run: reputation feeds active", "feeds", len(fcfgs))
 		fetcher.Run(ctx, fcfgs, func(res *feeds.Result) {
-			m := meta[res.Name]
-			action := m.Action
-			if action == "" {
-				action = "observe"
-			}
-			ttl := m.TTL.AsDuration()
-			if ttl <= 0 {
-				// Twice the refresh interval: survives one missed refresh,
-				// drains on its own when the feed dies.
-				ttl = 2 * m.RefreshInterval.AsDuration()
-			}
-			report(daemon.FeedUpdate{
-				Name:     res.Name,
-				Action:   action,
-				TTL:      ttl,
-				Prefixes: res.Prefixes,
-			})
+			report(toUpdate(res))
 		})
 	}
+	refresh := func(ctx context.Context, name string, report func(daemon.FeedUpdate)) (int, error) {
+		var (
+			refreshed int
+			errs      []error
+			found     bool
+		)
+		for _, fc := range fcfgs {
+			if name != "" && fc.Name != name {
+				continue
+			}
+			found = true
+			res, err := fetcher.Fetch(ctx, fc)
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			report(toUpdate(res))
+			refreshed++
+		}
+		if !found {
+			return 0, fmt.Errorf("no configured feed named %q", name)
+		}
+		return refreshed, errors.Join(errs...)
+	}
+	return loop, refresh
 }
 
 // buildWebshellActivity wires the opt-in webshell-drop tripwire (issue

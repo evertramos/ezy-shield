@@ -304,6 +304,24 @@ Audit columns: `TIME / IP / ACTION / STRIKE / TTL / REASON` (newest first;
 reasons). For a single offender's full history with detection verdicts and
 evidence, use `ezyshield report`.
 
+## ezyshield feeds
+
+Inspect and refresh the configured IP reputation feeds (config.yaml
+`feeds:` section) via the running daemon. See the
+[Reputation Feeds guide](../guides/reputation-feeds.md).
+
+```bash
+ezyshield feeds status            # per feed: action, entries, skipped, last/next refresh
+ezyshield feeds status --json
+ezyshield feeds refresh           # re-fetch every feed now
+ezyshield feeds refresh <name>    # re-fetch one feed
+```
+
+Feed entries never create strikes or bans and never appear in
+`ezyshield list` — they live in the dedicated `blocked_feeds` nftables
+sets (action `block`) or only in memory as a score boost (action
+`observe`, the default).
+
 ## ezyshield report
 
 Generate a complete abuse report for one offender IP from the daemon's

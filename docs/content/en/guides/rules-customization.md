@@ -1,7 +1,7 @@
 ---
 title: Customizing Detection Rules
 description: Tune or add rules with rules.d drop-ins that survive updates
-order: 5
+order: 7
 ---
 
 # Customizing Detection Rules

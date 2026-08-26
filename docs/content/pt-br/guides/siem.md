@@ -1,7 +1,7 @@
 ---
 title: Encaminhamento SIEM
 description: Envie toda ação auditada para Wazuh, Splunk ou qualquer coletor syslog
-order: 14
+order: 17
 ---
 
 # Encaminhamento SIEM

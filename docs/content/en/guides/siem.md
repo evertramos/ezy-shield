@@ -1,7 +1,7 @@
 ---
 title: SIEM Forwarding
 description: Ship every audited action to Wazuh, Splunk, or any syslog collector
-order: 14
+order: 17
 ---
 
 # SIEM Forwarding

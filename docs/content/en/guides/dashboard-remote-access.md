@@ -1,7 +1,7 @@
 ---
 title: Remote Access
 description: How to securely access the dashboard from your local machine
-order: 4
+order: 6
 ---
 
 # Remote access to the dashboard

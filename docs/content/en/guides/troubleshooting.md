@@ -1,7 +1,7 @@
 ---
 title: Troubleshooting
 description: The common failure questions, each with the doctor check that diagnoses it
-order: 12
+order: 14
 ---
 
 # Troubleshooting

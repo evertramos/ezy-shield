@@ -1,7 +1,7 @@
 ---
 title: Docker Exec Watch
 description: Visibilidade pós-exploração — todo `docker exec` nos seus containers, observado
-order: 17
+order: 22
 ---
 
 # Docker Exec Watch

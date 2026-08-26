@@ -1,7 +1,7 @@
 ---
 title: Deploying to bunny.net
 description: Block IPs at the edge with bunny.net pull zones
-order: 1
+order: 2
 ---
 
 # bunny.net Edge Enforcement

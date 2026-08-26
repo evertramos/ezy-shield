@@ -1,7 +1,7 @@
 ---
 title: Deduplicação de Strikes
 description: Entenda como EzyShield evita bans redundantes
-order: 3
+order: 5
 ---
 
 # Deduplicação de Banimentos Ativos

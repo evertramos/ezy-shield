@@ -1,7 +1,7 @@
 ---
 title: Bots Verificados
 description: Protegendo crawlers legítimos com reverse DNS de confirmação direta
-order: 9
+order: 11
 ---
 
 # Proteção de Bots Verificados

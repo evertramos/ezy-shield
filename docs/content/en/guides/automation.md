@@ -1,7 +1,7 @@
 ---
 title: Unattended install (Ansible, cloud-init)
 description: Provision EzyShield non-interactively with an answers file
-order: 6
+order: 8
 ---
 
 # Non-interactive install (automation)

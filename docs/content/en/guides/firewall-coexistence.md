@@ -1,7 +1,7 @@
 ---
 title: Firewall Coexistence
 description: Running EzyShield alongside ufw or firewalld
-order: 7
+order: 9
 ---
 
 # Firewall Coexistence (ufw / firewalld)

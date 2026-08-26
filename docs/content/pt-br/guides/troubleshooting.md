@@ -1,7 +1,7 @@
 ---
 title: Solução de Problemas
 description: As perguntas comuns de falha, cada uma com o check do doctor que diagnostica
-order: 12
+order: 14
 ---
 
 # Solução de Problemas

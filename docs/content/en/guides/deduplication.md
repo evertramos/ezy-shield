@@ -1,7 +1,7 @@
 ---
 title: Strike Deduplication
 description: Understand how EzyShield avoids redundant bans
-order: 3
+order: 5
 ---
 
 # Active-Ban Deduplication

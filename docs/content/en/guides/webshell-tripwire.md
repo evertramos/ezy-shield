@@ -1,7 +1,7 @@
 ---
 title: Webshell Tripwire
 description: Detect webshell drops in your web roots — a tripwire, not an antivirus
-order: 12
+order: 15
 ---
 
 # Webshell Tripwire

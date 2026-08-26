@@ -1,7 +1,7 @@
 ---
 title: Low-and-Slow Detection
 description: Catching SSH attackers who pace themselves below hourly thresholds
-order: 8
+order: 10
 ---
 
 # Low-and-Slow SSH Detection

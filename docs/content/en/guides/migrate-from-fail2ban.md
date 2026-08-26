@@ -1,7 +1,7 @@
 ---
 title: Migrate from fail2ban
 description: Read your fail2ban jails and generate an equivalent EzyShield setup
-order: 10
+order: 12
 ---
 
 # Migrating from fail2ban

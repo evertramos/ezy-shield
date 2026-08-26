@@ -1,7 +1,7 @@
 ---
 title: Benchmark de Detecção
 description: Números reprodutíveis de taxa de detecção e falso positivo em corpus rotulado
-order: 8
+order: 9
 ---
 
 # Benchmark de Detecção

@@ -1,7 +1,7 @@
 ---
 title: Reputation Feeds
 description: Use public IP blocklists as an extra signal or block source
-order: 13
+order: 16
 ---
 
 # Reputation Feeds

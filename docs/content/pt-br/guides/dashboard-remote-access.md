@@ -1,7 +1,7 @@
 ---
 title: Acesso remoto
 description: Como acessar o dashboard com segurança da sua máquina local
-order: 4
+order: 6
 ---
 
 # Acesso remoto ao dashboard

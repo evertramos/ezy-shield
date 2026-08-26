@@ -127,7 +127,7 @@
           },
           "parser": {
             "type": "string",
-            "enum": ["nginx", "ssh", "caddy", "traefik", "apache", "apache-error", "postfix", "dovecot"],
+            "enum": ["nginx", "ssh", "caddy", "traefik", "apache", "apache-error", "postfix", "dovecot", "vaultwarden"],
             "description": "Forces parser selection by prefixing the source ID. Consumed by 'file' (source override) and 'docker' collectors; ignored by 'journald'."
           }
         }

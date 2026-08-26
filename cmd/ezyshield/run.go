@@ -47,6 +47,7 @@ func defaultParsers(logger *slog.Logger) []sdk.Parser {
 		parser.NewTraefikParser(logger, parser.TraefikConfig{}),
 		parser.NewPostfixParser(logger),
 		parser.NewDovecotParser(logger),
+		parser.NewVaultwardenParser(logger),
 	}
 }
 

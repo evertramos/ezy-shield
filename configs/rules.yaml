@@ -229,3 +229,21 @@ rules:
   #   threshold: 10
   #   score: 60
   #   category: scanner
+
+  # ── Vaultwarden (password vault — prime brute-force target, issue #191) ──
+
+  - name: vaultwarden_bruteforce
+    description: "Vaultwarden credential/2FA brute force"
+    kinds: [vaultwarden_auth_fail]
+    window: 300s
+    threshold: 5
+    score: 85
+    category: bruteforce
+
+  - name: vaultwarden_bruteforce_sustained
+    description: "Sustained Vaultwarden brute force (low & slow)"
+    kinds: [vaultwarden_auth_fail]
+    window: 3600s
+    threshold: 10
+    score: 80
+    category: bruteforce

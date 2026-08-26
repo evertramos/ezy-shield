@@ -248,6 +248,9 @@ ezyshield list
 
 # Test a notification channel without waiting for a real event
 sudo ezyshield test notifier telegram
+
+# Coming from fail2ban? Generate an equivalent setup + migration report
+sudo ezyshield migrate fail2ban
 ```
 
 ---

@@ -103,3 +103,16 @@ collectors: []
 #     - name: mymonitor
 #       ua_contains: [MyMonitor]     # case-insensitive UA substrings
 #       domains: [monitor.example.com]  # PTR must fall under one of these
+
+# Data retention (issue #184) — OPT-IN: without this section nothing is ever
+# pruned. Bounds database growth and documents your GDPR/LGPD retention
+# policy (IPs are personal data). Active bans and the allowlist are never
+# touched. Docs: reference/retention.
+# retention:
+#   strikes: 730d              # strike history (floor 180d) — powers repeat-offender
+#                              # escalation; fully-aged offenders reset to strike 1
+#   audit: 365d                # audit journal (floor 90d) — ALSO requires
+#                              # audit_export_not_required below before any deletion
+#   ai_usage: 90d              # AI cost accounting (floor 7d)
+#   i_understand_the_risks: false      # allow windows below the floors (never below 24h)
+#   audit_export_not_required: false   # acknowledge audit rows are deleted with no export

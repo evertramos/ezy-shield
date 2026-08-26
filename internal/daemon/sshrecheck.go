@@ -265,7 +265,9 @@ func (d *Daemon) recheckAfterAntiLockout(ctx context.Context, it sshRecheckItem)
 		return
 	}
 
-	verdicts := d.evaluateRules(ctx, ip)
+	// withLong=true: this path is SSH-specific by construction, so the
+	// long-window counters (issue #134) are part of the live evidence.
+	verdicts := d.evaluateRules(ctx, ip, true)
 	verdicts = d.maybeInjectGeoVerdict(ctx, ip, verdicts)
 	if len(verdicts) == 0 {
 		// The evidence aged out of every rule window — nothing left to

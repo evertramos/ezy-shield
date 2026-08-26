@@ -64,7 +64,9 @@ Creates `/etc/ezyshield/config.yaml` and `/etc/ezyshield/policy.yaml` with secur
 
 The wizard walks through named sections — **Environment** (what was detected
 on the host), **Collectors**, **Allowlist**, **Edge enforcers**, **AI
-analysis**, **Policy**, **Files**, and **System services** — with `✓`/`✗`/`!`
+analysis**, **Notifications** (zero or more of telegram, email, slack,
+discord, webhook — the same per-channel prompts as `config notifier <name>`),
+**Policy**, **Files**, and **System services** — with `✓`/`✗`/`!`
 status marks per line. Styling follows the global
 [color conventions](#color); piped output stays plain.
 

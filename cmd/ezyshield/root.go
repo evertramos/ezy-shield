@@ -64,6 +64,7 @@ Commands read as:  ` + progName + ` VERB   (equivalent to: ezy shield VERB)`,
 		newScanCmd(),
 		newUpdateCmd(),
 		newDashboardCmd(),
+		newMaintenanceCmd(),
 	)
 
 	return root

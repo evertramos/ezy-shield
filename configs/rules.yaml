@@ -161,6 +161,37 @@ rules:
     score: 80
     category: bruteforce
 
+  # Low-and-slow tiers (issue #134): windows above 1h are served by
+  # persistent per-IP hourly counters (survive restarts and the aggregator's
+  # LRU cap), so attackers pacing themselves beyond the 1-hour window are
+  # still counted. Kind-level only — the counters keep no field values.
+  # An IP accumulating 5 SSH auth failures across a day with no successful
+  # login is a strong attacker signal; a one-off typo (1-2 failures) never
+  # reaches the threshold, and the first strike is a recoverable 5-minute
+  # ban either way.
+  - name: ssh_bruteforce_daily
+    description: "Low-and-slow SSH brute force (daily accumulation)"
+    kinds: [ssh_fail, ssh_invalid_user]
+    window: 86400s
+    threshold: 5
+    score: 75
+    category: bruteforce
+
+  # Slowest tier — the ~once-a-day retrier (issue #384 scenario): failures
+  # spread across a week are automation grinding credentials, not a human
+  # typo (humans fix or give up; scripts with a dead password retry
+  # forever). Threshold 5 keeps the effective minimum evidence identical to
+  # every other SSH tier — no burst that today's rules tolerate becomes
+  # bannable — while a 1/day retrier crosses the line on day 5. First
+  # strike stays a recoverable 5-minute ban.
+  - name: ssh_bruteforce_weekly
+    description: "Very slow SSH credential grinding (~daily retries)"
+    kinds: [ssh_fail, ssh_invalid_user]
+    window: 604800s
+    threshold: 5
+    score: 75
+    category: bruteforce
+
   # ── Mail rules (postfix smtpd + dovecot imap/pop3, issues #188/#189/#190) ─
 
   - name: mail_bruteforce

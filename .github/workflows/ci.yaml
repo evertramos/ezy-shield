@@ -181,6 +181,22 @@ jobs:
             echo "| VitePress-safe placeholders | ${{ steps.placeholders.outcome }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # Detection benchmark (issue #216): runs the full pipeline over the labeled
+  # corpus and fails on regression vs fixtures/bench/baseline.json. NOT in the
+  # required-checks set initially — promote once the corpus stabilizes.
+  bench:
+    needs: detect
+    if: needs.detect.outputs.has_go == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Detection benchmark vs baseline
+        run: go test -tags bench ./internal/bench/ -v -run TestBenchCorpus
+
   fuzz:
     needs: detect
     if: needs.detect.outputs.has_go == 'true'

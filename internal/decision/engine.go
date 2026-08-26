@@ -136,6 +136,10 @@ type Engine struct {
 	cdnRanges func() ([]netip.Prefix, error)
 	// cdnWarnLast is the last "unavailable" WARN, guarded by e.mu.
 	cdnWarnLast time.Time
+
+	// botVerify is the optional verified-bot guard (issue #215); nil =
+	// disabled. See verifiedbot.go and SetBotVerifier.
+	botVerify func(ctx context.Context, ip netip.Addr) (provider string, spared bool)
 }
 
 // New creates an Engine from policy and a store.
@@ -253,6 +257,21 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 			slog.ErrorContext(ctx, "decision: audit notify-only", "ip", ip, "err", err)
 		}
 		return act, nil
+	}
+
+	// ── Verified-bot guard (issue #215) — ban candidates only ────────────────
+	// Runs after allowlist/anti-lockout (which always win) and only on the
+	// ban path: a forward-confirmed crawler is spared with an audited record;
+	// a failed/timed-out verification simply falls through to the normal ban.
+	if e.botVerify != nil {
+		if provider, spared := e.botVerify(ctx, ip); spared {
+			slog.InfoContext(ctx, "decision: verified bot — sparing ban", "ip", ip, "provider", provider)
+			act := sdk.Action{IP: ip, Op: "record", Reason: ReasonVerifiedBotSpared + ": " + provider, Verdicts: verdicts}
+			if err := e.store.Audit(ctx, act); err != nil {
+				slog.ErrorContext(ctx, "decision: audit verified-bot", "ip", ip, "err", err)
+			}
+			return act, nil
+		}
 	}
 
 	// ── Per-IP serialisation of the check-then-act strike section ───────────

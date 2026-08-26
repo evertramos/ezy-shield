@@ -138,6 +138,11 @@ type Config struct {
 	// FeedSyncer applies action:block feed entries to the dedicated
 	// nftables feed sets (nil = no local enforcement backend). See feeds.go.
 	FeedSyncer enforce.FeedSyncer
+	// FeedRefresh, when non-nil, performs an on-demand synchronous refresh
+	// of the feed named name ("" = every feed), calling report per result
+	// (issue #196). Returns how many feeds refreshed. Injected by run.go,
+	// sharing the fetcher with the FeedUpdates loop.
+	FeedRefresh func(ctx context.Context, name string, report func(FeedUpdate)) (int, error)
 }
 
 // enricherFrom converts a *enrich.Enricher into the geoLookup interface, or
@@ -197,11 +202,13 @@ type Daemon struct {
 	// desired block state; feedObserved per-feed observe entry counts;
 	// feedSSHPeersFn overrides decision.ProcSSHPeers in tests.
 	feedUpdates      func(ctx context.Context, report func(FeedUpdate))
+	feedRefresh      func(ctx context.Context, name string, report func(FeedUpdate)) (int, error)
 	feedSyncer       enforce.FeedSyncer
 	feedRep          *feedReputation
 	feedMu           sync.Mutex
 	feedBlockDesired map[string][]enforce.FeedElement
 	feedObserved     map[string]int
+	feedStatus       map[string]FeedStatusEntry
 	feedSSHPeersFn   func() []netip.Addr
 
 	// sigCh, when non-nil, replaces the process-signal channel in Run so
@@ -363,10 +370,12 @@ func New(dcfg Config) (*Daemon, error) {
 		sshRecheckDelay: dcfg.SSHRecheckDelay,
 
 		feedUpdates:      dcfg.FeedUpdates,
+		feedRefresh:      dcfg.FeedRefresh,
 		feedSyncer:       dcfg.FeedSyncer,
 		feedRep:          newFeedReputation(),
 		feedBlockDesired: map[string][]enforce.FeedElement{},
 		feedObserved:     map[string]int{},
+		feedStatus:       map[string]FeedStatusEntry{},
 	}
 
 	// Enforcement-anomaly delivery (ADR-0009 §4, issue #146): the engine

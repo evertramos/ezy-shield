@@ -92,22 +92,35 @@ collectors: []
 #     tls: starttls            # starttls | tls | none
 #     severity: []             # empty = all severities; or: [critical]
 
-# IP reputation feeds (issue #194) — download + parse only for now; applying
-# them to enforcement is a follow-up. Feeds are remote input that will
-# influence blocking, so they are heavily sanitized: https only, 10MiB/4KiB
-# caps, and private/loopback/link-local ranges are ALWAYS dropped (a feed can
-# never smuggle 10.0.0.0/8).
+# IP reputation feeds (issues #194–#196) — extra signal/block source. Feeds
+# are remote input that influences blocking, so they are heavily sanitized:
+# https only, 10MiB/4KiB caps, and private/loopback/link-local ranges are
+# ALWAYS dropped (a feed can never smuggle 10.0.0.0/8). Feed entries NEVER
+# create strikes or bans, live in their own nftables set (blocked_feeds),
+# and every entry is filtered by the allowlist/anti-lockout guardrails
+# before it can reach the firewall. Inspect with 'ezyshield feeds status'.
+#
+# Honest notes on the example feeds below — respect each project's policy:
+#   * Spamhaus DROP: free for non-commercial use; do not re-fetch more than
+#     ~1x/12h (they ask for at most twice a day). https://www.spamhaus.org/drop/
+#   * FireHOL level1: aggregate of several sources, updated ~hourly;
+#     conservative false-positive profile. https://iplists.firehol.org/
+#   * AbuseIPDB plain-list export requires an account/API key on their
+#     side; only use a list URL you are entitled to.
 # feeds:
 #   - name: spamhaus-drop
 #     url: https://www.spamhaus.org/drop/drop.txt
 #     format: cidr             # plain | cidr | abuseipdb
-#     refresh_interval: 12h    # minimum 1h
-#     # action: observe        # observe (default) = score boost only, no firewall
-#     #                        # write; block = also drop at the edge via the
-#     #                        # dedicated blocked_feeds nftables set. Feed
-#     #                        # entries NEVER create strikes or bans, and the
-#     #                        # allowlist/anti-lockout guardrails filter every
-#     #                        # entry before it can reach the firewall.
+#     refresh_interval: 12h    # minimum 1h; Spamhaus asks <= 2 fetches/day
+#     action: observe          # observe (default) = score boost only, no
+#                              # firewall write; block = also drop at the edge
+#                              # via the dedicated blocked_feeds nftables set
+#
+#   - name: firehol-level1
+#     url: https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level1.netset
+#     format: cidr
+#     refresh_interval: 6h
+#     # action: block          # level1 is curated to be safe to drop outright
 #     # ttl: 24h               # nft element timeout for action: block
 #     #                        # (default: 2x refresh_interval)
 #     # max_entries: 100000    # default 100k; hard cap 500k

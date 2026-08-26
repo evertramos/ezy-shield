@@ -92,3 +92,8 @@ enrich:
 dashboard:
   addr: 127.0.0.1:9090
   auth_db_path: /var/lib/ezyshield/dashboard.db
+
+plugins:
+  enabled: true
+  allow:
+    - example-parser

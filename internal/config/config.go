@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -65,6 +66,22 @@ type Config struct {
 	// Feeds lists IP reputation feeds to download and parse (issue #194).
 	// Download/parse only for now — enforcement is the follow-up (#195).
 	Feeds []FeedCfg `yaml:"feeds"`
+	// Plugins gates the tier-1 plugin system (issue #207). Absent or
+	// enabled:false = no plugin executable is ever spawned; even enabled,
+	// only names in Allow may run.
+	Plugins *PluginsCfg `yaml:"plugins"`
+}
+
+// PluginsCfg configures tier-1 plugin discovery (issue #207). Executing
+// operator-provided binaries is opt-in TWICE: Enabled must be true AND the
+// plugin's manifest name must be listed in Allow — dropping a file into
+// plugins.d is never enough to execute code.
+type PluginsCfg struct {
+	Enabled bool `yaml:"enabled"`
+	// Dir overrides /etc/ezyshield/plugins.d.
+	Dir string `yaml:"dir"`
+	// Allow is the explicit by-name allowlist. Required when enabled.
+	Allow []string `yaml:"allow"`
 }
 
 // SIEMSinkCfg describes one SIEM forwarding destination (issue #203).
@@ -609,6 +626,11 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("dashboard: %w", err)
 		}
 	}
+	if c.Plugins != nil {
+		if err := validatePlugins(c.Plugins); err != nil {
+			return fmt.Errorf("plugins: %w", err)
+		}
+	}
 	if len(c.SIEM) > 0 {
 		if err := validateSIEM(c.SIEM); err != nil {
 			return fmt.Errorf("siem: %w", err)
@@ -772,6 +794,29 @@ func validateWebshellWatch(w *WebshellWatchCfg) error {
 	}
 	return nil
 }
+
+// validatePlugins checks the tier-1 plugin gate (issue #207): an enabled
+// plugin system MUST carry an explicit allowlist, and allow entries follow
+// the plugin-name grammar (lowercase, no path characters — names, never
+// paths).
+func validatePlugins(p *PluginsCfg) error {
+	if p.Enabled && len(p.Allow) == 0 {
+		return fmt.Errorf("'allow' must list at least one plugin name when enabled (explicit allowlist — no plugin runs implicitly)")
+	}
+	seen := make(map[string]int, len(p.Allow))
+	for i, name := range p.Allow {
+		if !pluginAllowNameRE.MatchString(name) {
+			return fmt.Errorf("allow[%d]: %q is not a valid plugin name (want %s)", i, name, pluginAllowNameRE)
+		}
+		if prev, dup := seen[name]; dup {
+			return fmt.Errorf("allow[%d]: duplicate name %q (also at [%d])", i, name, prev)
+		}
+		seen[name] = i
+	}
+	return nil
+}
+
+var pluginAllowNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
 
 // validateLoopbackAddr mirrors the dashboard's own startup check
 // (internal/dashboard checkLoopback, Hard Rule 2: dashboard = 127.0.0.1 only)

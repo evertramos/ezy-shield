@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/evertramos/ezy-shield/docs/schemas/plugin/module.schema.json",
+  "title": "EzyShield tier-1 plugin manifest (module.yaml)",
+  "description": "One plugin under /etc/ezyshield/plugins.d/<name>/module.yaml. A plugin executes ONLY when plugins.enabled is true in config.yaml AND its name is listed in plugins.allow — dropping this file into plugins.d is never enough to run code. The executable must be a relative path inside the plugin directory (no absolute paths, no traversal, no symlinks), a regular file, not world-writable, owned by root or the plugin dir's owner.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "version", "type", "exec"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,31}$",
+      "description": "Plugin name. Must equal the directory name and the name in plugins.allow."
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Plugin version string (shown by `ezyshield plugins list`)."
+    },
+    "type": {
+      "type": "string",
+      "enum": ["parser", "notifier"],
+      "description": "Plugin kind. v1 vocabulary is closed."
+    },
+    "exec": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Executable path RELATIVE to the plugin directory. No PATH lookup, no absolute paths, no '..' traversal, no symlinks."
+    },
+    "matches": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1},
+      "description": "Parser plugins only: source patterns this parser claims."
+    },
+    "network": {
+      "description": "Network declaration. ADVISORY in v1: EzyShield does not yet isolate plugin network access — the field exists so authors declare intent and so v2 can enforce it. \"none\" (default) or a list of hostnames.",
+      "oneOf": [
+        {"const": "none"},
+        {"type": "array", "items": {"type": "string", "minLength": 1}}
+      ]
+    },
+    "timeout": {
+      "type": "string",
+      "pattern": "^[0-9]+(ms|s|m)$",
+      "description": "Per-request timeout override (Go duration, e.g. \"5s\"). Hard maximum 30s."
+    }
+  }
+}

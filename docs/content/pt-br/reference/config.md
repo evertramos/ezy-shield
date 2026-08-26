@@ -148,6 +148,25 @@ enquanto um *ban* atrasado é exposição real — por isso bans seguem o
 unban` manual também propaga ao edge na cadência do flush (o unban local no
 nftables é imediato).
 
+### bunny
+
+Enforcement de borda bunny.net via a lista de IPs bloqueados de cada pull zone. A presença da seção o habilita. **O EzyShield assume a propriedade da lista de IPs bloqueados** nas zonas configuradas — entradas adicionadas manualmente no painel da bunny são removidas no reconcile. Veja o [guia bunny.net](../guides/bunny.md).
+
+```yaml
+enforce:
+  bunny:
+    api_key: env:BUNNY_API_KEY   # segredos são referências env:, nunca inline
+    pull_zones: [123456, 234567] # IDs numéricos das pull zones
+```
+
+| Campo | Obrigatório | Descrição |
+|-------|-------------|-----------|
+| `api_key` | sim | referência `env:VARNAME` para a API key de conta da bunny.net |
+| `pull_zones` | sim | IDs numéricos de pull zone (ao menos um, positivos, únicos) |
+| `name` | não | rótulo mostrado nos logs como `bunny[<nome>]` |
+
+O enforcer limita cada zona a 500 IPs bloqueados (a bunny não documenta um limite do provider); acima disso os bans mais recentes vencem, com warning.
+
 ## notify
 
 ```yaml

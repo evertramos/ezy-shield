@@ -168,6 +168,26 @@
               "items": {"$ref": "#/$defs/cloudflareAccount"}
             }
           ]
+        },
+        "bunny": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "bunny.net edge enforcement via the Pull Zone blocked-IPs API. EzyShield takes ownership of the BlockedIps list on the configured zones (entries added by hand in the bunny panel are removed on reconcile).",
+          "required": ["api_key", "pull_zones"],
+          "properties": {
+            "name": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,32}$",
+              "description": "Optional operator label; surfaces as bunny[<name>] in logs."
+            },
+            "api_key": {"$ref": "#/$defs/secretRef"},
+            "pull_zones": {
+              "type": "array",
+              "minItems": 1,
+              "items": {"type": "integer", "minimum": 1},
+              "description": "Numeric pull zone IDs the blocklist applies to."
+            }
+          }
         }
       }
     },

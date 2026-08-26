@@ -107,7 +107,7 @@ flowchart TD
     G1 --> G2{{"anti-lockout: SSH peer / CDN range"}}
     G2 --> G3{{"dry-run by default"}}
     G3 --> G4{{"ban rate limit"}}
-    G4 --> E["Enforcer — nftables (local) + Cloudflare (edge)"]
+    G4 --> E["Enforcer — nftables (local) + Cloudflare / bunny.net (edge)"]
     G4 --> N["Notifier — Telegram / Email / Slack / Discord / webhook"]
 
     style G1 fill:#f9e79f,stroke:#b7950b
@@ -147,7 +147,7 @@ still escalates today.
 
 - **Escalating bans** — short first ban, permanent after repeated offences
 - **Local enforcement** — nftables, via a privilege-separated enforcer helper
-- **Edge enforcement** — push IP bans to a Cloudflare list
+- **Edge enforcement** — push IP bans to a Cloudflare list and/or bunny.net pull-zone blocklists (see the [Cloudflare](docs/content/en/guides/cloudflare.md) and [bunny.net](docs/content/en/guides/bunny.md) guides)
 - **SSH, Nginx, Apache, Caddy, Traefik, Postfix & Dovecot parsers** with fuzz-tested, panic-safe parsing of hostile input — web and [mail servers](docs/content/en/guides/mail-server.md) covered out of the box
 - **Deterministic rule engine** — thresholds + scanner signatures; works with zero AI configured; detection quality is measured by a [reproducible benchmark](docs/content/en/reference/benchmark.md) on a labeled corpus (currently 6/6 attacks detected, 0 false positives), regression-guarded in CI
 - **AI-assisted decisions (optional)** — Anthropic, any OpenAI-compatible endpoint, or local Ollama, with provider failover, a token budget, and verdict caching

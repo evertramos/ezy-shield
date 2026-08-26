@@ -164,6 +164,15 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # Docker Hub mirror of the same image (issue #289). Docker Hub has no
+      # github.actor equivalent, so the username is the fixed account that
+      # owns docker.io/evertramos/ezyshield; the token comes from the repo
+      # secret and is masked by login-action — never echoed.
+      - name: Log in to Docker Hub
+        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4.5.1
+        with:
+          username: evertramos
+          password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
 
       # goreleaser (issues #97/#98) builds both binaries for amd64+arm64
       # (CGO off, -trimpath, ldflags version), publishes raw binaries under
@@ -218,8 +227,10 @@ jobs:
             echo "- checksums.txt (+ .sig/.pem — cosign keyless signature)"
             echo "- *.spdx.json (SBOMs, one per artifact)"
             echo "- ghcr.io/${{ github.repository_owner }}/ezyshield:${TAG#v} — container image (multi-arch: amd64, arm64; cosign-signed at digest + SPDX SBOM attestation)"
+            echo "- docker.io/${{ github.repository_owner }}/ezyshield:${TAG#v} — same image, Docker Hub mirror (issue #289)"
             if [ "$IS_PRERELEASE" != "true" ]; then
               echo "- ghcr.io/${{ github.repository_owner }}/ezyshield:latest — moved to this release"
+              echo "- docker.io/${{ github.repository_owner }}/ezyshield:latest — moved to this release"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 

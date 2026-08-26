@@ -64,8 +64,11 @@ sha256sum --check --ignore-missing checksums.txt
 ## Verify the container image
 
 The multi-arch image `ghcr.io/evertramos/ezyshield` is signed with the same
-keyless workflow identity as `checksums.txt`. The signature lives in the
-registry next to the image, so cosign fetches everything it needs:
+keyless workflow identity as `checksums.txt`. The identical image is also
+mirrored to Docker Hub — `docker pull evertramos/ezyshield` works without
+pointing at ghcr.io; both registries receive the same manifest from one
+build, and prereleases never move `latest` on either. The signature lives
+in the registry next to the image, so cosign fetches everything it needs:
 
 ```bash
 VERSION=v0.1.0   # the release you are verifying (image tags drop the "v")

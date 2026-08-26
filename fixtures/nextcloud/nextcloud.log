@@ -1,0 +1,8 @@
+{"reqId":"aaa111","level":2,"time":"2026-08-25T15:00:00+00:00","remoteAddr":"203.0.113.130","user":"--","app":"core","method":"POST","url":"/login","message":"Login failed: 'admin' (Remote IP: '203.0.113.130')","userAgent":"Mozilla/5.0","version":"29.0.0"}
+{"reqId":"aaa112","level":2,"time":"2026-08-25T15:00:02+00:00","remoteAddr":"203.0.113.130","user":"--","app":"core","method":"POST","url":"/login","message":"Login failed: 'root' (Remote IP: '203.0.113.130')","userAgent":"Mozilla/5.0","version":"29.0.0"}
+{"reqId":"aaa113","level":2,"time":"2026-08-25T15:00:04+00:00","remoteAddr":"2001:db8::cc","user":"--","app":"core","method":"POST","url":"/login","message":"Login failed: 'user@example.com' (Remote IP: '2001:db8::cc')","userAgent":"curl/8.0","version":"29.0.0"}
+{"reqId":"aaa114","level":1,"time":"2026-08-25T15:00:06+00:00","remoteAddr":"203.0.113.131","user":"--","app":"admin_audit","method":"POST","url":"/login","message":"Login attempt failed for user: guest","userAgent":"python-requests/2.31","version":"29.0.0"}
+{"reqId":"aaa115","level":1,"time":"2026-08-25T15:00:08+00:00","remoteAddr":"198.51.100.9","user":"evert","app":"core","method":"POST","url":"/login","message":"Login successful: 'evert'","userAgent":"Mozilla/5.0","version":"29.0.0"}
+{"reqId":"aaa116","level":0,"time":"2026-08-25T15:00:10+00:00","remoteAddr":"198.51.100.9","user":"evert","app":"files","method":"GET","url":"/apps/files","message":"Deleted files expired","userAgent":"Mozilla/5.0","version":"29.0.0"}
+{"reqId":"aaa117","level":3,"time":"2026-08-25T15:00:12+00:00","remoteAddr":"","user":"--","app":"cron","method":"","url":"--","message":"Login failed: background job artifact without address","userAgent":"--","version":"29.0.0"}
+not json at all

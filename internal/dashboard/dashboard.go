@@ -49,6 +49,10 @@ type Config struct {
 	// Logger is the structured logger for server events. If nil,
 	// slog.Default() is used.
 	Logger *slog.Logger
+	// MetricsOpen serves GET /metrics without session auth (issue #183).
+	// The zero value keeps auth required; opening is safe only because the
+	// listener is loopback-only, and the route stays throttled either way.
+	MetricsOpen bool
 }
 
 // Server is a localhost-only HTTP server for the EzyShield dashboard.
@@ -64,9 +68,11 @@ type Server struct {
 	store     *authStore
 	sessions  *sessionStore
 	throttle  *loginThrottle
-	mux       *http.ServeMux
-	srv       *http.Server
-	bus       *eventBus
+	// metricsLimit throttles the /metrics route (issue #183).
+	metricsLimit *metricsThrottle
+	mux          *http.ServeMux
+	srv          *http.Server
+	bus          *eventBus
 	// decoyHash is a valid PBKDF2 hash of a random string, computed once at
 	// server construction. When a login POST references an unknown user,
 	// the handler runs verifyPassword against this decoy so both paths pay
@@ -109,13 +115,14 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("dashboard: hash decoy password: %w", err)
 	}
 	s := &Server{
-		cfg:       cfg,
-		boundAddr: cfg.Addr,
-		logger:    cfg.Logger,
-		store:     store,
-		sessions:  newSessionStore(cfg.SessionTimeout, cfg.Logger),
-		throttle:  newLoginThrottle(),
-		decoyHash: decoyHash,
+		cfg:          cfg,
+		boundAddr:    cfg.Addr,
+		logger:       cfg.Logger,
+		store:        store,
+		sessions:     newSessionStore(cfg.SessionTimeout, cfg.Logger),
+		throttle:     newLoginThrottle(),
+		metricsLimit: newMetricsThrottle(),
+		decoyHash:    decoyHash,
 	}
 	s.bus = newEventBus(s.fetchEvents, cfg.Logger)
 	s.mux = s.routes()

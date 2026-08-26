@@ -2,7 +2,10 @@
 //
 // All SQL uses parameterized queries; log-derived data is never interpolated
 // into query strings (Hard Rule §4 from AGENTS.md).
-// The audit_log table has no UPDATE or DELETE code paths by construction.
+// The audit_log table has no UPDATE code path and exactly ONE delete path:
+// retention pruning (retention.go, issue #184) — window-bounded, gated behind
+// an explicit config acknowledgement, and itself audited. Nothing else may
+// mutate audit_log rows.
 package store
 
 import (
@@ -655,9 +658,10 @@ func (s *DB) RecordManualBan(ctx context.Context, ip netip.Addr, ttl time.Durati
 
 // Audit appends an audit entry for a. Use this for actions (e.g. "unban",
 // "notify_only") that don't otherwise write to audit_log. audit_log is
-// append-only across the whole package — no code path issues UPDATE or DELETE
-// against it — but several methods (RecordStrike, RecordManualBan, Unban,
-// UnbanPrefix) each append their own entries as part of their transaction.
+// append-only across the whole package — no code path issues UPDATE, and the
+// single DELETE path is retention pruning (retention.go, issue #184) — but
+// several methods (RecordStrike, RecordManualBan, Unban, UnbanPrefix) each
+// append their own entries as part of their transaction.
 func (s *DB) Audit(ctx context.Context, a sdk.Action) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO audit_log (recorded_at, op, ip, ttl_seconds, strike_num, reason)
@@ -729,6 +733,40 @@ func (s *DB) ListAuditLog(ctx context.Context, limit int) ([]AuditEntry, error) 
 		var e AuditEntry
 		if err := rows.Scan(&e.ID, &e.RecordedAt, &e.Op, &e.IP, &e.TTLSeconds, &e.Strike, &e.Reason); err != nil {
 			return nil, fmt.Errorf("store: ListAuditLog scan: %w", err)
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// AuditLogAfter returns up to limit audit_log rows with id > afterID, in
+// ascending id order. Read-only; backs the SIEM forwarding tail (issue
+// #203), which follows the audit log as the single choke point through
+// which every audited action passes.
+func (s *DB) AuditLogAfter(ctx context.Context, afterID int64, limit int) ([]AuditEntry, error) {
+	switch {
+	case limit <= 0:
+		limit = 100
+	case limit > 1000:
+		limit = 1000
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, recorded_at, op, ip, ttl_seconds, strike_num, reason
+		FROM audit_log
+		WHERE id > ?
+		ORDER BY id ASC
+		LIMIT ?
+	`, afterID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: AuditLogAfter: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make([]AuditEntry, 0, limit)
+	for rows.Next() {
+		var e AuditEntry
+		if err := rows.Scan(&e.ID, &e.RecordedAt, &e.Op, &e.IP, &e.TTLSeconds, &e.Strike, &e.Reason); err != nil {
+			return nil, fmt.Errorf("store: AuditLogAfter scan: %w", err)
 		}
 		out = append(out, e)
 	}

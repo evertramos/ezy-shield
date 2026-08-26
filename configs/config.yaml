@@ -58,6 +58,16 @@ collectors: []
 #     # mode: rulesets
 #     # zone_ids:
 #     #   - abc123def456                  # Cloudflare zone ID (Dashboard → Overview)
+#
+#   # bunny.net edge enforcer (issue #197/#198) — blocks IPs at the bunny edge
+#   # via each pull zone's blocked-IP list. NOTE: that list has no per-entry
+#   # tagging, so EzyShield takes ownership of it on the zones below — IPs
+#   # blocked by hand in the bunny panel are removed on reconcile.
+#   # bunny:
+#     # api_key: env:BUNNY_API_KEY       # must be "env:VARNAME"; inline values rejected
+#     # pull_zones:                      # numeric pull zone IDs (bunny panel → Pull Zone → ID in the URL)
+#     #   - 123456
+#     #   - 234567
 
 # AI analysis (issue #12) — disabled by default
 # ai:
@@ -91,3 +101,108 @@ collectors: []
 #     password: env:SMTP_PASSWORD
 #     tls: starttls            # starttls | tls | none
 #     severity: []             # empty = all severities; or: [critical]
+
+# Dashboard (localhost-only web UI) — optional; safe defaults are
+# 127.0.0.1:9090 and <data_dir>/dashboard.db.
+# dashboard:
+#   addr: 127.0.0.1:9090
+#   # metrics_auth: false   # open GET /metrics for Prometheus scrapes without
+#   #                       # session auth — safe ONLY because the listener is
+#   #                       # loopback-only; the route stays throttled.
+#   #                       # See docs reference/metrics.
+# SIEM forwarding (issue #203) — push every audited action (bans, unbans,
+# strikes, arm/disarm, daemon start/stop) to your SIEM. Outbound only, async
+# with a bounded queue (a dead SIEM never blocks the pipeline; when the queue
+# fills, the OLDEST events are dropped and counted). Formats: json (default),
+# cef, rfc5424 (octet-counted per RFC 6587 on stream transports).
+# Plaintext tcp:// / udp:// require allow_insecure_transport: true — audit
+# events can quote log content; prefer tls://.
+# siem:
+#   - name: wazuh
+#     address: tls://siem.example.com:6514
+#     format: rfc5424
+#     # ca_file: /etc/ezyshield/siem-ca.pem   # optional CA pin (PEM)
+#     # events: [ban, dry_ban, unban, expire, arm, disarm]  # empty = all
+#     # queue_size: 1024
+#   - name: local-audit-copy
+#     address: file:///var/log/ezyshield-forward.log
+#     format: json
+# IP reputation feeds (issues #194–#196) — extra signal/block source. Feeds
+# are remote input that influences blocking, so they are heavily sanitized:
+# https only, 10MiB/4KiB caps, and private/loopback/link-local ranges are
+# ALWAYS dropped (a feed can never smuggle 10.0.0.0/8). Feed entries NEVER
+# create strikes or bans, live in their own nftables set (blocked_feeds),
+# and every entry is filtered by the allowlist/anti-lockout guardrails
+# before it can reach the firewall. Inspect with 'ezyshield feeds status'.
+#
+# Honest notes on the example feeds below — respect each project's policy:
+#   * Spamhaus DROP: free for non-commercial use; do not re-fetch more than
+#     ~1x/12h (they ask for at most twice a day). https://www.spamhaus.org/drop/
+#   * FireHOL level1: aggregate of several sources, updated ~hourly;
+#     conservative false-positive profile. https://iplists.firehol.org/
+#   * AbuseIPDB plain-list export requires an account/API key on their
+#     side; only use a list URL you are entitled to.
+# feeds:
+#   - name: spamhaus-drop
+#     url: https://www.spamhaus.org/drop/drop.txt
+#     format: cidr             # plain | cidr | abuseipdb
+#     refresh_interval: 12h    # minimum 1h; Spamhaus asks <= 2 fetches/day
+#     action: observe          # observe (default) = score boost only, no
+#                              # firewall write; block = also drop at the edge
+#                              # via the dedicated blocked_feeds nftables set
+#
+#   - name: firehol-level1
+#     url: https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level1.netset
+#     format: cidr
+#     refresh_interval: 6h
+#     # action: block          # level1 is curated to be safe to drop outright
+#     # ttl: 24h               # nft element timeout for action: block
+#     #                        # (default: 2x refresh_interval)
+#     # max_entries: 100000    # default 100k; hard cap 500k
+#     # timeout: 30s
+# Verified-bot protection (issue #215) — spare well-known crawlers from
+# over-eager rules via forward-confirmed reverse DNS (never UA alone: a
+# spoofed Googlebot UA whose rDNS does not confirm is banned normally).
+# Built-in providers: googlebot, bingbot, applebot, yandexbot, baiduspider,
+# duckduckbot. Docs: guides/verified-bots.
+# verified_bots:
+#   enabled: true
+#   providers:                       # optional: extend/override by name
+#     - name: mymonitor
+#       ua_contains: [MyMonitor]     # case-insensitive UA substrings
+#       domains: [monitor.example.com]  # PTR must fall under one of these
+
+# Data retention (issue #184) — OPT-IN: without this section nothing is ever
+# pruned. Bounds database growth and documents your GDPR/LGPD retention
+# policy (IPs are personal data). Active bans and the allowlist are never
+# touched. Docs: reference/retention.
+# retention:
+#   strikes: 730d              # strike history (floor 180d) — powers repeat-offender
+#                              # escalation; fully-aged offenders reset to strike 1
+#   audit: 365d                # audit journal (floor 90d) — ALSO requires
+#                              # audit_export_not_required below before any deletion
+#   ai_usage: 90d              # AI cost accounting (floor 7d)
+#   i_understand_the_risks: false      # allow windows below the floors (never below 24h)
+#   audit_export_not_required: false   # acknowledge audit rows are deleted with no export
+# Docker exec activity watcher (issue #220) — post-exploitation visibility.
+# Observational ONLY: a `docker exec` into a container is audited, shown in
+# `ezyshield watch`, and notified (warn) — never a ban source (there is
+# usually no remote IP to ban). Docs: guides/docker-exec-watch.
+# docker_exec:
+#   enabled: true
+#   ignore:                    # legitimate tooling (globs or substrings)
+#     - "healthcheck*"
+#     - cron
+# Webshell-drop tripwire (opt-in) — sweeps web roots for new or modified
+# executable web files (.php etc.). Purely observational: audit trail +
+# notification (critical when content heuristics flag the file). It NEVER
+# bans — a filesystem event has no remote IP. A tripwire, not an antivirus.
+# webshell_watch:
+#   enabled: true
+#   roots:
+#     - /var/www/html
+#   ignore:
+#     - cache            # substring match anywhere in the path
+#     - "*.bak.php"      # or path.Match glob
+#   # extensions: [".php", ".phtml", ".php5", ".php7", ".phar"]  # default
+#   # interval_sec: 10   # sweep cadence (floor 5)

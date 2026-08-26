@@ -1,0 +1,8 @@
+Aug 25 13:00:01 mail dovecot: imap-login: Login: user=<evert>, method=PLAIN, rip=198.51.100.9, lip=198.51.100.1, mpid=1234, TLS, session=<ok1>
+Aug 25 13:00:02 mail dovecot: imap-login: Aborted login (auth failed, 3 attempts in 6 secs): user=<admin>, method=PLAIN, rip=203.0.113.70, lip=198.51.100.1, TLS, session=<x1>
+Aug 25 13:00:04 mail dovecot: pop3-login: Disconnected (auth failed, 1 attempts in 2 secs): user=<root>, method=PLAIN, rip=203.0.113.71, lip=198.51.100.1, session=<x2>
+Aug 25 13:00:06 mail dovecot: imap-login: Aborted login (auth failed, 5 attempts in 11 secs): user=<info>, method=LOGIN, rip=2001:db8::71, lip=2001:db8::1, TLS, session=<x3>
+Aug 25 13:00:08 mail dovecot: imap-login: Disconnected (no auth attempts in 5 secs): rip=203.0.113.72, lip=198.51.100.1, TLS handshaking, session=<x4>
+Aug 25 13:00:09 mail dovecot: pop3-login: Disconnected (no auth attempts in 0 secs): rip=203.0.113.72, lip=198.51.100.1, session=<x5>
+Aug 25 13:00:10 mail dovecot: imap(evert)<1234><ok1>: Logged out in=100 out=200
+Aug 25 13:00:11 mail dovecot: master: Warning: Killed with signal 15

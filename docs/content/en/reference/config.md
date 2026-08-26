@@ -252,6 +252,49 @@ ai:
 
 The AI verdict is always advisory: schema-validated, clamped by policy, and never able to ban an allowlisted IP.
 
+### Async second layer (`async: true`)
+
+```yaml
+ai:
+  provider: anthropic
+  api_key: env:ANTHROPIC_API_KEY
+  async: true                # analyze grey-zone traffic in the background
+  # async_queue_size: 256    # bounded queue; overflow drops the OLDEST episode
+```
+
+With `async: true` the pipeline **never waits for a provider**: grey-zone
+episodes (scores inside the ambiguous band) are queued — one entry per IP
+at a time — and a background worker drains them, rate-capped at one
+provider call per second. How the layer stays token-frugal:
+
+1. The rule engine decides the obvious cases; only the ambiguous band ever
+   enqueues (the same #419 gates apply — decisive scores and already-banned
+   IPs never spend tokens).
+2. The **Log Cleaner** runs before every call: static-asset noise is
+   dropped from the samples, already-decided episodes (banned/allowlisted
+   since queueing) are skipped, and the reduction is exposed as
+   `ezyshield_ai_cleaner_reduction_permille`.
+3. The provider receives only compact aggregates — counts, kind
+   distributions, enrichment, and a sanitized behavior summary (top paths
+   with querystrings cut, methods, status classes, capped user agents).
+   Raw log lines never enter a payload.
+
+Returned verdicts flow through the decision engine like any other verdict
+source: allowlist-wins, anti-lockout, and policy clamps all apply. A slow
+or dead provider degrades to rules-only detection — the bounded queue
+drops the oldest episode on overflow (`ezyshield_ai_queue_dropped_total`).
+The **agreement-rate metric** `ezyshield_ai_agreement_total`
+(`<provider>_agree` / `<provider>_disagree`, compared against the rule
+engine at the ban threshold) is the published proof the layer earns its
+tokens.
+
+Token cost expectations: one grey-zone episode costs one compact prompt
+(typically a few hundred input tokens) per un-cached behavior signature;
+the cache, the per-IP dedupe, and the #419 gates mean bursts do not
+multiply spend. For a **fully local** deployment use `provider: ollama` —
+the async layer works identically with zero outbound traffic and no API
+key.
+
 Every AI call is recorded in the `ai_usage` table with the analyzed IP, so cost attribution is a single query — the top spenders (an IP draining the budget is itself a leakage symptom):
 
 ```bash

@@ -78,6 +78,11 @@ collectors: []
 #                                    # rules alone and are never sent to the AI (issue #419)
 #   cache_ttl: 15m                   # verdict cache (default 15m when omitted or 0)
 #   token_budget_daily: 500000
+#   async: true                      # second-layer analysis in the background (issue #222):
+#                                    # grey-zone episodes are queued and cleaned before any
+#                                    # provider call — the pipeline never blocks on the AI,
+#                                    # and a dead provider degrades to rules-only.
+#   # async_queue_size: 256          # bounded queue; overflow drops the oldest episode
 
 # Notifications — configure channels and test with 'ezyshield test notifier <channel>'
 # Secrets must use env: references; inline values are rejected at load time.

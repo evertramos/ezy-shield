@@ -250,6 +250,49 @@ ai:
 
 O veredito da IA é sempre consultivo: validado por schema, limitado pela policy e nunca capaz de banir um IP da allowlist.
 
+### Segunda camada assíncrona (`async: true`)
+
+```yaml
+ai:
+  provider: anthropic
+  api_key: env:ANTHROPIC_API_KEY
+  async: true                # analisa o tráfego cinzento em segundo plano
+  # async_queue_size: 256    # fila limitada; overflow descarta o episódio MAIS ANTIGO
+```
+
+Com `async: true` o pipeline **nunca espera por um provider**: episódios
+da zona cinzenta (scores dentro da banda ambígua) entram numa fila — uma
+entrada por IP por vez — e um worker em segundo plano os drena, com teto
+de uma chamada por segundo. Como a camada permanece frugal em tokens:
+
+1. O motor de regras decide os casos óbvios; só a banda ambígua enfileira
+   (os mesmos gates da #419 valem — scores decisivos e IPs já banidos
+   nunca gastam tokens).
+2. O **Log Cleaner** roda antes de cada chamada: ruído de assets estáticos
+   sai das amostras, episódios já decididos (banidos/allowlistados desde o
+   enfileiramento) são pulados, e a redução é exposta em
+   `ezyshield_ai_cleaner_reduction_permille`.
+3. O provider recebe apenas agregados compactos — contagens, distribuição
+   de kinds, enriquecimento e um resumo comportamental sanitizado (top
+   paths com querystring cortada, métodos, classes de status, user agents
+   capados). Linhas de log cruas nunca entram no payload.
+
+Os vereditos que voltam passam pelo decision engine como qualquer outra
+fonte: allowlist-wins, anti-lockout e os clamps de policy se aplicam. Um
+provider lento ou morto degrada para detecção só-regras — a fila limitada
+descarta o episódio mais antigo no overflow
+(`ezyshield_ai_queue_dropped_total`). A **métrica de taxa de concordância**
+`ezyshield_ai_agreement_total` (`<provider>_agree` / `<provider>_disagree`,
+comparada com o motor de regras no ban threshold) é a prova publicada de
+que a camada rende os tokens que gasta.
+
+Expectativa de custo: um episódio cinzento custa um prompt compacto
+(tipicamente poucas centenas de tokens de entrada) por assinatura de
+comportamento não-cacheada; o cache, o dedupe por IP e os gates da #419
+impedem que rajadas multipliquem o gasto. Para operação **totalmente
+local**, use `provider: ollama` — a camada assíncrona funciona idêntica,
+com zero tráfego de saída e sem API key.
+
 Cada chamada de IA é registrada na tabela `ai_usage` com o IP analisado, então a atribuição de custo vira uma única consulta — os maiores gastadores (um IP drenando o orçamento é, por si só, sintoma de vazamento):
 
 ```bash

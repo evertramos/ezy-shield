@@ -55,6 +55,25 @@ type Aggregate struct {
 	Kinds  map[string]int
 	Sample []Event    // capped, redacted; never send raw to AI
 	Enrich Enrichment // asn, country, reputation flags
+	// Behavior is the compact behavioral summary derived from Sample
+	// (issue #222): distributions and top-N lists only, never raw log
+	// lines — it is the ONLY sample-derived data AI payloads may carry.
+	Behavior *BehaviorSummary
+}
+
+// BehaviorSummary condenses an aggregate's sampled events into the compact
+// fields an AI analysis needs (issue #222): path/method/status
+// distributions and a user-agent summary. Every string is length-capped
+// and control-stripped at construction; lists are top-N by frequency.
+type BehaviorSummary struct {
+	// TopPaths lists the most-requested paths as "path (xN)" entries.
+	TopPaths []string `json:"top_paths,omitempty"`
+	// Methods counts requests per HTTP method.
+	Methods map[string]int `json:"methods,omitempty"`
+	// StatusClasses counts responses per class ("2xx", "4xx", ...).
+	StatusClasses map[string]int `json:"status_classes,omitempty"`
+	// TopUserAgents lists the most-seen user agents as "ua (xN)" entries.
+	TopUserAgents []string `json:"top_user_agents,omitempty"`
 }
 
 // Verdict is a threat assessment, from the rule engine or an AI provider.

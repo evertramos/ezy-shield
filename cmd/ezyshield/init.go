@@ -194,6 +194,13 @@ type wizardState struct {
 	// returns so downstream writers can rely on len(cdn.cfAccounts) checks
 	// alone. Its String() masks every CF token.
 	cdn *cdnStep
+
+	// notify holds the channels configured by the Notifications step
+	// (issue #290); nil = none. Secrets are env: references only — pasted
+	// values live inside notifyPostSave closures (run after config.yaml is
+	// committed, same discipline as the channel wizards) and never here.
+	notify         *config.NotifyCfg
+	notifyPostSave func() error
 }
 
 // String on *wizardState prints every field EXCEPT aiToken, which is masked.
@@ -263,7 +270,7 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 	}
 
 	// ── Questions (sectioned sub-flows) ───────────────────────────────────
-	askQuestions(p.w, sc, state, yes, st)
+	askQuestions(p.w, sc, state, yes, st, configDir)
 
 	// Distill the operator's answers for the final Summary section. Runs
 	// before the writers so a skipped/aborted component is reported even
@@ -365,6 +372,29 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 			}
 			envTouched = envTouched || wrote || kept
 		}
+	}
+	// bunny.net API key: same .env file and merge semantics as the CF
+	// tokens above; never logged (issue #198).
+	if state.cdn != nil && state.cdn.bunnyEnabled && state.cdn.bunny != nil && state.cdn.bunny.key != "" {
+		wrote, kept, err := writeCloudflareEnvFile(configDir, state.cdn.bunny.keyEnvVar, state.cdn.bunny.key)
+		if err != nil {
+			return err
+		}
+		switch {
+		case kept:
+			p.println(st.ok("kept " + envPath + " (existing " + state.cdn.bunny.keyEnvVar + " preserved)"))
+		case wrote:
+			p.println(st.ok("wrote " + envPath + " (chmod 600, " + state.cdn.bunny.keyEnvVar + " merged)"))
+		}
+		envTouched = envTouched || wrote || kept
+	}
+	// Notifier channel secrets (issue #290): the post-save hooks the channel
+	// flows built — same merge/rotation semantics as `config notifier`.
+	if state.notifyPostSave != nil {
+		if err := state.notifyPostSave(); err != nil {
+			return err
+		}
+		envTouched = true
 	}
 	if envTouched {
 		sum.files = append(sum.files, envPath+" (mode 0600 — secret tokens live here, never in config.yaml)")
@@ -597,6 +627,22 @@ func summarizeChoices(state *wizardState, sum *initSummary, yes bool) {
 		sum.skipped = append(sum.skipped,
 			"cloudflare enforcer — declined (CDN detected: bans will not reach real client IPs)")
 	}
+	// bunny.net mirrors the cloudflare summary block above (issue #198); a
+	// separate switch because both enforcers can be configured in one run.
+	switch {
+	case state.cdn == nil:
+	case state.cdn.bunnyEnabled && state.cdn.bunny != nil:
+		sum.configured = append(sum.configured,
+			fmt.Sprintf("enforcer: bunny (%d pull zone(s))", len(state.cdn.bunny.cfg.PullZones)))
+	case state.cdn.bunnyAttempted:
+		sum.skipped = append(sum.skipped,
+			"bunny enforcer — setup did NOT complete (see the banner above)")
+	case yes:
+		// --yes skip already reported by the cloudflare block.
+	case providerDetected(state.cdn.detected, "bunny"):
+		sum.skipped = append(sum.skipped,
+			"bunny enforcer — declined (CDN detected: bans will not reach real client IPs)")
+	}
 
 	// AI.
 	if state.enableAI && state.aiProvider != "" {
@@ -675,7 +721,7 @@ func renderInitSummary(p *wPrinter, st styler, state *wizardState, sum *initSumm
 // The ask/askBool closures are shared with the `config <kind> <name>`
 // wizards (see newAskFuncs in configwizard.go). Prompts and section
 // headers are written to out (the wizard's stdout).
-func askQuestions(out io.Writer, sc *bufio.Scanner, state *wizardState, yes bool, st styler) {
+func askQuestions(out io.Writer, sc *bufio.Scanner, state *wizardState, yes bool, st styler, configDir string) {
 	p := &wPrinter{w: out}
 	ask, askBool := newAskFuncs(sc, out, yes)
 
@@ -769,6 +815,13 @@ func askQuestions(out io.Writer, sc *bufio.Scanner, state *wizardState, yes bool
 		state.aiToken = step.token
 		state.aiExternalKey = step.externalKey
 	}
+
+	// Notifications (issue #290) — dispatches to the same per-channel flows
+	// `config notifier <name>` uses; see init_notify.go.
+	p.println("")
+	p.println(st.header("Notifications"))
+	runNotifyStep(p, closurePrompter{askFn: ask, askBoolFn: askBool},
+		cdnDeps{Yes: yes}, state, configDir, yes)
 
 	// Dry-run vs armed
 	p.println("")
@@ -871,7 +924,8 @@ func renderGeneratedConfig(state *wizardState) ([]byte, error) {
 	}
 
 	hasCF := state.cdn != nil && state.cdn.cfEnabled && len(state.cdn.cfAccounts) > 0
-	if state.nftPath != "" || hasCF {
+	hasBunny := state.cdn != nil && state.cdn.bunnyEnabled && state.cdn.bunny != nil
+	if state.nftPath != "" || hasCF || hasBunny {
 		b.WriteString("enforce:\n")
 		if state.nftPath != "" {
 			// The empty mapping is the whole configuration (issue #268): its
@@ -883,6 +937,9 @@ func renderGeneratedConfig(state *wizardState) ([]byte, error) {
 		}
 		if hasCF {
 			emitCloudflareYAML(&b, state.cdn)
+		}
+		if hasBunny {
+			emitBunnyYAML(&b, state.cdn)
 		}
 	}
 
@@ -898,6 +955,12 @@ func renderGeneratedConfig(state *wizardState) ([]byte, error) {
 		fmt.Fprintf(&b, "  ambiguous_band: [%d, %d]\n",
 			config.DefaultAmbiguousBand[0], config.DefaultAmbiguousBand[1])
 		b.WriteString("  token_budget_daily: 100000\n")
+	}
+
+	// Notification channels (issue #290) — serialized from the same
+	// config.NotifyCfg shape both init modes build (see init_notify.go).
+	if err := renderNotifyYAML(&b, state.notify); err != nil {
+		return nil, err
 	}
 
 	data := []byte(b.String())

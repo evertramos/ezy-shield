@@ -67,6 +67,8 @@ permissões seguras (0600).
 
 O assistente percorre seções nomeadas — **Environment** (o que foi detectado
 no host), **Collectors**, **Allowlist**, **Edge enforcers**, **AI analysis**,
+**Notifications** (zero ou mais canais: telegram, email, slack, discord,
+webhook — os mesmos prompts de `config notifier <name>`),
 **Policy**, **Files** e **System services** — com marcas de status `✓`/`✗`/`!`
 por linha. A estilização segue as [convenções globais de cores](#cores);
 saída por pipe permanece texto puro.
@@ -206,6 +208,43 @@ a direção segura. Persistido no `policy.yaml` e auditado.
 sudo ezyshield disarm
 ```
 
+## ezyshield disable / enable
+
+O botão de pânico. **Quando usar**: falsos positivos banindo usuários reais,
+um colega trancado para fora, uma regra quebrada bloqueando tráfego de
+produção — qualquer momento em que "pare tudo, agora" vale mais que
+correções cirúrgicas.
+
+```bash
+sudo ezyshield disable --all          # desarma + remove TODOS os bloqueios ativos
+sudo ezyshield disable --local-only   # flush só do nftables local (funciona com o daemon fora)
+sudo ezyshield disable                # só desarma (igual a 'disarm')
+sudo ezyshield enable                 # re-arma (alias de 'arm', pre-flight completo)
+```
+
+`--all` desarma o daemon (sem novos bans), limpa todos os bans ativos do
+store e reconcilia os enforcers contra o estado agora vazio — os sets
+nftables locais são esvaziados via helper e os enforcers de edge
+(Cloudflare) esvaziam pelo caminho normal de reconcile. **Histórico de bans
+e strikes são preservados** — é um reset de enforcement, não uma limpeza de
+dados — e o `enable` re-arma depois **sem re-aplicar nada**. Um prompt de
+confirmação protege o comando (`--yes` pula); o disarm e uma linha-resumo
+(`disable_all`, com a contagem) vão para o audit log.
+
+`--local-only` é a variante quebra-vidro: fala **direto com o socket do
+helper enforcer** e faz flush dos sets locais de bloqueio, então funciona
+mesmo com o daemon doente. Bloqueios de edge ficam como estão, e um daemon
+*rodando* re-aplica os bans ativos no próximo reconcile (~1 min) — siga com
+`allow <seu-ip>`, `unban <ip>` ou `disable --all`.
+
+Se nenhum socket responder, o comando imprime no stderr os passos exatos de
+recuperação manual (`systemctl stop ezyshield`, `nft flush set inet
+ezyshield blocked` / `blocked6`, e a nota da lista do Cloudflare).
+
+As duas variantes honram `--json` e os exit codes padrão. Deliberadamente
+**não existe flag de config** para nada disso — só um operador com acesso
+ao socket (root ou grupo `ezyshield`) pode disparar.
+
 ## ezyshield status
 
 Mostra o status do daemon e do enforcer.
@@ -276,6 +315,24 @@ recentes primeiro; `TTL` é `perm` para ban permanente e `-` para ações sem TT
 `list --audit` mostra apenas a trilha de auditoria (timestamps, ações,
 strikes, motivos). Para o histórico completo de um ofensor, com vereditos de
 detecção e evidências, use `ezyshield report`.
+
+## ezyshield feeds
+
+Inspeciona e atualiza os feeds de reputação de IP configurados (seção
+`feeds:` do config.yaml) via daemon em execução. Veja o
+[guia de Feeds de Reputação](../guides/reputation-feeds.md).
+
+```bash
+ezyshield feeds status            # por feed: action, entradas, descartadas, último/próximo refresh
+ezyshield feeds status --json
+ezyshield feeds refresh           # re-baixa todos os feeds agora
+ezyshield feeds refresh <nome>    # re-baixa um feed
+```
+
+Entradas de feed nunca criam strikes nem bans e nunca aparecem no
+`ezyshield list` — vivem nos sets nftables dedicados `blocked_feeds`
+(action `block`) ou só em memória como boost de score (action `observe`,
+o padrão).
 
 ## ezyshield report
 

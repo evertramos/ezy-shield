@@ -13,8 +13,10 @@ import "encoding/json"
 type SocketRequest struct {
 	// Verb selects the operation: "status", "list", "list_allow", "events",
 	// "subscribe", "report", "ban", "unban", "allow", "unallow", "arm",
-	// "arm_keep", "disarm" — the complete set handleConn dispatches
-	// (issue #357: the arm family and "unallow" were missing here).
+	// "arm_keep", "disarm", "disable_all", "prune", "feeds_status",
+	// "feeds_refresh" — the complete set handleConn dispatches (issue
+	// #357: the arm family and "unallow" were missing here; #196 added
+	// the feeds pair).
 	Verb string `json:"verb"`
 	// IP is the target for ban/unban/allow/report. ban/unban/allow accept
 	// either a bare address ("1.2.3.4") or a CIDR ("203.0.113.0/24"); a bare
@@ -58,6 +60,12 @@ type SocketRequest struct {
 	// lines from the configured log sources (bounded, read-only, never
 	// persisted). Ignored by every other verb and by the listing mode.
 	Evidence bool `json:"evidence,omitempty"`
+	// Name selects one reputation feed for the "feeds_refresh" verb; empty
+	// refreshes every configured feed (issue #196).
+	Name string `json:"name,omitempty"`
+	// DryRun makes the prune verb report per-table candidate counts without
+	// deleting anything (issue #184). Ignored by every other verb.
+	DryRun bool `json:"dry_run,omitempty"`
 }
 
 // SocketResponse is returned by the daemon for every request.

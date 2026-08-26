@@ -1,0 +1,8 @@
+name: legit-admin-wp
+description: A real admin hitting wp-login twice (fat-fingered once)
+label: legit
+source: "file:/var/log/nginx/access.log"
+interval_ms: 10000
+lines:
+    - '198.51.100.23 - - [01/Jan/2026:12:00:00 +0000] "GET /wp-login.php HTTP/1.1" 200 162 "-" "Mozilla/5.0 (X11; Linux x86_64) Firefox/128.0"'
+    - '198.51.100.23 - - [01/Jan/2026:12:00:00 +0000] "GET /wp-login.php HTTP/1.1" 302 162 "-" "Mozilla/5.0 (X11; Linux x86_64) Firefox/128.0"'

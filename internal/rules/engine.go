@@ -207,6 +207,39 @@ func applyDropins(base []spec, dir string) ([]spec, map[string]string, error) {
 	return merged, origin, nil
 }
 
+// LongWindowCutoff splits rule windows between the two evaluation paths
+// (issue #134): windows <= cutoff are served by the in-memory sliding-window
+// aggregator (which retains events, enabling field-level rules); windows
+// above it are served by persistent per-IP hourly counters in the store
+// (aggregate integers only — hence the kind-level-only validation below).
+const LongWindowCutoff = time.Hour
+
+// KindsForLongWindows returns, for each distinct rule window strictly
+// greater than LongWindowCutoff, the union of kinds its rules reference.
+// The daemon uses this to know which event kinds to count persistently and
+// which extra windows to evaluate from those counts. Read-only; Evaluate
+// itself is untouched by the long-window path (design constraint of #134).
+func (e *Engine) KindsForLongWindows() map[time.Duration][]string {
+	out := map[time.Duration][]string{}
+	for _, r := range e.rules {
+		w := time.Duration(r.Window)
+		if w <= LongWindowCutoff {
+			continue
+		}
+		seen := make(map[string]bool, len(out[w]))
+		for _, k := range out[w] {
+			seen[k] = true
+		}
+		for _, k := range r.Kinds {
+			if !seen[k] {
+				out[w] = append(out[w], k)
+				seen[k] = true
+			}
+		}
+	}
+	return out
+}
+
 // Windows returns the unique window durations referenced by the loaded rules.
 // The aggregator should produce an sdk.Aggregate for each of these windows so
 // that Evaluate can match every rule.
@@ -257,7 +290,59 @@ func applyRule(r spec, agg sdk.Aggregate) (sdk.Verdict, bool) {
 		Reason:     fmt.Sprintf("rule/%s: %d events in %s (threshold %d)", r.Name, count, time.Duration(r.Window), r.Threshold),
 		Source:     "rules",
 		SuggestTTL: 0, // policy decides
+		Evidence:   evidenceLines(r, agg),
 	}, true
+}
+
+// evidenceLines collects up to sdk.EvidenceMaxLines raw log lines from the
+// sample events that MATCH the firing rule — the capture-at-detection
+// evidence of ADR-0011 (issue #127). The matching predicate mirrors
+// countMatches exactly, so the attached lines are (a subset of) the very
+// events that were counted. Events without Raw (synthetic, long-window
+// counter aggregates, pre-#127 tests) contribute nothing. Runs only when a
+// rule fires, never per event.
+func evidenceLines(r spec, agg sdk.Aggregate) []string {
+	kindSet := make(map[string]struct{}, len(r.Kinds))
+	for _, k := range r.Kinds {
+		kindSet[k] = struct{}{}
+	}
+	var out []string
+	for _, ev := range agg.Sample {
+		if len(out) >= sdk.EvidenceMaxLines {
+			break
+		}
+		if _, ok := kindSet[ev.Kind]; !ok || len(ev.Raw) == 0 {
+			continue
+		}
+		if r.Field != "" && !fieldMatches(r, ev) {
+			continue
+		}
+		out = append(out, string(ev.Raw))
+	}
+	return out
+}
+
+// fieldMatches reports whether ev satisfies the rule's field-level matcher.
+// Factored from countMatches' scan so evidenceLines applies the identical
+// predicate.
+func fieldMatches(r spec, ev sdk.Event) bool {
+	val, exists := ev.Fields[r.Field]
+	if !exists {
+		return false
+	}
+	switch {
+	case r.Value != "":
+		return val == r.Value
+	case r.Contains != "":
+		return strings.Contains(val, r.Contains)
+	case len(r.ContainsAny) > 0:
+		for _, sub := range r.ContainsAny {
+			if strings.Contains(val, sub) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // countMatches returns the number of events in agg that satisfy the rule.
@@ -286,28 +371,16 @@ func countMatches(r spec, agg sdk.Aggregate) int {
 		return total
 	}
 
-	// Field-level rule: scan Sample for matching field values.
+	// Field-level rule: scan Sample for matching field values. The
+	// predicate is shared with evidenceLines (ADR-0011) so captured
+	// evidence is always a subset of the counted events.
 	total := 0
 	for _, ev := range agg.Sample {
 		if _, ok := kindSet[ev.Kind]; !ok {
 			continue
 		}
-		val, exists := ev.Fields[r.Field]
-		if !exists {
-			continue
-		}
-		if r.Value != "" && val == r.Value {
+		if fieldMatches(r, ev) {
 			total++
-		} else if r.Contains != "" && strings.Contains(val, r.Contains) {
-			total++
-		} else if len(r.ContainsAny) > 0 {
-			// ContainsAny: OR logic — match if any substring is found
-			for _, sub := range r.ContainsAny {
-				if strings.Contains(val, sub) {
-					total++
-					break
-				}
-			}
 		}
 	}
 	return total
@@ -377,6 +450,14 @@ func validateRule(i int, r spec) error {
 	}
 	if r.Category == "" {
 		return fmt.Errorf("rule %q: category is required", r.Name)
+	}
+	// Long-window rules (issue #134) are evaluated from persistent per-IP
+	// hourly counters, which retain kind counts only — no field values. A
+	// field-level matcher on such a window could never fire, so it fails
+	// closed at load time like the field/matcher pairing above.
+	if time.Duration(r.Window) > LongWindowCutoff && r.Field != "" {
+		return fmt.Errorf("rule %q: windows above %s are served by persistent counters that keep no field values; field/value/contains/contains_any require window <= %s",
+			r.Name, LongWindowCutoff, LongWindowCutoff)
 	}
 	return nil
 }

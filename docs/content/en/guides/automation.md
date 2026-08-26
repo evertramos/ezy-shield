@@ -85,6 +85,34 @@ enforce:
       # Env var NAME holding the token. Optional; derived from `name` when
       # omitted (CLOUDFLARE_API_TOKEN, or CLOUDFLARE_API_TOKEN_<NAME>).
       api_token_env: CLOUDFLARE_API_TOKEN
+
+# ── Notification channels (optional) ───────────────────────────────────────
+# One instance per channel type. Secrets follow the same rule as everywhere
+# in this file: the *_env keys carry env var NAMES — a literal token/URL/
+# password in the answers file is rejected before anything is written.
+# Referenced vars are stubbed into .env as placeholders for you to fill.
+notify:
+  telegram:
+    chat_ids: ["-1001234567890"]        # required
+    severity: [critical]                # optional; empty = all
+    bot_token_env: TELEGRAM_BOT_TOKEN   # optional; this is the default
+  email:
+    from: ezyshield@example.com         # required
+    to: [admin@example.com]             # required
+    host: smtp.example.com              # required
+    port: 587                           # optional (default 587)
+    username: ezyshield@example.com     # optional; empty = no auth
+    tls: starttls                       # starttls | tls | none (default starttls)
+    password_env: SMTP_PASSWORD         # optional; default when username set
+  slack:
+    channel: "#security"                # optional
+    webhook_url_env: SLACK_WEBHOOK_URL  # optional; this is the default
+  discord:
+    webhook_url_env: DISCORD_WEBHOOK_URL
+  webhook:
+    url_env: WEBHOOK_URL
+    auth_header_name: Authorization     # optional
+    auth_header_value_env: WEBHOOK_AUTH_HEADER
 ```
 
 `nftables` local enforcement is enabled automatically when `nft` is detected on

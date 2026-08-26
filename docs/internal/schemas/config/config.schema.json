@@ -127,7 +127,7 @@
           },
           "parser": {
             "type": "string",
-            "enum": ["nginx", "ssh", "caddy", "traefik", "apache", "apache-error"],
+            "enum": ["nginx", "ssh", "caddy", "traefik", "apache", "apache-error", "postfix", "dovecot", "vaultwarden", "nextcloud", "keycloak"],
             "description": "Forces parser selection by prefixing the source ID. Consumed by 'file' (source override) and 'docker' collectors; ignored by 'journald'."
           }
         }
@@ -168,6 +168,26 @@
               "items": {"$ref": "#/$defs/cloudflareAccount"}
             }
           ]
+        },
+        "bunny": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "bunny.net edge enforcement via the Pull Zone blocked-IPs API. EzyShield takes ownership of the BlockedIps list on the configured zones (entries added by hand in the bunny panel are removed on reconcile).",
+          "required": ["api_key", "pull_zones"],
+          "properties": {
+            "name": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,32}$",
+              "description": "Optional operator label; surfaces as bunny[<name>] in logs."
+            },
+            "api_key": {"$ref": "#/$defs/secretRef"},
+            "pull_zones": {
+              "type": "array",
+              "minItems": 1,
+              "items": {"type": "integer", "minimum": 1},
+              "description": "Numeric pull zone IDs the blocklist applies to."
+            }
+          }
         }
       }
     },
@@ -360,6 +380,215 @@
         "metrics_auth": {
           "type": "boolean",
           "description": "Whether GET /metrics requires dashboard session auth (default true). false allows unauthenticated Prometheus scrapes — safe only because the listener is loopback-only; the route stays throttled."
+        }
+      }
+    },
+    "feeds": {
+      "type": "array",
+      "description": "IP reputation feeds to download and parse (issue #194). Download/parse only — enforcement is a follow-up. Private/loopback/link-local ranges in a feed are always dropped.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "url", "format", "refresh_interval"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,32}$",
+            "description": "Unique feed identifier used in logs and provenance."
+          },
+          "url": {
+            "type": "string",
+            "pattern": "^https://",
+            "description": "Feed source. https:// only — http is rejected at load."
+          },
+          "format": {
+            "type": "string",
+            "enum": ["plain", "cidr", "abuseipdb"],
+            "description": "plain = one IP per line; cidr = IP or prefix per line with ';'/'#' comments (Spamhaus DROP / FireHOL); abuseipdb = plain list export."
+          },
+          "refresh_interval": {
+            "type": "string",
+            "description": "Re-fetch cadence (Go duration). Minimum 1h."
+          },
+          "max_entries": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 500000,
+            "description": "Per-feed entry cap. 0 = 100k default; hard cap 500k."
+          },
+          "timeout": {
+            "type": "string",
+            "description": "Single-fetch timeout (Go duration). Default 30s."
+          },
+          "action": {
+            "type": "string",
+            "enum": ["observe", "block"],
+            "description": "observe (default) = in-memory reputation flag that boosts rule scores when the IP also appears in local events; block = additionally drop the entries via the dedicated blocked_feeds nftables set. Feed entries never create strikes or bans."
+          },
+          "ttl": {
+            "type": "string",
+            "description": "nft per-element timeout for action:block entries (Go duration). Default: 2x refresh_interval."
+          }
+        }
+      }
+    },
+    "verified_bots": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Verified-bot protection (issue #215): forward-confirmed reverse DNS sparing of well-known crawlers from over-eager rules. Absent/disabled = no DNS lookups ever happen. UA alone is never trusted.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Turn the guard on. Built-in providers: googlebot, bingbot, applebot, yandexbot, baiduspider, duckduckbot."
+        },
+        "providers": {
+          "type": "array",
+          "description": "Extend or override the built-in provider table, matched by name.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "ua_contains", "domains"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Provider identifier used in audits; overriding a built-in name replaces that entry."
+              },
+              "ua_contains": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+                "description": "Case-insensitive User-Agent substrings that make an IP a verification candidate."
+              },
+              "domains": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+                "description": "DNS suffixes the PTR name must fall under (dot-anchored match)."
+              }
+            }
+          }
+        }
+      }
+    },
+    "retention": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Data-retention pruning (issue #184). OPT-IN: without this section nothing is ever pruned. Durations use Go syntax plus a day unit ('30d', '365d', '2160h'); 'never' or '0' disables that table. Active bans and the allowlist are never touched.",
+      "properties": {
+        "strikes": {
+          "type": "string",
+          "pattern": "^([0-9]+d|[0-9]+(ns|us|µs|ms|s|m|h)([0-9]+(ns|us|µs|ms|s|m|h))*|never|0)$",
+          "description": "Window for strike history (default 730d, floor 180d). The newest strike of an IP with an active ban is never deleted; fully-aged offenders reset escalation."
+        },
+        "audit": {
+          "type": "string",
+          "pattern": "^([0-9]+d|[0-9]+(ns|us|µs|ms|s|m|h)([0-9]+(ns|us|µs|ms|s|m|h))*|never|0)$",
+          "description": "Window for the audit journal (default 365d, floor 90d). Deletion additionally requires audit_export_not_required: true."
+        },
+        "ai_usage": {
+          "type": "string",
+          "pattern": "^([0-9]+d|[0-9]+(ns|us|µs|ms|s|m|h)([0-9]+(ns|us|µs|ms|s|m|h))*|never|0)$",
+          "description": "Window for AI cost-accounting rows (default 90d, floor 7d)."
+        },
+        "i_understand_the_risks": {
+          "type": "boolean",
+          "description": "Allow windows below the per-table safety floors. A 24h absolute minimum still applies."
+        },
+        "audit_export_not_required": {
+          "type": "boolean",
+          "description": "Acknowledge that audit_log rows will be deleted with no export archiving them. Audit pruning refuses to run while false."
+        }
+      }
+    },
+    "docker_exec": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Docker exec activity watcher (issue #220): observational post-exploitation signal from the docker events API. Opt-in; NEVER a ban source — observations are audited, streamed to `watch`, and notified only.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Subscribe to exec_start events on the docker socket."
+        },
+        "ignore": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Container-name or image patterns to skip (path.Match globs; plain text matches as substring) — legitimate cron/health tooling."
+        }
+      }
+    },
+    "webshell_watch": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Webshell-drop tripwire (issue #221): polling watch over web roots for new/modified executable web files. Purely observational — audit + notification, never a ban.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Opt-in switch; false or absent means no filesystem is swept."
+        },
+        "roots": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Absolute web-root directories to sweep (e.g. /var/www/html). Required when enabled."
+        },
+        "extensions": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Watched extensions with leading dot. Default: .php, .phtml, .php5, .php7, .phar."
+        },
+        "ignore": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Path patterns to skip — path.Match globs, or substrings when the pattern has no glob metacharacters (cache/upload dirs that legitimately churn)."
+        },
+        "interval_sec": {
+          "type": "integer",
+          "minimum": 5,
+          "description": "Sweep cadence in seconds. Default 10; floor 5."
+        }
+      }
+    },
+    "siem": {
+      "type": "array",
+      "description": "Outbound SIEM event forwarding (issue #203). Async with a bounded queue — a slow or dead SIEM never back-pressures the pipeline. No listener is ever created.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "address"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,32}$",
+            "description": "Unique sink identifier used in logs/doctor."
+          },
+          "address": {
+            "type": "string",
+            "pattern": "^(udp|tcp|tls|uds|file)://",
+            "description": "scheme://target: udp://host:port, tcp://host:port, tls://host:port, uds:///path, file:///path. Plaintext tcp/udp require allow_insecure_transport."
+          },
+          "format": {
+            "type": "string",
+            "enum": ["json", "cef", "rfc5424"],
+            "description": "Event format. Default json. rfc5424 over stream transports uses RFC 6587 octet-counting framing."
+          },
+          "events": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Audit ops to forward (empty = all). See the SIEM guide for the documented kinds."
+          },
+          "ca_file": {
+            "type": "string",
+            "description": "PEM CA bundle path pinning the tls:// server chain. Verification is never disabled; this only replaces the system roots."
+          },
+          "queue_size": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65536,
+            "description": "Bounded in-memory queue per sink (default 1024). When full, the OLDEST event is dropped and counted."
+          },
+          "allow_insecure_transport": {
+            "type": "boolean",
+            "description": "Explicit opt-in required for plaintext tcp:// or udp:// — audit events cross the wire unencrypted. doctor warns loudly when set."
+          }
         }
       }
     }

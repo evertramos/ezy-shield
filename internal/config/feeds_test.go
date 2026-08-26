@@ -113,6 +113,29 @@ func TestFeedsConfig_Invalid(t *testing.T) {
 			wantErr: "'name' is required",
 		},
 		{
+			name: "bad action",
+			body: `
+  - name: bad
+    url: https://feeds.example/list.txt
+    format: plain
+    refresh_interval: 12h
+    action: nuke
+`,
+			wantErr: "observe|block",
+		},
+		{
+			name: "negative ttl",
+			body: `
+  - name: bad
+    url: https://feeds.example/list.txt
+    format: plain
+    refresh_interval: 12h
+    action: block
+    ttl: -1h
+`,
+			wantErr: "ttl",
+		},
+		{
 			name: "duplicate name",
 			body: `
   - name: same

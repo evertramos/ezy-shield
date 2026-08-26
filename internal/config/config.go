@@ -85,6 +85,17 @@ type FeedCfg struct {
 	MaxEntries int `yaml:"max_entries"`
 	// Timeout bounds one fetch (default 30s).
 	Timeout Duration `yaml:"timeout,omitempty"`
+	// Action decides what the daemon does with the feed's entries (#195):
+	// "observe" (default) stores them in memory as a reputation flag that
+	// boosts rule scores when the IP also appears in local events — no
+	// firewall write; "block" additionally drops the entries at the edge
+	// of the ezyshield nftables table via the dedicated blocked_feeds set.
+	// Feed entries NEVER create strikes and never appear as bans.
+	Action string `yaml:"action"`
+	// TTL is the nft per-element timeout for action:block entries. 0 =
+	// twice the refresh interval, so entries survive one missed refresh
+	// but drain on their own when a feed dies.
+	TTL Duration `yaml:"ttl,omitempty"`
 }
 
 // DockerExecCfg configures the docker exec activity watcher (issue #220).
@@ -643,6 +654,12 @@ func validateFeeds(list []FeedCfg) error {
 		}
 		if f.Timeout.AsDuration() < 0 {
 			return fmt.Errorf("[%d] %s: 'timeout' must not be negative", i, f.Name)
+		}
+		if f.Action != "" && f.Action != "observe" && f.Action != "block" {
+			return fmt.Errorf("[%d] %s: 'action' must be observe|block, got %q", i, f.Name, f.Action)
+		}
+		if f.TTL.AsDuration() < 0 {
+			return fmt.Errorf("[%d] %s: 'ttl' must not be negative", i, f.Name)
 		}
 	}
 	return nil

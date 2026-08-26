@@ -415,6 +415,15 @@
           "timeout": {
             "type": "string",
             "description": "Single-fetch timeout (Go duration). Default 30s."
+          },
+          "action": {
+            "type": "string",
+            "enum": ["observe", "block"],
+            "description": "observe (default) = in-memory reputation flag that boosts rule scores when the IP also appears in local events; block = additionally drop the entries via the dedicated blocked_feeds nftables set. Feed entries never create strikes or bans."
+          },
+          "ttl": {
+            "type": "string",
+            "description": "nft per-element timeout for action:block entries (Go duration). Default: 2x refresh_interval."
           }
         }
       }

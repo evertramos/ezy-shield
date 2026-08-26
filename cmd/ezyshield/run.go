@@ -18,6 +18,7 @@ import (
 	"github.com/evertramos/ezy-shield/internal/decision"
 	"github.com/evertramos/ezy-shield/internal/enforce"
 	"github.com/evertramos/ezy-shield/internal/enrich"
+	"github.com/evertramos/ezy-shield/internal/feeds"
 	"github.com/evertramos/ezy-shield/internal/notify"
 	"github.com/evertramos/ezy-shield/internal/parser"
 	"github.com/evertramos/ezy-shield/internal/store"
@@ -141,7 +142,13 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 
 	collectors := buildCollectors(cfg, logger)
 
-	var enf sdk.Enforcer
+	var (
+		enf sdk.Enforcer
+		// nftEnf keeps the concrete nftables enforcer for the reputation-
+		// feed sets (issue #195): feed entries travel their own SyncFeeds
+		// path, never the Ban/Sync fan-out the gate wraps below.
+		nftEnf *enforce.NftablesEnforcer
+	)
 	if cfg.Enforce != nil && cfg.Enforce.NFTables != nil {
 		sockPath := cfg.Enforce.NFTables.Socket
 		if sockPath == "" {
@@ -155,8 +162,9 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 		// Table/set come from config (issue #268): empty means the enforcer
 		// defaults; non-default names are validated at config load and the
 		// helper is capability-probed before first use.
-		enf = enforce.New(sockPath, allowlist,
+		nftEnf = enforce.New(sockPath, allowlist,
 			enforce.WithNames(cfg.Enforce.NFTables.Table, cfg.Enforce.NFTables.Set))
+		enf = nftEnf
 	}
 
 	var edgeEnforcers []sdk.Enforcer
@@ -315,7 +323,7 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 		}
 	}
 
-	d, err := daemon.New(daemon.Config{
+	dcfg := daemon.Config{
 		Cfg:              cfg,
 		Policy:           policy,
 		Store:            db,
@@ -332,12 +340,62 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 		PolicyPath:       policyPath,
 		ExecActivity:     execActivity,
 		WebshellActivity: buildWebshellActivity(cfg),
-	})
+		FeedUpdates:      buildFeedUpdates(cfg),
+	}
+	if nftEnf != nil {
+		dcfg.FeedSyncer = nftEnf
+	}
+	d, err := daemon.New(dcfg)
 	if err != nil {
 		return fmt.Errorf("run: create daemon: %w", err)
 	}
 
 	return d.Run(ctx)
+}
+
+// buildFeedUpdates wires the reputation-feed refresh loop (issues #194/#195)
+// into the daemon via injection — the daemon package never imports
+// internal/feeds. Returns nil (feature off) when no feeds are configured.
+func buildFeedUpdates(cfg *config.Config) func(context.Context, func(daemon.FeedUpdate)) {
+	if len(cfg.Feeds) == 0 {
+		return nil
+	}
+	fcfgs := make([]feeds.FeedConfig, 0, len(cfg.Feeds))
+	meta := make(map[string]config.FeedCfg, len(cfg.Feeds))
+	for _, f := range cfg.Feeds {
+		fcfgs = append(fcfgs, feeds.FeedConfig{
+			Name:            f.Name,
+			URL:             f.URL,
+			Format:          f.Format,
+			RefreshInterval: f.RefreshInterval.AsDuration(),
+			MaxEntries:      f.MaxEntries,
+			Timeout:         f.Timeout.AsDuration(),
+		})
+		meta[f.Name] = f
+	}
+	return func(ctx context.Context, report func(daemon.FeedUpdate)) {
+		fetcher := feeds.New(nil, slog.Default())
+		slog.Info("run: reputation feeds active", "feeds", len(fcfgs))
+		fetcher.Run(ctx, fcfgs, func(res *feeds.Result) {
+			m := meta[res.Name]
+			action := m.Action
+			if action == "" {
+				action = "observe"
+			}
+			ttl := m.TTL.AsDuration()
+			if ttl <= 0 {
+				// Twice the refresh interval: survives one missed refresh,
+				// drains on its own when the feed dies.
+				ttl = 2 * m.RefreshInterval.AsDuration()
+			}
+			report(daemon.FeedUpdate{
+				Name:     res.Name,
+				Action:   action,
+				TTL:      ttl,
+				Prefixes: res.Prefixes,
+			})
+		})
+	}
 }
 
 // buildWebshellActivity wires the opt-in webshell-drop tripwire (issue

@@ -146,6 +146,14 @@ type Config struct {
 	// 0 = defaults). See sshrecheck.go (issue #420).
 	SSHRecheckTick  time.Duration
 	SSHRecheckDelay time.Duration
+	// FeedUpdates, when non-nil, is started by Run to deliver reputation-
+	// feed refreshes (issue #195); it must honor ctx and call report per
+	// sanitized feed result. Injected by run.go so the daemon stays
+	// decoupled from internal/feeds. See feeds.go.
+	FeedUpdates func(ctx context.Context, report func(FeedUpdate))
+	// FeedSyncer applies action:block feed entries to the dedicated
+	// nftables feed sets (nil = no local enforcement backend). See feeds.go.
+	FeedSyncer enforce.FeedSyncer
 	// ExecActivity, when non-nil, is started by Run to watch docker exec
 	// events (issue #220); it must honor ctx and call report for each
 	// observation. Injected by run.go so the daemon never imports the
@@ -229,6 +237,19 @@ type Daemon struct {
 	// webshellActivity is the injected web-root tripwire (issue #221);
 	// nil = disabled. See webshellactivity.go.
 	webshellActivity func(ctx context.Context, report func(WebshellReport))
+
+	// Reputation-feed state (issue #195; see feeds.go). feedUpdates is the
+	// injected refresh loop; feedSyncer the nftables feed-set backend;
+	// feedRep the observe-mode lookup; feedBlockDesired the per-feed
+	// desired block state; feedObserved per-feed observe entry counts;
+	// feedSSHPeersFn overrides decision.ProcSSHPeers in tests.
+	feedUpdates      func(ctx context.Context, report func(FeedUpdate))
+	feedSyncer       enforce.FeedSyncer
+	feedRep          *feedReputation
+	feedMu           sync.Mutex
+	feedBlockDesired map[string][]enforce.FeedElement
+	feedObserved     map[string]int
+	feedSSHPeersFn   func() []netip.Addr
 
 	// sigCh, when non-nil, replaces the process-signal channel in Run so
 	// tests can drive the SIGTERM drain / SIGINT immediate-exit branches
@@ -379,31 +400,37 @@ func New(dcfg Config) (*Daemon, error) {
 	}
 
 	d := &Daemon{
-		cfg:              dcfg.Cfg,
-		policy:           dcfg.Policy,
-		store:            dcfg.Store,
-		agg:              agg,
-		ruleEng:          ruleEng,
-		decEng:           decEng,
-		parsers:          dcfg.Parsers,
-		collectors:       dcfg.Collectors,
-		enforcer:         dcfg.Enforcer,
-		notifier:         dcfg.Notifier,
-		aiProvider:       dcfg.AIProvider,
-		aiBudget:         dcfg.AIBudget,
-		aiCache:          dcfg.AICache,
-		enricher:         enricherFrom(dcfg.Enricher),
-		staticAllowlist:  staticAllowlistFromPolicy(dcfg.Policy),
-		events:           newEventBus(),
-		socketPath:       socketPath,
-		version:          dcfg.Version,
-		startTime:        time.Now(),
-		policyPath:       dcfg.PolicyPath,
-		armWindowTick:    dcfg.ArmWindowTick,
-		enfProbeTick:     dcfg.EnfProbeTick,
-		expireTick:       dcfg.ExpireTick,
-		sshRecheckTick:   dcfg.SSHRecheckTick,
-		sshRecheckDelay:  dcfg.SSHRecheckDelay,
+		cfg:             dcfg.Cfg,
+		policy:          dcfg.Policy,
+		store:           dcfg.Store,
+		agg:             agg,
+		ruleEng:         ruleEng,
+		decEng:          decEng,
+		parsers:         dcfg.Parsers,
+		collectors:      dcfg.Collectors,
+		enforcer:        dcfg.Enforcer,
+		notifier:        dcfg.Notifier,
+		aiProvider:      dcfg.AIProvider,
+		aiBudget:        dcfg.AIBudget,
+		aiCache:         dcfg.AICache,
+		enricher:        enricherFrom(dcfg.Enricher),
+		staticAllowlist: staticAllowlistFromPolicy(dcfg.Policy),
+		events:          newEventBus(),
+		socketPath:      socketPath,
+		version:         dcfg.Version,
+		startTime:       time.Now(),
+		policyPath:      dcfg.PolicyPath,
+		armWindowTick:   dcfg.ArmWindowTick,
+		enfProbeTick:    dcfg.EnfProbeTick,
+		expireTick:      dcfg.ExpireTick,
+		sshRecheckTick:  dcfg.SSHRecheckTick,
+		sshRecheckDelay: dcfg.SSHRecheckDelay,
+
+		feedUpdates:      dcfg.FeedUpdates,
+		feedSyncer:       dcfg.FeedSyncer,
+		feedRep:          newFeedReputation(),
+		feedBlockDesired: map[string][]enforce.FeedElement{},
+		feedObserved:     map[string]int{},
 		longRuleWindows:  longRuleWindows,
 		longKinds:        longKinds,
 		maintenanceTick:  dcfg.MaintenanceTick,
@@ -578,6 +605,8 @@ func (d *Daemon) Run(parentCtx context.Context) error {
 	// Trailing notify_only summaries for scanners that stopped (issue #421).
 	go d.runNotifySuppressFlush(ctx)
 
+	// Reputation-feed refresh delivery, when injected (issue #195).
+	go d.runFeeds(ctx)
 	// Daily retention pruning, when configured (issue #184).
 	go d.runMaintenance(ctx)
 	// Docker exec activity watcher, when injected (issue #220).
@@ -1074,8 +1103,24 @@ func (d *Daemon) evaluateRules(ctx context.Context, ip netip.Addr, withLong bool
 		}
 		verdicts = append(verdicts, d.ruleEng.Evaluate(ctx, agg)...)
 	}
+	// Reputation boost (issue #195): an IP flagged by an observe-mode feed
+	// gets a score bump — but only when it is ALREADY tripping local rules
+	// (len(verdicts) > 0). A feed alone never creates a verdict, a strike,
+	// or a ban.
 	if withLong {
 		verdicts = append(verdicts, d.evaluateLongRules(ctx, ip, now)...)
+	}
+	// Reputation boost (issue #195): an IP flagged by an observe-mode feed
+	// gets a score bump — but only when it is ALREADY tripping local rules
+	// (len(verdicts) > 0). A feed alone never creates a verdict, a strike,
+	// or a ban.
+	if len(verdicts) > 0 && d.feedRep != nil {
+		if feed, ok := d.feedRep.Lookup(ip); ok {
+			for i := range verdicts {
+				verdicts[i].Score = min(100, verdicts[i].Score+feedReputationBoost)
+				verdicts[i].Reason += " [reputation:" + feed + "]"
+			}
+		}
 	}
 	return verdicts
 }

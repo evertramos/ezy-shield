@@ -112,6 +112,14 @@ collectors: []
 #     url: https://www.spamhaus.org/drop/drop.txt
 #     format: cidr             # plain | cidr | abuseipdb
 #     refresh_interval: 12h    # minimum 1h
+#     # action: observe        # observe (default) = score boost only, no firewall
+#     #                        # write; block = also drop at the edge via the
+#     #                        # dedicated blocked_feeds nftables set. Feed
+#     #                        # entries NEVER create strikes or bans, and the
+#     #                        # allowlist/anti-lockout guardrails filter every
+#     #                        # entry before it can reach the firewall.
+#     # ttl: 24h               # nft element timeout for action: block
+#     #                        # (default: 2x refresh_interval)
 #     # max_entries: 100000    # default 100k; hard cap 500k
 #     # timeout: 30s
 # Verified-bot protection (issue #215) — spare well-known crawlers from

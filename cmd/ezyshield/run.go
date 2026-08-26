@@ -153,8 +153,8 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 			enforce.WithNames(cfg.Enforce.NFTables.Table, cfg.Enforce.NFTables.Set))
 	}
 
+	var edgeEnforcers []sdk.Enforcer
 	if cfg.Enforce != nil && len(cfg.Enforce.Cloudflare) > 0 {
-		cfEnforcers := make([]sdk.Enforcer, 0, len(cfg.Enforce.Cloudflare))
 		for i := range cfg.Enforce.Cloudflare {
 			cf := cfg.Enforce.Cloudflare[i]
 			cfEnf, cfErr := enforce.NewCloudflareEnforcer(ctx, &cf, parseAllowlist(policy))
@@ -165,19 +165,32 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 					"cloudflare_name", cf.Name, "err", cfErr)
 				continue
 			}
-			cfEnforcers = append(cfEnforcers, cfEnf)
+			edgeEnforcers = append(edgeEnforcers, cfEnf)
 		}
-		all := make([]sdk.Enforcer, 0, len(cfEnforcers)+1)
+	}
+	if cfg.Enforce != nil && cfg.Enforce.Bunny != nil {
+		bunnyEnf, bErr := enforce.NewBunnyEnforcer(&enforce.BunnyConfig{
+			AccessKey:   cfg.Enforce.Bunny.APIKey,
+			PullZoneIDs: cfg.Enforce.Bunny.PullZones,
+			Name:        cfg.Enforce.Bunny.Name,
+		}, parseAllowlist(policy))
+		if bErr != nil {
+			// Same isolation as cloudflare: a missing key disables only bunny.
+			slog.Warn("run: bunny enforcer unavailable; continuing without it",
+				"bunny_name", cfg.Enforce.Bunny.Name, "err", bErr)
+		} else {
+			edgeEnforcers = append(edgeEnforcers, bunnyEnf)
+		}
+	}
+	if len(edgeEnforcers) > 0 {
+		all := make([]sdk.Enforcer, 0, len(edgeEnforcers)+1)
 		if enf != nil {
 			all = append(all, enf)
 		}
-		all = append(all, cfEnforcers...)
-		switch len(all) {
-		case 0:
-			// nothing wired up
-		case 1:
+		all = append(all, edgeEnforcers...)
+		if len(all) == 1 {
 			enf = all[0]
-		default:
+		} else {
 			enf = enforce.NewMulti(all...)
 		}
 	}

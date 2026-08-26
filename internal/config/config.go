@@ -171,6 +171,28 @@ type CollectorCfg struct {
 type EnforceCfg struct {
 	NFTables   *NFTablesCfg   `yaml:"nftables"`
 	Cloudflare CloudflareCfgs `yaml:"cloudflare"`
+	Bunny      *BunnyCfg      `yaml:"bunny"`
+}
+
+// BunnyCfg holds bunny.net edge enforcer settings (issue #198). Presence of
+// the section enables the enforcer, matching the cloudflare convention.
+// APIKey must be an "env:VARNAME" reference; inline values are rejected at
+// load time like every other secret.
+//
+// The enforcer manages each configured pull zone's BlockedIps list via the
+// bunny.net pull-zone API. That list is flat (no per-entry tagging), so
+// EzyShield takes ownership of the whole list on the configured zones —
+// entries added by hand in the bunny panel are removed on reconcile.
+type BunnyCfg struct {
+	// Name is a short operator-chosen label used to disambiguate this
+	// enforcer in logs (surfaces as "bunny[<name>]"). Optional. Must match
+	// [A-Za-z0-9_-]+ and be 1..32 characters when set.
+	Name string `yaml:"name"`
+	// APIKey is the bunny.net account API key — env-reference only.
+	APIKey SecretRef `yaml:"api_key"`
+	// PullZones are the numeric pull zone IDs the blocklist applies to.
+	// At least one is required.
+	PullZones []int64 `yaml:"pull_zones"`
 }
 
 // CloudflareCfgs is a list of Cloudflare account configurations. The YAML form
@@ -448,6 +470,11 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("enforce.cloudflare: %w", err)
 		}
 	}
+	if c.Enforce != nil && c.Enforce.Bunny != nil {
+		if err := validateBunny(c.Enforce.Bunny); err != nil {
+			return fmt.Errorf("enforce.bunny: %w", err)
+		}
+	}
 	if c.Notify != nil {
 		if err := validateNotify(c.Notify); err != nil {
 			return fmt.Errorf("notify: %w", err)
@@ -647,6 +674,35 @@ func validateCFInstanceName(name string) error {
 		case r == '_', r == '-':
 		default:
 			return fmt.Errorf("must match [A-Za-z0-9_-]+")
+		}
+	}
+	return nil
+}
+
+// validateBunny checks the bunny.net edge enforcer section (issue #198):
+// the API key must be configured (env-reference only — the SecretRef loader
+// already rejects inline literals with a redacted error) and at least one
+// positive pull zone ID is required.
+func validateBunny(b *BunnyCfg) error {
+	if !b.APIKey.IsSet() {
+		return fmt.Errorf("'api_key' is required")
+	}
+	if len(b.PullZones) == 0 {
+		return fmt.Errorf("at least one 'pull_zones' entry is required")
+	}
+	seen := make(map[int64]int, len(b.PullZones))
+	for i, z := range b.PullZones {
+		if z <= 0 {
+			return fmt.Errorf("pull_zones[%d]: must be a positive pull zone ID, got %d", i, z)
+		}
+		if prev, dup := seen[z]; dup {
+			return fmt.Errorf("pull_zones[%d]: duplicate zone %d (also at [%d])", i, z, prev)
+		}
+		seen[z] = i
+	}
+	if b.Name != "" {
+		if err := validateCFInstanceName(b.Name); err != nil {
+			return fmt.Errorf("'name': %w", err)
 		}
 	}
 	return nil

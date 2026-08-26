@@ -102,7 +102,7 @@ logs (SSH, Nginx, Apache, Caddy, Traefik)
         ▼
  [ Decision Engine ] ── strikes + TTL escalation + policy
         │
-        ├──▶ [ Enforcer ] ── nftables (local) / Cloudflare (edge)
+        ├──▶ [ Enforcer ] ── nftables (local) / Cloudflare, bunny.net (edge)
         └──▶ [ Notifier ] ── Telegram / Email / Slack / Discord / webhook
 ```
 
@@ -130,7 +130,7 @@ still escalates today.
 
 - **Escalating bans** — short first ban, permanent after repeated offences
 - **Local enforcement** — nftables, via a privilege-separated enforcer helper
-- **Edge enforcement** — push IP bans to a Cloudflare list
+- **Edge enforcement** — push IP bans to a Cloudflare list and/or bunny.net pull-zone blocklists (see the [Cloudflare](docs/content/en/guides/cloudflare.md) and [bunny.net](docs/content/en/guides/bunny.md) guides)
 - **SSH, Nginx, Apache, Caddy & Traefik parsers** with fuzz-tested, panic-safe parsing of hostile input
 - **Deterministic rule engine** — thresholds + scanner signatures; works with zero AI configured
 - **AI-assisted decisions (optional)** — Anthropic, any OpenAI-compatible endpoint, or local Ollama, with provider failover, a token budget, and verdict caching

@@ -150,6 +150,25 @@ and harmless, while a delayed *ban* is real exposure — which is why bans ride
 unban` also propagates to the edge on the flush cadence (the local nftables
 unban is immediate).
 
+### bunny
+
+bunny.net edge enforcement via each pull zone's blocked-IP list. Presence of the section enables it. **EzyShield takes ownership of the blocked-IP list** on the configured zones — entries added by hand in the bunny panel are removed on reconcile. See the [bunny.net guide](../guides/bunny.md).
+
+```yaml
+enforce:
+  bunny:
+    api_key: env:BUNNY_API_KEY   # secrets are env: references, never inline
+    pull_zones: [123456, 234567] # numeric pull zone IDs
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `api_key` | yes | `env:VARNAME` reference to the bunny.net account API key |
+| `pull_zones` | yes | numeric pull zone IDs (at least one, positive, unique) |
+| `name` | no | label shown in logs as `bunny[<name>]` |
+
+The enforcer caps each zone at 500 blocked IPs (bunny does not document a provider limit); beyond that the most recent bans win, with a warning.
+
 ## notify
 
 ```yaml

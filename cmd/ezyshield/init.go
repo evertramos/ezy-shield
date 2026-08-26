@@ -366,6 +366,21 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 			envTouched = envTouched || wrote || kept
 		}
 	}
+	// bunny.net API key: same .env file and merge semantics as the CF
+	// tokens above; never logged (issue #198).
+	if state.cdn != nil && state.cdn.bunnyEnabled && state.cdn.bunny != nil && state.cdn.bunny.key != "" {
+		wrote, kept, err := writeCloudflareEnvFile(configDir, state.cdn.bunny.keyEnvVar, state.cdn.bunny.key)
+		if err != nil {
+			return err
+		}
+		switch {
+		case kept:
+			p.println(st.ok("kept " + envPath + " (existing " + state.cdn.bunny.keyEnvVar + " preserved)"))
+		case wrote:
+			p.println(st.ok("wrote " + envPath + " (chmod 600, " + state.cdn.bunny.keyEnvVar + " merged)"))
+		}
+		envTouched = envTouched || wrote || kept
+	}
 	if envTouched {
 		sum.files = append(sum.files, envPath+" (mode 0600 — secret tokens live here, never in config.yaml)")
 	}
@@ -596,6 +611,22 @@ func summarizeChoices(state *wizardState, sum *initSummary, yes bool) {
 	case providerDetected(state.cdn.detected, "cloudflare"):
 		sum.skipped = append(sum.skipped,
 			"cloudflare enforcer — declined (CDN detected: bans will not reach real client IPs)")
+	}
+	// bunny.net mirrors the cloudflare summary block above (issue #198); a
+	// separate switch because both enforcers can be configured in one run.
+	switch {
+	case state.cdn == nil:
+	case state.cdn.bunnyEnabled && state.cdn.bunny != nil:
+		sum.configured = append(sum.configured,
+			fmt.Sprintf("enforcer: bunny (%d pull zone(s))", len(state.cdn.bunny.cfg.PullZones)))
+	case state.cdn.bunnyAttempted:
+		sum.skipped = append(sum.skipped,
+			"bunny enforcer — setup did NOT complete (see the banner above)")
+	case yes:
+		// --yes skip already reported by the cloudflare block.
+	case providerDetected(state.cdn.detected, "bunny"):
+		sum.skipped = append(sum.skipped,
+			"bunny enforcer — declined (CDN detected: bans will not reach real client IPs)")
 	}
 
 	// AI.
@@ -871,7 +902,8 @@ func renderGeneratedConfig(state *wizardState) ([]byte, error) {
 	}
 
 	hasCF := state.cdn != nil && state.cdn.cfEnabled && len(state.cdn.cfAccounts) > 0
-	if state.nftPath != "" || hasCF {
+	hasBunny := state.cdn != nil && state.cdn.bunnyEnabled && state.cdn.bunny != nil
+	if state.nftPath != "" || hasCF || hasBunny {
 		b.WriteString("enforce:\n")
 		if state.nftPath != "" {
 			// The empty mapping is the whole configuration (issue #268): its
@@ -883,6 +915,9 @@ func renderGeneratedConfig(state *wizardState) ([]byte, error) {
 		}
 		if hasCF {
 			emitCloudflareYAML(&b, state.cdn)
+		}
+		if hasBunny {
+			emitBunnyYAML(&b, state.cdn)
 		}
 	}
 

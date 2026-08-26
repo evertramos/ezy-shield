@@ -45,7 +45,7 @@ func TestMigrateFail2ban_GeneratesValidatedProposal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generated config.yaml did not validate: %v", err)
 	}
-	var haveSSH, haveNginx bool
+	var haveSSH, haveNginx, havePostfix bool
 	for _, c := range cfg.Collectors {
 		if c.Kind == "journald" {
 			haveSSH = true
@@ -53,9 +53,12 @@ func TestMigrateFail2ban_GeneratesValidatedProposal(t *testing.T) {
 		if c.Kind == "file" && c.Parser == "nginx" {
 			haveNginx = true
 		}
+		if c.Kind == "file" && c.Parser == "postfix" {
+			havePostfix = true
+		}
 	}
-	if !haveSSH || !haveNginx {
-		t.Fatalf("collectors = %+v, want journald ssh + nginx file", cfg.Collectors)
+	if !haveSSH || !haveNginx || !havePostfix {
+		t.Fatalf("collectors = %+v, want journald ssh + nginx and postfix files", cfg.Collectors)
 	}
 
 	// policy.yaml validates, is ALWAYS dry-run, and carries the imported
@@ -80,7 +83,8 @@ func TestMigrateFail2ban_GeneratesValidatedProposal(t *testing.T) {
 	for _, want := range []string{
 		"## Mapped jails", "## Not mapped", "## Allowlist imported",
 		"## Differences to understand", "## Next steps",
-		"postfix",            // mapped as planned-parser unmapped entry
+		"postfix",            // mapped via the postfix parser (mail rules)
+		"my-webapp-filter",   // custom filter surfaced under Not mapped
 		"escalates",          // escalation vs fixed bantime explained
 		"office.example.com", // hostname warning surfaced via reader warnings
 	} {

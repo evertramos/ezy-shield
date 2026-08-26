@@ -290,7 +290,59 @@ func applyRule(r spec, agg sdk.Aggregate) (sdk.Verdict, bool) {
 		Reason:     fmt.Sprintf("rule/%s: %d events in %s (threshold %d)", r.Name, count, time.Duration(r.Window), r.Threshold),
 		Source:     "rules",
 		SuggestTTL: 0, // policy decides
+		Evidence:   evidenceLines(r, agg),
 	}, true
+}
+
+// evidenceLines collects up to sdk.EvidenceMaxLines raw log lines from the
+// sample events that MATCH the firing rule — the capture-at-detection
+// evidence of ADR-0011 (issue #127). The matching predicate mirrors
+// countMatches exactly, so the attached lines are (a subset of) the very
+// events that were counted. Events without Raw (synthetic, long-window
+// counter aggregates, pre-#127 tests) contribute nothing. Runs only when a
+// rule fires, never per event.
+func evidenceLines(r spec, agg sdk.Aggregate) []string {
+	kindSet := make(map[string]struct{}, len(r.Kinds))
+	for _, k := range r.Kinds {
+		kindSet[k] = struct{}{}
+	}
+	var out []string
+	for _, ev := range agg.Sample {
+		if len(out) >= sdk.EvidenceMaxLines {
+			break
+		}
+		if _, ok := kindSet[ev.Kind]; !ok || len(ev.Raw) == 0 {
+			continue
+		}
+		if r.Field != "" && !fieldMatches(r, ev) {
+			continue
+		}
+		out = append(out, string(ev.Raw))
+	}
+	return out
+}
+
+// fieldMatches reports whether ev satisfies the rule's field-level matcher.
+// Factored from countMatches' scan so evidenceLines applies the identical
+// predicate.
+func fieldMatches(r spec, ev sdk.Event) bool {
+	val, exists := ev.Fields[r.Field]
+	if !exists {
+		return false
+	}
+	switch {
+	case r.Value != "":
+		return val == r.Value
+	case r.Contains != "":
+		return strings.Contains(val, r.Contains)
+	case len(r.ContainsAny) > 0:
+		for _, sub := range r.ContainsAny {
+			if strings.Contains(val, sub) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // countMatches returns the number of events in agg that satisfy the rule.
@@ -319,28 +371,16 @@ func countMatches(r spec, agg sdk.Aggregate) int {
 		return total
 	}
 
-	// Field-level rule: scan Sample for matching field values.
+	// Field-level rule: scan Sample for matching field values. The
+	// predicate is shared with evidenceLines (ADR-0011) so captured
+	// evidence is always a subset of the counted events.
 	total := 0
 	for _, ev := range agg.Sample {
 		if _, ok := kindSet[ev.Kind]; !ok {
 			continue
 		}
-		val, exists := ev.Fields[r.Field]
-		if !exists {
-			continue
-		}
-		if r.Value != "" && val == r.Value {
+		if fieldMatches(r, ev) {
 			total++
-		} else if r.Contains != "" && strings.Contains(val, r.Contains) {
-			total++
-		} else if len(r.ContainsAny) > 0 {
-			// ContainsAny: OR logic — match if any substring is found
-			for _, sub := range r.ContainsAny {
-				if strings.Contains(val, sub) {
-					total++
-					break
-				}
-			}
 		}
 	}
 	return total

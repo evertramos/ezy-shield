@@ -29,6 +29,13 @@ if ! getent group ezyshield >/dev/null 2>&1; then
 	groupadd --system ezyshield
 fi
 
+# Read-only tier (issue #212): members of ezyshield-view can use the
+# ezyshield-ro.sock socket (status, list, watch, report) without any write
+# authority. The daemon group-owns the RO socket with this group at startup.
+if ! getent group ezyshield-view >/dev/null 2>&1; then
+	groupadd --system ezyshield-view
+fi
+
 if ! getent passwd ezyshield >/dev/null 2>&1; then
 	# nologin lives in /usr/sbin on Debian and /sbin on RHEL-family.
 	NOLOGIN="$(command -v nologin 2>/dev/null || echo /usr/sbin/nologin)"

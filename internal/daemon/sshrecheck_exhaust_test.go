@@ -85,27 +85,32 @@ func TestSSHRecheck_BudgetExhaustion_LoudAndQueryable(t *testing.T) {
 		t.Errorf("WARN must carry the attempts count; log:\n%s", buf.String())
 	}
 
-	// 2. Queryable: the offenders row exists (the exact gate report checks) …
-	off, err := db.GetOffender(ctx, attacker)
-	if err != nil {
-		t.Fatalf("GetOffender: %v", err)
-	}
-	if off == nil {
+	// 2. Queryable: the offenders row exists (the exact gate report
+	// checks). Polled: the queue drains (len()==0) when the final entry is
+	// POPPED, while its recheck — the one that persists on exhaustion — may
+	// still be running (CI runners lose this race; locally it never shows).
+	if !waitFor(3*time.Second, func() bool {
+		off, err := db.GetOffender(ctx, attacker)
+		return err == nil && off != nil
+	}) {
 		t.Fatalf("no offender row after exhaustion — report would still answer \"no records\"")
 	}
 	// … so buildAbuseReport succeeds and surfaces the audited trail.
-	rep, err := d.buildAbuseReport(ctx, attacker, 100, false)
-	if err != nil {
-		t.Fatalf("report must find the IP after exhaustion: %v", err)
-	}
 	sawExhausted := false
-	for _, a := range rep.Actions {
-		if a.Op == "recheck_exhausted" {
-			sawExhausted = true
+	if !waitFor(3*time.Second, func() bool {
+		rep, err := d.buildAbuseReport(ctx, attacker, 100, false)
+		if err != nil {
+			return false
 		}
-	}
-	if !sawExhausted {
-		t.Errorf("audit trail missing the recheck_exhausted entry: %+v", rep.Actions)
+		for _, a := range rep.Actions {
+			if a.Op == "recheck_exhausted" {
+				sawExhausted = true
+			}
+		}
+		return sawExhausted
+	}) {
+		rep, _ := d.buildAbuseReport(ctx, attacker, 100, false)
+		t.Errorf("audit trail missing the recheck_exhausted entry: %+v", rep)
 	}
 
 	// 3. Invariant untouched: observability only — never a ban.
@@ -114,8 +119,11 @@ func TestSSHRecheck_BudgetExhaustion_LoudAndQueryable(t *testing.T) {
 	}
 
 	// 4. Fresh event-driven evidence resets the budget: a new refusal
-	// re-arms the re-check as before.
-	feedBurst(ctx, d, attacker, 6)
+	// re-arms the re-check as before. The worker loop is stopped first so
+	// the armed entry cannot be drained between schedule and the assert.
+	cancel()
+	time.Sleep(20 * time.Millisecond) // let the loop observe the cancel
+	feedBurst(context.Background(), d, attacker, 6)
 	if d.sshRecheck.len() == 0 {
 		t.Fatalf("fresh refusal after exhaustion did not re-arm the re-check")
 	}

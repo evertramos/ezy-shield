@@ -1,7 +1,7 @@
 # ADR-0013: Anti-lockout immunity requires an authenticated peer (logind-verified, fail-open)
 
 Date: 2026-08-26
-Status: Proposed (decision owner: maintainer — Hard Rule 1 territory)
+Status: Accepted (maintainer review 2026-08-26)
 Issue: #560 (tier 2 of #559; refs #384, #420, #175)
 
 ## Context

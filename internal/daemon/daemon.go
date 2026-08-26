@@ -15,6 +15,7 @@ import (
 
 	"github.com/evertramos/ezy-shield/internal/aggregate"
 	"github.com/evertramos/ezy-shield/internal/ai"
+	"github.com/evertramos/ezy-shield/internal/botverify"
 	"github.com/evertramos/ezy-shield/internal/cdndetect"
 	"github.com/evertramos/ezy-shield/internal/config"
 	"github.com/evertramos/ezy-shield/internal/decision"
@@ -175,6 +176,11 @@ type Daemon struct {
 	// (notify.notify_only_window_sec < 0, issue #421).
 	notifySup *notifySuppressor
 	enricher  geoLookup // nil = enrichment disabled; set via enricherFrom()
+
+	// Verified-bot guard (issue #215): both nil/empty unless
+	// verified_bots.enabled — see verifiedbot.go.
+	botProviders []botverify.Provider
+	botVerifier  *botverify.Verifier
 
 	// AI optional components; all three must be non-nil to enable AI analysis.
 	aiProvider sdk.AIProvider
@@ -408,6 +414,11 @@ func New(dcfg Config) (*Daemon, error) {
 	// unavailable state is surfaced by doctor/status and marked in bans'
 	// audit reasons rather than silently skipping the check.
 	decEng.SetCDNRangeSource(cdndetect.SharedRanges)
+
+	// Verified-bot FCrDNS guard (issue #215), opt-in via verified_bots.
+	if dcfg.Cfg != nil {
+		d.initVerifiedBots(dcfg.Cfg.VerifiedBots)
+	}
 
 	if dcfg.Cfg != nil && dcfg.Cfg.AI != nil {
 		d.aiLo = dcfg.Cfg.AI.AmbiguousBand[0]

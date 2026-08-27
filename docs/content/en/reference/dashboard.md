@@ -13,8 +13,9 @@ timeline, plus in-page controls for manual ban / unban / allow.
 
 It provides authentication, live views, an event log, the strike
 timeline, WebSocket live updates, CSRF-protected write forms, a
-per-account login throttle, and a per-user session cap. Server-side
-redaction and multi-user RBAC are out of scope for this release.
+per-account login throttle, a per-user session cap, and per-user RBAC
+(see "Users and roles" below). Server-side event redaction is out of
+scope for this release.
 
 ---
 

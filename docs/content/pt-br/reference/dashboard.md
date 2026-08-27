@@ -14,9 +14,9 @@ ban / unban / allow manuais.
 
 Ele oferece autenticação, visões ao vivo, event log, timeline de
 strikes, updates ao vivo via WebSocket, forms de escrita protegidos
-por CSRF, throttle de login por conta e limite de sessões por usuário.
-Redação server-side e RBAC multi-usuário estão fora do escopo deste
-release.
+por CSRF, throttle de login por conta, limite de sessões por usuário
+e RBAC por usuário (veja "Usuários e papéis" abaixo). Redação
+server-side de eventos está fora do escopo deste release.
 
 ---
 

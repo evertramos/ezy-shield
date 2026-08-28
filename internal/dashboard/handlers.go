@@ -1,6 +1,9 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package dashboard
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -21,23 +24,88 @@ func (s *Server) routes() *http.ServeMux {
 	// one invariant for all mutations (issue #86). An expired session lands
 	// on /login via requireAuth — the outcome a stale "Sign out" click
 	// wants anyway.
-	mux.HandleFunc("POST /logout", s.requireAuth(s.handleLogout))
+	mux.HandleFunc("POST /logout", s.requireRole("logout", s.handleLogout))
 	// Root redirects authed sessions to the Phase 2 status page and drops
 	// unauthed callers on /login.
-	mux.HandleFunc("GET /", s.requireAuth(s.handleRootRedirect))
-	mux.HandleFunc("GET /dashboard", s.requireAuth(s.handleStatusPage))
-	mux.HandleFunc("GET /dashboard/bans", s.requireAuth(s.handleBansPage))
-	mux.HandleFunc("GET /dashboard/allowlist", s.requireAuth(s.handleAllowlistPage))
-	mux.HandleFunc("GET /dashboard/events", s.requireAuth(s.handleEventsPage))
-	mux.HandleFunc("GET /dashboard/timeline", s.requireAuth(s.handleTimelinePage))
-	mux.HandleFunc("POST /dashboard/ban", s.requireAuth(s.handleBanPost))
-	mux.HandleFunc("POST /dashboard/unban", s.requireAuth(s.handleUnbanPost))
-	mux.HandleFunc("POST /dashboard/allow", s.requireAuth(s.handleAllowPost))
+	mux.HandleFunc("GET /", s.requireRole("view", s.handleRootRedirect))
+	mux.HandleFunc("GET /dashboard", s.requireRole("view", s.handleStatusPage))
+	mux.HandleFunc("GET /dashboard/bans", s.requireRole("view", s.handleBansPage))
+	mux.HandleFunc("GET /dashboard/allowlist", s.requireRole("view", s.handleAllowlistPage))
+	mux.HandleFunc("GET /dashboard/events", s.requireRole("view", s.handleEventsPage))
+	mux.HandleFunc("GET /dashboard/timeline", s.requireRole("view", s.handleTimelinePage))
+	// RBAC (issue #204): every mutating route names its action from the
+	// permission table in rbac.go — enforcement is server-side here; any
+	// UI hiding is cosmetic only.
+	mux.HandleFunc("POST /dashboard/ban", s.requireRole("ban", s.handleBanPost))
+	mux.HandleFunc("POST /dashboard/unban", s.requireRole("unban", s.handleUnbanPost))
+	mux.HandleFunc("POST /dashboard/allow", s.requireRole("allow", s.handleAllowPost))
 	// WebSocket endpoint for live-update pushes. The upgrade is auth-
 	// gated by the same session cookie check as every /dashboard route,
-	// so an unauthenticated browser cannot open the socket.
-	mux.HandleFunc("GET /dashboard/ws", s.requireAuth(s.handleWebSocket))
+	// so an unauthenticated browser cannot open the socket. Push-only —
+	// no client command ever mutates state through it, hence viewer tier.
+	mux.HandleFunc("GET /dashboard/ws", s.requireRole("ws", s.handleWebSocket))
+	// Prometheus exposition (issue #183): session auth by default;
+	// dashboard.metrics_auth: false opens it for scrapers — acceptable
+	// only because the listener is loopback-only. Throttled either way
+	// inside handleMetrics.
+	if s.cfg.MetricsOpen {
+		mux.HandleFunc("GET /metrics", s.handleMetrics)
+	} else {
+		mux.HandleFunc("GET /metrics", s.requireRole("metrics", s.handleMetrics))
+	}
 	return mux
+}
+
+// requireRole layers RBAC on top of requireAuth: the session's user must
+// currently hold at least the role the permission table demands for
+// action. Denials are audited (actor, action — never any token) and answer
+// 403. A session whose user vanished from config is terminated.
+func (s *Server) requireRole(action string, h http.HandlerFunc) http.HandlerFunc {
+	return s.requireAuth(func(w http.ResponseWriter, r *http.Request) {
+		info, ok := sessionFromContext(r.Context())
+		if !ok {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		role, known := s.roleFor(r.Context(), info.Username)
+		if !known {
+			// The user was deprovisioned while logged in: kill the
+			// session rather than downgrading it silently.
+			if c, err := r.Cookie(sessionCookieName); err == nil {
+				s.sessions.Delete(c.Value)
+			}
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+		if need := requiredRole(action); role < need {
+			s.auditDenied(r.Context(), info.Username, action, role)
+			http.Error(w, "forbidden: this action requires the "+need.String()+" role", http.StatusForbidden)
+			return
+		}
+		h(w, r)
+	})
+}
+
+// roleFor resolves the CURRENT role of a logged-in username: config users
+// from the live user set (so reloads apply immediately), and the auth-DB
+// password admin as the documented implicit RoleAdmin fallback.
+func (s *Server) roleFor(ctx context.Context, username string) (Role, bool) {
+	if role, ok := s.users.roleOf(username); ok {
+		return role, true
+	}
+	if _, err := s.store.getAdminHash(ctx, username); err == nil {
+		return RoleAdmin, true
+	}
+	return RoleViewer, false
+}
+
+// auditDenied records one 403 in the dashboard's audit table and logs it.
+// Actor and action only — never tokens.
+func (s *Server) auditDenied(ctx context.Context, actor, action string, held Role) {
+	s.logger.Warn("dashboard: rbac denied", "actor", actor, "action", action, "role", held.String())
+	if err := s.store.auditRBACDenial(ctx, actor, action, held.String()); err != nil {
+		s.logger.Error("dashboard: rbac audit write", "err", err)
+	}
 }
 
 // requireAuth wraps h so unauthenticated requests are redirected to /login.
@@ -98,6 +166,17 @@ func (s *Server) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Config-provisioned RBAC users first (issue #204): name + per-user
+	// token, constant-time over digest comparisons. On a miss we FALL
+	// THROUGH to the auth-DB path below, which pays the full PBKDF2 (or
+	// decoy) cost — so a failed config-user attempt is indistinguishable in
+	// timing from any other failed login.
+	if u, ok := s.users.authenticate(username, password); ok {
+		s.throttle.Clear(username)
+		s.createSessionAndRedirect(w, r, u.name)
+		return
+	}
+
 	hash, err := s.store.getAdminHash(r.Context(), username)
 	switch {
 	case err == nil:
@@ -122,7 +201,11 @@ func (s *Server) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.throttle.Clear(username)
+	s.createSessionAndRedirect(w, r, username)
+}
 
+// createSessionAndRedirect finishes a successful login: session + cookie.
+func (s *Server) createSessionAndRedirect(w http.ResponseWriter, r *http.Request, username string) {
 	token, _, err := s.sessions.Create(username)
 	if err != nil {
 		s.logger.Error("session create", "err", err)

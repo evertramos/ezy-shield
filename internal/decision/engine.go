@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package decision is the safety-critical policy engine that converts Verdicts
 // into enforceable Actions. It enforces allowlists, anti-lockout checks, strike
 // escalation, global rate limiting, and dry-run mode.
@@ -136,6 +138,10 @@ type Engine struct {
 	cdnRanges func() ([]netip.Prefix, error)
 	// cdnWarnLast is the last "unavailable" WARN, guarded by e.mu.
 	cdnWarnLast time.Time
+
+	// botVerify is the optional verified-bot guard (issue #215); nil =
+	// disabled. See verifiedbot.go and SetBotVerifier.
+	botVerify func(ctx context.Context, ip netip.Addr) (provider string, spared bool)
 }
 
 // New creates an Engine from policy and a store.
@@ -253,6 +259,21 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 			slog.ErrorContext(ctx, "decision: audit notify-only", "ip", ip, "err", err)
 		}
 		return act, nil
+	}
+
+	// ── Verified-bot guard (issue #215) — ban candidates only ────────────────
+	// Runs after allowlist/anti-lockout (which always win) and only on the
+	// ban path: a forward-confirmed crawler is spared with an audited record;
+	// a failed/timed-out verification simply falls through to the normal ban.
+	if e.botVerify != nil {
+		if provider, spared := e.botVerify(ctx, ip); spared {
+			slog.InfoContext(ctx, "decision: verified bot — sparing ban", "ip", ip, "provider", provider)
+			act := sdk.Action{IP: ip, Op: "record", Reason: ReasonVerifiedBotSpared + ": " + provider, Verdicts: verdicts}
+			if err := e.store.Audit(ctx, act); err != nil {
+				slog.ErrorContext(ctx, "decision: audit verified-bot", "ip", ip, "err", err)
+			}
+			return act, nil
+		}
 	}
 
 	// ── Per-IP serialisation of the check-then-act strike section ───────────
@@ -607,6 +628,26 @@ func (e *Engine) trackSuppressedEvent(ctx context.Context, ip netip.Addr, banned
 // buildAllowlist parses policy.Allowlist, policy.AdminCIDRs, and the SSH peer
 // from SSH_CLIENT into a slice of netip.Prefix used for allowlist lookup.
 func buildAllowlist(policy *config.Policy) ([]netip.Prefix, error) {
+	prefixes, err := StaticAllowlist(policy)
+	if err != nil {
+		return nil, err
+	}
+
+	// Anti-lockout: add the SSH peer present at daemon startup.
+	if peer := sshClientIP(); peer.IsValid() {
+		prefixes = append(prefixes, netip.PrefixFrom(peer, peer.BitLen()))
+	}
+
+	return prefixes, nil
+}
+
+// StaticAllowlist parses policy.Allowlist and policy.AdminCIDRs into
+// prefixes, using the exact parsing/normalization the engine applies at
+// startup. Exported for read-only consumers (`rule test`, issue #224) that
+// need to flag would-be detections on protected addresses; it deliberately
+// EXCLUDES the SSH-peer anti-lockout entry, which is a property of the
+// daemon's own startup environment, not of the policy.
+func StaticAllowlist(policy *config.Policy) ([]netip.Prefix, error) {
 	var prefixes []netip.Prefix
 
 	for _, s := range policy.Allowlist {
@@ -627,11 +668,6 @@ func buildAllowlist(policy *config.Policy) ([]netip.Prefix, error) {
 			return nil, fmt.Errorf("decision: admin_cidrs entry %q: %w", s, err)
 		}
 		prefixes = append(prefixes, p)
-	}
-
-	// Anti-lockout: add the SSH peer present at daemon startup.
-	if peer := sshClientIP(); peer.IsValid() {
-		prefixes = append(prefixes, netip.PrefixFrom(peer, peer.BitLen()))
 	}
 
 	return prefixes, nil

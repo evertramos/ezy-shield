@@ -57,6 +57,17 @@
       "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$",
       "description": "Escalations (strike > 1) skip max_bans_per_minute only when the previous ban ended within this window. Default: 24h; values above 168h are clamped down."
     },
+    "anti_lockout": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "SSH anti-lockout tuning (ADR-0013).",
+      "properties": {
+        "require_authenticated": {
+          "type": "boolean",
+          "description": "Narrow SSH-peer immunity to peers with an active systemd-logind session (someone actually logged in — interactive or exec). A connection parked before authentication becomes bannable after a 10s grace. Default false (ESTABLISHED-only). Every logind failure fails OPEN back to the default; doctor reports the effective mode."
+        }
+      }
+    },
     "ban_ineffective_grace": {
       "type": "string",
       "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$",

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package store
 
 // Regression test for issue #358 item 2: a manual ban issued while disarmed

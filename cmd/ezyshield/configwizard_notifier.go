@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // Post-install notifier wizards for `config notifier <name>` (issue #103,
@@ -259,6 +261,23 @@ func channelVerb(replaced bool) string {
 	return "added"
 }
 
+// notifierChannelFlows maps each channel name to its prompt flow — the body
+// of the channel wizard WITHOUT the leading configure/remove confirmation.
+// `config notifier <name>` wraps a flow with that confirmation; the init
+// Notifications step (issue #290) calls flows directly after its own channel
+// selection, so the prompt logic exists exactly once.
+var notifierChannelFlows = map[string]func(p *wPrinter, pr prompter, deps cdnDeps,
+	cfg *config.Config, configDir string) ([]string, func() error, error){
+	"telegram": notifierTelegramFlow,
+	"email":    notifierEmailFlow,
+	"slack":    notifierSlackFlow,
+	"discord":  notifierDiscordFlow,
+	"webhook":  notifierWebhookFlow,
+}
+
+// notifierChannelNames is the stable prompt/dispatch order.
+var notifierChannelNames = []string{"telegram", "email", "slack", "discord", "webhook"}
+
 // wizardNotifierTelegram configures notify.telegram: chat IDs, severity
 // filter, and the bot token (secret → .env).
 func wizardNotifierTelegram(_ context.Context, p *wPrinter, pr prompter, deps cdnDeps,
@@ -266,6 +285,11 @@ func wizardNotifierTelegram(_ context.Context, p *wPrinter, pr prompter, deps cd
 	if !pr.askBool("Configure the telegram notification channel?", true) {
 		return removeNotifierIfConfirmed(p, pr, cfg, "telegram")
 	}
+	return notifierTelegramFlow(p, pr, deps, cfg, configDir)
+}
+
+func notifierTelegramFlow(p *wPrinter, pr prompter, deps cdnDeps,
+	cfg *config.Config, configDir string) ([]string, func() error, error) {
 	chatIDs := splitCommaList(pr.ask("Telegram chat IDs (comma-separated)", ""))
 	if len(chatIDs) == 0 {
 		p.println("  at least one chat ID is required — aborting, nothing will be written.")
@@ -298,6 +322,11 @@ func wizardNotifierEmail(_ context.Context, p *wPrinter, pr prompter, deps cdnDe
 	if !pr.askBool("Configure the email notification channel?", true) {
 		return removeNotifierIfConfirmed(p, pr, cfg, "email")
 	}
+	return notifierEmailFlow(p, pr, deps, cfg, configDir)
+}
+
+func notifierEmailFlow(p *wPrinter, pr prompter, deps cdnDeps,
+	cfg *config.Config, configDir string) ([]string, func() error, error) {
 	from := strings.TrimSpace(pr.ask("From address", ""))
 	toList := splitCommaList(pr.ask("To addresses (comma-separated)", ""))
 	host := strings.TrimSpace(pr.ask("SMTP host", ""))
@@ -350,6 +379,11 @@ func wizardNotifierSlack(_ context.Context, p *wPrinter, pr prompter, deps cdnDe
 	if !pr.askBool("Configure the slack notification channel?", true) {
 		return removeNotifierIfConfirmed(p, pr, cfg, "slack")
 	}
+	return notifierSlackFlow(p, pr, deps, cfg, configDir)
+}
+
+func notifierSlackFlow(p *wPrinter, pr prompter, deps cdnDeps,
+	cfg *config.Config, configDir string) ([]string, func() error, error) {
 	channel := strings.TrimSpace(pr.ask("Slack channel override (e.g. #security; empty = app default)", ""))
 	sev, err := askSeverityFilter(pr)
 	if err != nil {
@@ -376,6 +410,11 @@ func wizardNotifierDiscord(_ context.Context, p *wPrinter, pr prompter, deps cdn
 	if !pr.askBool("Configure the discord notification channel?", true) {
 		return removeNotifierIfConfirmed(p, pr, cfg, "discord")
 	}
+	return notifierDiscordFlow(p, pr, deps, cfg, configDir)
+}
+
+func notifierDiscordFlow(p *wPrinter, pr prompter, deps cdnDeps,
+	cfg *config.Config, configDir string) ([]string, func() error, error) {
 	sev, err := askSeverityFilter(pr)
 	if err != nil {
 		return nil, nil, err
@@ -402,6 +441,11 @@ func wizardNotifierWebhook(_ context.Context, p *wPrinter, pr prompter, deps cdn
 	if !pr.askBool("Configure the generic webhook notification channel?", true) {
 		return removeNotifierIfConfirmed(p, pr, cfg, "webhook")
 	}
+	return notifierWebhookFlow(p, pr, deps, cfg, configDir)
+}
+
+func notifierWebhookFlow(p *wPrinter, pr prompter, deps cdnDeps,
+	cfg *config.Config, configDir string) ([]string, func() error, error) {
 	sev, err := askSeverityFilter(pr)
 	if err != nil {
 		return nil, nil, err

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package nftnames is the single source of truth for the nftables table and
 // set names EzyShield enforces into (issue #268).
 //
@@ -52,6 +54,12 @@ type Names struct {
 	// Allow4 / Allow6 are the allowlist sets (fixed names).
 	Allow4 string
 	Allow6 string
+	// Feeds4 / Feeds6 hold reputation-feed entries (issue #195) — fixed
+	// names, like the allowlist sets: feed entries are bulk external data
+	// kept strictly apart from the ban sets so they can be reconciled
+	// wholesale without touching strike-driven bans.
+	Feeds4 string
+	Feeds6 string
 }
 
 // IsDefault reports whether n is exactly the default name set.
@@ -99,10 +107,13 @@ func Resolve(table, set string) (Names, error) {
 		if len(set) >= maxNameLen {
 			return Names{}, fmt.Errorf("nftables set name %q is longer than %d characters (the derived IPv6 set appends '6')", set, maxNameLen-1)
 		}
-		// The allowlist sets are a fixed anti-lockout invariant living in the
+		// The allowlist and feed sets are fixed invariants living in the
 		// same table — a blocked set may not shadow them.
 		if set == "allowed" || set == "allowed6" {
 			return Names{}, fmt.Errorf("nftables set name %q collides with the reserved allowlist sets (allowed/allowed6)", set)
+		}
+		if set == "blocked_feeds" || set == "blocked_feeds6" {
+			return Names{}, fmt.Errorf("nftables set name %q collides with the reserved feed sets (blocked_feeds/blocked_feeds6)", set)
 		}
 		setName = set
 	}
@@ -113,6 +124,8 @@ func Resolve(table, set string) (Names, error) {
 		Set6:   setName + "6",
 		Allow4: "allowed",
 		Allow6: "allowed6",
+		Feeds4: "blocked_feeds",
+		Feeds6: "blocked_feeds6",
 	}, nil
 }
 

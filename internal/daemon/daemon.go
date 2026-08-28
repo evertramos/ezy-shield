@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package daemon
 
 import (
@@ -10,17 +12,21 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/evertramos/ezy-shield/internal/aggregate"
 	"github.com/evertramos/ezy-shield/internal/ai"
+	"github.com/evertramos/ezy-shield/internal/botverify"
 	"github.com/evertramos/ezy-shield/internal/cdndetect"
 	"github.com/evertramos/ezy-shield/internal/config"
 	"github.com/evertramos/ezy-shield/internal/decision"
+	"github.com/evertramos/ezy-shield/internal/enforce"
 	"github.com/evertramos/ezy-shield/internal/enrich"
 	"github.com/evertramos/ezy-shield/internal/notify"
 	"github.com/evertramos/ezy-shield/internal/rules"
+	"github.com/evertramos/ezy-shield/internal/siem"
 	"github.com/evertramos/ezy-shield/internal/store"
 	"github.com/evertramos/ezy-shield/pkg/sdk"
 )
@@ -79,12 +85,30 @@ type daemonStore interface {
 	ListAllow(ctx context.Context) ([]store.AllowEntry, error)
 	ExpireAllows(ctx context.Context, now time.Time) (int, error)
 	ListAuditLog(ctx context.Context, limit int) ([]store.AuditEntry, error)
+	AuditLogAfter(ctx context.Context, afterID int64, limit int) ([]store.AuditEntry, error)
 	// Read-only queries backing the "report" verb (issue #54).
 	GetOffender(ctx context.Context, ip netip.Addr) (*store.OffenderRecord, error)
 	ActiveBanForIP(ctx context.Context, ip netip.Addr) (*store.BanRecord, error)
 	StrikesForIP(ctx context.Context, ip netip.Addr, limit int) ([]store.StrikeRecord, error)
 	AuditLogForIP(ctx context.Context, ip netip.Addr, limit int) ([]store.AuditEntry, error)
 	ListOffenders(ctx context.Context, permanentOnly bool, limit int) ([]store.OffenderSummary, error)
+	// Panic button (issue #176) — see internal/store/disableall.go.
+	UnbanAll(ctx context.Context, reason string) (int, error)
+	// BumpLastSeen upserts the offenders row (0 strikes on insert) — the
+	// visibility hook for evidence dropped without a strike (issue #559).
+	BumpLastSeen(ctx context.Context, ip netip.Addr) error
+	// Audit appends one per-IP audit entry (bare-IP row, the form
+	// AuditLogForIP surfaces in reports — unlike AuditOp's prefix rows).
+	Audit(ctx context.Context, a sdk.Action) error
+	// Persistent hourly counters backing long-window (>1h) rules (issue
+	// #134) — see internal/store/eventsagg.go.
+	IncrEventCount(ctx context.Context, ip netip.Addr, kind string, bucketStart int64) error
+	SumEventCounts(ctx context.Context, ip netip.Addr, kinds []string, since int64) (map[string]int, error)
+	PruneEventCounts(ctx context.Context, before int64) (int, error)
+	// Retention pruning (issue #184) — see internal/store/retention.go.
+	CountPruneCandidates(ctx context.Context, pol store.RetentionPolicy, now time.Time) ([]store.PruneStat, error)
+	PruneRetention(ctx context.Context, pol store.RetentionPolicy, now time.Time) ([]store.PruneStat, bool, error)
+	ReclaimSpace(ctx context.Context, threshold float64) (bool, int64, error)
 }
 
 // geoLookup is the minimal interface consumed from *enrich.Enricher.
@@ -124,11 +148,45 @@ type Config struct {
 	// ExpireTick overrides the ban/allow expiry poll interval (tests only;
 	// 0 = default 1m). See runExpireBans / runExpireAllows (issue #327).
 	ExpireTick time.Duration
+	// MaintenanceTick overrides the retention-prune interval (tests only;
+	// 0 = default 24h with a jittered first run). See maintenance.go
+	// (issue #184).
+	MaintenanceTick time.Duration
 	// SSHRecheckTick / SSHRecheckDelay override the deferred anti-lockout
 	// re-evaluation poll interval and refusal→re-check delay (tests only;
 	// 0 = defaults). See sshrecheck.go (issue #420).
 	SSHRecheckTick  time.Duration
 	SSHRecheckDelay time.Duration
+	// SIEMEmit, when non-nil, receives every audited action plus daemon
+	// lifecycle events for SIEM forwarding (issue #203). Injected by
+	// run.go (the transports live in internal/siem); must be non-blocking.
+	SIEMEmit func(siem.Event)
+	// SIEMTailTick overrides the audit-tail poll interval (tests only;
+	// 0 = default 2s).
+	SIEMTailTick time.Duration
+	// FeedUpdates, when non-nil, is started by Run to deliver reputation-
+	// feed refreshes (issue #195); it must honor ctx and call report per
+	// sanitized feed result. Injected by run.go so the daemon stays
+	// decoupled from internal/feeds. See feeds.go.
+	FeedUpdates func(ctx context.Context, report func(FeedUpdate))
+	// FeedSyncer applies action:block feed entries to the dedicated
+	// nftables feed sets (nil = no local enforcement backend). See feeds.go.
+	FeedSyncer enforce.FeedSyncer
+	// FeedRefresh, when non-nil, performs an on-demand synchronous refresh
+	// of the feed named name ("" = every feed), calling report per result
+	// (issue #196). Returns how many feeds refreshed. Injected by run.go,
+	// sharing the fetcher with the FeedUpdates loop.
+	FeedRefresh func(ctx context.Context, name string, report func(FeedUpdate)) (int, error)
+	// ExecActivity, when non-nil, is started by Run to watch docker exec
+	// events (issue #220); it must honor ctx and call report for each
+	// observation. Injected by run.go so the daemon never imports the
+	// linux-only collector package. See execactivity.go.
+	ExecActivity func(ctx context.Context, report func(ExecActivityReport))
+	// WebshellActivity, when non-nil, is started by Run to watch web roots
+	// for webshell drops (issue #221); it must honor ctx and call report
+	// for each observation. Injected by run.go so the daemon stays
+	// decoupled from the watcher package. See webshellactivity.go.
+	WebshellActivity func(ctx context.Context, report func(WebshellReport))
 }
 
 // enricherFrom converts a *enrich.Enricher into the geoLookup interface, or
@@ -162,11 +220,32 @@ type Daemon struct {
 	notifySup *notifySuppressor
 	enricher  geoLookup // nil = enrichment disabled; set via enricherFrom()
 
+	// Verified-bot guard (issue #215): both nil/empty unless
+	// verified_bots.enabled — see verifiedbot.go.
+	botProviders []botverify.Provider
+	botVerifier  *botverify.Verifier
+
 	// AI optional components; all three must be non-nil to enable AI analysis.
 	aiProvider sdk.AIProvider
 	aiBudget   *ai.Budget
 	aiCache    *ai.Cache
-	aiLo, aiHi int // ambiguous band: lo <= score <= hi triggers AI
+	// aiQueue is the async second-layer queue (issue #222); nil = inline
+	// consults (the pre-#222 behavior).
+	aiQueue *aiAsyncQueue
+	// aiCleanReduction holds math.Float64bits of the last Log Cleaner
+	// reduction ratio, exported via registerAICleanerGauge.
+	aiCleanReduction atomic.Uint64
+
+	// Periodic hardening self-check (issue #563). selfCheckOn gates the
+	// goroutine; interval/initial are test-tunable; enfSocket is the
+	// nftables helper socket for the functional probe ("" = skip probe);
+	// selfCheckHealthy tracks the transition state (starts healthy).
+	selfCheckOn        bool
+	selfCheckInterval  time.Duration
+	selfCheckInitial   time.Duration
+	selfCheckEnfSocket string
+	selfCheckHealthy   atomic.Bool
+	aiLo, aiHi         int // ambiguous band: lo <= score <= hi triggers AI
 
 	socketPath string
 	// policyPath is where arm/disarm persist the armed flag ("" = skip).
@@ -181,6 +260,41 @@ type Daemon struct {
 	// re-evaluation (0 = defaults; see sshrecheck.go, issue #420).
 	sshRecheckTick  time.Duration
 	sshRecheckDelay time.Duration
+	// siemEmit / siemTailTick drive the SIEM audit tail (issue #203;
+	// see siem.go). siemEmit nil = forwarding disabled.
+	siemEmit     func(siem.Event)
+	siemTailTick time.Duration
+	// Long-window detection (issue #134): longRuleWindows maps each rule
+	// window >1h to the kinds its rules reference; longKinds is the union.
+	// Empty maps = no long-window rules loaded (feature dormant).
+	longRuleWindows map[time.Duration][]string
+	longKinds       map[string]bool
+	// retention, when non-nil, enables the daily prune job (issue #184;
+	// built in New from cfg.Retention). maintenanceTick overrides the
+	// interval in tests (0 = default 24h, jittered first run).
+	retention       *store.RetentionPolicy
+	maintenanceTick time.Duration
+	// execActivity is the injected docker exec watcher (issue #220);
+	// nil = disabled. See execactivity.go.
+	execActivity func(ctx context.Context, report func(ExecActivityReport))
+	// webshellActivity is the injected web-root tripwire (issue #221);
+	// nil = disabled. See webshellactivity.go.
+	webshellActivity func(ctx context.Context, report func(WebshellReport))
+
+	// Reputation-feed state (issue #195; see feeds.go). feedUpdates is the
+	// injected refresh loop; feedSyncer the nftables feed-set backend;
+	// feedRep the observe-mode lookup; feedBlockDesired the per-feed
+	// desired block state; feedObserved per-feed observe entry counts;
+	// feedSSHPeersFn overrides decision.ProcSSHPeers in tests.
+	feedUpdates      func(ctx context.Context, report func(FeedUpdate))
+	feedRefresh      func(ctx context.Context, name string, report func(FeedUpdate)) (int, error)
+	feedSyncer       enforce.FeedSyncer
+	feedRep          *feedReputation
+	feedMu           sync.Mutex
+	feedBlockDesired map[string][]enforce.FeedElement
+	feedObserved     map[string]int
+	feedStatus       map[string]FeedStatusEntry
+	feedSSHPeersFn   func() []netip.Addr
 
 	// sigCh, when non-nil, replaces the process-signal channel in Run so
 	// tests can drive the SIGTERM drain / SIGINT immediate-exit branches
@@ -199,8 +313,11 @@ type Daemon struct {
 	// observation-state reporting in status (issue #456; see collhealth.go).
 	// Fed by the runCollector supervisor (issue #305).
 	collHealth collHealth
-	startTime  time.Time
-	version    string
+	// metrics is the per-daemon Prometheus registry (issue #183; see
+	// metrics.go). Always non-nil after New.
+	metrics   *daemonMetrics
+	startTime time.Time
+	version   string
 
 	// evidenceJournalctl and evidenceDockerSocket override the journalctl
 	// binary and Docker engine socket used by on-demand evidence extraction
@@ -291,9 +408,26 @@ func New(dcfg Config) (*Daemon, error) {
 		return nil, fmt.Errorf("daemon: rule engine: %w", err)
 	}
 
-	windows := ruleEng.Windows()
+	// Split rule windows at the long-window cutoff (issue #134): fine
+	// windows stay on the in-memory sliding-window aggregator (they need
+	// Sample for field-level rules); long windows (>1h) are served by the
+	// persistent per-IP hourly counters in the store, so no 24h horizon of
+	// events is ever held in RAM.
+	var windows []time.Duration
+	for _, w := range ruleEng.Windows() {
+		if w <= rules.LongWindowCutoff {
+			windows = append(windows, w)
+		}
+	}
 	if len(windows) == 0 {
 		windows = []time.Duration{time.Minute, 10 * time.Minute}
+	}
+	longRuleWindows := ruleEng.KindsForLongWindows()
+	longKinds := map[string]bool{}
+	for _, kinds := range longRuleWindows {
+		for _, k := range kinds {
+			longKinds[k] = true
+		}
 	}
 
 	maxIPs := dcfg.MaxIPs
@@ -304,6 +438,15 @@ func New(dcfg Config) (*Daemon, error) {
 	agg := aggregate.New(windows, 0).WithMaxIPs(maxIPs)
 
 	decEng, err := decision.New(dcfg.Policy, dcfg.Store)
+	if err == nil && dcfg.Policy != nil && dcfg.Policy.RequireAuthenticatedPeer() {
+		// ADR-0013 (issue #560): narrow SSH-peer immunity to authenticated
+		// peers (logind-verified, fail-open). Installed at the probe source
+		// so both immunity layers (engine + enforcement gate) see it.
+		filter := decision.NewAuthenticatedPeerFilter(
+			decision.ProcSSHPeers, decision.NewLogindSessionProbe(), decision.AuthPeerGraceWindow)
+		decEng.SetSSHPeerProbe(filter.Peers)
+		slog.Info("daemon: anti-lockout authenticated-peer mode ON (ADR-0013) — logind failures fall back to ESTABLISHED-only immunity")
+	}
 	if err != nil {
 		return nil, fmt.Errorf("daemon: decision engine: %w", err)
 	}
@@ -339,7 +482,40 @@ func New(dcfg Config) (*Daemon, error) {
 		expireTick:      dcfg.ExpireTick,
 		sshRecheckTick:  dcfg.SSHRecheckTick,
 		sshRecheckDelay: dcfg.SSHRecheckDelay,
+		metrics:         newDaemonMetrics(dcfg.Version),
+		siemEmit:        dcfg.SIEMEmit,
+		siemTailTick:    dcfg.SIEMTailTick,
+
+		feedUpdates:      dcfg.FeedUpdates,
+		feedRefresh:      dcfg.FeedRefresh,
+		feedSyncer:       dcfg.FeedSyncer,
+		feedRep:          newFeedReputation(),
+		feedBlockDesired: map[string][]enforce.FeedElement{},
+		feedObserved:     map[string]int{},
+		feedStatus:       map[string]FeedStatusEntry{},
+		longRuleWindows:  longRuleWindows,
+		longKinds:        longKinds,
+		maintenanceTick:  dcfg.MaintenanceTick,
+		execActivity:     dcfg.ExecActivity,
+		webshellActivity: dcfg.WebshellActivity,
 	}
+
+	// Retention pruning (issue #184): opt-in via the retention: section.
+	// Windows() cannot fail on a config that passed Validate; a nil result
+	// simply leaves the maintenance job disabled.
+	if dcfg.Cfg != nil && dcfg.Cfg.Retention != nil {
+		if w, err := dcfg.Cfg.Retention.Windows(); err == nil {
+			d.retention = &store.RetentionPolicy{
+				Strikes:                w.Strikes,
+				Audit:                  w.Audit,
+				AIUsage:                w.AIUsage,
+				AuditPruneAcknowledged: dcfg.Cfg.Retention.AuditExportNotRequired,
+			}
+		}
+	}
+	// The store-sourced active-bans gauge (issue #183) — evaluated only at
+	// scrape time, never on the hot path.
+	d.registerActiveBansGauge()
 
 	// Enforcement-anomaly delivery (ADR-0009 §4, issue #146): the engine
 	// detects, the daemon delivers. Injected before any goroutine starts.
@@ -350,6 +526,11 @@ func New(dcfg Config) (*Daemon, error) {
 	// unavailable state is surfaced by doctor/status and marked in bans'
 	// audit reasons rather than silently skipping the check.
 	decEng.SetCDNRangeSource(cdndetect.SharedRanges)
+
+	// Verified-bot FCrDNS guard (issue #215), opt-in via verified_bots.
+	if dcfg.Cfg != nil {
+		d.initVerifiedBots(dcfg.Cfg.VerifiedBots)
+	}
 
 	if dcfg.Cfg != nil && dcfg.Cfg.AI != nil {
 		d.aiLo = dcfg.Cfg.AI.AmbiguousBand[0]
@@ -366,7 +547,30 @@ func New(dcfg Config) (*Daemon, error) {
 				d.aiHi = hi
 			}
 		}
+		// Async second layer (issue #222): grey-zone episodes go through a
+		// bounded queue + background worker instead of an inline consult.
+		if dcfg.Cfg.AI.Async {
+			d.aiQueue = newAIAsyncQueue(dcfg.Cfg.AI.AsyncQueueSize)
+			d.registerAICleanerGauge()
+		}
 	}
+
+	// Periodic hardening self-check (issue #563): on by default, opt-out
+	// via self_check.enabled: false. The functional netlink probe applies
+	// only when a local nftables enforcer is configured.
+	if dcfg.Cfg != nil {
+		d.selfCheckOn = dcfg.Cfg.SelfCheckEnabled()
+		if dcfg.Cfg.SelfCheck != nil {
+			d.selfCheckInterval = time.Duration(dcfg.Cfg.SelfCheck.Interval)
+		}
+		if dcfg.Cfg.Enforce != nil && dcfg.Cfg.Enforce.NFTables != nil {
+			d.selfCheckEnfSocket = dcfg.Cfg.Enforce.NFTables.Socket
+			if d.selfCheckEnfSocket == "" {
+				d.selfCheckEnfSocket = enforce.DefaultSocketPath
+			}
+		}
+	}
+	d.selfCheckHealthy.Store(true)
 
 	// notify_only suppression window (issue #421). Only built when a
 	// notifier exists; window comes from notify.notify_only_window_sec
@@ -486,8 +690,29 @@ func (d *Daemon) Run(parentCtx context.Context) error {
 	// ESTABLISHED SSH connection, once that connection is gone (issue #420).
 	go d.runSSHRecheck(ctx)
 
+	// Async second-layer AI worker (issue #222); no-op when disabled.
+	if d.aiQueue != nil {
+		go d.runAIAsync(ctx)
+	}
+
+	// Periodic hardening self-check (issue #563); opt-out via config.
+	if d.selfCheckOn {
+		go d.runSelfCheck(ctx)
+	}
+
 	// Trailing notify_only summaries for scanners that stopped (issue #421).
 	go d.runNotifySuppressFlush(ctx)
+
+	// SIEM audit-tail forwarding, when injected (issue #203).
+	go d.runSIEMTail(ctx)
+	// Reputation-feed refresh delivery, when injected (issue #195).
+	go d.runFeeds(ctx)
+	// Daily retention pruning, when configured (issue #184).
+	go d.runMaintenance(ctx)
+	// Docker exec activity watcher, when injected (issue #220).
+	go d.runExecActivity(ctx)
+	// Webshell-drop tripwire, when injected (issue #221).
+	go d.runWebshellActivity(ctx)
 
 	// Signal handling. Tests inject d.sigCh to drive the SIGTERM/SIGINT
 	// branches without raising real process signals (which would leak into
@@ -615,7 +840,39 @@ func (d *Daemon) runCollectorOnce(ctx context.Context, c sdk.Collector, out chan
 			err = fmt.Errorf("collector panic: %v", r)
 		}
 	}()
-	return c.Run(ctx, out)
+	// Per-collector line counter (issue #183): a small forwarding stage so
+	// the shared pipeline channel stays untouched. The label is the
+	// collector's TYPE (filetail/journald/docker...), never a path.
+	// (d.metrics is nil only in tests that build a bare Daemon literal.)
+	if d.metrics == nil {
+		return c.Run(ctx, out)
+	}
+	ctr := d.metrics.collectorLines.With(metricCollectorType(c))
+	mid := make(chan sdk.RawLine, 64)
+	fwdDone := make(chan struct{})
+	go func() {
+		defer close(fwdDone)
+		for l := range mid {
+			ctr.Inc()
+			out <- l
+		}
+	}()
+	err = c.Run(ctx, mid)
+	close(mid)
+	<-fwdDone
+	return err
+}
+
+// metricCollectorType derives the bounded collector label from the Go type
+// ("*collector.FileTailCollector" → "filetail") — operator paths/units never
+// become label values.
+func metricCollectorType(c sdk.Collector) string {
+	name := fmt.Sprintf("%T", c)
+	if i := strings.LastIndex(name, "."); i >= 0 {
+		name = name[i+1:]
+	}
+	name = strings.TrimSuffix(name, "Collector")
+	return strings.ToLower(name)
 }
 
 // collectorName derives a stable, human-readable identity for logs and alerts.
@@ -660,15 +917,47 @@ func (d *Daemon) processRaw(ctx context.Context, raw sdk.RawLine) {
 		return
 	}
 
+	// Capture-at-detection evidence (ADR-0011, issue #127): attach ONE
+	// bounded copy of the originating line, shared by this line's events —
+	// capture in-pipeline covers every collector kind uniformly. Parsers
+	// never see Raw; sanitization stays at render time.
+	var rawCopy []byte
+	if len(raw.Line) > 0 {
+		n := min(len(raw.Line), sdk.EvidenceRawCap)
+		rawCopy = make([]byte, n)
+		copy(rawCopy, raw.Line[:n])
+	}
+
 	for _, ev := range events {
+		ev.Raw = rawCopy
 		d.agg.Add(ev)
 
-		verdicts := d.evaluateRules(ctx, ev.SourceIP)
+		// Long-window kinds (issue #134) are also counted persistently, so
+		// low-and-slow attackers survive LRU eviction and daemon restarts.
+		// Only kinds referenced by long-window rules are ever written —
+		// high-volume HTTP traffic never touches the counter table.
+		longRelevant := d.longKinds[ev.Kind]
+		if longRelevant {
+			if err := d.store.IncrEventCount(ctx, ev.SourceIP, ev.Kind, store.HourBucket(time.Now())); err != nil {
+				slog.WarnContext(ctx, "daemon: event counter increment failed",
+					"ip", ev.SourceIP, "kind", ev.Kind, "err", err)
+			}
+		}
+
+		verdicts := d.evaluateRules(ctx, ev.SourceIP, longRelevant)
 		if len(verdicts) == 0 {
 			continue
 		}
 
-		verdicts = d.maybeConsultAI(ctx, ev.SourceIP, verdicts)
+		// AI second layer: inline consult (blocking, pre-#222 behavior) or
+		// async enqueue (#222) — the pipeline never waits on a provider in
+		// async mode; verdicts arrive later via runAIAsync and pass through
+		// the identical decision-engine gates.
+		if d.aiQueue != nil {
+			d.maybeEnqueueAI(ctx, ev.SourceIP, highestScore(verdicts))
+		} else {
+			verdicts = d.maybeConsultAI(ctx, ev.SourceIP, verdicts)
+		}
 		verdicts = d.maybeInjectGeoVerdict(ctx, ev.SourceIP, verdicts)
 
 		// Live "detection" events for `watch` subscribers. Published before the
@@ -748,22 +1037,42 @@ func bindVerdictsToIP(ctx context.Context, verdicts []sdk.Verdict, ip netip.Addr
 // All returned AI verdicts — fresh or cached — pass through bindVerdictsToIP,
 // and fresh verdicts are bound before the cache Set so a poisoned target can
 // neither act now nor be replayed later.
+//
+// Issue #222 refactor: the gates (aiEligible), aggregate collection
+// (collectAIAggregates) and the provider round trip (consultProvider) are
+// shared with the async second-layer worker — behavior of this inline path
+// is unchanged.
 func (d *Daemon) maybeConsultAI(ctx context.Context, ip netip.Addr, verdicts []sdk.Verdict) []sdk.Verdict {
-	if d.aiProvider == nil || d.aiBudget == nil || d.aiCache == nil {
+	if !d.aiEligible(ctx, ip, highestScore(verdicts)) {
 		return verdicts
 	}
-	if d.aiLo >= d.aiHi {
-		return verdicts
-	}
+	aggs := d.collectAIAggregates(ip)
+	return append(verdicts, d.consultProvider(ctx, ip, aggs)...)
+}
 
-	highScore := 0
+// highestScore returns the max verdict score (0 for none).
+func highestScore(verdicts []sdk.Verdict) int {
+	high := 0
 	for _, v := range verdicts {
-		if v.Score > highScore {
-			highScore = v.Score
+		if v.Score > high {
+			high = v.Score
 		}
 	}
+	return high
+}
+
+// aiEligible applies every pre-aggregate gate for an AI consult: wiring
+// present, band configured, score inside the band, decided-outcome gates
+// (issue #419), and the daily budget.
+func (d *Daemon) aiEligible(ctx context.Context, ip netip.Addr, highScore int) bool {
+	if d.aiProvider == nil || d.aiBudget == nil || d.aiCache == nil {
+		return false
+	}
+	if d.aiLo >= d.aiHi {
+		return false
+	}
 	if highScore < d.aiLo || highScore > d.aiHi {
-		return verdicts
+		return false
 	}
 
 	// ── Decided-outcome gates (issue #419) ──────────────────────────────────
@@ -776,7 +1085,7 @@ func (d *Daemon) maybeConsultAI(ctx context.Context, ip netip.Addr, verdicts []s
 	if highScore >= d.policy.BanThreshold {
 		slog.DebugContext(ctx, "daemon: ai consult skipped — rule score already decisive",
 			"ip", ip, "score", highScore, "ban_threshold", d.policy.BanThreshold)
-		return verdicts
+		return false
 	}
 
 	// Likewise, an actively banned IP is a decided outcome: the engine's
@@ -793,14 +1102,14 @@ func (d *Daemon) maybeConsultAI(ctx context.Context, ip netip.Addr, verdicts []s
 	} else if banned && (!dryBan || !d.policy.IsArmed()) {
 		slog.DebugContext(ctx, "daemon: ai consult skipped — IP already banned",
 			"ip", ip, "score", highScore, "dry_run", dryBan)
-		return verdicts
+		return false
 	}
 
 	// Budget check — skip and warn once if daily limit is exhausted.
 	exceeded, err := d.aiBudget.Exceeded(ctx)
 	if err != nil {
 		slog.WarnContext(ctx, "daemon: ai budget check failed", "err", err)
-		return verdicts
+		return false
 	}
 	if exceeded {
 		// Once per UTC day (Budget owns the rollover, issue #359) — the old
@@ -808,10 +1117,14 @@ func (d *Daemon) maybeConsultAI(ctx context.Context, ip netip.Addr, verdicts []s
 		if d.aiBudget.NoteExceededToday() {
 			slog.WarnContext(ctx, "daemon: AI daily token budget exceeded; switching to rules-only")
 		}
-		return verdicts
+		return false
 	}
+	return true
+}
 
-	// Collect aggregates for all windows; populate enrichment when available.
+// collectAIAggregates snapshots the IP's aggregates for all windows, with
+// enrichment when available.
+func (d *Daemon) collectAIAggregates(ip netip.Addr) []sdk.Aggregate {
 	now := time.Now()
 	windows := d.agg.Windows()
 	aggs := make([]sdk.Aggregate, 0, len(windows))
@@ -822,14 +1135,20 @@ func (d *Daemon) maybeConsultAI(ctx context.Context, ip netip.Addr, verdicts []s
 		}
 		aggs = append(aggs, a)
 	}
+	return aggs
+}
 
+// consultProvider runs the cache → budget → Analyze → consume → bind →
+// cache-set round trip for one IP and returns the bound AI verdicts (an
+// empty slice on any failure — callers degrade to rules-only).
+func (d *Daemon) consultProvider(ctx context.Context, ip netip.Addr, aggs []sdk.Aggregate) []sdk.Verdict {
 	// Cache check — keyed on first (shortest) window aggregate behavior signature.
 	// Cache.Get already re-targets replayed verdicts to the requesting IP
 	// (issue #311); the bind below re-asserts that invariant at the chokepoint.
 	if len(aggs) > 0 {
 		if cached := d.aiCache.Get(aggs[0]); cached != nil {
 			slog.DebugContext(ctx, "daemon: ai cache hit", "ip", ip)
-			return append(verdicts, bindVerdictsToIP(ctx, cached, ip)...)
+			return bindVerdictsToIP(ctx, cached, ip)
 		}
 	}
 
@@ -837,13 +1156,19 @@ func (d *Daemon) maybeConsultAI(ctx context.Context, ip netip.Addr, verdicts []s
 	budget, err := d.aiBudget.Current(ctx)
 	if err != nil {
 		slog.WarnContext(ctx, "daemon: ai budget query failed", "err", err)
-		return verdicts
+		return nil
 	}
 
 	aiVerdicts, usage, err := d.aiProvider.Analyze(ctx, aggs, budget)
+	if d.metrics != nil {
+		d.metrics.aiRequests.With(d.aiProvider.Name()).Inc()
+	}
 	if err != nil {
 		slog.WarnContext(ctx, "daemon: ai analyze failed", "ip", ip, "err", err)
-		return verdicts
+		return nil
+	}
+	if d.metrics != nil {
+		d.metrics.aiTokens.With(d.aiProvider.Name()).Add(int64(usage.InputTokens + usage.OutputTokens))
 	}
 
 	slog.InfoContext(ctx, "daemon: ai analyzed",
@@ -870,7 +1195,7 @@ func (d *Daemon) maybeConsultAI(ctx context.Context, ip netip.Addr, verdicts []s
 		d.aiCache.Set(aggs[0], aiVerdicts)
 	}
 
-	return append(verdicts, aiVerdicts...)
+	return aiVerdicts
 }
 
 // maybeInjectGeoVerdict appends a synthetic "geo_block" verdict when the IP's
@@ -930,7 +1255,11 @@ func (d *Daemon) maybeInjectGeoVerdict(ctx context.Context, ip netip.Addr, verdi
 func (d *Daemon) parse(raw sdk.RawLine) ([]sdk.Event, error) {
 	for _, p := range d.parsers {
 		if p.Matches(raw.Source) {
-			return p.Parse(raw)
+			events, err := p.Parse(raw)
+			if len(events) > 0 && d.metrics != nil {
+				d.metrics.parserEvents.With(metricParserName(p)).Add(int64(len(events)))
+			}
+			return events, err
 		}
 	}
 	return nil, nil // no matching parser → silently ignore
@@ -939,11 +1268,66 @@ func (d *Daemon) parse(raw sdk.RawLine) ([]sdk.Event, error) {
 // evaluateRules aggregates all windows for ip and collects triggered verdicts.
 // When an enricher is configured, each aggregate's Enrich field is populated
 // before being passed to the rule engine.
-func (d *Daemon) evaluateRules(ctx context.Context, ip netip.Addr) []sdk.Verdict {
+//
+// withLong additionally evaluates long-window (>1h) rules from the persistent
+// hourly counters (issue #134). Callers pass true only when the triggering
+// context is long-window-relevant (an SSH-kind event, an SSH re-check) so the
+// per-event hot path never runs counter queries for high-volume HTTP kinds.
+func (d *Daemon) evaluateRules(ctx context.Context, ip netip.Addr, withLong bool) []sdk.Verdict {
 	now := time.Now()
 	var verdicts []sdk.Verdict
 	for _, w := range d.agg.Windows() {
 		agg := d.agg.Aggregate(ip, w, now)
+		if d.enricher != nil {
+			agg.Enrich = d.enricher.Lookup(ip)
+		}
+		verdicts = append(verdicts, d.ruleEng.Evaluate(ctx, agg)...)
+	}
+	// Reputation boost (issue #195): an IP flagged by an observe-mode feed
+	// gets a score bump — but only when it is ALREADY tripping local rules
+	// (len(verdicts) > 0). A feed alone never creates a verdict, a strike,
+	// or a ban.
+	if withLong {
+		verdicts = append(verdicts, d.evaluateLongRules(ctx, ip, now)...)
+	}
+	// Reputation boost (issue #195): an IP flagged by an observe-mode feed
+	// gets a score bump — but only when it is ALREADY tripping local rules
+	// (len(verdicts) > 0). A feed alone never creates a verdict, a strike,
+	// or a ban.
+	if len(verdicts) > 0 && d.feedRep != nil {
+		if feed, ok := d.feedRep.Lookup(ip); ok {
+			for i := range verdicts {
+				verdicts[i].Score = min(100, verdicts[i].Score+feedReputationBoost)
+				verdicts[i].Reason += " [reputation:" + feed + "]"
+			}
+		}
+	}
+	return verdicts
+}
+
+// evaluateLongRules builds one aggregate per long window from the persistent
+// counters and hands it to the UNCHANGED rule engine — Evaluate already
+// filters rules by agg.Window, so the long path reuses it as-is (the design
+// constraint of issue #134). Counter buckets are hour-coarse: the window
+// boundary lands on the containing hour, a documented slack long-window
+// thresholds tolerate.
+func (d *Daemon) evaluateLongRules(ctx context.Context, ip netip.Addr, now time.Time) []sdk.Verdict {
+	var verdicts []sdk.Verdict
+	for w, kinds := range d.longRuleWindows {
+		sums, err := d.store.SumEventCounts(ctx, ip, kinds, store.HourBucket(now.Add(-w)))
+		if err != nil {
+			slog.WarnContext(ctx, "daemon: long-window count query failed",
+				"ip", ip, "window", w, "err", err)
+			continue
+		}
+		total := 0
+		for _, n := range sums {
+			total += n
+		}
+		if total == 0 {
+			continue
+		}
+		agg := sdk.Aggregate{IP: ip, Window: w, Count: total, Kinds: sums}
 		if d.enricher != nil {
 			agg.Enrich = d.enricher.Lookup(ip)
 		}
@@ -970,17 +1354,21 @@ func (d *Daemon) dispatch(ctx context.Context, action sdk.Action) {
 	d.publishActionEvent(action.Op, action.IP.String(), action.Strike,
 		action.TTL, action.Reason, "pipeline")
 
+	banApplied := false
 	if action.Op == "ban" && d.enforcer != nil {
 		t := sdk.Target{IP: action.IP, TTL: action.TTL}
 		err := d.enforcer.Ban(ctx, t)
 		if err != nil {
 			slog.ErrorContext(ctx, "daemon: enforcer ban failed", "ip", action.IP, "err", err)
 			d.notifyCritical(ctx, fmt.Sprintf("enforcer ban failed for %s: %v", action.IP, err))
+		} else {
+			banApplied = true
 		}
 		// Enforcement-state health (issue #174): a failed ban flips the
 		// daemon to DEGRADED so status/doctor stop claiming protection.
 		d.recordEnforceResult(ctx, "ban", err)
 	}
+	d.recordActionMetrics(action, banApplied)
 
 	if d.notifier != nil && (action.Op == "ban" || action.Op == "dry_ban" || action.Op == "notify_only") {
 		// notify_only streams are windowed per (IP, rule): the first event
@@ -1081,6 +1469,22 @@ func (d *Daemon) syncEnforcer(ctx context.Context) error {
 	// signal that flips DEGRADED→ACTIVE on recovery (and ACTIVE→DEGRADED if
 	// the firewall backend went away between bans).
 	d.recordEnforceResult(ctx, "sync", err)
+
+	// Reconcile-repair audit (issue #214): a mid-write interruption (crash,
+	// OOM-kill, external flush) surfaces as drift the next reconcile has to
+	// repair — record it in the append-only audit_log so the incident is
+	// traceable, not just a transient WARN. The boot reconcile is exempt:
+	// re-adding every persisted ban after a restart is expected recovery.
+	if err == nil {
+		if rep, ok := d.enforcer.(enforce.SyncRepairReporter); ok {
+			if a, r, first := rep.LastSyncRepairs(); (a > 0 || r > 0) && !first {
+				reason := fmt.Sprintf("reconcile repaired store↔kernel drift: re-added %d, removed %d", a, r)
+				if aerr := d.store.AuditSystem(ctx, "enforce_reconcile", reason); aerr != nil {
+					slog.ErrorContext(ctx, "daemon: audit enforce_reconcile", "err", aerr)
+				}
+			}
+		}
+	}
 	return err
 }
 
@@ -1197,8 +1601,16 @@ func unionPrefixes(a, b []netip.Prefix) []netip.Prefix {
 	return out
 }
 
-// runFlush periodically removes stale aggregator buckets to bound memory.
+// runFlush periodically removes stale aggregator buckets to bound memory,
+// and prunes persistent long-window counter buckets past the longest long
+// window (issue #134) so events_agg can never grow unbounded.
 func (d *Daemon) runFlush(ctx context.Context) {
+	var longest time.Duration
+	for w := range d.longRuleWindows {
+		if w > longest {
+			longest = w
+		}
+	}
 	t := time.NewTicker(flushInterval)
 	defer t.Stop()
 	for {
@@ -1207,6 +1619,14 @@ func (d *Daemon) runFlush(ctx context.Context) {
 			return
 		case now := <-t.C:
 			d.agg.Flush(ctx, now.Add(-d.agg.Windows()[len(d.agg.Windows())-1]))
+			if longest > 0 {
+				// One extra hour of slack keeps the boundary bucket whole.
+				if n, err := d.store.PruneEventCounts(ctx, store.HourBucket(now.Add(-longest-time.Hour))); err != nil {
+					slog.WarnContext(ctx, "daemon: event counter prune failed", "err", err)
+				} else if n > 0 {
+					slog.DebugContext(ctx, "daemon: pruned event counter buckets", "rows", n)
+				}
+			}
 		}
 	}
 }
@@ -1303,6 +1723,18 @@ func (d *Daemon) notifyCritical(ctx context.Context, msg string) {
 	}
 	_ = d.notifier.Send(ctx, sdk.Notification{
 		Severity: "critical",
+		Title:    msg,
+		Body:     msg,
+	})
+}
+
+// notifyInfo sends an informational system notification (recoveries).
+func (d *Daemon) notifyInfo(ctx context.Context, msg string) {
+	if d.notifier == nil {
+		return
+	}
+	_ = d.notifier.Send(ctx, sdk.Notification{
+		Severity: "info",
 		Title:    msg,
 		Body:     msg,
 	})

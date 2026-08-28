@@ -36,6 +36,8 @@ against:
 | `list` | Array of rows — active bans, `--allow` entries, or `--audit` events (`[]` when empty) |
 | `report <ip>` | Object: versioned abuse report (`schema_version`, `ip`, `country`, `asn`, `current_ban`, `strikes`, `actions`, plus `evidence` with `--evidence`) |
 | `report` | Array of offender summaries (`ip`, `first_seen`, `last_seen`, `total_strikes`, `banned`, `permanent`, `country`, `asn`) |
+| `report --since` | Object: versioned digest (`schema_version`, `since`, `totals`, `events_by_kind`, `categories`, `rules`, `top_offenders`, `patterns`, plus `narrative` with `--narrative`) |
+| `rule test` | Object: `results` array (`rule`, `since`, `detections`, `unique_ips`, `allowlisted_hits`, `ips`, `per_day`, `upper_bound`, `warnings`, `limitation`) |
 | `watch` | NDJSON: one event object per line |
 | `scan` | Object: `listeners`, `new_listeners` (each a socket, all fields of the `scan.Listener` struct: `Addr`, `Protocol`, `UID`, `Inode`, `PID`, `ExePath`, `UserName`, `IsPublic`, `OwnerType`, `UnitName`, `ContainerID`, `ContainerName`, `ContainerImage`, `LogSource`) |
 | `doctor` | Object: `checks` (`name`, `status`, `hint`) and `summary` (`total`, `pass`, `fail`, `warn`) |
@@ -64,7 +66,9 @@ Creates `/etc/ezyshield/config.yaml` and `/etc/ezyshield/policy.yaml` with secur
 
 The wizard walks through named sections — **Environment** (what was detected
 on the host), **Collectors**, **Allowlist**, **Edge enforcers**, **AI
-analysis**, **Policy**, **Files**, and **System services** — with `✓`/`✗`/`!`
+analysis**, **Notifications** (zero or more of telegram, email, slack,
+discord, webhook — the same per-channel prompts as `config notifier <name>`),
+**Policy**, **Files**, and **System services** — with `✓`/`✗`/`!`
 status marks per line. Styling follows the global
 [color conventions](#color); piped output stays plain.
 
@@ -196,6 +200,42 @@ safe direction. Persisted to `policy.yaml` and audited.
 sudo ezyshield disarm
 ```
 
+## ezyshield disable / enable
+
+The panic button. **When to reach for this**: false positives banning real
+users, a locked-out colleague, a broken rule blocking production traffic —
+any moment where "make it all stop, now" beats surgical fixes.
+
+```bash
+sudo ezyshield disable --all          # disarm + remove EVERY active block
+sudo ezyshield disable --local-only   # flush local nftables only (works with the daemon down)
+sudo ezyshield disable                # disarm only (same as 'disarm')
+sudo ezyshield enable                 # re-arm (alias for 'arm', full pre-flight)
+```
+
+`--all` disarms the daemon (no new bans), clears every active ban from the
+store, and reconciles the enforcers against the now-empty state — the local
+nftables sets are emptied via the enforcer helper and edge enforcers
+(Cloudflare) empty through their normal reconcile path. **Ban history and
+strikes are preserved** — this is an enforcement reset, not a data wipe —
+and `enable` re-arms later **without re-applying anything**. A confirmation
+prompt guards the command (`--yes` skips it); the disarm and a summary row
+(`disable_all`, with the count) land in the audit log.
+
+`--local-only` is the break-glass variant: it talks **directly to the
+enforcer helper socket** and flushes the local blocked sets, so it works
+even when the daemon is unhealthy. Edge blocks stay as-is, and a *running*
+daemon re-applies active bans on its next reconcile (~1 min) — follow up
+with `allow <your-ip>`, `unban <ip>`, or `disable --all`.
+
+If neither socket is reachable, the command prints the exact manual
+recovery steps (`systemctl stop ezyshield`, `nft flush set inet ezyshield
+blocked` / `blocked6`, and the Cloudflare list note) on stderr.
+
+Both variants honor `--json` and the standard exit codes. There is
+deliberately **no config flag** for any of this — only a socket-capable
+operator (root or the `ezyshield` group) can trigger it.
+
 ## ezyshield status
 
 Show daemon and enforcer status.
@@ -266,6 +306,24 @@ Audit columns: `TIME / IP / ACTION / STRIKE / TTL / REASON` (newest first;
 reasons). For a single offender's full history with detection verdicts and
 evidence, use `ezyshield report`.
 
+## ezyshield feeds
+
+Inspect and refresh the configured IP reputation feeds (config.yaml
+`feeds:` section) via the running daemon. See the
+[Reputation Feeds guide](../guides/reputation-feeds.md).
+
+```bash
+ezyshield feeds status            # per feed: action, entries, skipped, last/next refresh
+ezyshield feeds status --json
+ezyshield feeds refresh           # re-fetch every feed now
+ezyshield feeds refresh <name>    # re-fetch one feed
+```
+
+Feed entries never create strikes or bans and never appear in
+`ezyshield list` — they live in the dedicated `blocked_feeds` nftables
+sets (action `block`) or only in memory as a score boost (action
+`observe`, the default).
+
 ## ezyshield report
 
 Generate a complete abuse report for one offender IP from the daemon's
@@ -315,6 +373,101 @@ are escaped — so hostile log content cannot spoof your terminal or break the
 document. Evidence excerpts are rendered as indented code blocks in markdown,
 so a log line cannot inject formatting into the report. Timestamps are UTC
 (RFC 3339).
+
+### Incident digest (`report --since`)
+
+Without an IP but with `--since`, `report` switches to the **server-wide
+incident digest**: "what happened on this server since yesterday?" as one
+readable document. It reads the store directly (the daemon does not need to
+be running) and is fully offline and deterministic — no AI dependency.
+
+```bash
+# Terminal digest of the last 24 hours
+ezyshield report --since 24h
+
+# Weekly digest as markdown, ready to paste into a ticket/email
+ezyshield report --since 7d -o md > weekly-digest.md
+
+# Machine-readable
+ezyshield report --since 24h --json
+
+# With a short AI-generated prose summary (requires a configured provider)
+ezyshield report --since 24h --narrative
+```
+
+The markdown structure is stable and documented — sections always appear in
+this order (empty ones are omitted; Totals and Enforcement always render):
+**Totals**, **Events by kind**, **Strikes by category**, **Strikes by
+rule**, **Top offenders** (strike-ladder position, new vs repeat), 
+**Enforcement**, **Notable patterns**, **AI narrative** (only with
+`--narrative`). Sample:
+
+```markdown
+# EzyShield digest — last 24h0m0s
+
+## Totals
+| Metric | Count |
+|---|---|
+| Strikes | 12 |
+| Dry-run bans | 7 |
+
+## Top offenders
+| IP | Strikes (window) | Max strike | Total strikes | New |
+|---|---|---|---|---|
+| 203.0.113.7 | 4 | 3 | 9 | repeat |
+
+## Notable patterns
+- coordinated bruteforce activity: 5 distinct IPs struck in the window
+- dry-run mode: 7 ban(s) were simulated but not enforced in this window
+```
+
+Digest-mode flags: `--since` (window; `d` suffix allowed), `--db` (SQLite
+path), `--narrative`, `--config` (AI provider settings for `--narrative`).
+
+`--narrative` sends ONLY the aggregated digest JSON (counts, categories,
+rule names, IPs — never raw log lines) to the configured AI provider,
+respects the daily token budget, and **degrades to the plain digest with a
+note on any failure**. The narrative renders under a clearly-labeled
+advisory section. Event totals come from the persisted hourly counters,
+which only track kinds referenced by long-window rules.
+
+## ezyshield rule test
+
+Dry-evaluate one rule against the stored event history, before enabling it.
+Strictly read-only: no strikes, no bans, no audit writes, and the daemon
+does not need to be running.
+
+```bash
+# A loaded rule by name (built-in, rules.d drop-in, or rules_path override)
+ezyshield rule test ssh_bruteforce_daily --since 7d
+
+# A standalone YAML file — test a drop-in BEFORE copying it into rules.d
+ezyshield rule test ./60-admin-panel.yaml --since 24h
+
+# Machine-readable
+ezyshield rule test ssh_bruteforce_daily --json
+```
+
+The rule passes the same fail-closed validation as the daemon's loader
+first; an invalid rule is a clear error and a non-zero exit. Output: how
+many times the rule would have fired (rising-edge counting — consecutive
+saturated hours are one incident), unique IPs (sampled), per-day
+distribution, and the **allowlisted hits** false-positive early warning
+(would-be detections on `allowlist`/`admin_cidrs` or runtime-allowlist
+addresses).
+
+Flags:
+- `--since` — history window to evaluate (Go duration, `d` suffix allowed;
+  default `24h`)
+- `--db` — SQLite database path (default `/var/lib/ezyshield/ezyshield.db`)
+- `--config` — config.yaml path, used to resolve `rules.d`/`rules_path`
+- `--policy` — policy.yaml path, used for the allowlist check
+
+Honest limitation (also printed on every run): evaluation uses the stored
+hourly aggregates, so granularity is bounded by 1-hour buckets and by
+retention; only kinds referenced by long-window (>1h) rules are persisted,
+and field-level matchers cannot be applied to counts — such rules are
+reported as a loudly-marked kind-level upper bound.
 
 ## ezyshield ban
 
@@ -455,6 +608,40 @@ degrades gracefully — e.g. `PID` `0`, empty binary — rather than failing the
 scan. The command follows the [global exit-code contract](#exit-codes); with
 `--json` it prints only JSON on stdout, with the newly detected sockets also
 collected under `new_listeners`.
+
+## ezyshield plugins
+
+Inspect tier-1 plugins: external executables under
+`/etc/ezyshield/plugins.d/<name>/module.yaml` speaking JSON over stdio.
+Plugins are opt-in **twice**: `plugins.enabled: true` in config.yaml AND
+the plugin's name listed in `plugins.allow[]` — dropping files into
+plugins.d is never enough to execute code.
+
+```bash
+# Every plugins.d entry with name, version, type and status
+# (ready / not-allowed / invalid / disabled). Never executes anything.
+ezyshield plugins list
+
+# Author helper: strict manifest validation (schema, permissions,
+# ownership, exec resolution) plus ONE handshake dry-run, then kill.
+ezyshield plugins validate /etc/ezyshield/plugins.d/my-plugin
+```
+
+Manifest schema: `docs/schemas/plugin/module.schema.json`. The `exec`
+path is relative to the plugin directory only (no PATH lookup, no
+absolute paths, no traversal, no symlinks), must not be world-writable,
+and must belong to root or the plugin dir's owner.
+
+Honest note: the manifest's `network:` declaration is **advisory in v1**
+— EzyShield does not yet isolate plugin network access. The field exists
+so authors declare intent and a future version can enforce it.
+
+```yaml
+plugins:
+  enabled: true
+  allow: [my-plugin]        # explicit by-name allowlist, required
+  # dir: /etc/ezyshield/plugins.d
+```
 
 ## ezyshield doctor
 

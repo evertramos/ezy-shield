@@ -1,4 +1,30 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
+
+// Atomicity contract (issue #214). One `nft` invocation applies its whole
+// script as a single kernel transaction, so a crash/OOM-kill of this helper
+// can never leave a PARTIAL nft script applied. Per logical operation:
+//
+//   - initTable, add element, delete element, flush, and every allow_* verb:
+//     one nft invocation each → atomic. Interrupting the helper between the
+//     kernel write and the cache write only stales the in-memory cache, which
+//     init() rebuilds from the kernel (with per-element `expires`, issue
+//     #383) on the next start.
+//   - replace-on-re-add (dispatch "add" when the cache holds the element):
+//     TWO invocations (delete, then add) — NOT atomic. Recovery: on a failed
+//     add the previous element is restored with its remaining lifetime; if
+//     the rollback also fails, the cache is made to agree with the empty
+//     kernel so the daemon's periodic reconcile re-adds from the store.
+//   - name switch (switchNamesLocked): multi-step but idempotent — initTable
+//     is create-if-absent and nothing is deleted until the new table is live;
+//     a failure mid-switch leaves the old table untouched and a retry
+//     converges. No destructive rollback is attempted: the target table may
+//     have pre-existed with operator state we must not delete.
+//
+// The store↔kernel backstop for every non-atomic window is the daemon's
+// reconcile (startup + periodic Sync), which repairs both directions and now
+// reports repair counts for auditing (issue #214).
 
 import (
 	"bytes"
@@ -13,6 +39,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/evertramos/ezy-shield/internal/enforce"
 	"github.com/evertramos/ezy-shield/internal/nftnames"
 )
 
@@ -121,6 +148,8 @@ add set %[1]s %[2]s { type ipv4_addr ; flags interval,timeout ; auto-merge ; }
 add set %[1]s %[3]s { type ipv6_addr ; flags interval,timeout ; auto-merge ; }
 add set %[1]s %[4]s { type ipv4_addr ; flags interval ; auto-merge ; }
 add set %[1]s %[5]s { type ipv6_addr ; flags interval ; auto-merge ; }
+add set %[1]s %[6]s { type ipv4_addr ; flags interval,timeout ; auto-merge ; }
+add set %[1]s %[7]s { type ipv6_addr ; flags interval,timeout ; auto-merge ; }
 add chain %[1]s prerouting { type filter hook prerouting priority raw ; policy accept ; }
 flush chain %[1]s prerouting
 add rule %[1]s prerouting ip saddr @%[4]s accept
@@ -129,16 +158,60 @@ add rule %[1]s prerouting ip saddr @%[2]s notrack
 add rule %[1]s prerouting ip6 saddr @%[3]s notrack
 add rule %[1]s prerouting ip saddr @%[2]s drop
 add rule %[1]s prerouting ip6 saddr @%[3]s drop
+add rule %[1]s prerouting ip saddr @%[6]s notrack
+add rule %[1]s prerouting ip6 saddr @%[7]s notrack
+add rule %[1]s prerouting ip saddr @%[6]s drop
+add rule %[1]s prerouting ip6 saddr @%[7]s drop
 add chain %[1]s input { type filter hook input priority filter ; policy accept ; }
 flush chain %[1]s input
 add rule %[1]s input ip saddr @%[2]s drop
 add rule %[1]s input ip6 saddr @%[3]s drop
+add rule %[1]s input ip saddr @%[6]s drop
+add rule %[1]s input ip6 saddr @%[7]s drop
 add chain %[1]s forward { type filter hook forward priority filter ; policy accept ; }
 flush chain %[1]s forward
 add rule %[1]s forward ip saddr @%[2]s drop
 add rule %[1]s forward ip6 saddr @%[3]s drop
-`, n.Table, n.Set4, n.Set6, n.Allow4, n.Allow6)
+add rule %[1]s forward ip saddr @%[6]s drop
+add rule %[1]s forward ip6 saddr @%[7]s drop
+`, n.Table, n.Set4, n.Set6, n.Allow4, n.Allow6, n.Feeds4, n.Feeds6)
 	return run(ctx, []byte(script))
+}
+
+// nftFeedsSync atomically replaces the reputation-feed sets with exactly the
+// given elements (issue #195): one `nft -f` script flushes both feed sets
+// and re-adds every element with its timeout, so the kernel never observes a
+// partial state. Elements were validated by the dispatch layer; each IP is
+// a netip-parsed Addr/Prefix string and every TTL is > 0 (feed entries are
+// never permanent).
+func nftFeedsSync(ctx context.Context, run nftRunner, n nftnames.Names, elems []enforce.FeedElement) error {
+	var b bytes.Buffer
+	fmt.Fprintf(&b, "flush set %s %s\nflush set %s %s\n", n.Table, n.Feeds4, n.Table, n.Feeds6)
+	var v4, v6 []string
+	for _, e := range elems {
+		set, err := setForIPIn(e.IP, "4", "6")
+		if err != nil {
+			return err
+		}
+		entry := fmt.Sprintf("%s timeout %ds", e.IP, e.TTLSeconds)
+		if set == "4" {
+			v4 = append(v4, entry)
+		} else {
+			v6 = append(v6, entry)
+		}
+	}
+	// Batch adds in chunks so no single script line grows unbounded.
+	const chunk = 512
+	writeChunks := func(set string, entries []string) {
+		for len(entries) > 0 {
+			n2 := min(chunk, len(entries))
+			fmt.Fprintf(&b, "add element %s %s { %s }\n", n.Table, set, strings.Join(entries[:n2], ", "))
+			entries = entries[n2:]
+		}
+	}
+	writeChunks(n.Feeds4, v4)
+	writeChunks(n.Feeds6, v6)
+	return run(ctx, b.Bytes())
 }
 
 // nftAdd adds ip to the appropriate set with an optional timeout.

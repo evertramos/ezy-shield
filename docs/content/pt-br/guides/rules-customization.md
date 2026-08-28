@@ -1,7 +1,7 @@
 ---
 title: Customizando Regras de Detecção
 description: Ajuste ou adicione regras com drop-ins em rules.d que sobrevivem a updates
-order: 5
+order: 7
 ---
 
 # Customizando Regras de Detecção
@@ -66,6 +66,43 @@ O schema das regras (campos, matchers, windows) está documentado no
 [Getting Started §6](../getting-started/index.md); o conjunto completo
 atual é distribuído como `/etc/ezyshield/rules.yaml.example` para
 referência.
+
+## Teste uma regra antes de habilitá-la
+
+Escrever uma regra às cegas — habilitar e esperar — é assim que falsos
+positivos entram em produção. O `rule test` avalia uma regra a seco contra
+o histórico de eventos que o daemon já guarda, com **zero efeitos
+colaterais** (sem strikes, sem bans, sem escrita de auditoria; o daemon nem
+precisa estar rodando):
+
+```console
+$ ezyshield rule test ssh_bruteforce_daily --since 7d
+Rule test: ssh_bruteforce_daily
+  kinds: ssh_fail, ssh_invalid_user | window: 24h0m0s | threshold: 5 | ...
+
+  Would have fired : 12 time(s)
+  Unique IPs       : 4
+  Allowlisted hits : 1 — this rule would fire on protected addresses; tune it before enabling
+```
+
+O argumento é o nome de uma regra carregada (embutida ou drop-in) ou o
+caminho de um arquivo YAML avulso — dá para testar o
+`rules.d/60-admin-panel.yaml` *antes* de copiá-lo para o lugar. A regra
+passa primeiro pela mesma validação fail-closed do loader do daemon; uma
+regra inválida é um erro claro e exit não-zero.
+
+A linha de **allowlisted hits** é o alerta antecipado de falso positivo:
+conta as detecções que cairiam em endereços cobertos pelo seu
+`allowlist`/`admin_cidrs` ou pela allowlist de runtime. Uma regra que
+dispara nas suas próprias faixas precisa de tuning, não de habilitação.
+`--json` entrega o resultado completo para scripts.
+
+Limitação honesta: a avaliação usa os agregados horários armazenados, então
+a granularidade é limitada pelos buckets de 1 hora e pela retenção — e só
+kinds referenciados por regras de janela longa (>1h) são persistidos.
+Matchers de campo (`field`/`value`/`contains`) não se aplicam a contagens,
+então essas regras são reportadas como um **teto** (upper bound) em nível
+de kind, marcado de forma bem visível.
 
 ## Instalações WordPress
 

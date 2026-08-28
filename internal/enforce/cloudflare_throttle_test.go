@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package enforce
 
 // Internal unit tests for the throttle-classification and backoff helpers

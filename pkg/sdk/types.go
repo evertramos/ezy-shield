@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package sdk is the public API surface for EzyShield native modules.
 // All types here are stable contracts; changes require an ADR in docs/internal/adr/.
 package sdk
@@ -32,7 +34,20 @@ type Event struct {
 	Kind     string            // "ssh_fail", "http_request", "port_probe", ...
 	Fields   map[string]string // method, path, status, ua, port, ...
 	Origin   string            // collector id
+	// Raw is a bounded copy of the originating log line (ADR-0011, issue
+	// #127), attached by the daemon after parsing — parsers never set or
+	// read it. Capped at EvidenceRawCap bytes; may be nil (synthetic
+	// events, tests). Hostile input: sanitize at render time only.
+	Raw []byte
 }
+
+// Evidence bounds (ADR-0011): the per-event raw-line cap applied at attach
+// time, and the maximum triggering lines a firing rule attaches to its
+// verdict.
+const (
+	EvidenceRawCap   = 512
+	EvidenceMaxLines = 5
+)
 
 // Aggregate is the per-IP summary produced by the Aggregator over a time window.
 type Aggregate struct {
@@ -42,6 +57,25 @@ type Aggregate struct {
 	Kinds  map[string]int
 	Sample []Event    // capped, redacted; never send raw to AI
 	Enrich Enrichment // asn, country, reputation flags
+	// Behavior is the compact behavioral summary derived from Sample
+	// (issue #222): distributions and top-N lists only, never raw log
+	// lines — it is the ONLY sample-derived data AI payloads may carry.
+	Behavior *BehaviorSummary
+}
+
+// BehaviorSummary condenses an aggregate's sampled events into the compact
+// fields an AI analysis needs (issue #222): path/method/status
+// distributions and a user-agent summary. Every string is length-capped
+// and control-stripped at construction; lists are top-N by frequency.
+type BehaviorSummary struct {
+	// TopPaths lists the most-requested paths as "path (xN)" entries.
+	TopPaths []string `json:"top_paths,omitempty"`
+	// Methods counts requests per HTTP method.
+	Methods map[string]int `json:"methods,omitempty"`
+	// StatusClasses counts responses per class ("2xx", "4xx", ...).
+	StatusClasses map[string]int `json:"status_classes,omitempty"`
+	// TopUserAgents lists the most-seen user agents as "ua (xN)" entries.
+	TopUserAgents []string `json:"top_user_agents,omitempty"`
 }
 
 // Verdict is a threat assessment, from the rule engine or an AI provider.
@@ -54,6 +88,12 @@ type Verdict struct {
 	Reason     string
 	Source     string        // "rules", "ai:anthropic", "ai:ollama", ...
 	SuggestTTL time.Duration // suggestion only; policy decides
+	// Evidence holds up to EvidenceMaxLines raw log lines that produced
+	// this verdict, captured at detection time (ADR-0011, issue #127).
+	// Only rule verdicts carry it; persisted with the strike via the
+	// strikes.verdicts JSON column. Hostile input — render-time sanitizing
+	// only.
+	Evidence []string `json:"evidence,omitempty"`
 }
 
 // Action is what the decision engine decides to do about an IP.

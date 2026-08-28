@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package daemon
 
 // sshrecheck.go — deferred re-evaluation after an SSH-peer anti-lockout
@@ -45,6 +47,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/netip"
 	"strings"
@@ -265,7 +268,9 @@ func (d *Daemon) recheckAfterAntiLockout(ctx context.Context, it sshRecheckItem)
 		return
 	}
 
-	verdicts := d.evaluateRules(ctx, ip)
+	// withLong=true: this path is SSH-specific by construction, so the
+	// long-window counters (issue #134) are part of the live evidence.
+	verdicts := d.evaluateRules(ctx, ip, true)
 	verdicts = d.maybeInjectGeoVerdict(ctx, ip, verdicts)
 	if len(verdicts) == 0 {
 		// The evidence aged out of every rule window — nothing left to
@@ -295,7 +300,9 @@ func (d *Daemon) recheckAfterAntiLockout(ctx context.Context, it sshRecheckItem)
 			// retry later, bounded by the attempt budget.
 			slog.WarnContext(ctx, "daemon: ssh re-check hit ban rate limit — deferring", "ip", ip)
 			d.notifyCritical(ctx, "ban rate limit exceeded")
-			d.sshRecheck.requeue(ip, attempts+1, time.Now().Add(d.sshRecheckDelayVal()), it.aiVerdict)
+			if !d.sshRecheck.requeue(ip, attempts+1, time.Now().Add(d.sshRecheckDelayVal()), it.aiVerdict) {
+				d.noteSSHRecheckDropped(ctx, ip, attempts+1)
+			}
 			return
 		}
 		slog.ErrorContext(ctx, "daemon: ssh re-check decide error", "ip", ip, "err", err)
@@ -310,6 +317,46 @@ func (d *Daemon) recheckAfterAntiLockout(ctx context.Context, it sshRecheckItem)
 		// Still ESTABLISHED — an operator session or an attacker holding the
 		// connection. The invariant held; re-arm within the retry budget,
 		// keeping the carried verdict for the next pass.
-		d.sshRecheck.requeue(ip, attempts+1, time.Now().Add(d.sshRecheckDelayVal()), it.aiVerdict)
+		if !d.sshRecheck.requeue(ip, attempts+1, time.Now().Add(d.sshRecheckDelayVal()), it.aiVerdict) {
+			d.noteSSHRecheckDropped(ctx, ip, attempts+1)
+		}
+	}
+}
+
+// noteSSHRecheckDropped makes a dropped deferred re-evaluation LOUD and
+// QUERYABLE (issue #559). A peer that simply holds the SSH socket in
+// ESTABLISHED (sshd's "Timeout before authentication" pattern) outlasts the
+// retry budget; before this, the evidence vanished with no WARN, no
+// offender row, and `report <ip>` answering "no records". Now:
+//
+//   - a WARN mirrors the queue-full message from the initial-schedule path
+//     (parity — this was the only silent drop in the file);
+//   - an append-only audit entry (op "recheck_exhausted") records that a
+//     would-be ban was suppressed, so ban-audits can find it;
+//   - the offenders row is upserted (0 strikes), which is exactly the gate
+//     `report` checks — the IP's full audit trail (the refusals were
+//     already audited) becomes visible to `ezyshield report <ip>`.
+//
+// Observability only: no strike, no ban, no enforcement — the anti-lockout
+// invariant (Hard Rule 1) is untouched. The budget resets on any fresh
+// event-driven refusal (schedule zeroes attempts), so a peer that emits new
+// parseable evidence re-arms the re-check as before. The authenticated-vs-
+// unauthenticated peer distinction is tier 2 (follow-up issue).
+func (d *Daemon) noteSSHRecheckDropped(ctx context.Context, ip netip.Addr, attempts int) {
+	slog.WarnContext(ctx, "daemon: ssh re-check retry budget exhausted — deferred re-evaluation dropped",
+		"ip", ip, "attempts", attempts)
+
+	reason := fmt.Sprintf(
+		"ssh anti-lockout re-check retry budget exhausted after %d attempts — would-be ban evidence dropped while the peer held an ESTABLISHED SSH connection", attempts)
+	// Audit (bare-IP row) rather than AuditOp (prefix row): AuditLogForIP —
+	// what `report <ip>` renders — matches bare-IP rows only.
+	if err := d.store.Audit(ctx, sdk.Action{IP: ip.Unmap(), Op: "recheck_exhausted", Reason: reason}); err != nil {
+		slog.ErrorContext(ctx, "daemon: audit recheck_exhausted failed", "ip", ip, "err", err)
+	}
+	// The offenders row is the visibility gate buildAbuseReport checks:
+	// with it, `report <ip>` surfaces the already-audited refusals instead
+	// of "no records".
+	if err := d.store.BumpLastSeen(ctx, ip.Unmap()); err != nil {
+		slog.ErrorContext(ctx, "daemon: offender upsert after re-check exhaustion failed", "ip", ip, "err", err)
 	}
 }

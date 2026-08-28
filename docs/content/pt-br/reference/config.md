@@ -58,7 +58,7 @@ collectors:
 | `path` | para `file` | arquivo a acompanhar |
 | `unit` | para `journald` | unit systemd a acompanhar |
 | `container` | para `docker` | nome do container, ID curto ou ID completo |
-| `parser` | não | força um parser: `nginx` \| `ssh` \| `apache` \| `apache-error` \| `traefik` \| `caddy` (padrão: roteado automaticamente a partir da fonte). `apache` lê o log de **acesso** do Apache (formato combined, compartilhado com `nginx`); `apache-error` lê o **error_log** do Apache (`error.log` / `error_log`). **Honrado apenas para coletores `file` e `docker`** — o `journald` o ignora e sempre roteia o parser a partir da unidade. |
+| `parser` | não | força um parser: `nginx` \| `ssh` \| `apache` \| `apache-error` \| `traefik` \| `caddy` \| `postfix` \| `dovecot` (padrão: roteado automaticamente a partir da fonte). `apache` lê o log de **acesso** do Apache (formato combined, compartilhado com `nginx`); `apache-error` lê o **error_log** do Apache (`error.log` / `error_log`); `postfix` lê linhas do smtpd do Postfix (`mail.log` / `maillog`, ou as units journald `postfix` / `postfix@*` — falhas de auth SASL, rejects de relay e assinaturas de abuso de conexão viram eventos `smtp_auth_fail` / `smtp_relay_denied` / `smtp_abuse`); `dovecot` lê linhas dos processos de login do Dovecot (`dovecot.log`, ou a unit journald `dovecot` — falhas de auth IMAP/POP3 viram `imap_auth_fail` e sondas sem credenciais `imap_probe`; em setups com `mail.log` compartilhado, que roteia primeiro para `postfix`, use a unit journald ou este override explícito). **Honrado apenas para coletores `file` e `docker`** — o `journald` o ignora e sempre roteia o parser a partir da unidade. |
 
 ### Coletor SSH (nome do unit varia por distro)
 
@@ -148,6 +148,47 @@ enquanto um *ban* atrasado é exposição real — por isso bans seguem o
 unban` manual também propaga ao edge na cadência do flush (o unban local no
 nftables é imediato).
 
+### bunny
+
+Enforcement de borda bunny.net via a lista de IPs bloqueados de cada pull zone. A presença da seção o habilita. **O EzyShield assume a propriedade da lista de IPs bloqueados** nas zonas configuradas — entradas adicionadas manualmente no painel da bunny são removidas no reconcile. Veja o [guia bunny.net](../guides/bunny.md).
+
+```yaml
+enforce:
+  bunny:
+    api_key: env:BUNNY_API_KEY   # segredos são referências env:, nunca inline
+    pull_zones: [123456, 234567] # IDs numéricos das pull zones
+```
+
+| Campo | Obrigatório | Descrição |
+|-------|-------------|-----------|
+| `api_key` | sim | referência `env:VARNAME` para a API key de conta da bunny.net |
+| `pull_zones` | sim | IDs numéricos de pull zone (ao menos um, positivos, únicos) |
+| `name` | não | rótulo mostrado nos logs como `bunny[<nome>]` |
+
+O enforcer limita cada zona a 500 IPs bloqueados (a bunny não documenta um limite do provider); acima disso os bans mais recentes vencem, com warning.
+
+### aws_waf
+
+Enforcement de borda no AWS WAFv2 via IPSets dedicados referenciados pelas regras do seu WebACL (ADR-0012). A presença da seção o habilita. O EzyShield só muta os endereços membros dos IPSets designados aqui — ele **nunca toca WebACLs**. Credenciais vêm da cadeia padrão da AWS (env vars, `~/.aws/credentials`, IMDSv2) e nunca devem aparecer neste arquivo; a validação rejeita material de chave colado. Veja o [guia AWS WAF](../guides/aws-waf.md).
+
+```yaml
+enforce:
+  aws_waf:
+    scope: regional            # regional (exige region) ou cloudfront (fixa us-east-1)
+    region: eu-west-1
+    ipset_v4: {name: ezyshield-v4, id: aaaabbbb-cccc-dddd-eeee-ffff00001111}
+    ipset_v6: {name: ezyshield-v6, id: aaaabbbb-cccc-dddd-eeee-ffff00002222}
+```
+
+| Campo | Obrigatório | Descrição |
+|-------|-------------|-----------|
+| `scope` | sim | `regional` (ALB/API Gateway) ou `cloudfront` (global) |
+| `region` | para `regional` | região AWS dos IPSets |
+| `ipset_v4` / `ipset_v6` | ao menos um | `name` + `id` de cada IPSet designado |
+| `name` | não | rótulo mostrado nos logs como `awswaf[<nome>]` |
+
+Cada IPSet comporta no máximo 10.000 endereços (limite da AWS); acima disso os bans mais recentes vencem, com warning.
+
 ## notify
 
 ```yaml
@@ -231,6 +272,49 @@ ai:
 
 O veredito da IA é sempre consultivo: validado por schema, limitado pela policy e nunca capaz de banir um IP da allowlist.
 
+### Segunda camada assíncrona (`async: true`)
+
+```yaml
+ai:
+  provider: anthropic
+  api_key: env:ANTHROPIC_API_KEY
+  async: true                # analisa o tráfego cinzento em segundo plano
+  # async_queue_size: 256    # fila limitada; overflow descarta o episódio MAIS ANTIGO
+```
+
+Com `async: true` o pipeline **nunca espera por um provider**: episódios
+da zona cinzenta (scores dentro da banda ambígua) entram numa fila — uma
+entrada por IP por vez — e um worker em segundo plano os drena, com teto
+de uma chamada por segundo. Como a camada permanece frugal em tokens:
+
+1. O motor de regras decide os casos óbvios; só a banda ambígua enfileira
+   (os mesmos gates da #419 valem — scores decisivos e IPs já banidos
+   nunca gastam tokens).
+2. O **Log Cleaner** roda antes de cada chamada: ruído de assets estáticos
+   sai das amostras, episódios já decididos (banidos/allowlistados desde o
+   enfileiramento) são pulados, e a redução é exposta em
+   `ezyshield_ai_cleaner_reduction_permille`.
+3. O provider recebe apenas agregados compactos — contagens, distribuição
+   de kinds, enriquecimento e um resumo comportamental sanitizado (top
+   paths com querystring cortada, métodos, classes de status, user agents
+   capados). Linhas de log cruas nunca entram no payload.
+
+Os vereditos que voltam passam pelo decision engine como qualquer outra
+fonte: allowlist-wins, anti-lockout e os clamps de policy se aplicam. Um
+provider lento ou morto degrada para detecção só-regras — a fila limitada
+descarta o episódio mais antigo no overflow
+(`ezyshield_ai_queue_dropped_total`). A **métrica de taxa de concordância**
+`ezyshield_ai_agreement_total` (`<provider>_agree` / `<provider>_disagree`,
+comparada com o motor de regras no ban threshold) é a prova publicada de
+que a camada rende os tokens que gasta.
+
+Expectativa de custo: um episódio cinzento custa um prompt compacto
+(tipicamente poucas centenas de tokens de entrada) por assinatura de
+comportamento não-cacheada; o cache, o dedupe por IP e os gates da #419
+impedem que rajadas multipliquem o gasto. Para operação **totalmente
+local**, use `provider: ollama` — a camada assíncrona funciona idêntica,
+com zero tráfego de saída e sem API key.
+
 Cada chamada de IA é registrada na tabela `ai_usage` com o IP analisado, então a atribuição de custo vira uma única consulta — os maiores gastadores (um IP drenando o orçamento é, por si só, sintoma de vazamento):
 
 ```bash
@@ -239,6 +323,43 @@ sudo sqlite3 /var/lib/ezyshield/ezyshield.db \
    FROM ai_usage WHERE ip IS NOT NULL
    GROUP BY ip ORDER BY usd DESC LIMIT 10;"
 ```
+
+## self_check
+
+Self-check periódico de hardening — **ligado por padrão, sem precisar de
+seção**. A cada 6 horas o daemon re-executa as checagens read-only de
+systemd do `ezyshield doctor` (o `RestrictAddressFamilies`/`AF_NETLINK`
+efetivo do enforcer e o `RuntimeDirectory` dos dois serviços — ciente de
+drop-ins, via `systemctl show`) mais o probe funcional de netlink contra
+o helper em execução. Isso pega o drift de não-enforcement silencioso
+(uma unit editada à mão) **antes** de o próximo restart do serviço
+morder — sem você precisar lembrar de rodar o doctor.
+
+Semântica de notificação — só transições:
+
+- saudável → degradado: **um CRITICAL** nomeando a checagem que falhou
+  (mais uma entrada append-only `selfcheck_degraded` na auditoria);
+- degradado → saudável: **um INFO** (`selfcheck_recovered`);
+- estado estável: silêncio.
+
+Hosts sem systemd, units não instaladas ou helper antigo: essas checagens
+retornam N/A e contam como saudáveis — instalações via script/manuais
+ficam quietas. O self-check é estritamente read-only: nunca edita units
+nem reinicia serviços; a correção continua sendo uma dica copy-paste.
+
+**Para desativar** (instalações mínimas, ou hosts onde chamadas
+periódicas de `systemctl show` são indesejadas):
+
+```yaml
+self_check:
+  enabled: false     # desliga por completo — o doctor continua disponível sob demanda
+  # interval: 6h     # cadência quando ligado; default 6h, piso 10m
+```
+
+| Campo | Descrição |
+|-------|-----------|
+| `enabled` | omitido = `true`; `false` desliga o self-check periódico por completo |
+| `interval` | duração Go entre execuções; default `6h`, piso `10m` |
 
 ## enrich (GeoIP/ASN)
 
@@ -278,6 +399,18 @@ A chave é um segredo como qualquer outro: coloque `MAXMIND_LICENSE_KEY=...` em 
 |-------|--------|-----------|
 | `addr` | `127.0.0.1:9090` | Endereço de bind — **somente loopback**; binds fora do loopback são recusados no startup |
 | `auth_db_path` | `<data_dir>/dashboard.db` | Banco de autenticação do dashboard |
+
+## webshell_watch
+
+Tripwire de webshell (opt-in): varre web roots por arquivos web executáveis novos ou modificados. Puramente observacional — audit + notificação, nunca ban. Veja o [guia Tripwire de Webshell](../guides/webshell-tripwire.md).
+
+| Campo | Padrão | Descrição |
+|-------|--------|-----------|
+| `enabled` | `false` | Chave de opt-in |
+| `roots` | — | Diretórios web-root absolutos a varrer (**obrigatório** quando habilitado) |
+| `extensions` | `.php, .phtml, .php5, .php7, .phar` | Extensões vigiadas (com ponto inicial) |
+| `ignore` | `[]` | Padrões de caminho a ignorar — globs `path.Match`, ou substring quando o padrão não tem metacaracteres de glob |
+| `interval_sec` | `10` | Cadência da varredura em segundos (mínimo 5) |
 
 ## Exemplo mínimo
 

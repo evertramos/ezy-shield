@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package daemon
 
 // Handlers for the read-only "report" socket verb (issue #54): a per-IP
@@ -171,6 +173,7 @@ func reportStrikes(in []store.StrikeRecord) []sdk.AbuseReportStrike {
 				Confidence: v.Confidence,
 				Reason:     v.Reason,
 				Source:     v.Source,
+				Evidence:   v.Evidence,
 			})
 		}
 		out = append(out, ws)

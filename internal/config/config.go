@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package config provides YAML loading and strict validation for ezyshield
 // configuration files. No secret values may appear in config files; use
 // SecretRef for any credential field so the loader rejects inline values.
@@ -8,13 +10,19 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"net/url"
 	"os"
+	"path"
+	"path/filepath"
+	"regexp"
 	"sort"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/evertramos/ezy-shield/internal/nftnames"
+	"github.com/evertramos/ezy-shield/internal/siem"
 )
 
 // DefaultRulesDir is the drop-in overlay directory scanned for rule
@@ -43,6 +51,159 @@ type Config struct {
 	Notify     *NotifyCfg     `yaml:"notify"`
 	Enrich     *EnrichCfg     `yaml:"enrich"`
 	Dashboard  *DashboardCfg  `yaml:"dashboard"`
+	// SIEM lists outbound event-forwarding sinks (issue #203).
+	SIEM []SIEMSinkCfg `yaml:"siem"`
+	// VerifiedBots enables FCrDNS protection for well-known crawlers
+	// (issue #215). Absent/disabled = no DNS lookups ever happen.
+	VerifiedBots *VerifiedBotsCfg `yaml:"verified_bots"`
+	// Retention configures data-retention pruning (issue #184). Absent =
+	// never prune anything. See internal/config/retention.go.
+	Retention *RetentionCfg `yaml:"retention"`
+	// DockerExec enables the docker exec activity watcher (issue #220) —
+	// observational post-exploitation signal; never a ban source.
+	DockerExec *DockerExecCfg `yaml:"docker_exec"`
+	// WebshellWatch enables the webshell-drop tripwire (issue #221) —
+	// observational filesystem watch over web roots; never a ban source.
+	WebshellWatch *WebshellWatchCfg `yaml:"webshell_watch"`
+	// Feeds lists IP reputation feeds to download and parse (issue #194).
+	// Download/parse only for now — enforcement is the follow-up (#195).
+	Feeds []FeedCfg `yaml:"feeds"`
+	// Plugins gates the tier-1 plugin system (issue #207). Absent or
+	// enabled:false = no plugin executable is ever spawned; even enabled,
+	// only names in Allow may run.
+	Plugins *PluginsCfg `yaml:"plugins"`
+	// SelfCheck configures the periodic hardening self-check (issue #563).
+	// Absent = enabled with defaults; set enabled: false to opt out.
+	SelfCheck *SelfCheckCfg `yaml:"self_check"`
+}
+
+// SelfCheckCfg controls the daemon's periodic hardening self-check (issue
+// #563): the read-only systemd unit checks from `doctor` (AF_NETLINK for
+// the enforcer, RuntimeDirectory for both units) plus the functional
+// netlink probe, run on a timer with a CRITICAL notification when the
+// state degrades and an INFO one when it recovers. Steady state is silent.
+//
+// ON BY DEFAULT — the point is not depending on the operator remembering
+// to run doctor. To disable it entirely (minimal installs, hosts where
+// periodic `systemctl show` calls are undesirable):
+//
+//	self_check:
+//	  enabled: false
+type SelfCheckCfg struct {
+	// Enabled defaults to true when the section is absent or the field is
+	// omitted (pointer distinguishes "omitted" from an explicit false).
+	Enabled *bool `yaml:"enabled"`
+	// Interval between runs. Default 6h; floor 10m (a hot systemctl loop
+	// helps nobody).
+	Interval Duration `yaml:"interval,omitempty"`
+}
+
+// SelfCheckEnabled resolves the tri-state: absent section or omitted field
+// mean enabled.
+func (c *Config) SelfCheckEnabled() bool {
+	if c.SelfCheck == nil || c.SelfCheck.Enabled == nil {
+		return true
+	}
+	return *c.SelfCheck.Enabled
+}
+
+// PluginsCfg configures tier-1 plugin discovery (issue #207). Executing
+// operator-provided binaries is opt-in TWICE: Enabled must be true AND the
+// plugin's manifest name must be listed in Allow — dropping a file into
+// plugins.d is never enough to execute code.
+type PluginsCfg struct {
+	Enabled bool `yaml:"enabled"`
+	// Dir overrides /etc/ezyshield/plugins.d.
+	Dir string `yaml:"dir"`
+	// Allow is the explicit by-name allowlist. Required when enabled.
+	Allow []string `yaml:"allow"`
+}
+
+// SIEMSinkCfg describes one SIEM forwarding destination (issue #203).
+// Outbound only — no listener is ever created. Delivery is asynchronous
+// with a bounded queue; a slow or dead SIEM can never back-pressure the
+// decision pipeline.
+type SIEMSinkCfg struct {
+	// Name identifies the sink in logs/doctor. Required; unique;
+	// [A-Za-z0-9_-]{1,32}.
+	Name string `yaml:"name"`
+	// Address is scheme://target: udp://host:port, tcp://host:port,
+	// tls://host:port, uds:///path, file:///path.
+	Address string `yaml:"address"`
+	// Format is "json" (default), "cef", or "rfc5424".
+	Format string `yaml:"format"`
+	// Events filters which audit ops are forwarded (empty = all). See the
+	// SIEM guide for the documented kinds.
+	Events []string `yaml:"events"`
+	// CAFile optionally pins the CA bundle for tls:// (PEM path).
+	CAFile string `yaml:"ca_file,omitempty"`
+	// QueueSize bounds the in-memory queue (default 1024, max 65536).
+	QueueSize int `yaml:"queue_size,omitempty"`
+	// AllowInsecureTransport must be set to true to use plaintext tcp://
+	// or udp:// — audit events can carry credentials-adjacent data (IPs,
+	// rule reasons quoting log lines), and plaintext transports expose
+	// them in transit. doctor warns loudly when this is set.
+	AllowInsecureTransport bool `yaml:"allow_insecure_transport,omitempty"`
+}
+
+// FeedCfg describes one IP reputation feed (issue #194). The feed body is
+// remote, attacker-adjacent input; internal/feeds enforces the runtime caps
+// (10MiB response, 4KiB lines, reserved-range dropping) — this section only
+// carries the operator's choices, validated strictly at load.
+type FeedCfg struct {
+	// Name identifies the feed in logs and provenance. Required; unique;
+	// [A-Za-z0-9_-]{1,32}.
+	Name string `yaml:"name"`
+	// URL is the feed source. https:// only — http is rejected.
+	URL string `yaml:"url"`
+	// Format is "plain" (one IP per line), "cidr" (IP or prefix per line,
+	// ';'/'#' comments), or "abuseipdb" (plain list export).
+	Format string `yaml:"format"`
+	// RefreshInterval is how often the feed is re-fetched. Required;
+	// minimum 1h (politeness floor).
+	RefreshInterval Duration `yaml:"refresh_interval"`
+	// MaxEntries caps parsed entries per feed. 0 = 100k default; values
+	// above the 500k hard cap are rejected.
+	MaxEntries int `yaml:"max_entries"`
+	// Timeout bounds one fetch (default 30s).
+	Timeout Duration `yaml:"timeout,omitempty"`
+	// Action decides what the daemon does with the feed's entries (#195):
+	// "observe" (default) stores them in memory as a reputation flag that
+	// boosts rule scores when the IP also appears in local events — no
+	// firewall write; "block" additionally drops the entries at the edge
+	// of the ezyshield nftables table via the dedicated blocked_feeds set.
+	// Feed entries NEVER create strikes and never appear as bans.
+	Action string `yaml:"action"`
+	// TTL is the nft per-element timeout for action:block entries. 0 =
+	// twice the refresh interval, so entries survive one missed refresh
+	// but drain on their own when a feed dies.
+	TTL Duration `yaml:"ttl,omitempty"`
+}
+
+// DockerExecCfg configures the docker exec activity watcher (issue #220).
+// Opt-in: absent or enabled=false means the events API is never touched.
+type DockerExecCfg struct {
+	Enabled bool `yaml:"enabled"`
+	// Ignore lists container-name or image patterns to skip (glob syntax
+	// per path.Match; a pattern without glob metacharacters matches as a
+	// substring) — legitimate cron/health tooling.
+	Ignore []string `yaml:"ignore"`
+}
+
+// WebshellWatchCfg configures the webshell-drop tripwire (issue #221).
+// Opt-in: absent or enabled=false means no filesystem is ever swept.
+type WebshellWatchCfg struct {
+	Enabled bool `yaml:"enabled"`
+	// Roots are the web-root directories to sweep (required when enabled).
+	Roots []string `yaml:"roots"`
+	// Extensions overrides the default executable web extensions
+	// (.php, .phtml, .php5, .php7, .phar). Leading dot required.
+	Extensions []string `yaml:"extensions"`
+	// Ignore lists path patterns to skip (path.Match globs or substrings)
+	// — cache/upload dirs that legitimately churn.
+	Ignore []string `yaml:"ignore"`
+	// IntervalSec overrides the 10s sweep cadence (floor 5s).
+	IntervalSec int `yaml:"interval_sec"`
 }
 
 // DashboardCfg configures the localhost-only web UI (see docs/dashboard.md).
@@ -56,6 +217,31 @@ type DashboardCfg struct {
 	// AuthDBPath is the SQLite file storing the admin password hash.
 	// Defaults to <data_dir>/dashboard.db when empty.
 	AuthDBPath string `yaml:"auth_db_path"`
+	// MetricsAuth controls whether GET /metrics requires the dashboard
+	// session auth (issue #183). nil/true (default) = auth required;
+	// false = unauthenticated scrape allowed — safe ONLY because the
+	// listener is loopback-only, and still throttled.
+	MetricsAuth *bool `yaml:"metrics_auth,omitempty"`
+	// Users provisions per-user RBAC access (issue #204): each entry is a
+	// name, a role (viewer|operator|admin), and a per-user token as an
+	// env: reference — inline token literals are rejected like every other
+	// secret. Empty keeps the legacy single-credential model, whose
+	// password admin remains an implicit admin either way.
+	Users []DashboardUserCfg `yaml:"users,omitempty"`
+}
+
+// DashboardUserCfg is one provisioned dashboard user (issue #204).
+type DashboardUserCfg struct {
+	// Name identifies the user in sessions and audit records. Required;
+	// unique; [A-Za-z0-9_-]{1,32}.
+	Name string `yaml:"name"`
+	// Role is viewer (read-only), operator (+ ban/unban), or admin
+	// (+ allowlist mutations, arm/disarm, policy edit).
+	Role string `yaml:"role"`
+	// Token is the user's login token — env-reference only. Generate with
+	// e.g. `openssl rand -hex 32`; doctor warns when the resolved value
+	// is shorter than 32 bytes.
+	Token SecretRef `yaml:"token"`
 }
 
 // EnrichCfg configures GeoIP/ASN enrichment via MaxMind MMDB databases.
@@ -171,6 +357,59 @@ type CollectorCfg struct {
 type EnforceCfg struct {
 	NFTables   *NFTablesCfg   `yaml:"nftables"`
 	Cloudflare CloudflareCfgs `yaml:"cloudflare"`
+	Bunny      *BunnyCfg      `yaml:"bunny"`
+	AWSWAF     *AWSWAFCfg     `yaml:"aws_waf"`
+}
+
+// AWSWAFCfg holds AWS WAFv2 edge enforcer settings (issue #201, per
+// ADR-0012). Presence of the section enables the enforcer. Credentials are
+// deliberately ABSENT from this struct: they come from the standard AWS
+// chain (env vars, ~/.aws/credentials, IMDSv2) and must never appear in
+// EzyShield config files — the strict loader rejects any credential-shaped
+// key here as an unknown field, and validation double-checks for pasted
+// key material in the values.
+type AWSWAFCfg struct {
+	// Name is a short operator-chosen label used to disambiguate this
+	// enforcer in logs (surfaces as "awswaf[<name>]"). Optional.
+	Name string `yaml:"name"`
+	// Scope is "regional" (ALB/API Gateway; requires Region) or
+	// "cloudfront" (global; the API pins region us-east-1).
+	Scope string `yaml:"scope"`
+	// Region is the AWS region for scope "regional" (e.g. eu-west-1).
+	Region string `yaml:"region"`
+	// IPSetV4/IPSetV6 designate the IPSets EzyShield maintains. At least
+	// one is required; EzyShield only ever mutates the sets named here and
+	// never touches WebACLs.
+	IPSetV4 *AWSIPSetRefCfg `yaml:"ipset_v4"`
+	IPSetV6 *AWSIPSetRefCfg `yaml:"ipset_v6"`
+}
+
+// AWSIPSetRefCfg identifies one WAFv2 IPSet by its Name and Id (both shown
+// in the AWS console and present in the set's ARN).
+type AWSIPSetRefCfg struct {
+	Name string `yaml:"name"`
+	ID   string `yaml:"id"`
+}
+
+// BunnyCfg holds bunny.net edge enforcer settings (issue #198). Presence of
+// the section enables the enforcer, matching the cloudflare convention.
+// APIKey must be an "env:VARNAME" reference; inline values are rejected at
+// load time like every other secret.
+//
+// The enforcer manages each configured pull zone's BlockedIps list via the
+// bunny.net pull-zone API. That list is flat (no per-entry tagging), so
+// EzyShield takes ownership of the whole list on the configured zones —
+// entries added by hand in the bunny panel are removed on reconcile.
+type BunnyCfg struct {
+	// Name is a short operator-chosen label used to disambiguate this
+	// enforcer in logs (surfaces as "bunny[<name>]"). Optional. Must match
+	// [A-Za-z0-9_-]+ and be 1..32 characters when set.
+	Name string `yaml:"name"`
+	// APIKey is the bunny.net account API key — env-reference only.
+	APIKey SecretRef `yaml:"api_key"`
+	// PullZones are the numeric pull zone IDs the blocklist applies to.
+	// At least one is required.
+	PullZones []int64 `yaml:"pull_zones"`
 }
 
 // CloudflareCfgs is a list of Cloudflare account configurations. The YAML form
@@ -312,6 +551,14 @@ type AICfg struct {
 	TokenBudgetDaily int           `yaml:"token_budget_daily"`
 	CacheTTL         Duration      `yaml:"cache_ttl"`
 	Providers        []ProviderCfg `yaml:"providers"`
+	// Async enables the second-layer analysis worker (issue #222):
+	// grey-zone episodes are queued and analyzed in the background —
+	// the pipeline never blocks on a provider; a dead provider degrades
+	// to rules-only detection.
+	Async bool `yaml:"async"`
+	// AsyncQueueSize bounds the grey-zone queue (default 256, max 65536).
+	// On overflow the OLDEST episode is dropped and counted.
+	AsyncQueueSize int `yaml:"async_queue_size"`
 }
 
 // LoadConfig reads and strictly validates the config.yaml at path.
@@ -448,6 +695,16 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("enforce.cloudflare: %w", err)
 		}
 	}
+	if c.Enforce != nil && c.Enforce.Bunny != nil {
+		if err := validateBunny(c.Enforce.Bunny); err != nil {
+			return fmt.Errorf("enforce.bunny: %w", err)
+		}
+	}
+	if c.Enforce != nil && c.Enforce.AWSWAF != nil {
+		if err := validateAWSWAF(c.Enforce.AWSWAF); err != nil {
+			return fmt.Errorf("enforce.aws_waf: %w", err)
+		}
+	}
 	if c.Notify != nil {
 		if err := validateNotify(c.Notify); err != nil {
 			return fmt.Errorf("notify: %w", err)
@@ -468,8 +725,238 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("dashboard: %w", err)
 		}
 	}
+	if c.Dashboard != nil && len(c.Dashboard.Users) > 0 {
+		if err := validateDashboardUsers(c.Dashboard.Users); err != nil {
+			return fmt.Errorf("dashboard.users: %w", err)
+		}
+	}
+	if c.Plugins != nil {
+		if err := validatePlugins(c.Plugins); err != nil {
+			return fmt.Errorf("plugins: %w", err)
+		}
+	}
+	if c.SelfCheck != nil {
+		if iv := time.Duration(c.SelfCheck.Interval); iv != 0 && iv < 10*time.Minute {
+			return fmt.Errorf("self_check: interval %s is below the 10m floor (0/omitted = default 6h)", iv)
+		}
+	}
+	if len(c.SIEM) > 0 {
+		if err := validateSIEM(c.SIEM); err != nil {
+			return fmt.Errorf("siem: %w", err)
+		}
+	}
+	if c.VerifiedBots != nil {
+		if err := validateVerifiedBots(c.VerifiedBots); err != nil {
+			return fmt.Errorf("verified_bots: %w", err)
+		}
+	}
+	if c.Retention != nil {
+		if err := validateRetention(c.Retention); err != nil {
+			return fmt.Errorf("retention: %w", err)
+		}
+	}
+	if c.DockerExec != nil {
+		for i, pat := range c.DockerExec.Ignore {
+			if _, err := path.Match(pat, "probe"); err != nil {
+				return fmt.Errorf("docker_exec.ignore[%d]: invalid pattern %q: %w", i, pat, err)
+			}
+		}
+	}
+	if c.WebshellWatch != nil {
+		if err := validateWebshellWatch(c.WebshellWatch); err != nil {
+			return fmt.Errorf("webshell_watch: %w", err)
+		}
+	}
+	if len(c.Feeds) > 0 {
+		if err := validateFeeds(c.Feeds); err != nil {
+			return fmt.Errorf("feeds: %w", err)
+		}
+	}
 	return nil
 }
+
+var validSIEMFormats = map[string]bool{"": true, "json": true, "cef": true, "rfc5424": true}
+
+// validateSIEM checks the forwarding sinks (issue #203). Plaintext tcp/udp
+// is rejected unless the operator explicitly opts in — audit events cross
+// the wire and can quote hostile-but-sensitive log content.
+func validateSIEM(list []SIEMSinkCfg) error {
+	seen := make(map[string]int, len(list))
+	for i, s := range list {
+		if s.Name == "" {
+			return fmt.Errorf("[%d]: 'name' is required", i)
+		}
+		if err := validateCFInstanceName(s.Name); err != nil {
+			return fmt.Errorf("[%d]: 'name': %w", i, err)
+		}
+		if prev, dup := seen[s.Name]; dup {
+			return fmt.Errorf("[%d]: duplicate 'name' %q (also used by [%d])", i, s.Name, prev)
+		}
+		seen[s.Name] = i
+		scheme, _, err := siem.ParseAddress(s.Address)
+		if err != nil {
+			return fmt.Errorf("[%d] %s: 'address': %w", i, s.Name, err)
+		}
+		if (scheme == "tcp" || scheme == "udp") && !s.AllowInsecureTransport {
+			return fmt.Errorf("[%d] %s: plaintext %s:// sends audit events unencrypted — use tls://, or set allow_insecure_transport: true if the network is trusted", i, s.Name, scheme)
+		}
+		if !validSIEMFormats[s.Format] {
+			return fmt.Errorf("[%d] %s: 'format' must be json|cef|rfc5424, got %q", i, s.Name, s.Format)
+		}
+		if s.CAFile != "" && scheme != "tls" {
+			return fmt.Errorf("[%d] %s: 'ca_file' only applies to tls:// addresses", i, s.Name)
+		}
+		if s.QueueSize < 0 || s.QueueSize > 65536 {
+			return fmt.Errorf("[%d] %s: 'queue_size' must be 0..65536, got %d", i, s.Name, s.QueueSize)
+		}
+		for j, ev := range s.Events {
+			if strings.TrimSpace(ev) == "" {
+				return fmt.Errorf("[%d] %s: events[%d] must not be empty", i, s.Name, j)
+			}
+		}
+	}
+	return nil
+}
+
+// Feed validation constants mirror internal/feeds (kept literal here so the
+// config package stays dependency-light; the feeds package re-checks its own
+// caps at runtime).
+const (
+	feedHardMaxEntries    = 500_000
+	feedMinRefreshSeconds = 3600
+)
+
+var validFeedFormats = map[string]bool{"plain": true, "cidr": true, "abuseipdb": true}
+
+// validateFeeds checks the reputation-feed list (issue #194): https-only
+// URLs, known formats, a 1h refresh floor, sane entry caps, unique names.
+func validateFeeds(list []FeedCfg) error {
+	seen := make(map[string]int, len(list))
+	for i, f := range list {
+		if f.Name == "" {
+			return fmt.Errorf("[%d]: 'name' is required", i)
+		}
+		if err := validateCFInstanceName(f.Name); err != nil {
+			return fmt.Errorf("[%d]: 'name': %w", i, err)
+		}
+		if prev, dup := seen[f.Name]; dup {
+			return fmt.Errorf("[%d]: duplicate 'name' %q (also used by [%d])", i, f.Name, prev)
+		}
+		seen[f.Name] = i
+		u, err := url.Parse(f.URL)
+		if err != nil || u.Host == "" {
+			return fmt.Errorf("[%d] %s: 'url' is not a valid URL", i, f.Name)
+		}
+		if u.Scheme != "https" {
+			return fmt.Errorf("[%d] %s: 'url' must be https:// — a reputation feed fetched over http can be tampered in transit", i, f.Name)
+		}
+		if !validFeedFormats[f.Format] {
+			return fmt.Errorf("[%d] %s: 'format' must be plain|cidr|abuseipdb, got %q", i, f.Name, f.Format)
+		}
+		ri := f.RefreshInterval.AsDuration()
+		if ri <= 0 {
+			return fmt.Errorf("[%d] %s: 'refresh_interval' is required (minimum 1h)", i, f.Name)
+		}
+		if ri < feedMinRefreshSeconds*time.Second {
+			return fmt.Errorf("[%d] %s: 'refresh_interval' %s is below the 1h politeness floor", i, f.Name, ri)
+		}
+		if f.MaxEntries < 0 {
+			return fmt.Errorf("[%d] %s: 'max_entries' must not be negative", i, f.Name)
+		}
+		if f.MaxEntries > feedHardMaxEntries {
+			return fmt.Errorf("[%d] %s: 'max_entries' %d exceeds the %d hard cap", i, f.Name, f.MaxEntries, feedHardMaxEntries)
+		}
+		if f.Timeout.AsDuration() < 0 {
+			return fmt.Errorf("[%d] %s: 'timeout' must not be negative", i, f.Name)
+		}
+		if f.Action != "" && f.Action != "observe" && f.Action != "block" {
+			return fmt.Errorf("[%d] %s: 'action' must be observe|block, got %q", i, f.Name, f.Action)
+		}
+		if f.TTL.AsDuration() < 0 {
+			return fmt.Errorf("[%d] %s: 'ttl' must not be negative", i, f.Name)
+		}
+	}
+	return nil
+}
+
+func validateWebshellWatch(w *WebshellWatchCfg) error {
+	if w.Enabled && len(w.Roots) == 0 {
+		return fmt.Errorf("'roots' is required when enabled (the web directories to sweep)")
+	}
+	for i, r := range w.Roots {
+		if !filepath.IsAbs(r) {
+			return fmt.Errorf("roots[%d]: %q must be an absolute path", i, r)
+		}
+	}
+	for i, e := range w.Extensions {
+		if !strings.HasPrefix(e, ".") || len(e) < 2 {
+			return fmt.Errorf("extensions[%d]: %q must start with a dot (e.g. \".php\")", i, e)
+		}
+	}
+	for i, pat := range w.Ignore {
+		if _, err := path.Match(pat, "probe"); err != nil {
+			return fmt.Errorf("ignore[%d]: invalid pattern %q: %w", i, pat, err)
+		}
+	}
+	if w.IntervalSec != 0 && w.IntervalSec < 5 {
+		return fmt.Errorf("interval_sec: %d is below the 5s floor (a hot sweep loop over web roots)", w.IntervalSec)
+	}
+	return nil
+}
+
+// validDashboardRoles is the RBAC role enum (issue #204).
+var validDashboardRoles = map[string]bool{"viewer": true, "operator": true, "admin": true}
+
+// validateDashboardUsers checks the RBAC user list (issue #204): unique
+// valid names, the role enum, and a token that MUST be an env: reference —
+// the SecretRef loader already rejects inline literals with a redacted
+// error, so here only presence is checked. Token entropy on the RESOLVED
+// value is a doctor warning (config validation never resolves secrets).
+func validateDashboardUsers(users []DashboardUserCfg) error {
+	seen := make(map[string]int, len(users))
+	for i, u := range users {
+		if u.Name == "" {
+			return fmt.Errorf("[%d]: 'name' is required", i)
+		}
+		if err := validateCFInstanceName(u.Name); err != nil {
+			return fmt.Errorf("[%d]: 'name': %w", i, err)
+		}
+		if prev, dup := seen[u.Name]; dup {
+			return fmt.Errorf("[%d]: duplicate name %q (also at [%d])", i, u.Name, prev)
+		}
+		seen[u.Name] = i
+		if !validDashboardRoles[u.Role] {
+			return fmt.Errorf("[%d] (%s): 'role' must be viewer, operator, or admin, got %q", i, u.Name, u.Role)
+		}
+		if !u.Token.IsSet() {
+			return fmt.Errorf("[%d] (%s): 'token' is required (env:VARNAME reference)", i, u.Name)
+		}
+	}
+	return nil
+}
+
+// validatePlugins checks the tier-1 plugin gate (issue #207): an enabled
+// plugin system MUST carry an explicit allowlist, and allow entries follow
+// the plugin-name grammar (lowercase, no path characters — names, never
+// paths).
+func validatePlugins(p *PluginsCfg) error {
+	if p.Enabled && len(p.Allow) == 0 {
+		return fmt.Errorf("'allow' must list at least one plugin name when enabled (explicit allowlist — no plugin runs implicitly)")
+	}
+	seen := make(map[string]int, len(p.Allow))
+	for i, name := range p.Allow {
+		if !pluginAllowNameRE.MatchString(name) {
+			return fmt.Errorf("allow[%d]: %q is not a valid plugin name (want %s)", i, name, pluginAllowNameRE)
+		}
+		if prev, dup := seen[name]; dup {
+			return fmt.Errorf("allow[%d]: duplicate name %q (also at [%d])", i, name, prev)
+		}
+		seen[name] = i
+	}
+	return nil
+}
+
+var pluginAllowNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
 
 // validateLoopbackAddr mirrors the dashboard's own startup check
 // (internal/dashboard checkLoopback, Hard Rule 2: dashboard = 127.0.0.1 only)
@@ -538,6 +1025,12 @@ func validateAI(ai *AICfg) error {
 			return fmt.Errorf("ambiguous_band: want [low, high] with 0 <= low < high <= 100, got [%d, %d] — scores in this band consult the AI; an empty or reversed band silently disables the configured provider", lo, hi)
 		}
 	}
+	if ai.AsyncQueueSize < 0 || ai.AsyncQueueSize > 65536 {
+		return fmt.Errorf("async_queue_size: must be in [0, 65536] (0 = default 256), got %d", ai.AsyncQueueSize)
+	}
+	if ai.Async && ai.Provider == "" && len(ai.Providers) == 0 {
+		return fmt.Errorf("async: true requires a configured provider")
+	}
 	return nil
 }
 
@@ -548,6 +1041,11 @@ var validParserNames = map[string]bool{
 	"apache-error": true,
 	"traefik":      true,
 	"caddy":        true,
+	"postfix":      true,
+	"dovecot":      true,
+	"vaultwarden":  true,
+	"nextcloud":    true,
+	"keycloak":     true,
 }
 
 // ValidParserNames returns the set of collector parser names accepted by config
@@ -649,6 +1147,80 @@ func validateCFInstanceName(name string) error {
 			return fmt.Errorf("must match [A-Za-z0-9_-]+")
 		}
 	}
+	return nil
+}
+
+// validateBunny checks the bunny.net edge enforcer section (issue #198):
+// the API key must be configured (env-reference only — the SecretRef loader
+// already rejects inline literals with a redacted error) and at least one
+// positive pull zone ID is required.
+func validateBunny(b *BunnyCfg) error {
+	if !b.APIKey.IsSet() {
+		return fmt.Errorf("'api_key' is required")
+	}
+	if len(b.PullZones) == 0 {
+		return fmt.Errorf("at least one 'pull_zones' entry is required")
+	}
+	seen := make(map[int64]int, len(b.PullZones))
+	for i, z := range b.PullZones {
+		if z <= 0 {
+			return fmt.Errorf("pull_zones[%d]: must be a positive pull zone ID, got %d", i, z)
+		}
+		if prev, dup := seen[z]; dup {
+			return fmt.Errorf("pull_zones[%d]: duplicate zone %d (also at [%d])", i, z, prev)
+		}
+		seen[z] = i
+	}
+	if b.Name != "" {
+		if err := validateCFInstanceName(b.Name); err != nil {
+			return fmt.Errorf("'name': %w", err)
+		}
+	}
+	return nil
+}
+
+// validateAWSWAF checks the AWS WAF edge enforcer section (issue #201, per
+// ADR-0012): scope regional|cloudfront (regional requires a region), at
+// least one fully-identified IPSet, and — because AWS credentials must
+// NEVER live in EzyShield config files — a fail-closed refusal of anything
+// that looks like pasted AWS key material in the values.
+func validateAWSWAF(a *AWSWAFCfg) error {
+	switch strings.ToLower(a.Scope) {
+	case "regional":
+		if a.Region == "" {
+			return fmt.Errorf("scope 'regional' requires 'region' (e.g. eu-west-1)")
+		}
+	case "cloudfront":
+		// The WAFv2 API pins CLOUDFRONT calls to us-east-1; a region here
+		// would be ignored, which is operator confusion — reject it.
+		if a.Region != "" && a.Region != "us-east-1" {
+			return fmt.Errorf("scope 'cloudfront' pins region us-east-1; drop 'region' (got %q)", a.Region)
+		}
+	case "":
+		return fmt.Errorf("'scope' is required: regional or cloudfront")
+	default:
+		return fmt.Errorf("'scope' must be regional or cloudfront, got %q", a.Scope)
+	}
+	if a.IPSetV4 == nil && a.IPSetV6 == nil {
+		return fmt.Errorf("at least one of 'ipset_v4'/'ipset_v6' is required")
+	}
+	for label, ref := range map[string]*AWSIPSetRefCfg{"ipset_v4": a.IPSetV4, "ipset_v6": a.IPSetV6} {
+		if ref == nil {
+			continue
+		}
+		if ref.Name == "" || ref.ID == "" {
+			return fmt.Errorf("%s: both 'name' and 'id' are required", label)
+		}
+	}
+	if a.Name != "" {
+		if err := validateCFInstanceName(a.Name); err != nil {
+			return fmt.Errorf("'name': %w", err)
+		}
+	}
+	// No pasted-credential check needed here: the loader's generic
+	// credential scan already rejects AKIA/ASIA-shaped material in ANY
+	// config field, and this struct deliberately has no credential fields
+	// at all (ADR-0012: the standard AWS chain only).
 	return nil
 }
 

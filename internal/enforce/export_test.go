@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package enforce
 
 import (
@@ -117,4 +119,44 @@ func NewCFListsEnforcerWithExpireFlush(ctx context.Context, token, baseURL, acco
 // without waiting for the background ticker (issue #445).
 func (e *CloudflareListsEnforcer) FlushRemovalsForTest(ctx context.Context) error {
 	return e.flushRemovals(ctx)
+}
+
+// ── BunnyEnforcer test helpers ───────────────────────────────────────────────
+
+// NewBunnyEnforcerForTest constructs a BunnyEnforcer with a pre-resolved
+// access key and a custom base URL, for use in tests only.
+func NewBunnyEnforcerForTest(key, baseURL string, zoneIDs []int64) *BunnyEnforcer {
+	return newBunnyEnforcerForTest(key, baseURL, zoneIDs)
+}
+
+// NewBunnyEnforcerWithAllowlist constructs a BunnyEnforcer for tests with an
+// explicit allowlist.
+func NewBunnyEnforcerWithAllowlist(key, baseURL string, zoneIDs []int64, allowlist []netip.Prefix) *BunnyEnforcer {
+	e := newBunnyEnforcerForTest(key, baseURL, zoneIDs)
+	e.allowlist = allowlist
+	return e
+}
+
+// NewBunnyEnforcerWithZoneCap constructs a BunnyEnforcer for tests with a
+// small per-zone capacity, to exercise the most-recent-first guard.
+func NewBunnyEnforcerWithZoneCap(key, baseURL string, zoneIDs []int64, cap int) *BunnyEnforcer {
+	e := newBunnyEnforcerForTest(key, baseURL, zoneIDs)
+	e.zoneCap = cap
+	return e
+}
+
+// NewBunnyEnforcerWithRetryDelays constructs a BunnyEnforcer for tests with
+// a custom (short) backoff schedule, to exercise 429/5xx retries.
+func NewBunnyEnforcerWithRetryDelays(key, baseURL string, zoneIDs []int64, delays []time.Duration) *BunnyEnforcer {
+	e := newBunnyEnforcerForTest(key, baseURL, zoneIDs)
+	e.retryDelays = delays
+	return e
+}
+
+// NewBunnyEnforcerWithName constructs a BunnyEnforcer with an operator-style
+// instance name, to verify Name() disambiguation.
+func NewBunnyEnforcerWithName(name, key, baseURL string, zoneIDs []int64) *BunnyEnforcer {
+	e := newBunnyEnforcerForTest(key, baseURL, zoneIDs)
+	e.instanceName = name
+	return e
 }

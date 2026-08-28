@@ -1,7 +1,7 @@
 ---
 title: Instalação não-interativa (Ansible, cloud-init)
 description: Provisione o EzyShield sem interação usando um arquivo de respostas
-order: 6
+order: 8
 ---
 
 # Instalação não-interativa (automação)
@@ -88,6 +88,34 @@ enforce:
       # NOME da variável de ambiente que guarda o token. Opcional; derivado de
       # `name` quando omitido (CLOUDFLARE_API_TOKEN, ou CLOUDFLARE_API_TOKEN_<NOME>).
       api_token_env: CLOUDFLARE_API_TOKEN
+
+# ── Canais de notificação (opcional) ───────────────────────────────────────
+# Uma instância por tipo de canal. Segredos seguem a mesma regra de todo
+# este arquivo: as chaves *_env carregam NOMES de variáveis de ambiente —
+# um token/URL/senha literal no answers file é rejeitado antes de qualquer
+# escrita. As variáveis referenciadas são stubadas no .env como placeholders.
+notify:
+  telegram:
+    chat_ids: ["-1001234567890"]        # obrigatório
+    severity: [critical]                # opcional; vazio = todas
+    bot_token_env: TELEGRAM_BOT_TOKEN   # opcional; este é o padrão
+  email:
+    from: ezyshield@example.com         # obrigatório
+    to: [admin@example.com]             # obrigatório
+    host: smtp.example.com              # obrigatório
+    port: 587                           # opcional (padrão 587)
+    username: ezyshield@example.com     # opcional; vazio = sem auth
+    tls: starttls                       # starttls | tls | none (padrão starttls)
+    password_env: SMTP_PASSWORD         # opcional; padrão quando há username
+  slack:
+    channel: "#security"                # opcional
+    webhook_url_env: SLACK_WEBHOOK_URL  # opcional; este é o padrão
+  discord:
+    webhook_url_env: DISCORD_WEBHOOK_URL
+  webhook:
+    url_env: WEBHOOK_URL
+    auth_header_name: Authorization     # opcional
+    auth_header_value_env: WEBHOOK_AUTH_HEADER
 ```
 
 O enforcement local via `nftables` é habilitado automaticamente quando o `nft` é

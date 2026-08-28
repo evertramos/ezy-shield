@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package ai
 
 // Issue #422: Consume attributes usage to the analyzed IP in canonical form.

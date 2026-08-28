@@ -1,7 +1,7 @@
 ---
 title: Customizing Detection Rules
 description: Tune or add rules with rules.d drop-ins that survive updates
-order: 5
+order: 7
 ---
 
 # Customizing Detection Rules
@@ -63,6 +63,40 @@ rules:
 The rule schema (fields, matchers, windows) is documented in
 [Getting Started §6](../getting-started/index.md); the full current ruleset
 ships as `/etc/ezyshield/rules.yaml.example` for reference.
+
+## Test a rule before enabling it
+
+Writing a rule blind — enable it and wait — is how false positives ship.
+`rule test` dry-evaluates one rule against the event history the daemon
+already stores, with **zero side effects** (no strikes, no bans, no audit
+writes; the daemon doesn't even need to be running):
+
+```console
+$ ezyshield rule test ssh_bruteforce_daily --since 7d
+Rule test: ssh_bruteforce_daily
+  kinds: ssh_fail, ssh_invalid_user | window: 24h0m0s | threshold: 5 | ...
+
+  Would have fired : 12 time(s)
+  Unique IPs       : 4
+  Allowlisted hits : 1 — this rule would fire on protected addresses; tune it before enabling
+```
+
+The argument is a loaded rule's name (built-in or drop-in) or a path to a
+standalone YAML file — so you can test `rules.d/60-admin-panel.yaml`
+*before* copying it into place. The rule goes through the same fail-closed
+validation as the daemon's loader first; an invalid rule is a clear error
+and a non-zero exit.
+
+The **allowlisted hits** line is the false-positive early warning: it counts
+would-be detections on addresses covered by your `allowlist`/`admin_cidrs`
+or the runtime allowlist. A rule that fires on your own ranges needs tuning,
+not enabling. `--json` gives the full result for scripting.
+
+Honest limitation: evaluation uses the stored hourly aggregates, so
+granularity is bounded by 1-hour buckets and by retention — and only kinds
+referenced by long-window (>1h) rules are persisted at all. Field-level
+matchers (`field`/`value`/`contains`) can't be applied to counts, so such
+rules are reported as a kind-level **upper bound**, loudly marked.
 
 ## WordPress installs
 

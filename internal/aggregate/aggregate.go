@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package aggregate provides per-IP sliding-window event aggregation.
 // The Aggregator is safe for concurrent use. All methods honour context
 // cancellation where a loop is involved.

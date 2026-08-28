@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package daemon
 
 import (
@@ -35,7 +37,47 @@ const (
 	socketPerm = 0o660
 	// connDeadline is the read/write deadline per connection.
 	connDeadline = 10 * time.Second
+	// roSocketName is the read-only companion socket (issue #212), created
+	// next to the primary socket and group-owned by ownership.ViewGroup.
+	roSocketName = "ezyshield-ro.sock"
 )
+
+// ROSocketPath returns the read-only socket path for a given primary control
+// socket path: the same directory, fixed name roSocketName.
+func ROSocketPath(socketPath string) string {
+	return filepath.Join(filepath.Dir(socketPath), roSocketName)
+}
+
+// readOnlyVerbs is the CLOSED allowlist of verbs served on the read-only
+// socket (issue #212). Everything else — including verbs added in the
+// future — is denied there by default: a new verb only becomes visible to
+// the viewer tier by being added here deliberately.
+var readOnlyVerbs = map[string]bool{
+	"status":       true,
+	"list":         true,
+	"list_allow":   true,
+	"events":       true,
+	"report":       true,
+	"subscribe":    true,
+	"metrics":      true,
+	"feeds_status": true,
+}
+
+// mutatingVerbs lists every known verb with write authority; each request
+// for one is recorded in the append-only audit journal with the requesting
+// peer credential (SO_PEERCRED), successful or not.
+var mutatingVerbs = map[string]bool{
+	"arm":           true,
+	"arm_keep":      true,
+	"disarm":        true,
+	"ban":           true,
+	"unban":         true,
+	"allow":         true,
+	"unallow":       true,
+	"feeds_refresh": true,
+	"disable_all":   true,
+	"prune":         true,
+}
 
 // ErrSocketInUse is returned by ProbeSocket when another daemon is already
 // listening on the control socket. Daemon.Run surfaces this before starting so
@@ -105,32 +147,58 @@ func (d *Daemon) serveSocket(ctx context.Context) {
 		return
 	}
 
+	ln := d.bindControlSocket(ctx, d.socketPath, ownership.Group)
+	if ln == nil {
+		return
+	}
+	slog.InfoContext(ctx, "daemon: control socket listening", "path", d.socketPath)
+
+	// Read-only companion socket (issue #212): same wire protocol, but only
+	// the readOnlyVerbs allowlist is served. Group ezyshield-view + mode
+	// 0660 means the kernel enforces WHO can connect; the verb allowlist
+	// enforces WHAT they can do. A bind failure here degrades to
+	// primary-socket-only operation — never a daemon startup failure.
+	roPath := ROSocketPath(d.socketPath)
+	if roPath != d.socketPath {
+		if roLn := d.bindControlSocket(ctx, roPath, ownership.ViewGroup); roLn != nil {
+			slog.InfoContext(ctx, "daemon: read-only control socket listening",
+				"path", roPath, "group", ownership.ViewGroup)
+			go d.acceptLoop(ctx, roLn, true)
+		}
+	}
+
+	d.acceptLoop(ctx, ln, false)
+}
+
+// bindControlSocket binds one unix control socket at path with the shared
+// permission model (group-owned, mode 0660). Returns nil on failure (logged).
+func (d *Daemon) bindControlSocket(ctx context.Context, path, group string) net.Listener {
 	// Remove a stale socket from a previous run — ProbeSocket in Run has
-	// already confirmed nothing is listening here.
-	_ = os.Remove(d.socketPath)
+	// already confirmed no live daemon owns the primary socket (and the RO
+	// socket is only ever bound by the daemon that owns the primary).
+	_ = os.Remove(path)
 
 	lc := net.ListenConfig{}
-	ln, err := lc.Listen(ctx, "unix", d.socketPath)
+	ln, err := lc.Listen(ctx, "unix", path)
 	if err != nil {
 		slog.ErrorContext(ctx, "daemon: socket listen failed",
-			"path", d.socketPath, "err", err)
-		return
+			"path", path, "err", err)
+		return nil
 	}
 
 	// Set permissions immediately after bind so a window between bind and chmod
 	// is as narrow as possible. The standard for security daemons (fail2ban,
-	// sshguard) is group=ezyshield 0660 so admins in the group can use the
-	// control socket without sudo — see issue #6.
-	if err := ownership.ChownToGroup(d.socketPath, ownership.Group); err != nil {
-		slog.WarnContext(ctx, "daemon: could not set control socket group; admins may need sudo until 'ezyshield init' creates the group",
-			"path", d.socketPath, "group", ownership.Group, "err", err)
+	// sshguard) is group ownership + 0660 so members can use the socket
+	// without sudo — see issues #6 and #212. When the group does not exist
+	// the socket stays root-owned 0660: fail closed, root-only access.
+	if err := ownership.ChownToGroup(path, group); err != nil {
+		slog.WarnContext(ctx, "daemon: could not set control socket group; only root can use it until the group exists",
+			"path", path, "group", group, "err", err)
 	}
-	if err := os.Chmod(d.socketPath, socketPerm); err != nil {
+	if err := os.Chmod(path, socketPerm); err != nil {
 		slog.WarnContext(ctx, "daemon: socket chmod failed",
-			"path", d.socketPath, "err", err)
+			"path", path, "err", err)
 	}
-
-	slog.InfoContext(ctx, "daemon: control socket listening", "path", d.socketPath)
 
 	// Close the listener when the context is cancelled so Accept unblocks.
 	// The ListenConfig.Listen call already wires ctx cancellation to ln.Close()
@@ -139,7 +207,12 @@ func (d *Daemon) serveSocket(ctx context.Context) {
 		<-ctx.Done()
 		_ = ln.Close()
 	}()
+	return ln
+}
 
+// acceptLoop serves one listener until ctx is done. readOnly marks every
+// connection from this listener as viewer-tier.
+func (d *Daemon) acceptLoop(ctx context.Context, ln net.Listener, readOnly bool) {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -149,12 +222,20 @@ func (d *Daemon) serveSocket(ctx context.Context) {
 			slog.ErrorContext(ctx, "daemon: socket accept error", "err", err)
 			continue
 		}
-		go d.handleConn(ctx, conn)
+		go d.handleConnScoped(ctx, conn, readOnly)
 	}
 }
 
-// handleConn decodes one SocketRequest, dispatches it, and encodes the response.
+// handleConn is the full-access entry point (primary socket and tests).
 func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
+	d.handleConnScoped(ctx, conn, false)
+}
+
+// handleConnScoped decodes one SocketRequest, enforces the connection's
+// access tier, dispatches it, and encodes the response. Mutating verbs are
+// recorded in the append-only audit journal with the requesting peer
+// credential (SO_PEERCRED) — successful or not.
+func (d *Daemon) handleConnScoped(ctx context.Context, conn net.Conn, readOnly bool) {
 	defer func() { _ = conn.Close() }()
 
 	deadline := time.Now().Add(connDeadline)
@@ -163,6 +244,24 @@ func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
 	var req SocketRequest
 	if err := json.NewDecoder(conn).Decode(&req); err != nil {
 		writeResponse(conn, SocketResponse{Error: fmt.Sprintf("decode request: %v", err)})
+		return
+	}
+
+	// Deny by default on the read-only tier: only the closed readOnlyVerbs
+	// allowlist passes; every other verb — mutating, unknown, or future —
+	// requires the operator socket.
+	if readOnly && !readOnlyVerbs[req.Verb] {
+		uid, gid, credOK := peerCredOf(conn)
+		slog.WarnContext(ctx, "daemon: read-only socket refused verb",
+			"verb", req.Verb, "peer_uid", uid, "peer_gid", gid, "peer_known", credOK)
+		// A viewer attempting a write verb is a security-relevant event:
+		// journal the refusal with the peer credential.
+		if mutatingVerbs[req.Verb] {
+			d.auditSocketCmd(ctx, conn, req, false)
+		}
+		writeResponse(conn, SocketResponse{Error: fmt.Sprintf(
+			"read-only socket: verb %q requires the operator socket (group %s)",
+			req.Verb, ownership.Group)})
 		return
 	}
 
@@ -196,11 +295,50 @@ func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
 		resp = d.handleAllow(ctx, req)
 	case "unallow":
 		resp = d.handleUnallow(ctx, req)
+	case "metrics":
+		resp = d.handleMetrics(ctx)
+	case "feeds_status":
+		resp = d.handleFeedsStatus(ctx)
+	case "feeds_refresh":
+		resp = d.handleFeedsRefresh(ctx, req)
+	case "disable_all":
+		resp = d.handleDisableAll(ctx)
+	case "prune":
+		resp = d.handlePrune(ctx, req)
 	default:
-		resp = SocketResponse{Error: fmt.Sprintf("unknown verb %q; valid: status list list_allow events subscribe report arm arm_keep disarm ban unban allow unallow", req.Verb)}
+		resp = SocketResponse{Error: fmt.Sprintf("unknown verb %q; valid: status list list_allow events subscribe report arm arm_keep disarm ban unban allow unallow disable_all prune feeds_status feeds_refresh metrics", req.Verb)}
+	}
+
+	// Audit attribution (issue #212): every mutating verb request — refused
+	// ones included — lands in the append-only journal with the peer
+	// credential, so "who disarmed / who unbanned" is always answerable.
+	if mutatingVerbs[req.Verb] {
+		d.auditSocketCmd(ctx, conn, req, resp.Error == "")
 	}
 
 	writeResponse(conn, resp)
+}
+
+// auditSocketCmd appends one audit entry for a mutating socket request.
+// The target is length-capped; renderers sanitize on display like every
+// other audit reason.
+func (d *Daemon) auditSocketCmd(ctx context.Context, conn net.Conn, req SocketRequest, ok bool) {
+	uid, gid, credOK := peerCredOf(conn)
+	peer := "peer=unknown"
+	if credOK {
+		peer = fmt.Sprintf("peer_uid=%d peer_gid=%d", uid, gid)
+	}
+	target := req.IP
+	if len(target) > 64 {
+		target = target[:64]
+	}
+	reason := fmt.Sprintf("verb=%s ok=%t %s", req.Verb, ok, peer)
+	if target != "" {
+		reason = fmt.Sprintf("verb=%s target=%s ok=%t %s", req.Verb, target, ok, peer)
+	}
+	if err := d.store.AuditSystem(ctx, "socket_cmd", reason); err != nil {
+		slog.ErrorContext(ctx, "daemon: audit socket_cmd failed", "verb", req.Verb, "err", err)
+	}
 }
 
 // subscribeWriteTimeout bounds each event write to a subscriber so a stuck

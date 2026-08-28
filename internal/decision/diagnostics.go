@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package decision
 
 // diagnostics.go — delivery hook for enforcement-anomaly signals

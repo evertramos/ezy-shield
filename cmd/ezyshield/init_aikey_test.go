@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 import (
@@ -56,7 +58,7 @@ func runAskQuestionsWithAI(t *testing.T, input string) (*wizardState, string) {
 	}
 	sc := bufio.NewScanner(strings.NewReader(input))
 	out := captureStdout(t, func() {
-		askQuestions(os.Stdout, sc, state, false, styler{})
+		askQuestions(os.Stdout, sc, state, false, styler{}, t.TempDir())
 	})
 	return state, out
 }
@@ -467,7 +469,7 @@ func TestInit_YesMode_NoKeyPrompt(t *testing.T) {
 	}
 	out := captureStdout(t, func() {
 		// yes=true — askQuestions skips the key prompt entirely.
-		askQuestions(os.Stdout, nil, state, true, styler{})
+		askQuestions(os.Stdout, nil, state, true, styler{}, t.TempDir())
 	})
 
 	if tokenReaderCalled {

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package daemon
 
 // collhealth.go — honest observation-path reporting (issue #456), the

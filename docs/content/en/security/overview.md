@@ -137,6 +137,33 @@ EzyShield opens no network listener for control (the optional dashboard binds to
 - CLI: `ezyshield ban`, `ezyshield list`, etc. (local only)
 - Unix socket: `/run/ezyshield/ezyshield.sock` (filesystem permissions)
 
+## Control-socket access tiers
+
+Socket access is kernel-enforced by unix group membership; the daemon adds
+a verb allowlist on top (issue #212). Who can do what:
+
+| Tier | Socket | Group | Verbs |
+|---|---|---|---|
+| Operator | `ezyshield.sock` | `ezyshield` | everything: read verbs plus `ban`, `unban`, `allow`, `unallow`, `arm`, `disarm`, `disable_all`, `prune`, `feeds_refresh` |
+| Viewer | `ezyshield-ro.sock` | `ezyshield-view` | read only: `status`, `list`, `list_allow`, `events`, `report`, `subscribe` (watch), `metrics`, `feeds_status` |
+
+Both sockets are mode `0660` and — like unix sockets in general — are NOT
+network listeners. The viewer allowlist is **closed and deny-by-default**:
+a verb added in the future is refused on the read-only socket until it is
+deliberately classified as read-only. Membership in `ezyshield-view` can
+never mutate state — no unban, no disarm, no allowlist edits.
+
+Both packages' postinstall create the two groups; add a monitoring user
+with `usermod -aG ezyshield-view <user>`. The CLI falls back to the
+read-only socket automatically when the operator socket denies permission,
+so viewer-tier users run `ezyshield status`, `list`, `watch`, and `report`
+with no extra flags.
+
+Every mutating verb request — refused ones included — is recorded in the
+append-only audit journal as a `socket_cmd` entry carrying the requesting
+peer's uid/gid (`SO_PEERCRED`), so "who disarmed the daemon?" is always
+answerable.
+
 ## Data flow
 
 Every outbound connection EzyShield can make — AI providers, Cloudflare,

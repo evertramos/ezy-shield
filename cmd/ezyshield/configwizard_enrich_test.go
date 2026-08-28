@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // Tests for `config enrich maxmind` (issue #168). Secret discipline mirrors

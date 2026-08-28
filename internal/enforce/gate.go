@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package enforce
 
 // gate.go — centralized allowlist / anti-lockout gate ahead of the enforcer
@@ -229,4 +231,13 @@ func gateKey(t sdk.Target) string {
 	default:
 		return t.Country
 	}
+}
+
+// LastSyncRepairs forwards the optional SyncRepairReporter facet
+// (issue #214) so the daemon can audit reconcile repairs through the Gate.
+func (g *Gate) LastSyncRepairs() (added, removed int, firstSync bool) {
+	if r, ok := g.inner.(SyncRepairReporter); ok {
+		return r.LastSyncRepairs()
+	}
+	return 0, 0, false
 }

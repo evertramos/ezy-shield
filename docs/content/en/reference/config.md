@@ -58,7 +58,7 @@ collectors:
 | `path` | for `file` | file to tail |
 | `unit` | for `journald` | systemd unit to follow |
 | `container` | for `docker` | container name, short ID, or full ID |
-| `parser` | no | force a parser: `nginx` \| `ssh` \| `apache` \| `apache-error` \| `traefik` \| `caddy` (default: routed automatically from the source). `apache` reads the Apache **access** log (combined format, shared with `nginx`); `apache-error` reads the Apache **error_log** (`error.log` / `error_log`). **Honored only for `file` and `docker` collectors** — `journald` ignores it and always routes its parser from the unit. |
+| `parser` | no | force a parser: `nginx` \| `ssh` \| `apache` \| `apache-error` \| `traefik` \| `caddy` \| `postfix` \| `dovecot` (default: routed automatically from the source). `apache` reads the Apache **access** log (combined format, shared with `nginx`); `apache-error` reads the Apache **error_log** (`error.log` / `error_log`); `postfix` reads Postfix smtpd lines (`mail.log` / `maillog`, or the `postfix` / `postfix@*` journald units — SASL auth failures, relay-denied rejects, and connection-abuse signatures become `smtp_auth_fail` / `smtp_relay_denied` / `smtp_abuse` events); `dovecot` reads Dovecot login-process lines (`dovecot.log`, or the `dovecot` journald unit — IMAP/POP3 auth failures become `imap_auth_fail` and credential-less probes `imap_probe`; on shared `mail.log` setups, which route to `postfix` first, use the journald unit or this explicit override). **Honored only for `file` and `docker` collectors** — `journald` ignores it and always routes its parser from the unit. |
 
 ### SSH collector (unit name varies by distro)
 
@@ -150,6 +150,47 @@ and harmless, while a delayed *ban* is real exposure — which is why bans ride
 unban` also propagates to the edge on the flush cadence (the local nftables
 unban is immediate).
 
+### bunny
+
+bunny.net edge enforcement via each pull zone's blocked-IP list. Presence of the section enables it. **EzyShield takes ownership of the blocked-IP list** on the configured zones — entries added by hand in the bunny panel are removed on reconcile. See the [bunny.net guide](../guides/bunny.md).
+
+```yaml
+enforce:
+  bunny:
+    api_key: env:BUNNY_API_KEY   # secrets are env: references, never inline
+    pull_zones: [123456, 234567] # numeric pull zone IDs
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `api_key` | yes | `env:VARNAME` reference to the bunny.net account API key |
+| `pull_zones` | yes | numeric pull zone IDs (at least one, positive, unique) |
+| `name` | no | label shown in logs as `bunny[<name>]` |
+
+The enforcer caps each zone at 500 blocked IPs (bunny does not document a provider limit); beyond that the most recent bans win, with a warning.
+
+### aws_waf
+
+AWS WAFv2 edge enforcement via dedicated IPSets referenced from your WebACL rules (ADR-0012). Presence of the section enables it. EzyShield only mutates the member addresses of the IPSets designated here — it **never touches WebACLs**. Credentials come from the standard AWS chain (env vars, `~/.aws/credentials`, IMDSv2) and must never appear in this file; validation rejects pasted key material. See the [AWS WAF guide](../guides/aws-waf.md).
+
+```yaml
+enforce:
+  aws_waf:
+    scope: regional            # regional (needs region) or cloudfront (pins us-east-1)
+    region: eu-west-1
+    ipset_v4: {name: ezyshield-v4, id: aaaabbbb-cccc-dddd-eeee-ffff00001111}
+    ipset_v6: {name: ezyshield-v6, id: aaaabbbb-cccc-dddd-eeee-ffff00002222}
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `scope` | yes | `regional` (ALB/API Gateway) or `cloudfront` (global) |
+| `region` | for `regional` | AWS region of the IPSets |
+| `ipset_v4` / `ipset_v6` | at least one | `name` + `id` of each designated IPSet |
+| `name` | no | label shown in logs as `awswaf[<name>]` |
+
+Each IPSet holds at most 10,000 addresses (AWS limit); beyond that the most recent bans win, with a warning.
+
 ## notify
 
 ```yaml
@@ -233,6 +274,49 @@ ai:
 
 The AI verdict is always advisory: schema-validated, clamped by policy, and never able to ban an allowlisted IP.
 
+### Async second layer (`async: true`)
+
+```yaml
+ai:
+  provider: anthropic
+  api_key: env:ANTHROPIC_API_KEY
+  async: true                # analyze grey-zone traffic in the background
+  # async_queue_size: 256    # bounded queue; overflow drops the OLDEST episode
+```
+
+With `async: true` the pipeline **never waits for a provider**: grey-zone
+episodes (scores inside the ambiguous band) are queued — one entry per IP
+at a time — and a background worker drains them, rate-capped at one
+provider call per second. How the layer stays token-frugal:
+
+1. The rule engine decides the obvious cases; only the ambiguous band ever
+   enqueues (the same #419 gates apply — decisive scores and already-banned
+   IPs never spend tokens).
+2. The **Log Cleaner** runs before every call: static-asset noise is
+   dropped from the samples, already-decided episodes (banned/allowlisted
+   since queueing) are skipped, and the reduction is exposed as
+   `ezyshield_ai_cleaner_reduction_permille`.
+3. The provider receives only compact aggregates — counts, kind
+   distributions, enrichment, and a sanitized behavior summary (top paths
+   with querystrings cut, methods, status classes, capped user agents).
+   Raw log lines never enter a payload.
+
+Returned verdicts flow through the decision engine like any other verdict
+source: allowlist-wins, anti-lockout, and policy clamps all apply. A slow
+or dead provider degrades to rules-only detection — the bounded queue
+drops the oldest episode on overflow (`ezyshield_ai_queue_dropped_total`).
+The **agreement-rate metric** `ezyshield_ai_agreement_total`
+(`<provider>_agree` / `<provider>_disagree`, compared against the rule
+engine at the ban threshold) is the published proof the layer earns its
+tokens.
+
+Token cost expectations: one grey-zone episode costs one compact prompt
+(typically a few hundred input tokens) per un-cached behavior signature;
+the cache, the per-IP dedupe, and the #419 gates mean bursts do not
+multiply spend. For a **fully local** deployment use `provider: ollama` —
+the async layer works identically with zero outbound traffic and no API
+key.
+
 Every AI call is recorded in the `ai_usage` table with the analyzed IP, so cost attribution is a single query — the top spenders (an IP draining the budget is itself a leakage symptom):
 
 ```bash
@@ -241,6 +325,43 @@ sudo sqlite3 /var/lib/ezyshield/ezyshield.db \
    FROM ai_usage WHERE ip IS NOT NULL
    GROUP BY ip ORDER BY usd DESC LIMIT 10;"
 ```
+
+## self_check
+
+Periodic hardening self-check — **on by default, no section needed**.
+Every 6 hours the daemon re-runs the read-only systemd checks from
+`ezyshield doctor` (effective `RestrictAddressFamilies`/`AF_NETLINK` for
+the enforcer, `RuntimeDirectory` for both services — drop-in aware via
+`systemctl show`) plus the functional netlink probe against the running
+enforcer helper. This catches the silent-non-enforcement drift (a
+hand-edited unit) **before** the next service restart makes it bite,
+without you remembering to run doctor.
+
+Notification semantics — transitions only:
+
+- healthy → degraded: **one CRITICAL** notification naming the failing
+  check (plus an append-only `selfcheck_degraded` audit entry);
+- degraded → healthy: **one INFO** notification (`selfcheck_recovered`);
+- steady state: silence.
+
+Hosts without systemd, units not installed, or an older helper: those
+checks report N/A and count as healthy — script/manual installs stay
+quiet. The self-check is strictly read-only: it never edits units and
+never restarts services; the fix always remains a copy-paste hint.
+
+**Disabling it** (minimal installs, or hosts where periodic
+`systemctl show` calls are undesirable):
+
+```yaml
+self_check:
+  enabled: false     # opt out entirely — doctor remains available on demand
+  # interval: 6h     # cadence when enabled; default 6h, floor 10m
+```
+
+| Field | Description |
+|-------|-------------|
+| `enabled` | omitted = `true`; `false` disables the periodic self-check entirely |
+| `interval` | Go duration between runs; default `6h`, floor `10m` |
 
 ## enrich
 
@@ -280,6 +401,18 @@ The key is a secret like any other: put `MAXMIND_LICENSE_KEY=...` in `/etc/ezysh
 |-------|---------|-------------|
 | `addr` | `127.0.0.1:9090` | Bind address — **loopback only**; non-loopback binds are refused at startup |
 | `auth_db_path` | `<data_dir>/dashboard.db` | Dashboard auth database |
+
+## webshell_watch
+
+Opt-in webshell-drop tripwire: sweeps web roots for new or modified executable web files. Purely observational — audit + notification, never a ban. See the [Webshell Tripwire guide](../guides/webshell-tripwire.md).
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `false` | Opt-in switch |
+| `roots` | — | Absolute web-root directories to sweep (**required** when enabled) |
+| `extensions` | `.php, .phtml, .php5, .php7, .phar` | Watched extensions (leading dot) |
+| `ignore` | `[]` | Path patterns to skip — `path.Match` globs, or substring when the pattern has no glob metacharacters |
+| `interval_sec` | `10` | Sweep cadence in seconds (floor 5) |
 
 ## Minimal example
 

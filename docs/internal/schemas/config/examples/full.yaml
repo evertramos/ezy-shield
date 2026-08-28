@@ -39,6 +39,16 @@ enforce:
       mode: rulesets
       zone_ids: [zone-fixture-2]
       action: challenge
+  aws_waf:
+    name: edge
+    scope: regional
+    region: eu-west-1
+    ipset_v4:
+      name: ezyshield-v4
+      id: aaaabbbb-cccc-dddd-eeee-ffff00001111
+    ipset_v6:
+      name: ezyshield-v6
+      id: aaaabbbb-cccc-dddd-eeee-ffff00002222
 
 ai:
   provider: anthropic
@@ -47,6 +57,8 @@ ai:
   ambiguous_band: [30, 69]
   token_budget_daily: 200000
   cache_ttl: 15m
+  async: true
+  async_queue_size: 256
   providers:
     - name: anthropic
       priority: 0
@@ -92,3 +104,16 @@ enrich:
 dashboard:
   addr: 127.0.0.1:9090
   auth_db_path: /var/lib/ezyshield/dashboard.db
+  users:
+    - {name: vera, role: viewer, token: env:EZYSHIELD_DASH_VERA_TOKEN}
+    - {name: omar, role: operator, token: env:EZYSHIELD_DASH_OMAR_TOKEN}
+    - {name: ada, role: admin, token: env:EZYSHIELD_DASH_ADA_TOKEN}
+
+self_check:
+  enabled: true
+  interval: 6h
+
+plugins:
+  enabled: true
+  allow:
+    - example-parser

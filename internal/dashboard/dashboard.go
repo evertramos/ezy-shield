@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package dashboard implements the localhost-only web UI for EzyShield.
 //
 // The dashboard binds exclusively to loopback addresses (127.0.0.1 or ::1).
@@ -49,6 +51,15 @@ type Config struct {
 	// Logger is the structured logger for server events. If nil,
 	// slog.Default() is used.
 	Logger *slog.Logger
+	// MetricsOpen serves GET /metrics without session auth (issue #183).
+	// The zero value keeps auth required; opening is safe only because the
+	// listener is loopback-only, and the route stays throttled either way.
+	MetricsOpen bool
+	// Users are the config-provisioned RBAC users (issue #204), tokens
+	// already resolved from their env references by the caller. Empty
+	// keeps the legacy model: the auth-DB password admin only, which
+	// remains an implicit admin either way (backwards compatibility).
+	Users []AuthUser
 }
 
 // Server is a localhost-only HTTP server for the EzyShield dashboard.
@@ -64,15 +75,21 @@ type Server struct {
 	store     *authStore
 	sessions  *sessionStore
 	throttle  *loginThrottle
-	mux       *http.ServeMux
-	srv       *http.Server
-	bus       *eventBus
+	// metricsLimit throttles the /metrics route (issue #183).
+	metricsLimit *metricsThrottle
+	mux          *http.ServeMux
+	srv          *http.Server
+	bus          *eventBus
 	// decoyHash is a valid PBKDF2 hash of a random string, computed once at
 	// server construction. When a login POST references an unknown user,
 	// the handler runs verifyPassword against this decoy so both paths pay
 	// the same ~300 ms PBKDF2 cost — the enumeration guard becomes
 	// constant-time (CWE-208).
 	decoyHash string
+	// users holds the config-provisioned RBAC users (issue #204). The
+	// auth-DB password admin remains an implicit RoleAdmin outside this
+	// set (backwards compatibility with the single-credential model).
+	users *userSet
 }
 
 // New constructs a Server and opens the auth store. It rejects non-loopback
@@ -109,17 +126,27 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("dashboard: hash decoy password: %w", err)
 	}
 	s := &Server{
-		cfg:       cfg,
-		boundAddr: cfg.Addr,
-		logger:    cfg.Logger,
-		store:     store,
-		sessions:  newSessionStore(cfg.SessionTimeout, cfg.Logger),
-		throttle:  newLoginThrottle(),
-		decoyHash: decoyHash,
+		cfg:          cfg,
+		boundAddr:    cfg.Addr,
+		logger:       cfg.Logger,
+		store:        store,
+		sessions:     newSessionStore(cfg.SessionTimeout, cfg.Logger),
+		throttle:     newLoginThrottle(),
+		metricsLimit: newMetricsThrottle(),
+		decoyHash:    decoyHash,
+		users:        newUserSet(cfg.Users),
 	}
 	s.bus = newEventBus(s.fetchEvents, cfg.Logger)
 	s.mux = s.routes()
 	return s, nil
+}
+
+// ReloadUsers swaps the config-provisioned RBAC user set (issue #204).
+// Roles are looked up per request, so the swap re-evaluates every live
+// session immediately: a demoted user loses the privilege on their next
+// request, and a removed user's sessions stop authorizing anything.
+func (s *Server) ReloadUsers(users []AuthUser) {
+	s.users.replace(users)
 }
 
 // EnsureAdmin creates the default "admin" account when the store is empty and

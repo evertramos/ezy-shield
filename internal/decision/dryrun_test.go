@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package decision_test
 
 // Tests for ADR-0009 §5 (issue #145): dry-run mirrors armed semantics.

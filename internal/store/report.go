@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package store
 
 // Per-IP read queries backing the daemon's "report" verb (issue #54).

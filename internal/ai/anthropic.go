@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package ai implements AI providers for EzyShield's threat analysis pipeline.
 // Aggregates are passed as structured JSON data; AI output is treated as advisory
 // and re-validated by the policy engine before any enforcement action.
@@ -130,6 +132,9 @@ type aggregatePayload struct {
 	Count  int            `json:"count"`
 	Kinds  map[string]int `json:"kinds"`
 	Enrich enrichPayload  `json:"enrichment"`
+	// Behavior is the compact, sanitized summary from behavior.go (issue
+	// #222) — the ONLY sample-derived data that ever reaches a provider.
+	Behavior *sdk.BehaviorSummary `json:"behavior,omitempty"`
 }
 
 type enrichPayload struct {
@@ -145,10 +150,11 @@ func buildPayload(batch []sdk.Aggregate) ([]byte, error) {
 	items := make([]aggregatePayload, len(batch))
 	for i, agg := range batch {
 		items[i] = aggregatePayload{
-			IP:     agg.IP.String(),
-			Window: agg.Window.String(),
-			Count:  agg.Count,
-			Kinds:  agg.Kinds,
+			IP:       agg.IP.String(),
+			Window:   agg.Window.String(),
+			Count:    agg.Count,
+			Kinds:    agg.Kinds,
+			Behavior: agg.Behavior,
 			Enrich: enrichPayload{
 				Country:    agg.Enrich.Country,
 				ASN:        agg.Enrich.ASN,

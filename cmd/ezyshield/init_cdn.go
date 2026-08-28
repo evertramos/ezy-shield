@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // CDN detection + Cloudflare edge-enforcer subflow for `ezyshield init`.
@@ -56,6 +58,18 @@ type cdnStep struct {
 	// accounts, each with its own token). Only populated when cfEnabled is
 	// true and every entry passed validation.
 	cfAccounts []cfAccountSetup
+	// bunnyEnabled / bunnyAttempted / bunny mirror the cf* fields for the
+	// bunny.net subflow (issue #198). bunny is only set when bunnyEnabled is
+	// true and validation passed.
+	bunnyEnabled   bool
+	bunnyAttempted bool
+	bunny          *bunnySetup
+	// awsWAF* mirror the same pattern for the AWS WAF subflow (issue
+	// #201). No secret material exists in awsWAFSetup — AWS credentials
+	// come from the standard chain, never from EzyShield files.
+	awsWAFEnabled   bool
+	awsWAFAttempted bool
+	awsWAF          *awsWAFSetup
 }
 
 // cfAccountSetup is one configured Cloudflare account: the config.yaml entry
@@ -86,8 +100,9 @@ func (c *cdnStep) String() string {
 	for _, a := range c.cfAccounts {
 		accts = append(accts, a.String())
 	}
-	return fmt.Sprintf("cdnStep{vhosts=%d detected=%d cfEnabled=%v accounts=[%s]}",
-		len(c.vhosts), len(c.detected), c.cfEnabled, strings.Join(accts, " "))
+	return fmt.Sprintf("cdnStep{vhosts=%d detected=%d cfEnabled=%v accounts=[%s] bunnyEnabled=%v bunny=%s}",
+		len(c.vhosts), len(c.detected), c.cfEnabled, strings.Join(accts, " "),
+		c.bunnyEnabled, c.bunny.String())
 }
 
 // String on cfAccountSetup masks the token for the same reason.
@@ -147,6 +162,12 @@ type cdnDeps struct {
 	// CFAPIBaseURL overrides https://api.cloudflare.com/client/v4 for
 	// tests. Empty means the real endpoint.
 	CFAPIBaseURL string
+	// BunnyAPIBaseURL overrides https://api.bunny.net for tests. Empty
+	// means the real endpoint (issue #198).
+	BunnyAPIBaseURL string
+	// AWSWAFEndpoint overrides the wafv2 API endpoint for tests. Empty
+	// means the real per-region endpoint (issue #201).
+	AWSWAFEndpoint string
 	// Yes mirrors the wizard's --yes flag: when true, prompts are skipped
 	// entirely (the whole CDN subflow becomes a no-op, since we cannot
 	// safely make firewall + secret decisions without operator input).
@@ -193,7 +214,7 @@ func runCDNStep(
 		// still ask the generic "behind a CDN?" question so the operator
 		// isn't silently skipped.
 		if pr.askBool("Does this server sit behind a CDN (Cloudflare, Bunny, …)?", false) {
-			runCloudflareSubflow(ctx, p, pr, step, deps, nil, cfSubflowOpts{})
+			runGenericEdgeSubflows(ctx, p, pr, step, deps)
 		}
 		return
 	}
@@ -216,7 +237,7 @@ func runCDNStep(
 		// question — the range table may be out of date, or the user
 		// might be on a CDN we haven't populated yet.
 		if pr.askBool("Does this server sit behind a CDN (Cloudflare, Bunny, …)?", false) {
-			runCloudflareSubflow(ctx, p, pr, step, deps, nil, cfSubflowOpts{})
+			runGenericEdgeSubflows(ctx, p, pr, step, deps)
 		}
 		return
 	}
@@ -224,17 +245,24 @@ func runCDNStep(
 	// Which CF-matched domain(s) does the operator need to be aware of?
 	cfDomains := domainsForProvider(step.results, "cloudflare")
 
-	// If Cloudflare is one of the detected providers, offer the CF
-	// subflow. For non-CF detections (Bunny/Fastly/…) the enforcer isn't
-	// wired yet — we still print the loud warning if the operator does
+	// Offer a subflow per detected provider that has an enforcer wired:
+	// Cloudflare and bunny.net (issue #198). For other detections
+	// (Fastly/…) we still print the loud warning if the operator does
 	// nothing so they know their bans won't cover those domains.
 	hasCF := providerDetected(step.detected, "cloudflare")
+	hasBunny := providerDetected(step.detected, "bunny")
 	if hasCF {
 		want := pr.askBool("Configure the Cloudflare edge enforcer now? (recommended)", true)
 		if want {
 			runCloudflareSubflow(ctx, p, pr, step, deps, cfDomains, cfSubflowOpts{})
 		}
-	} else {
+	}
+	if hasBunny {
+		if pr.askBool("Configure the bunny.net edge enforcer now? (recommended)", true) {
+			runBunnySubflow(ctx, p, pr, step, deps)
+		}
+	}
+	if !hasCF && !hasBunny {
 		p.println("  Detected CDNs do not have an EzyShield enforcer wired yet in this release.")
 		p.println("  Bans will still be ineffective for those domains — see the warning below.")
 	}
@@ -242,8 +270,29 @@ func runCDNStep(
 	// Loud-skip warning (issue #43 §3): if any provider was detected AND
 	// we're leaving without a working edge enforcer for it, tell the
 	// operator, per-domain, with the exact IPs.
-	if !step.cfEnabled {
+	if !step.cfEnabled && !step.bunnyEnabled {
 		printLoudSkipWarning(p, step.results)
+	}
+}
+
+// runGenericEdgeSubflows is the manual "behind a CDN? yes" path where no
+// provider was auto-detected: ask which of the wired edge enforcers the
+// operator wants (issue #198 added bunny alongside Cloudflare).
+func runGenericEdgeSubflows(
+	ctx context.Context,
+	p *wPrinter,
+	pr prompter,
+	step *cdnStep,
+	deps cdnDeps,
+) {
+	if pr.askBool("Configure the Cloudflare edge enforcer?", true) {
+		runCloudflareSubflow(ctx, p, pr, step, deps, nil, cfSubflowOpts{})
+	}
+	if pr.askBool("Configure the bunny.net edge enforcer (pull-zone blocklist)?", false) {
+		runBunnySubflow(ctx, p, pr, step, deps)
+	}
+	if pr.askBool("Configure the AWS WAF edge enforcer (WAFv2 IPSets, CloudFront/ALB)?", false) {
+		runAWSWAFSubflow(ctx, p, pr, step, deps)
 	}
 }
 

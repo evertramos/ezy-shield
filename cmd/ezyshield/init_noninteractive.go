@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // Non-interactive driver for `ezyshield init` (issue #231). This is a
@@ -46,6 +48,67 @@ type initAnswers struct {
 	Allowlist  answersAllowlist  `yaml:"allowlist"`
 	AI         answersAI         `yaml:"ai"`
 	Enforce    answersEnforce    `yaml:"enforce"`
+	Notify     answersNotify     `yaml:"notify"`
+}
+
+// answersNotify mirrors config.NotifyCfg's one-instance-per-channel shape
+// (pointer fields, issue #290) — NOT the Cloudflare list pattern; multiple
+// accounts per channel type would need its own issue first. Secrets follow
+// the #231 rule: *_env fields carry env var NAMES; the value fields are
+// traps caught by rejectLiteralSecrets before any write.
+type answersNotify struct {
+	Telegram *answersNotifyTelegram `yaml:"telegram"`
+	Email    *answersNotifyEmail    `yaml:"email"`
+	Slack    *answersNotifySlack    `yaml:"slack"`
+	Discord  *answersNotifyDiscord  `yaml:"discord"`
+	Webhook  *answersNotifyWebhook  `yaml:"webhook"`
+}
+
+type answersNotifyTelegram struct {
+	ChatIDs     []string `yaml:"chat_ids"`
+	Severity    []string `yaml:"severity"`
+	BotTokenEnv string   `yaml:"bot_token_env"`
+	// BotToken is a trap for a pasted literal token — see rejectLiteralSecrets.
+	BotToken string `yaml:"bot_token"`
+}
+
+type answersNotifyEmail struct {
+	From        string   `yaml:"from"`
+	To          []string `yaml:"to"`
+	Host        string   `yaml:"host"`
+	Port        int      `yaml:"port"` // 0 = default 587
+	Username    string   `yaml:"username"`
+	TLS         string   `yaml:"tls"` // starttls (default) | tls | none
+	Severity    []string `yaml:"severity"`
+	PasswordEnv string   `yaml:"password_env"`
+	// Password is a trap for a pasted literal password — see rejectLiteralSecrets.
+	Password string `yaml:"password"`
+}
+
+type answersNotifySlack struct {
+	Channel       string   `yaml:"channel"`
+	Severity      []string `yaml:"severity"`
+	WebhookURLEnv string   `yaml:"webhook_url_env"`
+	// WebhookURL is a trap for a pasted capability URL — see rejectLiteralSecrets.
+	WebhookURL string `yaml:"webhook_url"`
+}
+
+type answersNotifyDiscord struct {
+	Severity      []string `yaml:"severity"`
+	WebhookURLEnv string   `yaml:"webhook_url_env"`
+	// WebhookURL is a trap for a pasted capability URL — see rejectLiteralSecrets.
+	WebhookURL string `yaml:"webhook_url"`
+}
+
+type answersNotifyWebhook struct {
+	Severity           []string `yaml:"severity"`
+	URLEnv             string   `yaml:"url_env"`
+	AuthHeaderName     string   `yaml:"auth_header_name"`
+	AuthHeaderValueEnv string   `yaml:"auth_header_value_env"`
+	// URL / AuthHeaderValue are traps for pasted literals — see
+	// rejectLiteralSecrets.
+	URL             string `yaml:"url"`
+	AuthHeaderValue string `yaml:"auth_header_value"`
 }
 
 type answersCollectors struct {
@@ -339,6 +402,33 @@ func rejectLiteralSecrets(a *initAnswers) error {
 				i, config.RedactSecret(cf.APIToken), envFileName)
 		}
 	}
+	// Notifier channel secrets (issue #290) — same rule, same message shape.
+	reject := func(field, got, envField string) error {
+		return fmt.Errorf(
+			"%s is not accepted (got %s): the secret must never appear in the answers file or a flag — "+
+				"it would leak into shell history and process lists; put it in %s and reference the variable NAME via %s",
+			field, config.RedactSecret(got), envFileName, envField)
+	}
+	if t := a.Notify.Telegram; t != nil && t.BotToken != "" {
+		return reject("notify.telegram.bot_token", t.BotToken, "bot_token_env")
+	}
+	if e := a.Notify.Email; e != nil && e.Password != "" {
+		return reject("notify.email.password", e.Password, "password_env")
+	}
+	if s := a.Notify.Slack; s != nil && s.WebhookURL != "" {
+		return reject("notify.slack.webhook_url", s.WebhookURL, "webhook_url_env")
+	}
+	if d := a.Notify.Discord; d != nil && d.WebhookURL != "" {
+		return reject("notify.discord.webhook_url", d.WebhookURL, "webhook_url_env")
+	}
+	if w := a.Notify.Webhook; w != nil {
+		if w.URL != "" {
+			return reject("notify.webhook.url", w.URL, "url_env")
+		}
+		if w.AuthHeaderValue != "" {
+			return reject("notify.webhook.auth_header_value", w.AuthHeaderValue, "auth_header_value_env")
+		}
+	}
 	return nil
 }
 
@@ -437,6 +527,77 @@ func validateAnswers(a *initAnswers) []string {
 		}
 	}
 
+	// Notification channels (issue #290).
+	problems = append(problems, validateNotifyAnswers(&a.Notify)...)
+
+	return problems
+}
+
+// validateNotifyAnswers collects answer-level problems for the notify block:
+// per-channel requiredness plus env-name and severity validity. Deep schema
+// checks stay with the strict config loader at render time.
+func validateNotifyAnswers(n *answersNotify) []string {
+	var problems []string
+	checkEnv := func(field, name string) {
+		if name == "" {
+			return
+		}
+		if err := config.ValidateEnvVarName(name); err != nil {
+			problems = append(problems, fmt.Sprintf("%s: %v", field, err))
+		}
+	}
+	checkSev := func(field string, sev []string) {
+		for _, s := range sev {
+			if !notifierValidSeverities[strings.ToLower(strings.TrimSpace(s))] {
+				problems = append(problems,
+					fmt.Sprintf("%s: invalid severity %q (must be info, warn, or critical)", field, s))
+			}
+		}
+	}
+	if t := n.Telegram; t != nil {
+		if len(t.ChatIDs) == 0 {
+			problems = append(problems, "notify.telegram: 'chat_ids' is required (at least one)")
+		}
+		checkEnv("notify.telegram.bot_token_env", t.BotTokenEnv)
+		checkSev("notify.telegram.severity", t.Severity)
+	}
+	if e := n.Email; e != nil {
+		if e.From == "" {
+			problems = append(problems, "notify.email: 'from' is required")
+		}
+		if len(e.To) == 0 {
+			problems = append(problems, "notify.email: 'to' is required (at least one)")
+		}
+		if e.Host == "" {
+			problems = append(problems, "notify.email: 'host' is required")
+		}
+		if e.Port < 0 || e.Port > 65535 {
+			problems = append(problems, fmt.Sprintf("notify.email: invalid port %d (must be 1..65535; omit for 587)", e.Port))
+		}
+		switch e.TLS {
+		case "", "starttls", "tls", "none":
+		default:
+			problems = append(problems, fmt.Sprintf("notify.email: invalid tls %q (must be starttls|tls|none)", e.TLS))
+		}
+		checkEnv("notify.email.password_env", e.PasswordEnv)
+		checkSev("notify.email.severity", e.Severity)
+	}
+	if s := n.Slack; s != nil {
+		checkEnv("notify.slack.webhook_url_env", s.WebhookURLEnv)
+		checkSev("notify.slack.severity", s.Severity)
+	}
+	if d := n.Discord; d != nil {
+		checkEnv("notify.discord.webhook_url_env", d.WebhookURLEnv)
+		checkSev("notify.discord.severity", d.Severity)
+	}
+	if w := n.Webhook; w != nil {
+		checkEnv("notify.webhook.url_env", w.URLEnv)
+		checkEnv("notify.webhook.auth_header_value_env", w.AuthHeaderValueEnv)
+		if w.AuthHeaderValueEnv != "" && w.AuthHeaderName == "" {
+			problems = append(problems, "notify.webhook: 'auth_header_name' is required when auth_header_value_env is set")
+		}
+		checkSev("notify.webhook.severity", w.Severity)
+	}
 	return problems
 }
 
@@ -529,10 +690,82 @@ func applyAnswers(state *wizardState, a *initAnswers) {
 		}
 	}
 
+	// Notification channels (issue #290): mapped onto the same
+	// config.NotifyCfg shape the interactive Notifications step builds, so
+	// renderGeneratedConfig serializes an identical notify: block. Secrets
+	// never flow through answers — only env var NAMES, defaulted per channel.
+	state.notify = notifyFromAnswers(&a.Notify)
+
 	// Invariant: non-interactive init is always dry-run (Hard Rule 1). There
 	// is deliberately no answer or flag to arm — the operator arms explicitly
 	// after observing clean dry-run output.
 	state.armed = false
+}
+
+// notifyFromAnswers converts the answers block into config.NotifyCfg;
+// nil when no channel was requested.
+func notifyFromAnswers(n *answersNotify) *config.NotifyCfg {
+	if n.Telegram == nil && n.Email == nil && n.Slack == nil && n.Discord == nil && n.Webhook == nil {
+		return nil
+	}
+	envOr := func(name, def string) string {
+		if name != "" {
+			return name
+		}
+		return def
+	}
+	out := &config.NotifyCfg{}
+	if t := n.Telegram; t != nil {
+		out.Telegram = &config.TelegramCfg{
+			BotToken: config.SecretRef("env:" + envOr(t.BotTokenEnv, notifierSecretEnvVar["telegram"])),
+			ChatIDs:  t.ChatIDs,
+			Severity: t.Severity,
+		}
+	}
+	if e := n.Email; e != nil {
+		port := e.Port
+		if port == 0 {
+			port = 587
+		}
+		tlsMode := e.TLS
+		if tlsMode == "" {
+			tlsMode = "starttls"
+		}
+		entry := &config.EmailCfg{
+			From: e.From, To: e.To, Host: e.Host, Port: port,
+			Username: e.Username, TLS: tlsMode, Severity: e.Severity,
+		}
+		if e.Username != "" {
+			entry.Password = config.SecretRef("env:" + envOr(e.PasswordEnv, notifierSecretEnvVar["email"]))
+		}
+		out.Email = entry
+	}
+	if s := n.Slack; s != nil {
+		out.Slack = &config.SlackCfg{
+			WebhookURL: config.SecretRef("env:" + envOr(s.WebhookURLEnv, notifierSecretEnvVar["slack"])),
+			Channel:    s.Channel,
+			Severity:   s.Severity,
+		}
+	}
+	if d := n.Discord; d != nil {
+		out.Discord = &config.DiscordCfg{
+			WebhookURL: config.SecretRef("env:" + envOr(d.WebhookURLEnv, notifierSecretEnvVar["discord"])),
+			Severity:   d.Severity,
+		}
+	}
+	if w := n.Webhook; w != nil {
+		entry := &config.WebhookCfg{
+			URL:      config.SecretRef("env:" + envOr(w.URLEnv, notifierSecretEnvVar["webhook"])),
+			Severity: w.Severity,
+		}
+		if w.AuthHeaderName != "" {
+			entry.Headers = map[string]string{
+				w.AuthHeaderName: "env:" + envOr(w.AuthHeaderValueEnv, webhookAuthHeaderEnvVar),
+			}
+		}
+		out.Webhook = entry
+	}
+	return out
 }
 
 // neededEnvVars returns the env var NAMES the generated config references and
@@ -550,6 +783,9 @@ func neededEnvVars(state *wizardState) []string {
 			}
 		}
 	}
+	// Notifier channel secrets (issue #290) — stubbed like every other
+	// referenced var so EnvironmentFile= never fails loudly.
+	names = append(names, notifyEnvVars(state.notify)...)
 	return names
 }
 

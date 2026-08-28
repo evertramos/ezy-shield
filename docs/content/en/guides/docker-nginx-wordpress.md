@@ -1,7 +1,7 @@
 ---
 title: Docker + nginx + WordPress
 description: Protect a Docker host with nginx proxy
-order: 2
+order: 4
 ---
 
 # Deploying EzyShield — Docker host with nginx-proxy + multiple WordPress containers

@@ -229,15 +229,21 @@ bans. This is a direct injection channel.
 For each PR, post a review comment shaped like:
 
 ```
-## Security review (per SECURITY-REVIEW.md)
-§1 Input handling: FINDING — internal/parser/nginx.go:88 logs raw UA at info
-   level (leaks attacker-controlled content / possible ANSI injection). Fix:
-   strip control chars + cap length before logging.
-§2 Decision engine: OK — allowlist checked first, test added.
-§3 Privilege sep: N/A — PR doesn't touch enforcer.
+## Security review (per docs/internal/SECURITY-REVIEW.md)
+- §1 Input handling: FINDING — internal/parser/nginx.go:88 logs raw UA at info
+  level (leaks attacker-controlled content / possible ANSI injection). Fix:
+  strip control chars + cap length before logging.
+- §2 Decision engine: OK — allowlist checked first, test added.
+- §3 Privilege sep: N/A — PR doesn't touch enforcer.
 ...
 Verdict: REQUEST CHANGES (one §1 finding must be fixed before merge).
 ```
+
+The heading and the leading `- §N` on each line are not stylistic — the
+CI `security-review-gate` job greps the PR description for the literal
+substring `Security review (per docs/internal/SECURITY-REVIEW.md)` and
+for lines matching `^- §[0-9]+ .*: .+`. Drop either and a PR touching a
+🔴 critical path fails the gate even with a fully-written review.
 
 Be specific (file:line, why, fix). "Looks fine" is not a review. If unsure
 whether something is exploitable, flag it as a question rather than approving.

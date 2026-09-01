@@ -98,9 +98,19 @@ func TestServiceUserDockerGroupCheck(t *testing.T) {
 			wantHint:   []string{"no 'docker' group"},
 		},
 		{
-			name:       "service user is not a member",
+			// issue #580: with a docker collector configured, "not a member"
+			// is not good news — it may be exactly why that collector reads
+			// nothing. The verdict belongs to the socket-access check.
+			name:       "not a member while a docker collector is configured",
 			groupFile:  withoutMembership,
 			config:     dockerCollectorCfg,
+			wantStatus: statusNA,
+			wantHint:   []string{"not in the 'docker' group", "docker: socket access"},
+		},
+		{
+			name:       "not a member and nothing needs the socket",
+			groupFile:  withoutMembership,
+			config:     fileCollectorCfg,
 			wantStatus: statusPass,
 			wantHint:   []string{"not in the 'docker' group"},
 		},
@@ -213,18 +223,5 @@ func TestConfigNeedsDockerSocket(t *testing.T) {
 	})
 }
 
-// TestCheckDockerSocketHint_NamesTheConsequence guards the remediation hint:
-// it must never read as a casual "just run usermod -aG docker".
-func TestCheckDockerSocketHint_NamesTheConsequence(t *testing.T) {
-	t.Parallel()
-	res := checkDockerSocket()
-	if res.Status != statusFail {
-		t.Skipf("docker socket check returned %s on this host — hint not exercised", res.Status)
-	}
-	if strings.Contains(res.Hint, "usermod -aG docker") {
-		t.Errorf("hint hands out a bare usermod command: %q", res.Hint)
-	}
-	if !strings.Contains(res.Hint, "root-equivalent") {
-		t.Errorf("hint %q does not name the consequence of joining the docker group", res.Hint)
-	}
-}
+// The socket-access hint is guarded in doctor_dockeraccess_test.go, against
+// fixtures rather than whatever this host happens to have installed.

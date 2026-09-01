@@ -56,6 +56,7 @@ func newInitCmd() *cobra.Command {
 		answersPath    string
 		force          bool
 		dockerGroup    bool
+		dockerHost     string
 	)
 
 	cmd := &cobra.Command{
@@ -95,7 +96,7 @@ Non-interactive (for Ansible / cloud-init / Terraform / golden images):
 				}
 				return runNonInteractiveInit(cmd, configDir, skipSystem, force, answersPath)
 			}
-			return runInitWizard(cmd, configDir, yes, skipSystem, dockerGroup)
+			return runInitWizard(cmd, configDir, yes, skipSystem, dockerGroup, dockerHost)
 		},
 	}
 
@@ -129,6 +130,11 @@ Non-interactive (for Ansible / cloud-init / Terraform / golden images):
 	// operator has to name it (issue #574).
 	cmd.Flags().BoolVar(&dockerGroup, "docker-group", false,
 		"add the ezyshield service user to the 'docker' group — root-equivalent access to the Docker socket; required by docker log collectors")
+	// The scoped alternative to that group (issue #579): a filtering,
+	// read-only proxy in front of the Engine socket. Mutually exclusive with
+	// --docker-group — one replaces the other, they never combine.
+	cmd.Flags().StringVar(&dockerHost, "docker-host", "",
+		"Docker Engine endpoint for container logs, e.g. tcp://127.0.0.1:2375 (a read-only socket proxy); replaces --docker-group")
 
 	return cmd
 }
@@ -184,12 +190,19 @@ type wizardState struct {
 	// --docker-group / the answers file, then confirmed at the prompt when a
 	// docker log source is actually configured.
 	dockerGroupOptIn bool
-	monitorSSH       bool
-	adminIPs         []string
-	enableAI         bool
-	aiProvider       string
-	aiModel          string
-	aiKeyEnvVar      string
+	// dockerAccess is which of the three container-log access paths this run
+	// chose (issue #579); empty means the question was never reached.
+	dockerAccess dockerAccessPath
+	// dockerHost is the Engine endpoint written as docker.host — set only
+	// for the read-only socket proxy path. Empty keeps the default unix
+	// socket, i.e. the behaviour of every install before #579.
+	dockerHost  string
+	monitorSSH  bool
+	adminIPs    []string
+	enableAI    bool
+	aiProvider  string
+	aiModel     string
+	aiKeyEnvVar string
 	// aiExternalKey is true when the operator chose key option 2 ("already
 	// in an env var — sops/vault/LoadCredential"): the key is managed
 	// OUTSIDE .env and the wizard must not write anything for it. Writing
@@ -248,7 +261,7 @@ type dockerContainer struct {
 	ports string
 }
 
-func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem, dockerGroup bool) error {
+func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem, dockerGroup bool, dockerHost string) error {
 	p := &wPrinter{w: cmd.OutOrStdout()}
 	st := newStyler(cmd.OutOrStdout())
 
@@ -279,9 +292,17 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem, docker
 
 	state := &wizardState{}
 	sum := &initSummary{}
-	// --docker-group pre-answers the docker group prompt: it becomes the
-	// prompt's default, so an interactive operator can still say no and a
-	// --yes run grants nothing unless the flag was passed (issue #574).
+	// --docker-group / --docker-host pre-answer the container-log access
+	// question: the flag becomes the prompt's pre-selection, so an
+	// interactive operator can still change it and a --yes run grants
+	// nothing unless a flag was passed (issues #574, #579). Passing both is
+	// refused rather than resolved.
+	access, host, err := resolveDockerAccessAnswers(dockerHost, dockerGroup)
+	if err != nil {
+		return err
+	}
+	state.dockerAccess = access
+	state.dockerHost = host
 	state.dockerGroupOptIn = dockerGroup
 
 	if err := detectEnvironment(p, st, state, configDir, sc, yes, skipSystem); err != nil {
@@ -616,6 +637,14 @@ func summarizeChoices(state *wizardState, sum *initSummary, yes bool) {
 		}
 	}
 
+	// Container log access via a read-only socket proxy (issue #579). The
+	// endpoint is only half the story — the proxy is the operator's to run —
+	// so the line says what still has to happen.
+	if state.dockerHost != "" {
+		sum.configured = append(sum.configured,
+			"docker endpoint: "+state.dockerHost+" (read-only socket proxy — start it, then '"+progName+" doctor')")
+	}
+
 	// Enforcers.
 	if state.nftPath != "" {
 		sum.configured = append(sum.configured, "enforcer: nftables ("+state.nftPath+")")
@@ -751,11 +780,12 @@ func askQuestions(out io.Writer, sc *bufio.Scanner, state *wizardState, yes bool
 	p.println(st.header("Collectors"))
 	state.webCollectors = confirmWebServerCollectors(ask, askBool, state.webServers)
 
-	// Docker socket access — asked only when a docker log source was actually
-	// chosen, and defaulting to No because the grant is root-equivalent on
-	// this host (issue #574).
+	// Container log access — asked only when a docker log source was
+	// actually chosen. The three paths differ by privilege, so the operator
+	// picks one explicitly and the root-equivalent one is never a default
+	// (issues #574, #579).
 	if dockerLogSources(state) > 0 {
-		state.dockerGroupOptIn = askBool(dockerGroupPrompt, state.dockerGroupOptIn)
+		askDockerAccess(p, st, ask, askBool, state, yes)
 	}
 
 	// SSH monitoring
@@ -949,6 +979,13 @@ func renderGeneratedConfig(state *wizardState) ([]byte, error) {
 				fmt.Fprintf(&b, "  - kind: docker\n    container: %s\n    parser: %s\n", wc.Container, wc.Parser)
 			}
 		}
+	}
+
+	// docker.host is written only for the read-only socket proxy path
+	// (issue #579). Absent means the default unix socket, so a config from a
+	// run that never chose the proxy is byte-identical to before.
+	if state.dockerHost != "" {
+		fmt.Fprintf(&b, "docker:\n  host: %s\n", state.dockerHost)
 	}
 
 	hasCF := state.cdn != nil && state.cdn.cfEnabled && len(state.cdn.cfAccounts) > 0
@@ -1374,6 +1411,18 @@ func grantDockerGroup() error {
 func applyDockerGroupDecision(p *wPrinter, st styler, state *wizardState, sum *initSummary) {
 	n := dockerLogSources(state)
 	if n == 0 {
+		return
+	}
+	// A configured read-only proxy endpoint REPLACES the group: the daemon
+	// reaches the Engine API over tcp and needs no socket permission at all,
+	// so there is no missing grant to warn about (issue #579). What is still
+	// missing is the proxy itself, which only doctor can confirm.
+	if state.dockerHost != "" {
+		line := fmt.Sprintf("docker group: not granted — %d docker collector(s) will use docker.host %s; "+
+			"start the socket proxy, then run '%s doctor' to confirm it is reachable and read-only",
+			n, state.dockerHost, progName)
+		p.println(st.ok(line))
+		sum.configured = append(sum.configured, line)
 		return
 	}
 	if !shouldGrantDockerGroup(n, state.dockerGroupOptIn) {

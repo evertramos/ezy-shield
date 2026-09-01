@@ -322,7 +322,13 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 	// the linux-only collector package.
 	var execActivity func(ctx context.Context, report func(daemon.ExecActivityReport))
 	if cfg.DockerExec != nil && cfg.DockerExec.Enabled {
-		watcher := &collector.DockerExecWatcher{Ignore: cfg.DockerExec.Ignore, Logger: logger}
+		watcher := &collector.DockerExecWatcher{
+			Ignore: cfg.DockerExec.Ignore,
+			Logger: logger,
+			// Same endpoint as the log collectors (issue #579). A
+			// filtering proxy must expose EVENTS for this to work.
+			DockerHost: cfg.DockerHost(),
+		}
 		execActivity = func(ctx context.Context, report func(daemon.ExecActivityReport)) {
 			err := watcher.Run(ctx, func(ev collector.ExecEvent) {
 				report(daemon.ExecActivityReport{
@@ -562,6 +568,10 @@ func buildCollectors(cfg *config.Config, logger *slog.Logger) []sdk.Collector {
 				Container: c.Container,
 				Parser:    c.Parser,
 				Logger:    logger,
+				// One endpoint per host, validated at config load
+				// (issue #579): the default unix socket, or the
+				// tcp:// read-only proxy the operator configured.
+				DockerHost: cfg.DockerHost(),
 			})
 		}
 	}

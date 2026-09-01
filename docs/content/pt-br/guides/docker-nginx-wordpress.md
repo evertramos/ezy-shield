@@ -99,10 +99,10 @@ arquivos não crescerem para sempre:
 > recriação). Se você recria containers com frequência, prefira a A — o caminho
 > da B muda junto com o ID do container.
 
-**Opção C — um collector `kind: docker`** lê os logs de um container através do
-socket do Docker Engine, em vez de um arquivo. É a opção mais conveniente e a
-mais cara em termos de privilégio: veja a §4a antes de escolhê-la. As opções A
-e B não precisam de nada do Docker.
+**Opção C — um collector `kind: docker`** lê os logs de um container através da
+API do Docker Engine, em vez de um arquivo. É a opção mais conveniente, e a
+forma como você concede esse acesso decide quanto do host o EzyShield alcança:
+veja a §4a antes de escolhê-la. As opções A e B não precisam de nada do Docker.
 
 ### 3b. Registre o IP real do cliente
 Se os clientes chegam **diretamente** ao nginx, os logs padrão já contêm o IP
@@ -196,17 +196,74 @@ configuração é necessária. Para customizar thresholds, descomente a regra
 relevante em `/etc/ezyshield/rules.d/10-wordpress.yaml` (gravado pelo `init`)
 e ajuste — veja [Customizando Regras de Detecção](rules-customization.md).
 
-### 4a. Se você escolheu collectors docker: o grupo `docker`
+### 4a. Se você escolheu collectors docker: como o EzyShield alcança o Engine
 
-Um collector `kind: docker` lê através do socket do Docker Engine, e o acesso a
-esse socket vem da participação no grupo `docker`. Esse grupo é a API do
+Um collector `kind: docker` lê através da API do Docker Engine. Há três formas
+de dar esse acesso, e elas não são equivalentes — o `init` oferece as três
+quando detecta collectors docker, nesta ordem:
+
+**1. Um arquivo de log no host (nenhum acesso ao Docker).** As opções A e B da
+§3a já fazem isso: o container grava o access log em um caminho bind-mountado
+do host e um collector `kind: file` o lê. Nada do Docker é concedido. Considere
+isso primeiro. O `init` pré-seleciona essa opção quando a mesma execução já lê
+o log daquele servidor web a partir de um arquivo do host; ele imprime o volume
+de compose necessário, mas nunca edita a sua stack.
+
+**2. Um proxy somente-leitura do socket (o caminho restrito).** Um container
+pequeno com filtro fica na frente do socket do Engine, serve logs e eventos de
+container e recusa criação de container, exec e mounts. O EzyShield fala com
+ele por TCP em loopback e fica fora do grupo `docker`. Adicione-o à sua stack:
+
+```yaml
+services:
+  ezyshield-docker-proxy:
+    image: tecnativa/docker-socket-proxy
+    restart: unless-stopped
+    environment:
+      CONTAINERS: 1        # GET /containers/<nome>/logs
+      EVENTS: 1            # GET /events (observador de docker exec)
+      POST: 0              # recusa create/exec/start de container
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      - "127.0.0.1:2375:2375"
+```
+
+e aponte o EzyShield para ele:
+
+```yaml
+docker:
+  host: tcp://127.0.0.1:2375
+```
+
+A porta é publicada em `127.0.0.1` para que a API do Engine nunca fique
+alcançável de outro host. O EzyShield não abre nenhum listener para isso — o
+proxy é um container da sua stack, e é a única coisa que toca o socket. É
+maquinário extra, honestamente: mais um container para rodar e atualizar,
+embora ele não toque em nenhum container da sua aplicação.
+
+Instalações scriptadas escolhem esse caminho com
+`--docker-host tcp://127.0.0.1:2375` (chave de resposta:
+`collectors.docker_host`). O `init` escreve o `docker.host` e imprime o trecho
+acima; ele nunca inicia o proxy para você. Depois que ele estiver rodando,
+verifique:
+
+```bash
+ezyshield doctor
+```
+
+O doctor sonda o endpoint: ele precisa responder `GET /_ping` e precisa
+**recusar** `POST /containers/create`. Um endpoint que aceita criação de
+container é acesso equivalente a root a este host pela rede, e o doctor FALHA
+nele.
+
+**3. O grupo `docker` (último recurso).** A participação nesse grupo é a API do
 Engine, não uma permissão de leitura — um processo que o alcança pode iniciar
 um container com o filesystem do host montado, o que é root no host. Colocar o
 usuário de serviço ezyshield nele torna o daemon que faz parsing de log — o
 componente que consome entrada controlada por atacantes o dia inteiro —
-equivalente a root.
-
-Por isso o `init` pergunta, com **não** como padrão:
+equivalente a root. Por isso o `init` pergunta antes de conceder, com **não**
+como padrão:
 
 ```
 Grant the ezyshield service user access to the Docker socket? This adds it to
@@ -216,12 +273,11 @@ collectors. [y/N]
 ```
 
 - Responda **não** e os collectors ainda são escritos — eles apenas não leem
-  nada enquanto o acesso não existir. Use um collector baseado em arquivo (§3a,
-  opção A ou B); ele não precisa de nenhum privilégio do Docker.
+  nada enquanto o acesso não existir.
 - Responda **sim** e a concessão é um trade-off deliberado e documentado.
 - Instalações scriptadas optam com `--docker-group`, ou
   `collectors.docker_group: true` no arquivo de respostas. O `--yes` sozinho
-  nunca concede.
+  nunca concede. `--docker-group` e `--docker-host` são mutuamente exclusivas.
 
 Uma instalação provisionada antes pode já estar no grupo: nem uma atualização
 de pacote nem uma nova execução do `init` a revogam. Verifique e revogue com:
@@ -378,7 +434,8 @@ opcionalmente — os dados).
 |---|---|---|
 | Está banindo `172.x.x.x` / IPs do Docker | o proxy loga o IP do container, não do cliente | configure o `real_ip` do nginx (§3b) |
 | Nada é detectado | caminho de log errado ou o parser não reconhece o formato | `ezyshield doctor`; confira `path`/`parser` do collector em `config.yaml` |
-| Um collector `kind: docker` não lê nada | o usuário de serviço não alcança o socket do Docker | `ezyshield doctor`; conceda o grupo deliberadamente (§4a) ou troque por um collector de arquivo |
+| Um collector `kind: docker` não lê nada | o usuário de serviço não alcança o Docker Engine | `ezyshield doctor`; aponte o `docker.host` para um proxy somente-leitura, troque por um collector de arquivo, ou conceda o grupo deliberadamente (§4a) |
+| O `doctor` diz que o endpoint docker aceita criação de container | o `docker.host` aponta para o próprio engine, ou para um proxy com escrita habilitada | coloque um proxy com filtro na frente e dê a ele `POST: 0` (§4a, opção 2) |
 | Fiquei brevemente trancado para fora | allowlist sem o seu IP | o anti-lockout deveria impedir; adicione seu IP à `allowlist` |
 | Telegram em silêncio | token/chat_id ou env não carregado | `ezyshield test notifier telegram`; confira as permissões do `.env` |
 | Visitantes reais bloqueados | o proxy confia no XFF de fonte não confiável | restrinja `set_real_ip_from` a upstreams que você controla |

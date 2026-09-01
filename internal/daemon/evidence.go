@@ -53,6 +53,17 @@ const (
 	evidenceSourceTimeout = 3 * time.Second
 )
 
+// dockerHost resolves the Docker Engine endpoint evidence extraction talks
+// to: the test override when one is set, otherwise the operator's docker.host
+// (issue #579) — the same endpoint the log collectors and the exec watcher
+// use, so a read-only socket proxy serves all three.
+func (d *Daemon) dockerHost() string {
+	if d.evidenceDockerHost != "" {
+		return d.evidenceDockerHost
+	}
+	return d.cfg.DockerHost()
+}
+
 // collectEvidence extracts log excerpts mentioning addr from every
 // configured log source. It never fails the report: per-source errors
 // become notes.
@@ -78,7 +89,7 @@ func (d *Daemon) collectEvidence(ctx context.Context, addr netip.Addr) []sdk.Abu
 		case "journald":
 			out = append(out, evidenceFromJournald(ctx, d.evidenceJournalctl, c.Unit, addr))
 		case "docker":
-			out = append(out, evidenceFromDocker(ctx, d.evidenceDockerSocket, c.Container, addr))
+			out = append(out, evidenceFromDocker(ctx, d.dockerHost(), c.Container, addr))
 		}
 	}
 	return out

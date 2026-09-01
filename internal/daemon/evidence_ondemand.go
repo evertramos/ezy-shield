@@ -11,9 +11,10 @@ package daemon
 //     shell; the unit name is allowlist-validated). No `--grep`: filtering
 //     in-process avoids depending on journalctl's optional PCRE2 support
 //     and keeps the target address out of subprocess arguments.
-//   - docker:   GET /containers/<name>/logs?tail=<window> on the Engine
-//     unix socket (no follow), demultiplexed with the same bounded frame
-//     parser the streaming collector uses.
+//   - docker:   GET /containers/<name>/logs?tail=<window> on the configured
+//     Engine endpoint (docker.host: the unix socket by default, or a
+//     read-only tcp proxy) with no follow, demultiplexed with the same
+//     bounded frame parser the streaming collector uses.
 //
 // Both paths degrade to an explanatory note on any failure — evidence can
 // never fail or stall the report (bounded by evidenceSourceTimeout).
@@ -22,7 +23,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/netip"
 	"os/exec"
@@ -38,10 +38,11 @@ import (
 // quiet one.
 const evidenceSourceWindowLines = 20000
 
-// evidenceDockerSocketPath is the canonical Docker Engine API endpoint
-// (mirrors the collector's default; the collector config has no socket
-// override, so neither does evidence).
-const evidenceDockerSocketPath = "/var/run/docker.sock"
+// evidenceDockerSocketPath is retained as the fallback endpoint for a
+// daemon built without a config (tests). Live extraction resolves the
+// endpoint from docker.host like every other docker consumer — see
+// Daemon.dockerHost.
+const evidenceDockerSocketPath = collector.DefaultDockerHost
 
 // evidenceFromJournald extracts recent journal entries for unit that mention
 // addr. bin overrides the journalctl binary (tests only); empty means
@@ -101,9 +102,13 @@ func evidenceFromJournald(ctx context.Context, bin, unit string, addr netip.Addr
 }
 
 // evidenceFromDocker extracts recent container log lines mentioning addr via
-// the Docker Engine API (bounded tail, no follow). socketPath overrides the
-// engine socket (tests only); empty means /var/run/docker.sock.
-func evidenceFromDocker(ctx context.Context, socketPath, container string, addr netip.Addr) sdk.AbuseReportEvidence {
+// the Docker Engine API (bounded tail, no follow). host is the configured
+// docker.host endpoint (unix:///path or tcp://host:port); empty means the
+// default unix socket. The transport — no environment proxy, no redirect
+// followed, bounded response headers — is the shared one from
+// internal/collector, so a tcp read-only proxy gets exactly the same
+// treatment here as in the streaming collector.
+func evidenceFromDocker(ctx context.Context, host, container string, addr netip.Addr) sdk.AbuseReportEvidence {
 	ev := sdk.AbuseReportEvidence{Source: "docker:" + container}
 
 	// Defense in depth: the name is embedded in the request path below.
@@ -111,28 +116,28 @@ func evidenceFromDocker(ctx context.Context, socketPath, container string, addr 
 		ev.Note = "invalid container name; skipped"
 		return ev
 	}
-	if socketPath == "" {
-		socketPath = evidenceDockerSocketPath
+	if host == "" {
+		host = evidenceDockerSocketPath
+	}
+	ep, err := collector.ParseDockerHost(host)
+	if err != nil {
+		// The endpoint is already validated at config load; a bad value here
+		// means a daemon built by hand. Never echo the parse error's quoted
+		// input into the report.
+		ev.Note = "docker endpoint is not usable; cannot extract container logs"
+		return ev
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, evidenceSourceTimeout)
 	defer cancel()
 
-	client := &http.Client{
-		Transport: &http.Transport{
-			// Host portion of the URL is ignored — always dial the socket.
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				var d net.Dialer
-				return d.DialContext(ctx, "unix", socketPath)
-			},
-		},
-	}
+	client := collector.NewDockerAPIClient(ep)
 	defer client.CloseIdleConnections()
 
 	// timestamps=true: evidence should show *when* (the streaming collector
 	// omits them because parsers expect bare app lines).
-	url := "http://docker/containers/" + container +
-		"/logs?stdout=true&stderr=true&timestamps=true&tail=" + strconv.Itoa(evidenceSourceWindowLines)
+	url := ep.URL("/containers/" + container +
+		"/logs?stdout=true&stderr=true&timestamps=true&tail=" + strconv.Itoa(evidenceSourceWindowLines))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		ev.Note = fmt.Sprintf("docker api: %v", err)
@@ -140,7 +145,7 @@ func evidenceFromDocker(ctx context.Context, socketPath, container string, addr 
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		ev.Note = "docker engine socket unreachable; cannot extract container logs"
+		ev.Note = "docker engine endpoint unreachable; cannot extract container logs"
 		return ev
 	}
 	defer resp.Body.Close() //nolint:errcheck

@@ -27,21 +27,42 @@ docker_exec:
     - cron                 # plain text matches as substring
 ```
 
-The watcher uses the same docker socket and permission model as the docker log collector, subscribes to `exec_start` only (one event per exec, at the moment it actually runs), and reconnects with backoff when docker restarts.
+The watcher uses the same Engine endpoint and permission model as the docker log collector, subscribes to `exec_start` only (one event per exec, at the moment it actually runs), and reconnects with backoff when docker restarts.
 
-## Socket access is a privilege decision
+## Engine access is a privilege decision
 
-Reaching the docker events API means reaching the Docker Engine socket, and
-that access comes from membership in the `docker` group. The group is the
-Engine API, not a read permission: anything that can talk to it can start a
-privileged container, i.e. become root on the host. Granting it to the
-ezyshield service user makes the log-parsing daemon root-equivalent.
+Reaching the docker events API means reaching the Docker Engine API. The
+endpoint is [`docker.host`](../reference/config.md), shared with the docker log
+collectors, and there are two ways to serve it — a file-based collector is not
+one of them here, because events have no file equivalent.
+
+**A read-only socket proxy (recommended).** A filtering proxy in front of the
+Engine socket, published on `127.0.0.1`, serves events and container logs and
+refuses container creation, exec and mounts:
+
+```yaml
+# /etc/ezyshield/config.yaml
+docker:
+  host: tcp://127.0.0.1:2375
+```
+
+The proxy must expose **both** `CONTAINERS` and `EVENTS` — this watcher needs
+`GET /events` — and nothing else. The compose snippet is in
+[Docker + nginx + WordPress](docker-nginx-wordpress.md); `ezyshield doctor`
+verifies the endpoint answers `GET /_ping` and refuses
+`POST /containers/create`.
+
+**The `docker` group (last resort).** Access to the Engine socket comes from
+membership in that group. The group is the Engine API, not a read permission:
+anything that can talk to it can start a privileged container, i.e. become
+root on the host. Granting it to the ezyshield service user makes the
+log-parsing daemon root-equivalent.
 
 `ezyshield init` therefore asks before granting it, defaults to no, and only
 asks at all when the run configures a docker log source. In scripted runs the
 opt-in is `--docker-group` (or `collectors.docker_group: true` in the answers
-file); `--yes` alone never grants it. Without the access, the watcher stays
-enabled in the config but observes nothing.
+file); `--yes` alone never grants it. Without either kind of access, the
+watcher stays enabled in the config but observes nothing.
 
 An install provisioned earlier may already carry the membership — removing the
 grant from `init` does not revoke it, and neither does a package upgrade.
@@ -59,7 +80,8 @@ sudo gpasswd -d ezyshield docker
 sudo systemctl restart ezyshield
 ```
 
-That disables this watcher along with the docker log collectors. See the
+That disables this watcher along with the docker log collectors, unless
+`docker.host` points at a read-only proxy. See the
 [security overview](../security/overview.md) for what the grant means and the
 alternatives.
 

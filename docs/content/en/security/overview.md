@@ -145,19 +145,49 @@ hardening on its unit (`NoNewPrivileges`, `ProtectSystem=strict`, seccomp)
 does not contain it, because the escape is to ask the Docker daemon — an
 unconfined root process — to do the work.
 
-EzyShield therefore never grants that group on its own:
+The group is therefore the **last** of three ways to read container logs, and
+EzyShield never grants it on its own. In privilege order:
 
-- `ezyshield init` asks for it **only** when you configure at least one docker
-  collector, the prompt defaults to **no**, and it names the consequence.
-- Scripted installs opt in explicitly with `--docker-group` (or
-  `collectors.docker_group: true` in the answers file). `--yes` accepts safe
-  defaults, and this default is no.
-- Declining still writes the collectors — they simply cannot read container
-  logs until the access exists.
+1. **A host log file.** The container writes its access log to a bind-mounted
+   host path, and a `kind: file` collector reads it. EzyShield gets no Docker
+   access at all. Reach for this first.
+2. **A read-only socket proxy.** A filtering proxy in front of the Engine
+   socket, published on `127.0.0.1`, answers container logs and events and
+   refuses container creation, exec and mounts. Point `docker.host` at it:
+
+   ```yaml
+   docker:
+     host: tcp://127.0.0.1:2375
+   ```
+
+   The daemon speaks the Engine API over loopback TCP and stays out of the
+   `docker` group. EzyShield opens no listener for this — the proxy is a
+   container in your own stack, and it is the only thing that touches the
+   socket. See [Docker + nginx + WordPress](../guides/docker-nginx-wordpress.md)
+   for the compose snippet.
+3. **The `docker` group.** Root-equivalent, as above. Only when neither of the
+   other two fits.
+
+How the choice is made:
+
+- `ezyshield init` offers all three **only** when you configure at least one
+  docker collector, pre-selects the least-privileged one that fits, and names
+  the consequence of the group before asking for it.
+- Scripted installs pick one explicitly: `--docker-host tcp://127.0.0.1:2375`
+  (answers key `collectors.docker_host`) or `--docker-group` (answers key
+  `collectors.docker_group: true`). Passing both is an error — the proxy
+  replaces the group, it does not accompany it. `--yes` accepts safe defaults,
+  and neither grant is a default.
+- Choosing nothing still writes the collectors — they simply cannot read
+  container logs until access exists.
 - `ezyshield doctor` warns whenever the service user is in `docker`, and says
-  whether anything in your configuration justifies it.
+  whether anything in your configuration justifies it. When `docker.host` is a
+  TCP endpoint, doctor also probes it: it must answer `GET /_ping` and it must
+  **refuse** `POST /containers/create`. An endpoint that accepts container
+  creation is root-equivalent access to the host over the network, and that
+  check FAILs.
 
-To check and revoke:
+To check and revoke the group:
 
 ```bash
 getent group docker                          # is ezyshield listed?
@@ -165,12 +195,14 @@ sudo gpasswd -d ezyshield docker             # revoke
 sudo systemctl restart ezyshield             # drop the group from the running daemon
 ```
 
-Revoking disables docker collectors. If you want container logs without a
-root-equivalent daemon, the usual alternatives are to write container logs to
-a host path (a bind-mounted access log read by a `kind: file` collector) or to
-put a read-only, endpoint-filtered proxy in front of the Engine socket. The
-file-based path needs nothing from Docker at all and is the one to reach for
-first.
+Revoking disables docker collectors unless one of the first two paths is in
+place.
+
+`docker.host` accepts `unix:///path` (the default is
+`unix:///var/run/docker.sock`) and `tcp://host:port`. A TCP host must be a
+loopback IP literal; anything else is refused unless you also set
+`docker.allow_remote: true`, which accepts an unauthenticated plaintext Engine
+endpoint reachable from off-host. TLS to a remote engine is not supported.
 
 ## No network listeners
 

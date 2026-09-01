@@ -17,11 +17,21 @@ serviço `ezyshield` e upgrades limpos. Os metadados do repositório são
 assinados com GPG; releases estáveis ficam na suite `stable`, release
 candidates em `testing`.
 
+**Pré-requisitos:** `curl` e o seu gerenciador de pacotes, nada além disso.
+Os passos de apt abaixo guardam a chave de assinatura em ASCII-armored e
+apontam o `signed-by=` direto para ela, então o `gnupg` **não** é necessário
+para instalar — o apt lê chaves armored nativamente. O `gnupg` só é
+necessário para a conferência opcional de fingerprint mais abaixo. O script
+de instalação usa ainda as ferramentas padrão do coreutils (`install`,
+`mktemp`, `sha256sum`) quando cai para os binários crus, e avisa pelo nome
+se alguma faltar.
+
 **Debian / Ubuntu:**
 
 ```bash
-curl -fsSL https://packages.ezyshield.com/ezyshield.asc | sudo gpg --dearmor -o /usr/share/keyrings/ezyshield.gpg
-echo "deb [signed-by=/usr/share/keyrings/ezyshield.gpg] https://packages.ezyshield.com/apt stable main" | sudo tee /etc/apt/sources.list.d/ezyshield.list
+sudo install -d -m 755 /etc/apt/keyrings
+sudo curl -fsSL https://packages.ezyshield.com/ezyshield.asc -o /etc/apt/keyrings/ezyshield.asc
+echo "deb [signed-by=/etc/apt/keyrings/ezyshield.asc] https://packages.ezyshield.com/apt stable main" | sudo tee /etc/apt/sources.list.d/ezyshield.list
 sudo apt update && sudo apt install ezyshield
 ```
 
@@ -45,19 +55,29 @@ sudo dnf install ezyshield
 > ponta. Assinatura por pacote rpm chega com o futuro trabalho de assinatura
 > de artefatos, quando `gpgcheck=1` vira o padrão documentado.
 
-Depois de importar a chave, confira o fingerprint antes de confiar no
+Depois de instalar a chave, confira o fingerprint antes de confiar no
 repositório. O fingerprint da chave de assinatura é:
 
 ```
 810E EEB0 1802 38F7 E800  4A9E E1AD 3D15 A121 3612
 ```
 
-Compare com o da chave importada (o CI re-verifica esse valor fixado contra a
+Compare com o da chave instalada (o CI re-verifica esse valor fixado contra a
 chave publicada a cada release, então ele não diverge silenciosamente):
 
 ```bash
-gpg --show-keys /usr/share/keyrings/ezyshield.gpg
+# Debian / Ubuntu
+gpg --show-keys /etc/apt/keyrings/ezyshield.asc
+
+# RHEL / Rocky / Alma — o dnf busca a chave sozinho; baixe uma cópia para conferir
+curl -fsSL https://packages.ezyshield.com/ezyshield.asc -o /tmp/ezyshield.asc
+gpg --show-keys /tmp/ezyshield.asc
 ```
+
+Essa é a única parte do fluxo que precisa do `gnupg`
+(`sudo apt install gnupg` / `sudo dnf install gnupg2`). Instalar a partir do
+repositório e usá-lo não precisa: o apt lê a chave ASCII-armored diretamente,
+e o dnf cuida do `gpgkey=` sozinho.
 
 Para acompanhar release candidates em vez das estáveis, troque `stable`
 por `testing` em qualquer dos snippets (o equivalente no script de
@@ -170,10 +190,25 @@ gerenciador de pacotes — resultado idêntico a seguir os passos de apt/dnf
 manualmente. Os binários crus em `/usr/local/bin/` só são usados quando:
 
 - o host não tem `apt-get`/`dnf`/`yum` algum,
-- `EZYSHIELD_BASE_URL` aponta para um espelho customizado (instalação air-gapped), ou
-- a configuração do repositório ou a checagem de acessibilidade falha — o
-  script imprime um aviso e cai para o modo binário automaticamente, então a
-  instalação ainda é concluída.
+- `EZYSHIELD_BASE_URL` aponta para um espelho customizado (instalação air-gapped),
+- `EZYSHIELD_METHOD=binary` ou `--dev` foi pedido, ou
+- a configuração do repositório falha — o script imprime um aviso, cai para
+  o modo binário automaticamente (a instalação ainda é concluída) e nomeia o
+  motivo concreto: o repositório de pacotes estava inacessível, a chave de
+  assinatura não pôde ser baixada, o arquivo servido na URL da chave não era
+  uma chave pública PGP em ASCII-armored, a entrada de source do apt não pôde
+  ser escrita, o `apt-get update` falhou depois de adicionar o repositório,
+  ou o próprio `apt-get`/`dnf install` do pacote `ezyshield` falhou.
+
+O motivo é repetido no banner final, junto com o comando que migra o host
+para a instalação via pacote assim que a causa for corrigida — assim, num
+one-liner `curl … | sudo sh`, você nunca precisa rolar a tela para trás para
+descobrir qual método realmente rodou. Uma instalação em modo binário sempre
+termina com uma linha explícita `Install method: raw binaries …`.
+
+Pré-requisitos ausentes nunca causam um downgrade silencioso: o script
+confere os comandos de que precisa antes de escolher um método e, se algum
+faltar, para com o nome dele e o comando exato que o instala.
 
 Uma exceção: se o host **já roda uma instalação de EzyShield gerenciada por
 pacote**, todo caminho de modo binário se recusa em vez de instalar

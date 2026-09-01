@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # get-sh-message-test.sh — regression test for get.sh's messaging and
-# install-method selection (issues #235, #240).
+# install-method selection (issues #235, #240, #573).
 #
 # WHY (issue #235): before v0.1.0 ships, GitHub's /releases/latest 404s for
 # every release (it only ever considers non-prerelease tags), and get.sh
@@ -26,6 +26,16 @@
 # setup_fakebin, which puts fake, logged, no-op scripts of those names
 # first in PATH.
 #
+# WHY (issue #573): the apt path used to pipe the signing key through `gpg
+# --dearmor`, but gnupg is Priority: optional on Debian/Ubuntu and missing
+# from most cloud/container images, so the package install failed and the
+# script silently degraded to the raw-binary one under a success banner.
+# get.sh now installs the ASCII-armored key as-is and references it from
+# signed-by=, validates that the downloaded body really is an armored PGP
+# public key, checks every required tool up front, and names the concrete
+# reason whenever the package path is skipped. The scenarios below cover all
+# four, including a run whose PATH contains no gpg at all (see make_toolbox).
+#
 # Usage: bash scripts/get-sh-message-test.sh
 set -euo pipefail
 
@@ -40,9 +50,42 @@ bad() { printf '  \033[31m✗ %s\033[0m\n' "$1"; fail=$((fail+1)); }
 # source, including a literal $(...) in the evil-tag fixture — nothing here
 # may expand in the shell.
 MOCK_SERVER_PY='
-import http.server, json, sys
+import hashlib, http.server, json, sys
 
 mode = sys.argv[1]
+
+# A syntactically plausible ASCII-armored public key. get.sh only checks the
+# armor header before installing it (a CDN error page must never be written
+# where apt expects a key); nothing in these tests ever asks gpg or apt to
+# parse it, because neither is real here.
+KEY_BODY = (
+    "-----BEGIN PGP PUBLIC KEY BLOCK-----\n"
+    "\n"
+    "mDMEZmockAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n"
+    "=m0ck\n"
+    "-----END PGP PUBLIC KEY BLOCK-----\n"
+).encode()
+
+# What a CDN serves when the key object is missing: HTTP 200 with an error
+# page. Installing this as a keyring is the failure mode get.sh must refuse.
+BAD_KEY_BODY = (
+    "<!DOCTYPE html><html><head><title>404 Not Found</title></head>"
+    "<body>The specified key does not exist.</body></html>\n"
+).encode()
+
+# Release assets for the --local mirror scenario, with a checksums.txt that
+# really matches them, so one scenario can run a binary install all the way
+# to the final banner. Both architectures are listed because the suffix is
+# derived from the runner uname.
+FAKE_BINARIES = {
+    "ezyshield": b"#!/bin/sh\necho ezyshield mock\n",
+    "ezyshield-enforcer": b"#!/bin/sh\necho ezyshield-enforcer mock\n",
+}
+CHECKSUMS = "".join(
+    "%s  %s-linux-%s\n" % (hashlib.sha256(body).hexdigest(), name, arch)
+    for name, body in sorted(FAKE_BINARIES.items())
+    for arch in ("amd64", "arm64")
+).encode()
 
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a):
@@ -50,21 +93,33 @@ class H(http.server.BaseHTTPRequestHandler):
 
     def _json(self, status, payload):
         body = json.dumps(payload).encode()
+        self._bytes(status, body, "application/json")
+
+    def _bytes(self, status, body, ctype):
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
     def do_GET(self):
         if self.path == "/ezyshield.asc":
-            # Package-repo signing-key endpoint: reachability probe AND the
-            # source install_via_packages() pipes into the (faked, in tests)
-            # gpg. Content is irrelevant here -- the fake gpg in
-            # setup_fakebin() just copies stdin to -o, it never really
-            # dearmors anything.
-            self._json(200, {"not": "a real key, fine for the fake gpg"})
+            # Package-repo signing-key endpoint: both the reachability probe
+            # and the file install_via_packages() writes to the keyrings
+            # directory. In bad-key mode it serves a CDN-style error page
+            # with HTTP 200 -- get.sh must refuse to install that as a key.
+            if mode == "bad-key":
+                self._bytes(200, BAD_KEY_BODY, "text/html")
+            else:
+                self._bytes(200, KEY_BODY, "application/pgp-keys")
             return
+        if self.path == "/checksums.txt":
+            self._bytes(200, CHECKSUMS, "text/plain")
+            return
+        for name, body in FAKE_BINARIES.items():
+            if self.path in ("/%s-linux-amd64" % name, "/%s-linux-arm64" % name):
+                self._bytes(200, body, "application/octet-stream")
+                return
         if self.path.startswith("/repos/evertramos/ezy-shield/releases/latest"):
             if mode == "200":
                 # A tag that can never exist as a real release: even if this
@@ -91,7 +146,7 @@ srv.serve_forever()
 '
 
 # run_against_mock <mode> — launches a local mock of the GitHub releases API
-# (modes: 404 | 200 | both-404 | evil-tag, see MOCK_SERVER_PY), runs the real
+# (modes: 404 | 200 | both-404 | evil-tag | bad-key, see MOCK_SERVER_PY), runs the real
 # get.sh against it via EZYSHIELD_API_BASE_URL, tears the mock down, and
 # leaves the result in the globals OUT (combined stdout+stderr) and RC (exit
 # code). get.sh runs behind a proxy pointed at a dead local port (no_proxy
@@ -230,10 +285,18 @@ stop_mock() {
 # prepending it to PATH. Sets OUT/RC. Does NOT start/stop the mock server —
 # call start_mock/stop_mock around it (needed because EXTRA_ENV often
 # references MOCK_PORT, which only exists once the mock is already up).
+# RUN_PATH_OVERRIDE (optional) replaces PATH entirely for the run instead of
+# prepending FAKEBIN — that is how the scenarios that must prove a tool is
+# genuinely ABSENT (no gpg at all, a missing prerequisite) are built, since
+# prepending can never hide a command the runner already has. Callers set it
+# to a directory from make_toolbox and clear it afterwards.
 run_get_sh_only() {
   local run_path="$PATH"
   if [ -n "${FAKEBIN:-}" ]; then
     run_path="$FAKEBIN:$PATH"
+  fi
+  if [ -n "${RUN_PATH_OVERRIDE:-}" ]; then
+    run_path="$RUN_PATH_OVERRIDE"
   fi
 
   set +e
@@ -246,6 +309,28 @@ run_get_sh_only() {
     sh "$GET_SH" "$@" 2>&1)"
   RC=$?
   set -e
+}
+
+# TOOLBOX_TOOLS is every real command get.sh invokes on either install path
+# (require_tools own list plus the ones the apt/binary steps call). A
+# toolbox built from it behaves exactly like a normal host; omitting one
+# entry makes that single tool genuinely missing for the run.
+TOOLBOX_TOOLS="sh curl install mktemp sha256sum grep sed awk tr uname mkdir rm cat head tail dirname chmod mv"
+
+# make_toolbox <dir> <tool>... — fills <dir> with symlinks to the named
+# commands as resolved on this runner, for use as a complete PATH.
+make_toolbox() {
+  local dir="$1"; shift
+  local t src
+  mkdir -p "$dir"
+  for t in "$@"; do
+    src="$(command -v "$t" 2>/dev/null || true)"
+    if [ -z "$src" ]; then
+      bad "toolbox: required runner command '$t' not found — cannot build the scenario"
+      return 1
+    fi
+    ln -sf "$src" "$dir/$t"
+  done
 }
 
 command -v python3 >/dev/null 2>&1 || { echo "python3 required for the mock server"; exit 2; }
@@ -360,7 +445,207 @@ case "$APT_LINE" in
   *" stable main"*) ok "apt source entry uses the 'stable' suite by default" ;;
   *) bad "apt source entry is not on the stable suite: $APT_LINE" ;;
 esac
+# issue #573: the key is installed ASCII-armored and referenced verbatim, so
+# gpg must not be involved at any point of the apt path.
+case "$CALLS" in
+  *"gpg "*) bad "gpg was invoked on the apt path; calls:
+$CALLS" ;;
+  *) ok "gpg was never invoked (an armored key needs no dearmor)" ;;
+esac
+KEY_AT="$SANDBOX/etc/apt/keyrings/ezyshield.asc"
+if [ -f "$KEY_AT" ]; then
+  ok "signing key installed at \${ROOT}/etc/apt/keyrings/ezyshield.asc"
+else
+  bad "no key at $KEY_AT"
+fi
+case "$(head -n1 "$KEY_AT" 2>/dev/null || true)" in
+  "-----BEGIN PGP PUBLIC KEY BLOCK-----") ok "installed key is the armored body served by the repo" ;;
+  *) bad "installed key is not the armored body served by the mock" ;;
+esac
+case "$APT_LINE" in
+  *"signed-by=$KEY_AT]"*) ok "apt source entry points signed-by= at the .asc key" ;;
+  *) bad "apt source entry does not reference the .asc key: $APT_LINE" ;;
+esac
+if [ ! -e "${KEY_AT}.tmp" ]; then
+  ok "no temp key file left behind in the keyrings directory"
+else
+  bad "temp key file survived at ${KEY_AT}.tmp"
+fi
 rm -rf "$FAKEBIN" "$SANDBOX"
+
+echo
+echo "▸ Scenario: the apt path works on a host with NO gpg in PATH at all (issue #573)"
+setup_fakebin
+SANDBOX="$(mktemp -d)"
+TOOLBOX="$(mktemp -d)"
+# A complete PATH minus gpg: every tool get.sh legitimately needs plus the
+# fake package-manager commands, and nothing else. This is the minimal
+# Debian/Ubuntu cloud image that used to degrade to the binary install.
+# shellcheck disable=SC2086  # deliberate word splitting of the tool list
+if make_toolbox "$TOOLBOX" $TOOLBOX_TOOLS; then
+  cp "$FAKEBIN/apt-get" "$FAKEBIN/systemctl" "$FAKEBIN/dpkg" "$TOOLBOX/"
+  if [ ! -e "$TOOLBOX/gpg" ]; then
+    ok "the run's PATH genuinely contains no gpg"
+  else
+    bad "the toolbox PATH still exposes gpg"
+  fi
+  start_mock 404
+  EXTRA_ENV=(
+    EZY_TEST_CALLLOG="$CALLLOG"
+    EZYSHIELD_METHOD=packages
+    EZYSHIELD_PACKAGES_BASE_URL="http://127.0.0.1:${MOCK_PORT}"
+    EZYSHIELD_ROOT="$SANDBOX"
+  )
+  RUN_PATH_OVERRIDE="$TOOLBOX"
+  run_get_sh_only
+  RUN_PATH_OVERRIDE=""
+  stop_mock
+  if [ "$RC" -eq 0 ]; then ok "exits 0 (package install completed without gnupg)"; else bad "exit code = $RC, want 0; output:
+$OUT"; fi
+  case "$OUT" in
+    *"installed via apt"*) ok "reports the package install as complete" ;;
+    *) bad "missing the package-install success message; output:
+$OUT" ;;
+  esac
+  case "$OUT" in
+    *"Installing EzyShield "*) bad "degraded to the raw-binary install on a gnupg-less host — the exact bug of issue #573" ;;
+    *) ok "never degraded to the raw-binary install" ;;
+  esac
+  if [ -f "$SANDBOX/etc/apt/keyrings/ezyshield.asc" ]; then
+    ok "armored key installed without gpg"
+  else
+    bad "no key installed under $SANDBOX/etc/apt/keyrings"
+  fi
+fi
+rm -rf "$FAKEBIN" "$SANDBOX" "$TOOLBOX"
+
+echo
+echo "▸ Scenario: an orphan keyring from an older run is removed once the new source entry supersedes it (issue #573)"
+setup_fakebin
+SANDBOX="$(mktemp -d)"
+mkdir -p "$SANDBOX/usr/share/keyrings" "$SANDBOX/etc/apt/sources.list.d"
+printf 'stale binary keyring from an older get.sh run\n' >"$SANDBOX/usr/share/keyrings/ezyshield.gpg"
+printf 'deb [signed-by=%s/usr/share/keyrings/ezyshield.gpg] http://old.invalid/apt testing main\n' \
+  "$SANDBOX" >"$SANDBOX/etc/apt/sources.list.d/ezyshield.list"
+start_mock 404
+EXTRA_ENV=(
+  EZY_TEST_CALLLOG="$CALLLOG"
+  EZYSHIELD_METHOD=packages
+  EZYSHIELD_PACKAGES_BASE_URL="http://127.0.0.1:${MOCK_PORT}"
+  EZYSHIELD_ROOT="$SANDBOX"
+)
+run_get_sh_only
+stop_mock
+if [ "$RC" -eq 0 ]; then ok "exits 0"; else bad "exit code = $RC, want 0; output:
+$OUT"; fi
+if [ ! -e "$SANDBOX/usr/share/keyrings/ezyshield.gpg" ]; then
+  ok "superseded /usr/share/keyrings/ezyshield.gpg removed"
+else
+  bad "orphan keyring still present at $SANDBOX/usr/share/keyrings/ezyshield.gpg"
+fi
+case "$OUT" in
+  *"removed the superseded keyring"*) ok "says which stale file it removed" ;;
+  *) bad "the removal was silent; output:
+$OUT" ;;
+esac
+APT_LINE="$(cat "$SANDBOX/etc/apt/sources.list.d/ezyshield.list" 2>/dev/null || true)"
+case "$APT_LINE" in
+  *"keyrings/ezyshield.asc]"*) ok "source entry now points at the .asc key" ;;
+  *) bad "source entry was not superseded: $APT_LINE" ;;
+esac
+rm -rf "$FAKEBIN" "$SANDBOX"
+
+echo
+echo "▸ Scenario: the key URL serves a non-PGP body — refused, package path degrades with the named reason (issue #573)"
+setup_fakebin
+SANDBOX="$(mktemp -d)"
+start_mock bad-key
+EXTRA_ENV=(
+  EZY_TEST_CALLLOG="$CALLLOG"
+  EZYSHIELD_METHOD=packages
+  EZYSHIELD_PACKAGES_BASE_URL="http://127.0.0.1:${MOCK_PORT}"
+  EZYSHIELD_API_BASE_URL="http://127.0.0.1:${MOCK_PORT}"
+  EZYSHIELD_ROOT="$SANDBOX"
+)
+run_get_sh_only
+stop_mock
+case "$OUT" in
+  *"is not an ASCII-armored PGP public key"*) ok "names the reason: the served body is not a key" ;;
+  *) bad "missing the named key-validation reason; output:
+$OUT" ;;
+esac
+case "$OUT" in
+  *"/ezyshield.asc is not an ASCII-armored"*) ok "names the URL it refused" ;;
+  *) bad "does not name the key URL; output:
+$OUT" ;;
+esac
+case "$OUT" in
+  *"Reason: the file served at"*) ok "the fallback warning repeats the concrete reason" ;;
+  *) bad "the fallback warning did not repeat the reason; output:
+$OUT" ;;
+esac
+if [ ! -e "$SANDBOX/etc/apt/keyrings/ezyshield.asc" ] && [ ! -e "$SANDBOX/etc/apt/keyrings/ezyshield.asc.tmp" ]; then
+  ok "the error page was never written where apt expects a key"
+else
+  bad "a non-key body was installed under $SANDBOX/etc/apt/keyrings"
+fi
+if [ ! -e "$SANDBOX/etc/apt/sources.list.d/ezyshield.list" ]; then
+  ok "no apt source entry written for a repository whose key was rejected"
+else
+  bad "source entry written despite the key being rejected"
+fi
+CALLS="$(cat "$CALLLOG")"
+case "$CALLS" in
+  *"apt-get install"*) bad "ran apt-get install despite the rejected key; calls:
+$CALLS" ;;
+  *) ok "apt-get install was never reached" ;;
+esac
+case "$OUT" in
+  *"No stable release has been published yet"*) ok "still falls through to the binary path so the install completes" ;;
+  *) bad "the binary-mode fallback did not run; output:
+$OUT" ;;
+esac
+rm -rf "$FAKEBIN" "$SANDBOX"
+
+echo
+echo "▸ Scenario: a missing prerequisite stops the install by name instead of degrading (issue #573)"
+setup_fakebin
+SANDBOX="$(mktemp -d)"
+TOOLBOX="$(mktemp -d)"
+# The same complete toolbox, minus curl. The check must fire before any
+# install-method decision, so nothing is probed, written, or degraded.
+# shellcheck disable=SC2086  # deliberate word splitting of the tool list
+if make_toolbox "$TOOLBOX" ${TOOLBOX_TOOLS/curl /}; then
+  cp "$FAKEBIN/apt-get" "$TOOLBOX/"
+  EXTRA_ENV=(
+    EZY_TEST_CALLLOG="$CALLLOG"
+    EZYSHIELD_METHOD=packages
+    EZYSHIELD_ROOT="$SANDBOX"
+  )
+  RUN_PATH_OVERRIDE="$TOOLBOX"
+  run_get_sh_only
+  RUN_PATH_OVERRIDE=""
+  if [ "$RC" -eq 1 ]; then ok "exits 1 (refused, never degraded)"; else bad "exit code = $RC, want 1; output:
+$OUT"; fi
+  case "$OUT" in
+    *"Error: 'curl' is required to install EzyShield but was not found."*) ok "names the missing tool" ;;
+    *) bad "the missing tool is not named; output:
+$OUT" ;;
+  esac
+  case "$OUT" in
+    *"sudo apt-get install -y curl"*) ok "prints the exact fix for this host's package manager" ;;
+    *) bad "missing the copy-pasteable fix; output:
+$OUT" ;;
+  esac
+  case "$OUT" in
+    *"Package manager detected"* | *"Installing EzyShield"* | *"Fetching"*) bad "chose an install method despite the missing prerequisite" ;;
+    *) ok "stopped before any install-method decision" ;;
+  esac
+  if [ -z "$(ls -A "$SANDBOX" 2>/dev/null)" ]; then ok "sandbox untouched"; else bad "the sandbox was written to"; fi
+  if [ -z "$(cat "$CALLLOG")" ]; then ok "no package-manager calls"; else bad "unexpected calls:
+$(cat "$CALLLOG")"; fi
+fi
+rm -rf "$FAKEBIN" "$SANDBOX" "$TOOLBOX"
 
 echo
 echo "▸ Scenario: EZYSHIELD_SUITE=testing opts the package install into the RC suite (issue #448)"
@@ -749,6 +1034,45 @@ case "$OUT" in
   *) bad "never reached the download step; output:
 $OUT" ;;
 esac
+rm -rf "$SANDBOX"
+
+echo
+echo "▸ Scenario: a completed binary install states its method in the final banner (issue #573)"
+SANDBOX="$(mktemp -d)"
+start_mock 404
+EXTRA_ENV=(
+  EZYSHIELD_BASE_URL="http://127.0.0.1:${MOCK_PORT}"
+  EZYSHIELD_LOCAL_ACK=1
+  EZYSHIELD_ROOT="$SANDBOX"
+)
+# The mock serves checksums.txt plus matching stand-in binaries, so this is
+# the one scenario that runs a binary install to completion — the only way
+# to assert the final banner. It is a mirror install by construction (that
+# is what serving assets from 127.0.0.1 requires), so the banner reports the
+# custom mirror as the reason the package path was not taken.
+run_get_sh_only --local
+stop_mock
+if [ "$RC" -eq 0 ]; then ok "exits 0 (install completed from the mock mirror)"; else bad "exit code = $RC, want 0; output:
+$OUT"; fi
+case "$OUT" in
+  *"Install method: raw binaries in ${SANDBOX}/usr/local/bin"*) ok "banner names the install method and location" ;;
+  *) bad "banner does not name the install method; output:
+$OUT" ;;
+esac
+case "$OUT" in
+  *"NOT on the apt/dnf package install"*) ok "banner says this host is not package-managed" ;;
+  *) bad "banner does not distinguish the two install modes" ;;
+esac
+case "$OUT" in
+  *"Package path skipped: EZYSHIELD_BASE_URL points at a custom mirror"*) ok "banner names why the package path was not used" ;;
+  *) bad "banner does not name the skip reason; output:
+$OUT" ;;
+esac
+if [ -x "$SANDBOX/usr/local/bin/ezyshield" ] && [ -x "$SANDBOX/usr/local/bin/ezyshield-enforcer" ]; then
+  ok "both binaries installed into the sandbox"
+else
+  bad "binaries missing under $SANDBOX/usr/local/bin"
+fi
 rm -rf "$SANDBOX"
 
 echo

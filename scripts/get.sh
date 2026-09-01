@@ -6,15 +6,26 @@
 #
 # Install method (issue #240 — package-first, tailscale/docker install-script
 # pattern): when this host has apt-get or dnf/yum AND the EzyShield package
-# repository is reachable, this script sets up the repo (GPG key + source
+# repository is reachable, this script sets up the repo (signing key + source
 # entry, same as the manual apt/dnf docs) and installs via the package
 # manager. Raw binaries in /usr/local/bin are used only when: the host has
 # no deb/rpm tooling, EZYSHIELD_BASE_URL points at a custom mirror,
 # EZYSHIELD_METHOD=binary is set explicitly, or the package repo setup /
 # reachability check fails (loud warning, automatic fallback — the install
-# still completes). Exception: if the host ALREADY has a package-managed
-# EzyShield install, every binary-mode path refuses (EZYSHIELD_FORCE_SCRIPT=1
+# still completes). Whenever that fallback happens the concrete reason is
+# recorded and repeated in the final banner, so a `curl | sudo sh` operator
+# never has to scroll back to find out which method actually ran (issue
+# #573). Exception: if the host ALREADY has a package-managed EzyShield
+# install, every binary-mode path refuses (EZYSHIELD_FORCE_SCRIPT=1
 # overrides) — installing to /usr/local/bin there would shadow the package.
+#
+# Prerequisites (issue #573): the apt path installs the ASCII-armored
+# signing key as-is under /etc/apt/keyrings and references it with
+# signed-by=, so `gpg` is NOT required — gnupg is Priority: optional on
+# Debian/Ubuntu and absent from most cloud and container images, and piping
+# the key through `gpg --dearmor` made those hosts silently fall back to the
+# raw-binary install. Every command this script does depend on is checked up
+# front by require_tools() and reported by name.
 #
 # Supply-chain authentication (issue #17): on the GitHub-release paths
 # (default, EZYSHIELD_VERSION, --dev) this script verifies checksums.txt's
@@ -79,7 +90,7 @@
 #   EZYSHIELD_ROOT               Internal/test-only path prefix (DESTDIR-style)
 #                               applied to every filesystem path this script
 #                               writes to or reads from (/usr/local/bin,
-#                               /etc/systemd/system, /usr/share/keyrings,
+#                               /etc/systemd/system, /etc/apt/keyrings,
 #                               /etc/apt/sources.list.d, /etc/yum.repos.d).
 #                               Not for production use.
 set -eu
@@ -92,7 +103,17 @@ REPO="evertramos/ezy-shield"
 ROOT="${EZYSHIELD_ROOT:-}"
 INSTALL_DIR="${ROOT}/usr/local/bin"
 SYSTEMD_DIR="${ROOT}/etc/systemd/system"
-KEYRING_PATH="${ROOT}/usr/share/keyrings/ezyshield.gpg"
+# The apt signing key is stored ASCII-armored (.asc) and referenced verbatim
+# from signed-by=. apt has read armored keyring files since 1.4; verified
+# by hand against the published repository down to apt 1.6 (Ubuntu 18.04),
+# far below every release in
+# docs/content/en/reference/supported-platforms.md. LEGACY_KEYRING_PATH is
+# the binary keyring older runs of this script produced with `gpg --dearmor`;
+# once the new source entry supersedes it, the orphan is removed so no stale
+# reference lingers (issue #573).
+KEYRING_DIR="${ROOT}/etc/apt/keyrings"
+KEYRING_PATH="${KEYRING_DIR}/ezyshield.asc"
+LEGACY_KEYRING_PATH="${ROOT}/usr/share/keyrings/ezyshield.gpg"
 APT_SOURCE_PATH="${ROOT}/etc/apt/sources.list.d/ezyshield.list"
 YUM_REPO_PATH="${ROOT}/etc/yum.repos.d/ezyshield.repo"
 PACKAGES_BASE_URL="${EZYSHIELD_PACKAGES_BASE_URL:-https://packages.ezyshield.com}"
@@ -321,23 +342,88 @@ packages_repo_reachable() {
   curl -sf --max-time 5 -o /dev/null "${PACKAGES_BASE_URL}/ezyshield.asc"
 }
 
+# pkg_degraded records WHY the package install did not happen and prints the
+# reason once, naming the exact step that failed instead of a vague "failed
+# to import" (issue #573). The stored reason is repeated verbatim in the
+# final banner of the binary-mode install.
+PKG_SKIP_REASON=""
+PKG_ATTEMPTED=0
+pkg_degraded() {
+  PKG_SKIP_REASON="$1"
+  echo "Warning: ${PKG_SKIP_REASON}" >&2
+}
+
+# install_apt_key downloads the ASCII-armored signing key to KEYRING_PATH.
+# No gpg involved: apt reads the armored key straight from signed-by=, so
+# this path works on the minimal Debian/Ubuntu images that ship apt-get
+# without gnupg (issue #573).
+#
+# The body is validated as a real armored public key before it replaces the
+# installed one — a CDN error page or a captive-portal redirect returns 200
+# with HTML, and that must never be written where apt expects a key. The
+# download lands on a sibling temp path in the same directory and is moved
+# into place only after that check, so a failed run never leaves a truncated
+# or bogus keyring behind.
+install_apt_key() {
+  key_url="${PACKAGES_BASE_URL}/ezyshield.asc"
+  key_tmp="${KEYRING_PATH}.tmp"
+
+  if ! mkdir -p "$KEYRING_DIR" || ! chmod 755 "$KEYRING_DIR"; then
+    pkg_degraded "could not create the keyring directory ${KEYRING_DIR}"
+    return 1
+  fi
+
+  if ! curl -fsSL "$key_url" -o "$key_tmp"; then
+    rm -f "$key_tmp"
+    pkg_degraded "failed to download the EzyShield signing key from ${key_url}"
+    return 1
+  fi
+  if ! head -n 1 "$key_tmp" | grep -qF -- "-----BEGIN PGP PUBLIC KEY BLOCK-----"; then
+    rm -f "$key_tmp"
+    pkg_degraded "the file served at ${key_url} is not an ASCII-armored PGP public key -- refusing to install it as one"
+    return 1
+  fi
+
+  if ! mv "$key_tmp" "$KEYRING_PATH" || ! chmod 644 "$KEYRING_PATH"; then
+    rm -f "$key_tmp"
+    pkg_degraded "could not install the EzyShield signing key at ${KEYRING_PATH}"
+    return 1
+  fi
+}
+
 # install_via_packages sets up the apt/dnf repo (matching the documented
 # manual steps in docs/content/en/getting-started/install.md; suite from
 # $SUITE, default 'stable') and installs the ezyshield package. Returns
-# non-zero on any failure so the caller can fall back to the binary install.
+# non-zero on any failure — with PKG_SKIP_REASON naming the failing step —
+# so the caller can fall back to the binary install and say why.
 install_via_packages() {
   pkg_mgr="$1"
   echo "Package manager detected (${pkg_mgr}) -- setting up the EzyShield repository..."
 
   case "$pkg_mgr" in
     apt)
-      mkdir -p "$(dirname "$KEYRING_PATH")" "$(dirname "$APT_SOURCE_PATH")"
-      if ! curl -fsSL "${PACKAGES_BASE_URL}/ezyshield.asc" | gpg --dearmor -o "$KEYRING_PATH"; then
-        echo "Warning: failed to import the EzyShield signing key." >&2
+      mkdir -p "$(dirname "$APT_SOURCE_PATH")"
+      install_apt_key || return 1
+      if ! echo "deb [signed-by=${KEYRING_PATH}] ${PACKAGES_BASE_URL}/apt ${SUITE} main" >"$APT_SOURCE_PATH"; then
+        pkg_degraded "could not write the apt source entry ${APT_SOURCE_PATH}"
         return 1
       fi
-      echo "deb [signed-by=${KEYRING_PATH}] ${PACKAGES_BASE_URL}/apt ${SUITE} main" >"$APT_SOURCE_PATH"
-      apt-get update -qq && apt-get install -y ezyshield
+      # The new source entry supersedes any binary keyring an older run of
+      # this script produced. Remove that exact, hardcoded path (never a
+      # glob — issue #240 security review §3) so nothing keeps pointing at
+      # a keyring apt no longer consults.
+      if [ -f "$LEGACY_KEYRING_PATH" ]; then
+        rm -f "$LEGACY_KEYRING_PATH"
+        echo "  removed the superseded keyring ${LEGACY_KEYRING_PATH}"
+      fi
+      if ! apt-get update -qq; then
+        pkg_degraded "apt-get update failed after writing ${APT_SOURCE_PATH}"
+        return 1
+      fi
+      if ! apt-get install -y ezyshield; then
+        pkg_degraded "apt-get install ezyshield failed"
+        return 1
+      fi
       ;;
     dnf | yum)
       mkdir -p "$(dirname "$YUM_REPO_PATH")"
@@ -350,9 +436,13 @@ gpgcheck=0
 repo_gpgcheck=1
 gpgkey=${PACKAGES_BASE_URL}/ezyshield.asc
 EOF
-      "$pkg_mgr" install -y ezyshield
+      if ! "$pkg_mgr" install -y ezyshield; then
+        pkg_degraded "${pkg_mgr} install ezyshield failed"
+        return 1
+      fi
       ;;
     *)
+      pkg_degraded "no supported package manager to install from (got: '${pkg_mgr}')"
       return 1
       ;;
   esac
@@ -382,6 +472,72 @@ if [ "$UNINSTALL" = "1" ]; then
   uninstall_script_install
   exit 0
 fi
+
+# ── package-manager detection ───────────────────────────────────────────────
+#
+# Detected before the prerequisite check below so a missing tool can be
+# reported with the install command for THIS host's package manager.
+PKG_MGR=""
+if command -v apt-get >/dev/null 2>&1; then
+  PKG_MGR="apt"
+elif command -v dnf >/dev/null 2>&1; then
+  PKG_MGR="dnf"
+elif command -v yum >/dev/null 2>&1; then
+  PKG_MGR="yum"
+fi
+
+# ── prerequisites (issue #573) ──────────────────────────────────────────────
+#
+# Every command this script needs, checked BEFORE any install-method
+# decision, so a missing one produces a named error and a copy-pasteable fix
+# instead of a mid-install failure or a silent degradation to a different
+# install method. Deliberately NOT in this list:
+#
+#   gpg          no longer used at all — the apt repo is configured with the
+#                ASCII-armored key as-is (see install_apt_key)
+#   systemctl    optional; every call already tolerates its absence
+#   dpkg / rpm   optional; package_owned_install() handles "not available"
+#   cosign       optional; verify_checksums_signature() degrades with a note
+#
+# The listed tools cover both install methods, because the package path can
+# still degrade to the binary one at any point after this check. mkdir, rm,
+# cat, head and tail come from the same coreutils package as install,
+# mktemp and sha256sum, so naming any one of them points at the same fix.
+REQUIRED_TOOLS="curl install mktemp sha256sum grep sed awk tr uname"
+
+# tool_package maps a required command to the package that provides it on
+# this host, so the error message ends in a command that actually works
+# here. Falls back to coreutils, which owns most of the list.
+tool_package() {
+  case "$1" in
+    curl) echo "curl" ;;
+    grep) echo "grep" ;;
+    sed) echo "sed" ;;
+    awk) if [ "$PKG_MGR" = "apt" ]; then echo "mawk"; else echo "gawk"; fi ;;
+    *) echo "coreutils" ;;
+  esac
+}
+
+# tool_install_command renders the exact command that installs $1 here.
+tool_install_command() {
+  case "$PKG_MGR" in
+    apt) echo "sudo apt-get install -y $(tool_package "$1")" ;;
+    dnf | yum) echo "sudo ${PKG_MGR} install -y $(tool_package "$1")" ;;
+    *) echo "install '$1' with this system's package manager" ;;
+  esac
+}
+
+require_tools() {
+  for t in $REQUIRED_TOOLS; do
+    if ! command -v "$t" >/dev/null 2>&1; then
+      echo "Error: '${t}' is required to install EzyShield but was not found."
+      echo "       Install it and re-run:  $(tool_install_command "$t")"
+      exit 1
+    fi
+  done
+}
+
+require_tools
 
 # ── --local gating (issue #17) ──────────────────────────────────────────────
 #
@@ -450,15 +606,8 @@ fi
 SUFFIX="${OS}-${ARCH}"
 
 # ── install-method selection ─────────────────────────────────────────────────
-
-PKG_MGR=""
-if command -v apt-get >/dev/null 2>&1; then
-  PKG_MGR="apt"
-elif command -v dnf >/dev/null 2>&1; then
-  PKG_MGR="dnf"
-elif command -v yum >/dev/null 2>&1; then
-  PKG_MGR="yum"
-fi
+#
+# PKG_MGR was detected above, before the prerequisite check.
 
 METHOD="${EZYSHIELD_METHOD:-auto}"
 case "$METHOD" in
@@ -471,11 +620,13 @@ esac
 
 USE_PACKAGES=0
 if [ -n "${EZYSHIELD_BASE_URL:-}" ]; then
-  : # custom mirror always wins -- air-gapped, binary mode
+  # custom mirror always wins -- air-gapped, binary mode
+  PKG_SKIP_REASON="EZYSHIELD_BASE_URL points at a custom mirror (binary mode by design)"
 elif [ "$DEV_MODE" = "1" ]; then
   # --dev pins the newest GitHub prerelease — binary mode by design. The
   # package-channel equivalent is the 'testing' suite, opted into with
   # EZYSHIELD_SUITE=testing (the default package install tracks 'stable').
+  PKG_SKIP_REASON="--dev selects the newest GitHub prerelease (binary mode by design)"
   if [ -n "$PKG_MGR" ]; then
     echo "Note: --dev installs the newest prerelease binaries from GitHub Releases."
     echo "      The package-repo equivalent is the 'testing' suite:"
@@ -483,21 +634,26 @@ elif [ "$DEV_MODE" = "1" ]; then
     echo ""
   fi
 elif [ "$METHOD" = "binary" ]; then
+  PKG_SKIP_REASON="EZYSHIELD_METHOD=binary was requested"
   if [ -n "$PKG_MGR" ]; then
     echo "Note: native .deb/.rpm packages are available for this host (EZYSHIELD_METHOD=binary was requested) --"
     echo "      see the install docs: https://github.com/${REPO}#install"
     echo ""
   fi
 elif [ -z "$PKG_MGR" ]; then
-  : # no deb/rpm tooling on this host -- binary mode
+  # no deb/rpm tooling on this host -- binary mode
+  PKG_SKIP_REASON="this host has no apt-get, dnf or yum"
 else
   # auto or packages: try the repo, fall back loudly on any failure so the
-  # install still completes.
+  # install still completes. PKG_ATTEMPTED marks the cases where the
+  # operator asked for (or would have got) a package install and did not
+  # get one -- those are the ones the final banner has to explain.
+  PKG_ATTEMPTED=1
   if packages_repo_reachable; then
     USE_PACKAGES=1
   else
     echo ""
-    echo "Warning: could not reach the EzyShield package repository (${PACKAGES_BASE_URL})."
+    pkg_degraded "could not reach the EzyShield package repository (${PACKAGES_BASE_URL}/ezyshield.asc)"
     echo "         Falling back to the raw-binary install. Package setup docs:"
     echo "         https://github.com/${REPO}#install"
     echo ""
@@ -516,7 +672,8 @@ if [ "$USE_PACKAGES" = "1" ]; then
     exit 0
   fi
   echo ""
-  echo "Warning: package install failed -- falling back to the raw-binary install."
+  echo "Warning: the ${PKG_MGR} package install did not complete -- falling back to the raw-binary install."
+  echo "         Reason: ${PKG_SKIP_REASON}"
   echo ""
 fi
 
@@ -730,6 +887,21 @@ install -m 755 ezyshield-enforcer "${INSTALL_DIR}/ezyshield-enforcer"
 
 echo ""
 echo "✅ EzyShield ${VERSION} installed to ${INSTALL_DIR}/"
+echo "   Install method: raw binaries in ${INSTALL_DIR} -- this host is NOT on the apt/dnf package install."
+# When a package install was on the table and did not happen, repeat the
+# concrete reason here: on a `curl | sudo sh` one-liner the mid-script
+# warning has long scrolled past by now, and the operator would otherwise
+# have no way to tell the two install modes apart (issue #573).
+if [ "$PKG_ATTEMPTED" = "1" ] && [ -n "$PKG_SKIP_REASON" ]; then
+  echo ""
+  echo "⚠️  The ${PKG_MGR} package install was attempted and skipped:"
+  echo "      ${PKG_SKIP_REASON}"
+  echo ""
+  echo "    Once that is resolved, switch this host to the package install with:"
+  echo "      curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_METHOD=packages sh"
+elif [ -n "$PKG_SKIP_REASON" ]; then
+  echo "   Package path skipped: ${PKG_SKIP_REASON}."
+fi
 echo ""
 echo "Next steps:"
 echo "  sudo ezyshield init    # interactive setup wizard"

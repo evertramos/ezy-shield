@@ -7,6 +7,13 @@
 # and the promises the guide makes (service user, units present, nothing
 # enabled or started).
 #
+# The apt leg mirrors the documented steps, which install the ASCII-armored
+# key as-is under /etc/apt/keyrings and reference it from signed-by= — no
+# `gpg --dearmor`, because gnupg is absent from most minimal Debian/Ubuntu
+# images (issue #573). This script still installs gnupg for itself: the
+# fingerprint check (`gpg --show-keys`) and the wrong-key negative test need
+# it, and both are verification steps, not install steps.
+#
 # WHY (issue #165): publish-repos.yaml uploads packages and signed metadata
 # to R2, but nothing in CI ever consumed them. A broken Release file, a
 # wrong or expired key, or docs drifting from the real repo layout would
@@ -39,7 +46,7 @@ set -euo pipefail
 BASE_URL="https://packages.ezyshield.com"
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 INSTALL_DOC="$REPO_ROOT/docs/content/en/getting-started/install.md"
-KEYRING=/usr/share/keyrings/ezyshield.gpg
+KEYRING=/etc/apt/keyrings/ezyshield.asc
 APT_LIST=/etc/apt/sources.list.d/ezyshield.list
 VERSION_RETRIES=5          # publish → CDN visibility can lag; bounded retry
 VERSION_RETRY_DELAY=45
@@ -63,7 +70,7 @@ check() {
   if "$@" >/dev/null 2>&1; then ok "$desc"; else bad "$desc"; fi
 }
 
-usage() { sed -n '2,37p' "$0"; exit "${1:-0}"; }
+usage() { sed -n '2,43p' "$0"; exit "${1:-0}"; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -169,11 +176,11 @@ fi
 # before the real install so the package-manager state is still clean.
 NEG_HOME="$(mktemp -d)"
 NEG_ASC="$(mktemp --suffix=.asc)"
-NEG_GPG=/usr/share/keyrings/ezyshield-negative-test.gpg
+NEG_KEY=/etc/apt/keyrings/ezyshield-negative-test.asc
 NEG_LIST=/etc/apt/sources.list.d/ezyshield-negative-test.list
 NEG_REPO=/etc/yum.repos.d/ezyshield-negative-test.repo
 cleanup_negative() {
-  rm -rf "$NEG_HOME" "$NEG_ASC" "$NEG_GPG" "$NEG_LIST" "$NEG_REPO"
+  rm -rf "$NEG_HOME" "$NEG_ASC" "$NEG_KEY" "$NEG_LIST" "$NEG_REPO"
 }
 trap cleanup_negative EXIT
 # Signals must still terminate: exit from the handler (which fires the EXIT
@@ -189,8 +196,11 @@ gpg --homedir "$NEG_HOME" --batch --pinentry-mode loopback --passphrase '' \
   default default never >/dev/null 2>&1
 
 if [ "$FAMILY" = apt ]; then
-  gpg --homedir "$NEG_HOME" --export > "$NEG_GPG"
-  echo "deb [signed-by=$NEG_GPG] $BASE_URL/apt $SUITE main" > "$NEG_LIST"
+  # Armored, in the same keyrings directory and signed-by= form the
+  # documented install uses — only the key itself is wrong.
+  install -d -m 755 /etc/apt/keyrings
+  gpg --homedir "$NEG_HOME" --armor --export > "$NEG_KEY"
+  echo "deb [signed-by=$NEG_KEY] $BASE_URL/apt $SUITE main" > "$NEG_LIST"
   neg_out="$(apt-get update 2>&1)" && neg_rc=0 || neg_rc=$?
   if [ "$neg_rc" -ne 0 ] && printf '%s' "$neg_out" | grep -Eq 'NO_PUBKEY|is not signed|not.*verified'; then
     ok "apt refuses repository metadata signed by an unknown key"
@@ -221,13 +231,18 @@ fi
 
 # --- Positive path: the documented install, verbatim (minus sudo) ---
 info "documented install flow ($FAMILY, suite=$SUITE)"
+# The key is stored ASCII-armored on both families: apt reads it straight
+# from signed-by=, dnf fetches it itself from gpgkey=. `gpg --show-keys`
+# reads armored files, so the pinned-fingerprint check is unchanged.
 if [ "$FAMILY" = apt ]; then
-  curl -fsSL "$BASE_URL/ezyshield.asc" | gpg --dearmor --yes -o "$KEYRING"
-  GOT_FPR="$(gpg --show-keys --with-colons "$KEYRING" | awk -F: '/^fpr/{print $10; exit}')"
+  install -d -m 755 /etc/apt/keyrings
+  KEY_FILE="$KEYRING"
 else
-  curl -fsSL "$BASE_URL/ezyshield.asc" -o /tmp/ezyshield.asc
-  GOT_FPR="$(gpg --show-keys --with-colons /tmp/ezyshield.asc | awk -F: '/^fpr/{print $10; exit}')"
+  KEY_FILE=/tmp/ezyshield.asc
 fi
+curl -fsSL "$BASE_URL/ezyshield.asc" -o "$KEY_FILE"
+chmod 644 "$KEY_FILE"
+GOT_FPR="$(gpg --show-keys --with-colons "$KEY_FILE" | awk -F: '/^fpr/{print $10; exit}')"
 # A fingerprint mismatch is fatal, not a counted failure: installing a
 # package signed by an unexpected key is exactly what this gate exists to
 # prevent, so nothing after this point would be trustworthy.

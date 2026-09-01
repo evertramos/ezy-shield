@@ -192,13 +192,18 @@ manualmente. Os binários crus em `/usr/local/bin/` só são usados quando:
 - o host não tem `apt-get`/`dnf`/`yum` algum,
 - `EZYSHIELD_BASE_URL` aponta para um espelho customizado (instalação air-gapped),
 - `EZYSHIELD_METHOD=binary` ou `--dev` foi pedido, ou
-- a configuração do repositório falha — o script imprime um aviso, cai para
-  o modo binário automaticamente (a instalação ainda é concluída) e nomeia o
-  motivo concreto: o repositório de pacotes estava inacessível, a chave de
-  assinatura não pôde ser baixada, o arquivo servido na URL da chave não era
-  uma chave pública PGP em ASCII-armored, a entrada de source do apt não pôde
-  ser escrita, o `apt-get update` falhou depois de adicionar o repositório,
-  ou o próprio `apt-get`/`dnf install` do pacote `ezyshield` falhou.
+- a configuração do repositório falha no modo padrão `auto` — o script
+  imprime um aviso, cai para o modo binário automaticamente (a instalação
+  ainda é concluída) e nomeia o motivo concreto: o repositório de pacotes
+  estava inacessível, a chave de assinatura não pôde ser baixada, o arquivo
+  servido na URL da chave não era uma chave pública PGP em ASCII-armored, a
+  entrada de source do apt não pôde ser escrita, o `apt-get update` falhou
+  depois de adicionar o repositório, ou o próprio `apt-get`/`dnf install` do
+  pacote `ezyshield` falhou.
+
+Esse último fallback é um comportamento exclusivo do modo `auto`. Com
+`EZYSHIELD_METHOD=packages` as mesmas falhas recusam com o mesmo motivo
+nomeado e saem com código diferente de zero, sem instalar nada.
 
 O motivo é repetido no banner final, junto com o comando que migra o host
 para a instalação via pacote assim que a causa for corrigida — assim, num
@@ -219,12 +224,22 @@ para sobrepor com um aviso ruidoso.
 Você pode forçar qualquer um dos dois caminhos explicitamente com `EZYSHIELD_METHOD`:
 
 ```bash
-# Sempre instalar via pacotes (falha ruidosamente se não for possível)
+# Pacotes ou nada: qualquer falha do caminho de pacotes recusa com o motivo
+# e sai com erro — nunca cai para os binários crus
 curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_METHOD=packages sh
 
 # Sempre instalar binários crus, mesmo com um gerenciador de pacotes presente
 curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_METHOD=binary sh
 ```
+
+Use `packages` quando uma instalação de binários crus for pior do que
+nenhuma instalação — gerência de configuração, build de imagens, ou qualquer
+host que precise permanecer gerenciado por pacote. Ele recusa em host sem
+`apt-get`/`dnf`/`yum`, com repositório inacessível, com chave de assinatura
+ausente ou que não seja uma chave PGP armored, e quando o `apt-get update`
+ou a instalação do pacote falha, dizendo qual dos casos ocorreu. O padrão
+`auto` trata esses casos como motivo para cair no modo binário, não para
+parar.
 
 Se o script encontrar uma instalação via script anterior (binários em
 `/usr/local/bin`, units em `/etc/systemd/system`) ao rotear para uma
@@ -398,7 +413,7 @@ sudo rm -rf /etc/ezyshield
 
 | Variável | Propósito | Exemplo |
 |----------|-----------|---------|
-| `EZYSHIELD_METHOD` | `auto` (padrão), `packages`, ou `binary` — força o método de instalação em vez de auto-detectar | `EZYSHIELD_METHOD=binary` |
+| `EZYSHIELD_METHOD` | `auto` (padrão, package-first com fallback ruidoso para binários), `packages` (pacotes ou nada — recusa com o motivo, nunca cai para binários), ou `binary` (sempre binários crus) | `EZYSHIELD_METHOD=binary` |
 | `EZYSHIELD_SUITE` | Suite do repositório de pacotes: `stable` (padrão) ou `testing` (release candidates). Só no modo pacote | `EZYSHIELD_SUITE=testing` |
 | `EZYSHIELD_VERSION` | Instalar uma versão específica (deve começar com `v`). Só no modo binário | `EZYSHIELD_VERSION=v0.1.0-rc.N` |
 | `EZYSHIELD_BASE_URL` | Instalar a partir de um espelho customizado (sobrescreve seleção de versão, força modo binário). Exige `--local` + `EZYSHIELD_LOCAL_ACK=1` | `EZYSHIELD_BASE_URL=https://mirror.exemplo.com/ezyshield/v0.1.0` |

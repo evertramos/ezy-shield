@@ -11,8 +11,9 @@
 # manager. Raw binaries in /usr/local/bin are used only when: the host has
 # no deb/rpm tooling, EZYSHIELD_BASE_URL points at a custom mirror,
 # EZYSHIELD_METHOD=binary is set explicitly, or the package repo setup /
-# reachability check fails (loud warning, automatic fallback — the install
-# still completes). Whenever that fallback happens the concrete reason is
+# reachability check fails in 'auto' mode (loud warning, automatic fallback
+# — the install still completes; EZYSHIELD_METHOD=packages refuses with the
+# reason instead). Whenever that fallback happens the concrete reason is
 # recorded and repeated in the final banner, so a `curl | sudo sh` operator
 # never has to scroll back to find out which method actually ran (issue
 # #573). Exception: if the host ALREADY has a package-managed EzyShield
@@ -73,6 +74,10 @@
 #   EZYSHIELD_METHOD            'auto' (default), 'packages', or 'binary'.
 #                               'binary' skips package-manager detection
 #                               entirely and always installs raw binaries.
+#                               'packages' means packages or nothing: any
+#                               failure of the package path refuses with the
+#                               named reason and exits 1 instead of falling
+#                               back. Only 'auto' degrades to raw binaries.
 #   EZYSHIELD_CLEANUP           Set to 1 to non-interactively remove a
 #                               previous script install (binaries in
 #                               /usr/local/bin, units in /etc/systemd/system)
@@ -351,6 +356,31 @@ PKG_ATTEMPTED=0
 pkg_degraded() {
   PKG_SKIP_REASON="$1"
   echo "Warning: ${PKG_SKIP_REASON}" >&2
+}
+
+# refuse_or_fallback is called on every package-path failure, right after
+# pkg_degraded() recorded the reason. EZYSHIELD_METHOD=packages means
+# packages or nothing: the operator asked for a specific install method, so
+# quietly installing a different one is the silent-degradation bug this
+# whole change exists to remove (issue #573) -- it refuses with the named
+# reason and a non-zero exit instead. In 'auto' it simply returns, and the
+# caller falls back loudly as before.
+#
+# Called only from the main flow (never inside install_via_packages), so
+# every exit here happens before any binary download.
+refuse_or_fallback() {
+  if [ "$METHOD" != "packages" ]; then
+    return 0
+  fi
+  echo ""
+  echo "Error: EZYSHIELD_METHOD=packages was requested but the package install did not complete."
+  echo "       Reason: ${PKG_SKIP_REASON}"
+  echo ""
+  echo "No raw-binary fallback was attempted, because you asked for the package install"
+  echo "explicitly. Fix the cause above and re-run, or install the raw binaries with:"
+  echo "  curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_METHOD=binary sh"
+  echo ""
+  exit 1
 }
 
 # install_apt_key downloads the ASCII-armored signing key to KEYRING_PATH.
@@ -641,8 +671,10 @@ elif [ "$METHOD" = "binary" ]; then
     echo ""
   fi
 elif [ -z "$PKG_MGR" ]; then
-  # no deb/rpm tooling on this host -- binary mode
+  # no deb/rpm tooling on this host -- binary mode. With METHOD=packages
+  # that is exactly the "not possible" case the mode promises to refuse on.
   PKG_SKIP_REASON="this host has no apt-get, dnf or yum"
+  refuse_or_fallback
 else
   # auto or packages: try the repo, fall back loudly on any failure so the
   # install still completes. PKG_ATTEMPTED marks the cases where the
@@ -654,6 +686,7 @@ else
   else
     echo ""
     pkg_degraded "could not reach the EzyShield package repository (${PACKAGES_BASE_URL}/ezyshield.asc)"
+    refuse_or_fallback
     echo "         Falling back to the raw-binary install. Package setup docs:"
     echo "         https://github.com/${REPO}#install"
     echo ""
@@ -671,6 +704,7 @@ if [ "$USE_PACKAGES" = "1" ]; then
     echo ""
     exit 0
   fi
+  refuse_or_fallback
   echo ""
   echo "Warning: the ${PKG_MGR} package install did not complete -- falling back to the raw-binary install."
   echo "         Reason: ${PKG_SKIP_REASON}"
@@ -899,6 +933,7 @@ if [ "$PKG_ATTEMPTED" = "1" ] && [ -n "$PKG_SKIP_REASON" ]; then
   echo ""
   echo "    Once that is resolved, switch this host to the package install with:"
   echo "      curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_METHOD=packages sh"
+  echo "    (that mode refuses with the reason instead of degrading again)"
 elif [ -n "$PKG_SKIP_REASON" ]; then
   echo "   Package path skipped: ${PKG_SKIP_REASON}."
 fi

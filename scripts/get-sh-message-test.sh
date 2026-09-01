@@ -562,7 +562,7 @@ SANDBOX="$(mktemp -d)"
 start_mock bad-key
 EXTRA_ENV=(
   EZY_TEST_CALLLOG="$CALLLOG"
-  EZYSHIELD_METHOD=packages
+  EZYSHIELD_METHOD=auto
   EZYSHIELD_PACKAGES_BASE_URL="http://127.0.0.1:${MOCK_PORT}"
   EZYSHIELD_API_BASE_URL="http://127.0.0.1:${MOCK_PORT}"
   EZYSHIELD_ROOT="$SANDBOX"
@@ -694,7 +694,7 @@ SANDBOX="$(mktemp -d)" # empty root: no package-owned install, guard must stay s
 start_mock 404
 EXTRA_ENV=(
   EZY_TEST_CALLLOG="$CALLLOG"
-  EZYSHIELD_METHOD=packages
+  EZYSHIELD_METHOD=auto # the fallback is an auto-mode behaviour; packages refuses instead
   EZYSHIELD_API_BASE_URL="http://127.0.0.1:${MOCK_PORT}"
   EZYSHIELD_ROOT="$SANDBOX"
   # EZYSHIELD_PACKAGES_BASE_URL intentionally left unset: it defaults to the
@@ -941,7 +941,7 @@ printf '#!/bin/sh\necho package\n' >"$SANDBOX/usr/bin/ezyshield"
 start_mock 404
 EXTRA_ENV=(
   EZY_TEST_CALLLOG="$CALLLOG"
-  EZYSHIELD_METHOD=packages
+  EZYSHIELD_METHOD=auto
   EZYSHIELD_API_BASE_URL="http://127.0.0.1:${MOCK_PORT}"
   EZYSHIELD_ROOT="$SANDBOX"
   # EZYSHIELD_PACKAGES_BASE_URL left unset: the dead proxy makes the real
@@ -1035,6 +1035,90 @@ case "$OUT" in
 $OUT" ;;
 esac
 rm -rf "$SANDBOX"
+
+echo
+echo "▸ Scenario: EZYSHIELD_METHOD=packages + unreachable repo — refuses, never installs binaries (issue #573)"
+setup_fakebin
+SANDBOX="$(mktemp -d)"
+start_mock 404
+EXTRA_ENV=(
+  EZY_TEST_CALLLOG="$CALLLOG"
+  EZYSHIELD_METHOD=packages
+  EZYSHIELD_API_BASE_URL="http://127.0.0.1:${MOCK_PORT}"
+  EZYSHIELD_ROOT="$SANDBOX"
+  # EZYSHIELD_PACKAGES_BASE_URL left unset: the dead proxy makes the real
+  # repo host unreachable, which in 'auto' would degrade to raw binaries.
+)
+run_get_sh_only
+stop_mock
+if [ "$RC" -eq 1 ]; then ok "exits 1 (refused, no fallback)"; else bad "exit code = $RC, want 1; output:
+$OUT"; fi
+case "$OUT" in
+  *"Error: EZYSHIELD_METHOD=packages was requested but the package install did not complete."*)
+    ok "refuses with the explicit packages-mode error" ;;
+  *) bad "missing the packages-mode refusal; output:
+$OUT" ;;
+esac
+case "$OUT" in
+  *"Reason: could not reach the EzyShield package repository"*) ok "names the concrete reason" ;;
+  *) bad "the refusal does not name the reason; output:
+$OUT" ;;
+esac
+case "$OUT" in
+  *"EZYSHIELD_METHOD=binary sh"*) ok "points at the explicit binary opt-in" ;;
+  *) bad "no way out offered; output:
+$OUT" ;;
+esac
+case "$OUT" in
+  *"Installing EzyShield"* | *"Fetching latest release"* | *"No stable release has been published yet"*)
+    bad "degraded to the binary path despite EZYSHIELD_METHOD=packages" ;;
+  *) ok "never entered the binary path" ;;
+esac
+if [ ! -e "$SANDBOX/usr/local/bin/ezyshield" ]; then
+  ok "nothing written to \${ROOT}/usr/local/bin"
+else
+  bad "binaries installed under $SANDBOX/usr/local/bin"
+fi
+rm -rf "$FAKEBIN" "$SANDBOX"
+
+echo
+echo "▸ Scenario: EZYSHIELD_METHOD=packages + non-PGP key body — refuses with the key reason (issue #573)"
+setup_fakebin
+SANDBOX="$(mktemp -d)"
+start_mock bad-key
+EXTRA_ENV=(
+  EZY_TEST_CALLLOG="$CALLLOG"
+  EZYSHIELD_METHOD=packages
+  EZYSHIELD_PACKAGES_BASE_URL="http://127.0.0.1:${MOCK_PORT}"
+  EZYSHIELD_API_BASE_URL="http://127.0.0.1:${MOCK_PORT}"
+  EZYSHIELD_ROOT="$SANDBOX"
+)
+run_get_sh_only
+stop_mock
+if [ "$RC" -eq 1 ]; then ok "exits 1 (refused, no fallback)"; else bad "exit code = $RC, want 1; output:
+$OUT"; fi
+case "$OUT" in
+  *"Error: EZYSHIELD_METHOD=packages was requested but the package install did not complete."*)
+    ok "refuses with the explicit packages-mode error" ;;
+  *) bad "missing the packages-mode refusal; output:
+$OUT" ;;
+esac
+case "$OUT" in
+  *"Reason: the file served at"*) ok "names the key-validation reason" ;;
+  *) bad "the refusal does not name the key reason; output:
+$OUT" ;;
+esac
+case "$OUT" in
+  *"Installing EzyShield"* | *"Fetching latest release"* | *"No stable release has been published yet"*)
+    bad "degraded to the binary path despite EZYSHIELD_METHOD=packages" ;;
+  *) ok "never entered the binary path" ;;
+esac
+if [ ! -e "$SANDBOX/etc/apt/keyrings/ezyshield.asc" ] && [ ! -e "$SANDBOX/etc/apt/sources.list.d/ezyshield.list" ]; then
+  ok "no key or source entry written for the rejected repository"
+else
+  bad "key or source entry written despite the rejected body"
+fi
+rm -rf "$FAKEBIN" "$SANDBOX"
 
 echo
 echo "▸ Scenario: a completed binary install states its method in the final banner (issue #573)"

@@ -187,13 +187,17 @@ identical result to following the apt/dnf steps by hand. Raw binaries in
 - the host has no `apt-get`/`dnf`/`yum` at all,
 - `EZYSHIELD_BASE_URL` points at a custom mirror (air-gapped install),
 - `EZYSHIELD_METHOD=binary` or `--dev` was requested, or
-- the package repo setup fails — the script prints a warning, falls back
-  automatically so the install still completes, and names the concrete
-  reason: the package repository was unreachable, the signing key could not
-  be downloaded, the file served at the key URL was not an ASCII-armored PGP
-  public key, the apt source entry could not be written, `apt-get update`
-  failed after the repository was added, or the `apt-get`/`dnf` install of
-  the `ezyshield` package itself failed.
+- the package repo setup fails in the default `auto` mode — the script
+  prints a warning, falls back automatically so the install still completes,
+  and names the concrete reason: the package repository was unreachable, the
+  signing key could not be downloaded, the file served at the key URL was
+  not an ASCII-armored PGP public key, the apt source entry could not be
+  written, `apt-get update` failed after the repository was added, or the
+  `apt-get`/`dnf` install of the `ezyshield` package itself failed.
+
+That last fallback is an `auto`-mode behaviour only. With
+`EZYSHIELD_METHOD=packages` the same failures refuse with the same named
+reason and exit non-zero, without installing anything.
 
 The reason is repeated in the final banner, together with the command that
 switches the host to the package install once the cause is fixed — so on a
@@ -214,12 +218,21 @@ override with a loud warning.
 You can force either path explicitly with `EZYSHIELD_METHOD`:
 
 ```bash
-# Always install packages (fails loudly if that's not possible)
+# Packages or nothing: any failure of the package path refuses with the
+# reason and exits non-zero — it never falls back to raw binaries
 curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_METHOD=packages sh
 
 # Always install raw binaries, even if a package manager is present
 curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_METHOD=binary sh
 ```
+
+Use `packages` when a raw-binary install would be worse than no install at
+all — configuration management, image builds, or any host that must stay
+package-managed. It refuses on a host with no `apt-get`/`dnf`/`yum`, on an
+unreachable repository, on a signing key that is missing or not an armored
+PGP key, and on a failed `apt-get update` or package install, naming which
+one it hit. The default `auto` treats those as reasons to fall back rather
+than to stop.
 
 If the script finds a previous script install (binaries in
 `/usr/local/bin`, units in `/etc/systemd/system`) while routing to a
@@ -390,7 +403,7 @@ sudo rm -rf /etc/ezyshield
 
 | Variable | Purpose | Example |
 |----------|---------|---------|
-| `EZYSHIELD_METHOD` | `auto` (default), `packages`, or `binary` — force the install method instead of auto-detecting | `EZYSHIELD_METHOD=binary` |
+| `EZYSHIELD_METHOD` | `auto` (default, package-first with a loud raw-binary fallback), `packages` (packages or nothing — refuses with the reason, never falls back), or `binary` (always raw binaries) | `EZYSHIELD_METHOD=binary` |
 | `EZYSHIELD_SUITE` | Package repo suite: `stable` (default) or `testing` (release candidates). Package mode only | `EZYSHIELD_SUITE=testing` |
 | `EZYSHIELD_VERSION` | Install a specific release (must start with `v`). Binary mode only | `EZYSHIELD_VERSION=v0.1.0-rc.N` |
 | `EZYSHIELD_BASE_URL` | Install from a custom mirror (overrides version selection, forces binary mode). Requires `--local` + `EZYSHIELD_LOCAL_ACK=1` | `EZYSHIELD_BASE_URL=https://mirror.example.com/ezyshield/v0.1.0` |

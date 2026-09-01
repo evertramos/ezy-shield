@@ -49,7 +49,13 @@ func (d *Daemon) handleDisableAll(ctx context.Context) SocketResponse {
 	}
 
 	// 2. Clear every active ban (history preserved; one summary audit row).
+	//    Taken under enforceMu (issue #575) so the clear cannot land between
+	//    a reconcile's desired-state snapshot and its kernel write — that
+	//    reconcile would re-add every ban we just cleared. The mutex is
+	//    released before step 3: syncEnforcer takes it itself.
+	d.enforceMu.Lock()
 	removed, err := d.store.UnbanAll(ctx, "panic button: operator ran disable --all")
+	d.enforceMu.Unlock()
 	if err != nil {
 		return SocketResponse{Error: fmt.Sprintf("clear active bans: %v", err)}
 	}

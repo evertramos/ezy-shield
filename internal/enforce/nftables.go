@@ -217,6 +217,11 @@ func (e *NftablesEnforcer) Sync(ctx context.Context, want []sdk.Target) error {
 	// recovery. AFTER boot, any non-zero repair means the kernel diverged
 	// from the store between reconciles (mid-write interruption, external
 	// flush, helper restart): say so loudly; the daemon audits it.
+	//
+	// The daemon serializes its own ban/unban mutations against reconcile
+	// (issue #575), so it can no longer race itself into apparent drift:
+	// after boot, a repair here means something OUTSIDE EzyShield touched
+	// the set — drift is external by construction.
 	e.repairMu.Lock()
 	first := !e.firstSyncDone
 	e.firstSyncDone = true

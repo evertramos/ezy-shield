@@ -525,13 +525,6 @@ func (d *Daemon) handleBan(ctx context.Context, req SocketRequest) SocketRespons
 		return d.refuseManualBan(ctx, prefix, ttl, err.Error())
 	}
 
-	if d.enforcer != nil && d.policy.IsArmed() {
-		t := targetFromPrefix(prefix, ttl)
-		if err := d.enforcer.Ban(ctx, t); err != nil {
-			return SocketResponse{Error: fmt.Sprintf("enforcer ban: %v", err)}
-		}
-	}
-
 	op := "ban"
 	if !d.policy.IsArmed() {
 		op = "dry_ban"
@@ -562,22 +555,45 @@ func (d *Daemon) handleBan(ctx context.Context, req SocketRequest) SocketRespons
 	// mirror it exactly like pipeline dry_bans — audit-only recording made
 	// the operator's own action invisible in dry-run mode (issue #358,
 	// ADR-0009 §5 "dry-run mirrors armed").
+	//
+	// The kernel write and the store write are taken under d.enforceMu
+	// (issue #575): handleBan applies the firewall rule FIRST and records
+	// bans_active second, so a reconcile straddling the two would list a
+	// kernel element with no matching row in its desired-state snapshot and
+	// delete the ban the operator had just placed. Held across both writes
+	// only — the guard checks above and the notification/publish below stay
+	// outside so an operator ban never blocks on network I/O under the lock.
 	stored := false
-	if prefix.Bits() == prefix.Addr().BitLen() {
-		if err := d.store.RecordManualBan(ctx, prefix.Addr(), ttl, reason, !d.policy.IsArmed()); err != nil {
-			slog.ErrorContext(ctx, "daemon: record manual ban failed, falling back to audit-only",
-				"ip", prefix.Addr(), "err", err)
-			if auditErr := d.store.AuditOp(ctx, op, prefix, ttl, reason); auditErr != nil {
-				slog.ErrorContext(ctx, "daemon: audit fallback also failed",
-					"prefix", prefix, "err", auditErr)
+	if resp, refused := func() (SocketResponse, bool) {
+		d.enforceMu.Lock()
+		defer d.enforceMu.Unlock()
+
+		if d.enforcer != nil && d.policy.IsArmed() {
+			t := targetFromPrefix(prefix, ttl)
+			if err := d.enforcer.Ban(ctx, t); err != nil {
+				return SocketResponse{Error: fmt.Sprintf("enforcer ban: %v", err)}, true
 			}
+		}
+
+		if prefix.Bits() == prefix.Addr().BitLen() {
+			if err := d.store.RecordManualBan(ctx, prefix.Addr(), ttl, reason, !d.policy.IsArmed()); err != nil {
+				slog.ErrorContext(ctx, "daemon: record manual ban failed, falling back to audit-only",
+					"ip", prefix.Addr(), "err", err)
+				if auditErr := d.store.AuditOp(ctx, op, prefix, ttl, reason); auditErr != nil {
+					slog.ErrorContext(ctx, "daemon: audit fallback also failed",
+						"prefix", prefix, "err", auditErr)
+				}
+			} else {
+				stored = true
+			}
+		} else if err := d.store.AuditOp(ctx, op, prefix, ttl, reason); err != nil {
+			slog.ErrorContext(ctx, "daemon: audit manual ban", "prefix", prefix, "err", err)
 		} else {
 			stored = true
 		}
-	} else if err := d.store.AuditOp(ctx, op, prefix, ttl, reason); err != nil {
-		slog.ErrorContext(ctx, "daemon: audit manual ban", "prefix", prefix, "err", err)
-	} else {
-		stored = true
+		return SocketResponse{}, false
+	}(); refused {
+		return resp
 	}
 
 	// Emit an INFO line matching the pipeline path's message so tools that grep
@@ -619,22 +635,35 @@ func (d *Daemon) handleUnban(ctx context.Context, req SocketRequest) SocketRespo
 		return SocketResponse{Error: err.Error()}
 	}
 
-	if d.enforcer != nil {
-		t := targetFromPrefix(prefix, 0)
-		if err := d.enforcer.Unban(ctx, t); err != nil {
-			// Log but don't fail — store cleanup should still proceed.
-			slog.ErrorContext(ctx, "daemon: enforcer unban failed", "prefix", prefix, "err", err)
-		}
-	}
+	// Kernel removal and store removal are one unit w.r.t. the periodic
+	// reconcile (issue #575): the enforcer rule is dropped first and the
+	// bans_active row second, so a Sync straddling the two would still see
+	// the row in its desired state and re-add the block the operator just
+	// lifted, until the following cycle.
+	if resp, failed := func() (SocketResponse, bool) {
+		d.enforceMu.Lock()
+		defer d.enforceMu.Unlock()
 
-	if prefix.Bits() == prefix.Addr().BitLen() {
-		if err := d.store.Unban(ctx, prefix.Addr()); err != nil {
-			return SocketResponse{Error: fmt.Sprintf("store unban: %v", err)}
+		if d.enforcer != nil {
+			t := targetFromPrefix(prefix, 0)
+			if err := d.enforcer.Unban(ctx, t); err != nil {
+				// Log but don't fail — store cleanup should still proceed.
+				slog.ErrorContext(ctx, "daemon: enforcer unban failed", "prefix", prefix, "err", err)
+			}
 		}
-	} else {
-		if _, err := d.store.UnbanPrefix(ctx, prefix); err != nil {
-			return SocketResponse{Error: fmt.Sprintf("store unban prefix: %v", err)}
+
+		if prefix.Bits() == prefix.Addr().BitLen() {
+			if err := d.store.Unban(ctx, prefix.Addr()); err != nil {
+				return SocketResponse{Error: fmt.Sprintf("store unban: %v", err)}, true
+			}
+		} else {
+			if _, err := d.store.UnbanPrefix(ctx, prefix); err != nil {
+				return SocketResponse{Error: fmt.Sprintf("store unban prefix: %v", err)}, true
+			}
 		}
+		return SocketResponse{}, false
+	}(); failed {
+		return resp
 	}
 
 	// Emit an INFO line matching the pipeline path's message so tools that grep

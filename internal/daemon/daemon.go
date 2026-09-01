@@ -342,6 +342,19 @@ type Daemon struct {
 	mu               sync.RWMutex
 	runtimeAllowlist []netip.Prefix // dynamically added by the 'allow' socket command
 
+	// enforceMu serializes every store+kernel ban/unban mutation against
+	// reconcile so Sync never sees a half-applied change — issue #575.
+	// The reconcile snapshots the desired state (store.ActiveBans) before
+	// the enforcer reads the kernel state, so a ban committing inside that
+	// window was present in the kernel but absent from `want` and got
+	// deleted as "stale" seconds after it was applied. Every path that
+	// writes the firewall and the store for the same ban (dispatch,
+	// handleBan, handleUnban, the panic button) holds this for the whole
+	// mutation; syncEnforcer holds it across ActiveBans → Sync → repair
+	// accounting. Never call syncEnforcer while holding it — it locks
+	// itself.
+	enforceMu sync.Mutex
+
 	// actionsSink, when non-nil, receives every Action the pipeline produces.
 	// Used in tests to observe pipeline output without a running enforcer.
 	actionsSink chan<- sdk.Action
@@ -1357,7 +1370,15 @@ func (d *Daemon) dispatch(ctx context.Context, action sdk.Action) {
 	banApplied := false
 	if action.Op == "ban" && d.enforcer != nil {
 		t := sdk.Target{IP: action.IP, TTL: action.TTL}
+		// Serialized against reconcile (issue #575): the decision engine
+		// already wrote the bans_active row before dispatch was called, so
+		// taking enforceMu here makes the pair atomic w.r.t. a Sync. A ban
+		// committed before the reconcile's snapshot is in `want`; one
+		// committed after waits here and lands on a kernel the reconcile
+		// has already finished reading — neither can be seen as "stale".
+		d.enforceMu.Lock()
 		err := d.enforcer.Ban(ctx, t)
+		d.enforceMu.Unlock()
 		if err != nil {
 			slog.ErrorContext(ctx, "daemon: enforcer ban failed", "ip", action.IP, "err", err)
 			d.notifyCritical(ctx, fmt.Sprintf("enforcer ban failed for %s: %v", action.IP, err))
@@ -1449,12 +1470,20 @@ func (d *Daemon) reloadAllowlist(ctx context.Context) error {
 // the enforcer: they exist only to mirror suppression/escalation while
 // armed=false, and must not materialise as real firewall rules — not even
 // after the operator flips armed=true and the daemon restarts.
+//
+// The desired-state snapshot, the Sync itself and the repair accounting are
+// taken under d.enforceMu (issue #575): without it a ban committing between
+// ActiveBans() and the enforcer's read of the kernel state was in the kernel
+// but not in `want`, so the reconcile deleted the ban the daemon had applied
+// seconds earlier and only re-added it a cycle later.
 func (d *Daemon) syncEnforcer(ctx context.Context) error {
 	if d.enforcer == nil {
 		return nil
 	}
+	d.enforceMu.Lock()
 	bans, err := d.store.ActiveBans(ctx)
 	if err != nil {
+		d.enforceMu.Unlock()
 		return fmt.Errorf("load active bans: %w", err)
 	}
 	targets := make([]sdk.Target, 0, len(bans))
@@ -1465,9 +1494,24 @@ func (d *Daemon) syncEnforcer(ctx context.Context) error {
 		targets = append(targets, sdk.Target{IP: b.IP, TTL: b.TTL})
 	}
 	err = d.enforcer.Sync(ctx, targets)
+	// Repair counters describe the Sync that just ran, so they are read
+	// under the same lock — a reconcile starting the moment we release
+	// would otherwise overwrite them before we look.
+	var added, removed int
+	var firstSync, haveRepairs bool
+	if err == nil {
+		if rep, ok := d.enforcer.(enforce.SyncRepairReporter); ok {
+			added, removed, firstSync = rep.LastSyncRepairs()
+			haveRepairs = true
+		}
+	}
+	d.enforceMu.Unlock()
+
 	// Enforcement-state health (issue #174): reconcile is the periodic
 	// signal that flips DEGRADED→ACTIVE on recovery (and ACTIVE→DEGRADED if
-	// the firewall backend went away between bans).
+	// the firewall backend went away between bans). Deliberately outside the
+	// lock: a state transition can send a critical notification, and the ban
+	// path must not queue behind a notifier round trip.
 	d.recordEnforceResult(ctx, "sync", err)
 
 	// Reconcile-repair audit (issue #214): a mid-write interruption (crash,
@@ -1475,14 +1519,10 @@ func (d *Daemon) syncEnforcer(ctx context.Context) error {
 	// repair — record it in the append-only audit_log so the incident is
 	// traceable, not just a transient WARN. The boot reconcile is exempt:
 	// re-adding every persisted ban after a restart is expected recovery.
-	if err == nil {
-		if rep, ok := d.enforcer.(enforce.SyncRepairReporter); ok {
-			if a, r, first := rep.LastSyncRepairs(); (a > 0 || r > 0) && !first {
-				reason := fmt.Sprintf("reconcile repaired store↔kernel drift: re-added %d, removed %d", a, r)
-				if aerr := d.store.AuditSystem(ctx, "enforce_reconcile", reason); aerr != nil {
-					slog.ErrorContext(ctx, "daemon: audit enforce_reconcile", "err", aerr)
-				}
-			}
+	if haveRepairs && (added > 0 || removed > 0) && !firstSync {
+		reason := fmt.Sprintf("reconcile repaired store↔kernel drift: re-added %d, removed %d", added, removed)
+		if aerr := d.store.AuditSystem(ctx, "enforce_reconcile", reason); aerr != nil {
+			slog.ErrorContext(ctx, "daemon: audit enforce_reconcile", "err", aerr)
 		}
 	}
 	return err

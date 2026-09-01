@@ -117,6 +117,11 @@ type answersCollectors struct {
 	// (the wizard default), false disables.
 	SSH *bool                 `yaml:"ssh"`
 	Web []answersWebCollector `yaml:"web"`
+	// DockerGroup opts the service user into the 'docker' group so docker
+	// collectors can reach the Engine socket. Default false, and never
+	// implied by anything else: the group is root-equivalent on the host
+	// (issue #574). Mirrors the --docker-group flag.
+	DockerGroup bool `yaml:"docker_group"`
 }
 
 type answersWebCollector struct {
@@ -246,6 +251,10 @@ func runNonInteractiveInit(cmd *cobra.Command, configDir string, skipSystem, for
 		if err := addAdminToEzyshieldGroup(p.w); err != nil {
 			p.printf("  warning: could not add admin to ezyshield group: %v\n", err)
 		}
+		// Docker socket access is a separate, explicit decision (issue #574):
+		// granted only when the answers/flags opted in AND this run
+		// configured a docker log source.
+		applyDockerGroupDecision(p, st, state, sum)
 	}
 	if err := os.MkdirAll(configDir, 0o750); err != nil {
 		return fmt.Errorf("creating config dir %s: %w", configDir, err)
@@ -357,6 +366,10 @@ func applyFlagOverrides(cmd *cobra.Command, a *initAnswers) {
 	if fs.Changed("monitor-ssh") {
 		v, _ := fs.GetBool("monitor-ssh")
 		a.Collectors.SSH = &v
+	}
+	if fs.Changed("docker-group") {
+		v, _ := fs.GetBool("docker-group")
+		a.Collectors.DockerGroup = v
 	}
 	if fs.Changed("admin-ips") {
 		v, _ := fs.GetString("admin-ips")
@@ -630,6 +643,12 @@ func applyAnswers(state *wizardState, a *initAnswers) {
 	} else {
 		state.webCollectors = acceptDetectedWebCollectors(state.webServers)
 	}
+
+	// Docker group opt-in (issue #574): explicit only. Detection finding
+	// docker collectors is never consent — without collectors.docker_group
+	// (or --docker-group) the run configures the collectors and warns that
+	// they cannot read anything yet.
+	state.dockerGroupOptIn = a.Collectors.DockerGroup
 
 	// Admin allowlist: explicit only. Unlike --yes we do NOT auto-add a
 	// detected IP: at golden-image build time that IP is the builder, not the

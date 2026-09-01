@@ -115,6 +115,17 @@ Flags:
   desconhecidas são rejeitadas.
 - `--force` — sobrescreve um `config.yaml`/`policy.yaml` existente (só no modo
   não-interativo; sem ela, uma reexecução recusa, igual ao assistente).
+- `--docker-group` — adiciona o usuário de serviço ezyshield ao grupo `docker`
+  para que collectors de log docker alcancem o socket do Engine. **Esse grupo é
+  equivalente a root no host** (seus membros podem iniciar um container
+  privilegiado), então a concessão nunca é implícita: no modo interativo o
+  wizard pergunta e tem não como padrão, o `--yes` sozinho nunca concede, e
+  esta flag é o opt-in explícito das execuções scriptadas (chave do arquivo de
+  respostas: `collectors.docker_group`). Só tem efeito quando a execução
+  configura ao menos um collector docker; sem ela, esses collectors ainda são
+  escritos, mas não conseguem ler os logs dos containers. O `ezyshield doctor`
+  avisa sempre que o usuário de serviço está no grupo. Para revogar:
+  `sudo gpasswd -d ezyshield docker && sudo systemctl restart ezyshield`.
 - `--admin-ips`, `--monitor-ssh`, `--enable-ai`, `--ai-provider`, `--ai-model`,
   `--ai-key-env` — sobrescritas por resposta para o caminho não-interativo. O
   `--ai-key-env` recebe um **NOME** de variável de ambiente, nunca a chave em
@@ -685,6 +696,10 @@ Verificações:
 - journald legível
 - socket do enforcer alcançável
 - socket do docker presente (quando coletores Docker estão configurados)
+- grupo docker do usuário de serviço: **WARN** quando o `ezyshield` é membro do
+  grupo `docker` — esse grupo é equivalente a root no host, então a dica diz se
+  os coletores configurados justificam isso ou se deve ser revogado
+  (`gpasswd -d ezyshield docker`); **N/A** quando o host não tem o grupo `docker`
 - permissões do arquivo de segredos `.env`
 - amplitude da allowlist: **WARN** (não FAIL) quando a allowlist do
   `policy.yaml` contém uma faixa privada (RFC1918/ULA) `/16` ou mais ampla —

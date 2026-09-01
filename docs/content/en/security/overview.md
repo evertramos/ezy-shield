@@ -131,6 +131,47 @@ When AI is enabled for ambiguous events (scores inside the configurable `ambiguo
 
 The enforcer is not a library. It's a separate process. The main daemon cannot directly modify the firewall.
 
+### The one grant that changes this: the `docker` group
+
+Docker log collectors (and the [docker exec watcher](../guides/docker-exec-watch.md)) read
+through the Docker Engine socket, and access to that socket is granted by
+membership in the `docker` group. That group is **not** a read permission — it
+is the Engine API. Any process that can reach it can start a container with
+the host filesystem mounted, which is root on the host.
+
+So on a Docker host where the service user is in `docker`, the first bullet
+above no longer holds: the daemon is root-equivalent, and the systemd
+hardening on its unit (`NoNewPrivileges`, `ProtectSystem=strict`, seccomp)
+does not contain it, because the escape is to ask the Docker daemon — an
+unconfined root process — to do the work.
+
+EzyShield therefore never grants that group on its own:
+
+- `ezyshield init` asks for it **only** when you configure at least one docker
+  collector, the prompt defaults to **no**, and it names the consequence.
+- Scripted installs opt in explicitly with `--docker-group` (or
+  `collectors.docker_group: true` in the answers file). `--yes` accepts safe
+  defaults, and this default is no.
+- Declining still writes the collectors — they simply cannot read container
+  logs until the access exists.
+- `ezyshield doctor` warns whenever the service user is in `docker`, and says
+  whether anything in your configuration justifies it.
+
+To check and revoke:
+
+```bash
+getent group docker                          # is ezyshield listed?
+sudo gpasswd -d ezyshield docker             # revoke
+sudo systemctl restart ezyshield             # drop the group from the running daemon
+```
+
+Revoking disables docker collectors. If you want container logs without a
+root-equivalent daemon, the usual alternatives are to write container logs to
+a host path (a bind-mounted access log read by a `kind: file` collector) or to
+put a read-only, endpoint-filtered proxy in front of the Engine socket. The
+file-based path needs nothing from Docker at all and is the one to reach for
+first.
+
 ## No network listeners
 
 EzyShield opens no network listener for control (the optional dashboard binds to a loopback address — `127.0.0.1` or `::1` — only, and refuses anything else). Control is via:

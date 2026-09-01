@@ -55,6 +55,7 @@ func newInitCmd() *cobra.Command {
 		nonInteractive bool
 		answersPath    string
 		force          bool
+		dockerGroup    bool
 	)
 
 	cmd := &cobra.Command{
@@ -94,7 +95,7 @@ Non-interactive (for Ansible / cloud-init / Terraform / golden images):
 				}
 				return runNonInteractiveInit(cmd, configDir, skipSystem, force, answersPath)
 			}
-			return runInitWizard(cmd, configDir, yes, skipSystem)
+			return runInitWizard(cmd, configDir, yes, skipSystem, dockerGroup)
 		},
 	}
 
@@ -123,6 +124,11 @@ Non-interactive (for Ansible / cloud-init / Terraform / golden images):
 		"AI model (overrides answers)")
 	cmd.Flags().String("ai-key-env", "",
 		"env var NAME holding the AI API key — never the key itself (overrides answers)")
+	// Opt-in privilege grant. Default false, and --yes deliberately does NOT
+	// flip it: membership in 'docker' is root-equivalent on the host, so the
+	// operator has to name it (issue #574).
+	cmd.Flags().BoolVar(&dockerGroup, "docker-group", false,
+		"add the ezyshield service user to the 'docker' group — root-equivalent access to the Docker socket; required by docker log collectors")
 
 	return cmd
 }
@@ -171,12 +177,19 @@ type wizardState struct {
 
 	webServers    []detectedWebServer  // detection result (for display + prompts)
 	webCollectors []webServerCollector // operator-approved collectors
-	monitorSSH    bool
-	adminIPs      []string
-	enableAI      bool
-	aiProvider    string
-	aiModel       string
-	aiKeyEnvVar   string
+	// dockerGroupOptIn is the operator's explicit consent to add the
+	// ezyshield service user to the 'docker' group (issue #574). Default
+	// false everywhere: the group is the Docker Engine API, not a read
+	// permission, so membership is root-equivalent on the host. Seeded from
+	// --docker-group / the answers file, then confirmed at the prompt when a
+	// docker log source is actually configured.
+	dockerGroupOptIn bool
+	monitorSSH       bool
+	adminIPs         []string
+	enableAI         bool
+	aiProvider       string
+	aiModel          string
+	aiKeyEnvVar      string
 	// aiExternalKey is true when the operator chose key option 2 ("already
 	// in an env var — sops/vault/LoadCredential"): the key is managed
 	// OUTSIDE .env and the wizard must not write anything for it. Writing
@@ -235,7 +248,7 @@ type dockerContainer struct {
 	ports string
 }
 
-func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) error {
+func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem, dockerGroup bool) error {
 	p := &wPrinter{w: cmd.OutOrStdout()}
 	st := newStyler(cmd.OutOrStdout())
 
@@ -266,6 +279,10 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 
 	state := &wizardState{}
 	sum := &initSummary{}
+	// --docker-group pre-answers the docker group prompt: it becomes the
+	// prompt's default, so an interactive operator can still say no and a
+	// --yes run grants nothing unless the flag was passed (issue #574).
+	state.dockerGroupOptIn = dockerGroup
 
 	if err := detectEnvironment(p, st, state, configDir, sc, yes, skipSystem); err != nil {
 		return err
@@ -298,6 +315,8 @@ func runInitWizard(cmd *cobra.Command, configDir string, yes, skipSystem bool) e
 		if err := addAdminToEzyshieldGroup(p.w); err != nil {
 			p.printf("  warning: could not add admin to ezyshield group: %v\n", err)
 		}
+		// Docker socket access is a separate, explicit decision (issue #574).
+		applyDockerGroupDecision(p, st, state, sum)
 	}
 
 	if err := os.MkdirAll(configDir, 0o750); err != nil {
@@ -731,6 +750,13 @@ func askQuestions(out io.Writer, sc *bufio.Scanner, state *wizardState, yes bool
 	p.println("")
 	p.println(st.header("Collectors"))
 	state.webCollectors = confirmWebServerCollectors(ask, askBool, state.webServers)
+
+	// Docker socket access — asked only when a docker log source was actually
+	// chosen, and defaulting to No because the grant is root-equivalent on
+	// this host (issue #574).
+	if dockerLogSources(state) > 0 {
+		state.dockerGroupOptIn = askBool(dockerGroupPrompt, state.dockerGroupOptIn)
+	}
 
 	// SSH monitoring
 	if state.sshUnit != "" {
@@ -1260,7 +1286,7 @@ func createEzyshieldUser(out io.Writer) error {
 		// created by postinstall with NO supplementary groups, so returning
 		// here left the journald collector permanently unable to read the
 		// journal (issue #454).
-		addLogAccessGroups()
+		addJournalAccessGroup()
 		return nil
 	}
 	if err := runSysCmd("useradd", "-r", "-s", "/usr/sbin/nologin", "-d", "/var/lib/ezyshield", "-m", "ezyshield"); err != nil {
@@ -1269,18 +1295,101 @@ func createEzyshieldUser(out io.Writer) error {
 	if _, err := fmt.Fprintln(out, "  user ezyshield: created"); err != nil {
 		return fmt.Errorf("writing output: %w", err)
 	}
-	addLogAccessGroups()
+	addJournalAccessGroup()
 	return nil
 }
 
-// addLogAccessGroups best-effort adds the service user to the groups that
-// gate log sources: systemd-journal (journald collector; also declared as
-// SupplementaryGroups= in the daemon unit) and docker (container-log
-// collectors). usermod -aG is idempotent, and a missing group just fails
-// silently — docker in particular is absent on most hosts.
-func addLogAccessGroups() {
-	_ = runCmdSilent("usermod", "-aG", "docker", "ezyshield")
+// addJournalAccessGroup best-effort adds the service user to systemd-journal,
+// the group that gates the journald collector (also declared as
+// SupplementaryGroups= in the daemon unit). usermod -aG is idempotent, and a
+// missing group just fails silently.
+//
+// It deliberately grants NOTHING else. The 'docker' group used to be added
+// here unconditionally, which handed the log-parsing daemon — the process
+// that consumes attacker-controlled input — a root-equivalent path on every
+// Docker host (the group is the Engine API, not a read permission). That
+// grant is now an explicit, collector-gated opt-in: see grantDockerGroup and
+// applyDockerGroupDecision (issue #574).
+func addJournalAccessGroup() {
 	_ = runCmdSilent("usermod", "-aG", "systemd-journal", "ezyshield")
+}
+
+// dockerGroupPrompt is the interactive opt-in question. It names the
+// consequence rather than the mechanism: an operator who reads only this
+// line must still learn that saying yes makes the daemon root-equivalent.
+const dockerGroupPrompt = "Grant the ezyshield service user access to the Docker socket? " +
+	"This adds it to the 'docker' group, which is root-equivalent on this host " +
+	"(any process running as ezyshield could start a privileged container). " +
+	"Required for docker log collectors."
+
+// dockerGroupSkippedLine is the summary/warning line printed when a run
+// configures docker log sources without granting the group. It is honest
+// about the outcome: the collector's filesystem fallback needs read access to
+// /var/lib/docker (and `docker inspect`, i.e. the same socket), so declining
+// leaves those collectors unable to read anything.
+const dockerGroupSkippedLine = "docker group: not granted — docker collectors will not be able to " +
+	"read container logs until access is granted (see docs)"
+
+// dockerLogSources counts the log sources configured in THIS init run that
+// need to reach the Docker Engine socket: the docker collectors approved in
+// the Collectors step. The docker exec watcher (config docker_exec) uses the
+// same socket, but no init path configures it today — when one does, count it
+// here so the grant decision stays complete.
+func dockerLogSources(state *wizardState) int {
+	if state == nil {
+		return 0
+	}
+	n := 0
+	for _, wc := range state.webCollectors {
+		if wc.Kind == "docker" {
+			n++
+		}
+	}
+	return n
+}
+
+// shouldGrantDockerGroup reports whether init may add the service user to the
+// root-equivalent 'docker' group. Both conditions are required and neither
+// has a default that says yes: the run must actually configure a docker log
+// source, AND the operator must have opted in (prompt answered y, or
+// --docker-group / the answers key set). --yes alone accepts safe defaults,
+// and this default is No. Issue #574.
+func shouldGrantDockerGroup(dockerSources int, optIn bool) bool {
+	return dockerSources > 0 && optIn
+}
+
+// grantDockerGroup adds the service user to the 'docker' group. usermod -aG
+// is idempotent; a missing group (Docker not installed) returns an error the
+// caller reports as a warning. Never call this without a shouldGrantDockerGroup
+// check — it is the one privilege grant in init that is not scoped to reading.
+func grantDockerGroup() error {
+	return runSysCmd("usermod", "-aG", "docker", "ezyshield")
+}
+
+// applyDockerGroupDecision performs the docker-group step of the Files
+// section for both drivers (wizard and non-interactive): grant when the run
+// configured docker log sources AND the operator opted in, otherwise print
+// and record the honest "collectors won't read anything" warning. A run with
+// no docker log source says nothing at all — there is nothing to decide.
+func applyDockerGroupDecision(p *wPrinter, st styler, state *wizardState, sum *initSummary) {
+	n := dockerLogSources(state)
+	if n == 0 {
+		return
+	}
+	if !shouldGrantDockerGroup(n, state.dockerGroupOptIn) {
+		p.println(st.warn(dockerGroupSkippedLine))
+		sum.skipped = append(sum.skipped, dockerGroupSkippedLine)
+		return
+	}
+	if err := grantDockerGroup(); err != nil {
+		p.printf("  warning: could not add ezyshield to the docker group: %v\n", err)
+		sum.skipped = append(sum.skipped, dockerGroupSkippedLine)
+		return
+	}
+	line := fmt.Sprintf("docker group: ezyshield added (root-equivalent access to the Docker socket "+
+		"— required by %d docker collector(s))", n)
+	p.println(st.ok(line))
+	sum.configured = append(sum.configured, line)
 }
 
 // waitForSocket polls for a unix socket to appear within timeout.

@@ -136,6 +136,47 @@ Quando a IA está habilitada para eventos ambíguos (scores dentro da `ambiguous
 
 O enforcer não é uma biblioteca. É um processo separado. O daemon principal não pode modificar o firewall diretamente.
 
+### A única concessão que muda isso: o grupo `docker`
+
+Coletores de log docker (e o [observador de docker exec](../guides/docker-exec-watch.md))
+leem através do socket do Docker Engine, e o acesso a esse socket é concedido
+pela participação no grupo `docker`. Esse grupo **não** é uma permissão de
+leitura — ele é a API do Engine. Qualquer processo que o alcance pode iniciar
+um container com o filesystem do host montado, o que é root no host.
+
+Portanto, em um host Docker onde o usuário de serviço está em `docker`, o
+primeiro item acima deixa de valer: o daemon é equivalente a root, e o
+hardening do systemd na unidade dele (`NoNewPrivileges`,
+`ProtectSystem=strict`, seccomp) não o contém, porque a fuga é pedir ao daemon
+do Docker — um processo root sem confinamento — que faça o trabalho.
+
+Por isso o EzyShield nunca concede esse grupo por conta própria:
+
+- o `ezyshield init` pergunta **apenas** quando você configura ao menos um
+  coletor docker, o prompt tem **não** como padrão e ele nomeia a consequência;
+- instalações scriptadas optam explicitamente com `--docker-group` (ou
+  `collectors.docker_group: true` no arquivo de respostas). O `--yes` aceita
+  padrões seguros, e este padrão é não;
+- recusar ainda escreve os coletores — eles apenas não conseguem ler os logs
+  dos containers enquanto o acesso não existir;
+- o `ezyshield doctor` avisa sempre que o usuário de serviço está em `docker`,
+  e diz se algo na sua configuração justifica isso.
+
+Para verificar e revogar:
+
+```bash
+getent group docker                          # o ezyshield aparece na lista?
+sudo gpasswd -d ezyshield docker             # revoga
+sudo systemctl restart ezyshield             # tira o grupo do daemon em execução
+```
+
+Revogar desabilita os coletores docker. Se você quer logs de container sem um
+daemon equivalente a root, as alternativas usuais são gravar os logs dos
+containers em um caminho do host (um access log bind-mountado, lido por um
+coletor `kind: file`) ou colocar um proxy somente-leitura, com filtro de
+endpoints, na frente do socket do Engine. O caminho por arquivo não precisa de
+nada do Docker e é o primeiro a considerar.
+
 ## Sem listeners de rede
 
 O EzyShield não abre nenhum listener de rede para controle (o dashboard opcional faz bind apenas em um endereço loopback — `127.0.0.1` ou `::1` — e recusa qualquer outra coisa). O controle é via:

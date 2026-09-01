@@ -29,6 +29,40 @@ docker_exec:
 
 The watcher uses the same docker socket and permission model as the docker log collector, subscribes to `exec_start` only (one event per exec, at the moment it actually runs), and reconnects with backoff when docker restarts.
 
+## Socket access is a privilege decision
+
+Reaching the docker events API means reaching the Docker Engine socket, and
+that access comes from membership in the `docker` group. The group is the
+Engine API, not a read permission: anything that can talk to it can start a
+privileged container, i.e. become root on the host. Granting it to the
+ezyshield service user makes the log-parsing daemon root-equivalent.
+
+`ezyshield init` therefore asks before granting it, defaults to no, and only
+asks at all when the run configures a docker log source. In scripted runs the
+opt-in is `--docker-group` (or `collectors.docker_group: true` in the answers
+file); `--yes` alone never grants it. Without the access, the watcher stays
+enabled in the config but observes nothing.
+
+An install provisioned earlier may already carry the membership — removing the
+grant from `init` does not revoke it, and neither does a package upgrade.
+Check it:
+
+```bash
+ezyshield doctor          # warns when the service user is in the docker group
+getent group docker       # is ezyshield listed?
+```
+
+To revoke:
+
+```bash
+sudo gpasswd -d ezyshield docker
+sudo systemctl restart ezyshield
+```
+
+That disables this watcher along with the docker log collectors. See the
+[security overview](../security/overview.md) for what the grant means and the
+alternatives.
+
 ## Tuning the ignore list
 
 Run a day with an empty list and review `ezyshield list --audit` (or your notifications): anything periodic and expected — health checks, cron containers, backup tooling, your own CI — goes into `ignore` by container-name or image pattern. What remains should be *rare and human*: that's the signal.

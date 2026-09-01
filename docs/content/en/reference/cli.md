@@ -118,6 +118,19 @@ Flags:
   it those collectors are still written but cannot read container logs.
   `ezyshield doctor` warns whenever the service user is in the group. To
   revoke: `sudo gpasswd -d ezyshield docker && sudo systemctl restart ezyshield`.
+- `--docker-host <endpoint>` — the scoped alternative to that group: point the
+  docker collectors, the exec watcher and evidence extraction at a **filtering,
+  read-only proxy** in front of the Engine socket, e.g.
+  `--docker-host tcp://127.0.0.1:2375`. It writes `docker.host` into
+  `config.yaml` (answers key: `collectors.docker_host`) and grants the service
+  user nothing. `--docker-host` and `--docker-group` are **mutually exclusive**
+  — the proxy replaces the group rather than accompanying it. A `tcp://`
+  endpoint must be a loopback address. `init` never starts the proxy (that is a
+  change to your own stack): it prints the compose snippet to run and leaves
+  verification to `ezyshield doctor`. Interactively, the wizard offers three
+  paths in privilege order — a host log file read by a `kind: file` collector,
+  this proxy, or the `docker` group — and pre-selects the least-privileged one
+  that fits.
 - `--admin-ips`, `--monitor-ssh`, `--enable-ai`, `--ai-provider`, `--ai-model`,
   `--ai-key-env` — per-answer overrides for the non-interactive path.
   `--ai-key-env` takes an env var **NAME**, never the key itself; a literal
@@ -677,6 +690,13 @@ Checks:
   `docker` group — that group is root-equivalent on the host, so the hint says
   whether the configured collectors justify it or it should be revoked
   (`gpasswd -d ezyshield docker`); **N/A** when the host has no `docker` group
+- docker endpoint (when `docker.host` is a `tcp://` endpoint; **N/A** for a
+  unix socket, where the socket check above covers it): two checks —
+  *reachable* (**PASS** when `GET /_ping` answers 200) and *read-only*
+  (**PASS** when `POST /containers/create` is refused, **FAIL** when the
+  endpoint accepts it, which means root-equivalent access to this host over
+  the network). Both probes are bounded by a timeout and never print a
+  response body. The probe body names no image, so nothing is ever created.
 - `.env` secret file permissions
 - allowlist breadth: **WARN** (not FAIL) when `policy.yaml`'s allowlist contains
   a private (RFC1918/ULA) range at `/16` or broader — such a range can never be

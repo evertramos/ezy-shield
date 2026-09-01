@@ -9,33 +9,24 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"time"
 
 	"github.com/evertramos/ezy-shield/pkg/sdk"
 )
 
-// newDockerAPIClient returns an http.Client whose transport dials the Docker
-// engine unix socket. The Host portion of URLs is ignored; the unix transport
-// always dials socketPath.
-func newDockerAPIClient(socketPath string) *http.Client {
-	return &http.Client{
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				d := net.Dialer{}
-				return d.DialContext(ctx, "unix", socketPath)
-			},
-		},
-	}
-}
+// The HTTP transport lives in dockerhost.go (NewDockerAPIClient) so the unix
+// and tcp variants — with their dial/header timeouts and their "never follow
+// a redirect" policy — are defined once and shared with the exec watcher, the
+// daemon's on-demand evidence extraction and doctor.
 
 // runAPI streams the container's stdout+stderr via the Docker Engine API and
 // emits one RawLine per '\n'-terminated line. It retries with exponential
 // backoff when the container is missing or the stream ends — mirroring the
 // filesystem path's semantics for container restarts.
-func (c *DockerCollector) runAPI(ctx context.Context, socketPath, source string, out chan<- sdk.RawLine, logger *slog.Logger) error {
-	client := newDockerAPIClient(socketPath)
+func (c *DockerCollector) runAPI(ctx context.Context, ep DockerEndpoint, source string, out chan<- sdk.RawLine, logger *slog.Logger) error {
+	client := NewDockerAPIClient(ep)
+	defer client.CloseIdleConnections()
 
 	backoff := dockerBackoffBase
 	for {

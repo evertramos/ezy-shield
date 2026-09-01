@@ -118,7 +118,7 @@ func TestCollectEvidence_Degradation(t *testing.T) {
 	}}
 	// Controlled fakes: never touch the host's journalctl or docker socket.
 	d.evidenceJournalctl = writeFakeJournalctl(t, "sshd", "") // emits nothing
-	d.evidenceDockerSocket = filepath.Join(t.TempDir(), "no-such.sock")
+	d.evidenceDockerHost = "unix://" + filepath.Join(t.TempDir(), "no-such.sock")
 
 	evs := d.collectEvidence(context.Background(), netip.MustParseAddr("203.0.113.7"))
 	if len(evs) != 4 {
@@ -133,8 +133,8 @@ func TestCollectEvidence_Degradation(t *testing.T) {
 	if evs[2].Source != "journald:sshd" || !strings.Contains(evs[2].Note, "no entries mentioning") {
 		t.Errorf("journald: want empty-journal note, got %+v", evs[2])
 	}
-	if evs[3].Source != "docker:web" || !strings.Contains(evs[3].Note, "socket unreachable") {
-		t.Errorf("docker: want unreachable-socket note, got %+v", evs[3])
+	if evs[3].Source != "docker:web" || !strings.Contains(evs[3].Note, "endpoint unreachable") {
+		t.Errorf("docker: want unreachable-endpoint note, got %+v", evs[3])
 	}
 }
 

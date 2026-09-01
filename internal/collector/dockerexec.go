@@ -63,6 +63,25 @@ type DockerExecWatcher struct {
 	Logger *slog.Logger
 	// DockerSocketPath overrides /var/run/docker.sock (tests).
 	DockerSocketPath string
+	// DockerHost is the configured Engine endpoint in docker.host syntax
+	// (unix:///path or tcp://host:port). When set it wins over
+	// DockerSocketPath; empty means DefaultDockerHost. The watcher needs
+	// /events, so a filtering proxy must expose EVENTS as well as
+	// CONTAINERS. See dockerhost.go.
+	DockerHost string
+}
+
+// endpoint resolves the Engine endpoint this watcher subscribes to.
+// DockerHost (operator configuration) wins over DockerSocketPath (the unix
+// test hook); an empty pair means the default socket.
+func (w *DockerExecWatcher) endpoint() (DockerEndpoint, error) {
+	if w.DockerHost != "" {
+		return ParseDockerHost(w.DockerHost)
+	}
+	if w.DockerSocketPath != "" {
+		return DockerEndpoint{Scheme: "unix", SocketPath: w.DockerSocketPath}, nil
+	}
+	return DockerEndpoint{Scheme: "unix", SocketPath: defaultDockerSocketPath}, nil
 }
 
 // Name identifies the watcher in supervision logs.
@@ -76,11 +95,12 @@ func (w *DockerExecWatcher) Run(ctx context.Context, sink func(ExecEvent)) error
 	if logger == nil {
 		logger = slog.Default()
 	}
-	sock := w.DockerSocketPath
-	if sock == "" {
-		sock = defaultDockerSocketPath
+	ep, err := w.endpoint()
+	if err != nil {
+		return fmt.Errorf("docker-exec: %w", err)
 	}
-	client := newDockerAPIClient(sock)
+	client := NewDockerAPIClient(ep)
+	defer client.CloseIdleConnections()
 
 	backoff := dockerBackoffBase
 	for {

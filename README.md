@@ -193,9 +193,10 @@ free, forever. — [Evert](https://github.com/evertramos)
 ### Package manager (apt / dnf)
 
 ```sh
-# Debian / Ubuntu
-curl -fsSL https://packages.ezyshield.com/ezyshield.asc | sudo gpg --dearmor -o /usr/share/keyrings/ezyshield.gpg
-echo "deb [signed-by=/usr/share/keyrings/ezyshield.gpg] https://packages.ezyshield.com/apt testing main" | sudo tee /etc/apt/sources.list.d/ezyshield.list
+# Debian / Ubuntu (needs curl and apt — no gnupg required)
+sudo install -d -m 755 /etc/apt/keyrings
+sudo curl -fsSL https://packages.ezyshield.com/ezyshield.asc -o /etc/apt/keyrings/ezyshield.asc
+echo "deb [signed-by=/etc/apt/keyrings/ezyshield.asc] https://packages.ezyshield.com/apt testing main" | sudo tee /etc/apt/sources.list.d/ezyshield.list
 sudo apt update && sudo apt install ezyshield
 ```
 

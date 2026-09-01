@@ -16,11 +16,20 @@ Native packages ship the binaries, systemd units, the `ezyshield` service
 user, and clean upgrades. Repository metadata is GPG-signed; stable releases
 live in the `stable` suite, release candidates in `testing`.
 
+**Prerequisites:** `curl` and your package manager, nothing else. The apt
+steps below store the signing key ASCII-armored and point `signed-by=` at it
+directly, so `gnupg` is **not** required to install — apt reads armored keys
+natively. `gnupg` is only needed for the optional fingerprint check further
+down. The install script additionally uses the standard coreutils tools
+(`install`, `mktemp`, `sha256sum`) when it falls back to raw binaries, and
+tells you by name if one is missing.
+
 **Debian / Ubuntu:**
 
 ```bash
-curl -fsSL https://packages.ezyshield.com/ezyshield.asc | sudo gpg --dearmor -o /usr/share/keyrings/ezyshield.gpg
-echo "deb [signed-by=/usr/share/keyrings/ezyshield.gpg] https://packages.ezyshield.com/apt stable main" | sudo tee /etc/apt/sources.list.d/ezyshield.list
+sudo install -d -m 755 /etc/apt/keyrings
+sudo curl -fsSL https://packages.ezyshield.com/ezyshield.asc -o /etc/apt/keyrings/ezyshield.asc
+echo "deb [signed-by=/etc/apt/keyrings/ezyshield.asc] https://packages.ezyshield.com/apt stable main" | sudo tee /etc/apt/sources.list.d/ezyshield.list
 sudo apt update && sudo apt install ezyshield
 ```
 
@@ -44,19 +53,29 @@ sudo dnf install ezyshield
 > Per-package rpm signatures arrive with the upcoming artifact-signing work,
 > at which point `gpgcheck=1` becomes the documented default.
 
-After importing the key, verify its fingerprint before you rely on the
+After installing the key, verify its fingerprint before you rely on the
 repository. The signing key's fingerprint is:
 
 ```
 810E EEB0 1802 38F7 E800  4A9E E1AD 3D15 A121 3612
 ```
 
-Compare it against the imported key (CI re-verifies this pinned value against
-the published key on every release, so it cannot silently drift):
+Compare it against the installed key (CI re-verifies this pinned value
+against the published key on every release, so it cannot silently drift):
 
 ```bash
-gpg --show-keys /usr/share/keyrings/ezyshield.gpg
+# Debian / Ubuntu
+gpg --show-keys /etc/apt/keyrings/ezyshield.asc
+
+# RHEL / Rocky / Alma — dnf fetches the key itself, so download a copy to check
+curl -fsSL https://packages.ezyshield.com/ezyshield.asc -o /tmp/ezyshield.asc
+gpg --show-keys /tmp/ezyshield.asc
 ```
+
+This is the only part of the flow that needs `gnupg`
+(`sudo apt install gnupg` / `sudo dnf install gnupg2`). Installing from and
+using the repository does not: apt reads the ASCII-armored key directly, and
+dnf handles `gpgkey=` itself.
 
 To follow release candidates instead, replace `stable` with `testing` in
 either snippet (the install script equivalent is
@@ -166,9 +185,29 @@ identical result to following the apt/dnf steps by hand. Raw binaries in
 `/usr/local/bin/` are used only when:
 
 - the host has no `apt-get`/`dnf`/`yum` at all,
-- `EZYSHIELD_BASE_URL` points at a custom mirror (air-gapped install), or
-- the package repo setup or reachability check fails — the script prints a
-  warning and falls back automatically so the install still completes.
+- `EZYSHIELD_BASE_URL` points at a custom mirror (air-gapped install),
+- `EZYSHIELD_METHOD=binary` or `--dev` was requested, or
+- the package repo setup fails in the default `auto` mode — the script
+  prints a warning, falls back automatically so the install still completes,
+  and names the concrete reason: the package repository was unreachable, the
+  signing key could not be downloaded, the file served at the key URL was
+  not an ASCII-armored PGP public key, the apt source entry could not be
+  written, `apt-get update` failed after the repository was added, or the
+  `apt-get`/`dnf` install of the `ezyshield` package itself failed.
+
+That last fallback is an `auto`-mode behaviour only. With
+`EZYSHIELD_METHOD=packages` the same failures refuse with the same named
+reason and exit non-zero, without installing anything.
+
+The reason is repeated in the final banner, together with the command that
+switches the host to the package install once the cause is fixed — so on a
+`curl … | sudo sh` one-liner you never have to scroll back to find out
+which method actually ran. A binary-mode install always ends with an
+explicit `Install method: raw binaries …` line.
+
+Missing prerequisites never cause a silent downgrade: the script checks the
+commands it needs before choosing a method and, if one is absent, stops with
+its name and the exact command that installs it.
 
 One exception: if the host **already runs a package-managed EzyShield
 install**, every binary-mode path refuses instead of installing (raw
@@ -179,12 +218,21 @@ override with a loud warning.
 You can force either path explicitly with `EZYSHIELD_METHOD`:
 
 ```bash
-# Always install packages (fails loudly if that's not possible)
+# Packages or nothing: any failure of the package path refuses with the
+# reason and exits non-zero — it never falls back to raw binaries
 curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_METHOD=packages sh
 
 # Always install raw binaries, even if a package manager is present
 curl -sfL https://get.ezyshield.com | sudo EZYSHIELD_METHOD=binary sh
 ```
+
+Use `packages` when a raw-binary install would be worse than no install at
+all — configuration management, image builds, or any host that must stay
+package-managed. It refuses on a host with no `apt-get`/`dnf`/`yum`, on an
+unreachable repository, on a signing key that is missing or not an armored
+PGP key, and on a failed `apt-get update` or package install, naming which
+one it hit. The default `auto` treats those as reasons to fall back rather
+than to stop.
 
 If the script finds a previous script install (binaries in
 `/usr/local/bin`, units in `/etc/systemd/system`) while routing to a
@@ -355,7 +403,7 @@ sudo rm -rf /etc/ezyshield
 
 | Variable | Purpose | Example |
 |----------|---------|---------|
-| `EZYSHIELD_METHOD` | `auto` (default), `packages`, or `binary` — force the install method instead of auto-detecting | `EZYSHIELD_METHOD=binary` |
+| `EZYSHIELD_METHOD` | `auto` (default, package-first with a loud raw-binary fallback), `packages` (packages or nothing — refuses with the reason, never falls back), or `binary` (always raw binaries) | `EZYSHIELD_METHOD=binary` |
 | `EZYSHIELD_SUITE` | Package repo suite: `stable` (default) or `testing` (release candidates). Package mode only | `EZYSHIELD_SUITE=testing` |
 | `EZYSHIELD_VERSION` | Install a specific release (must start with `v`). Binary mode only | `EZYSHIELD_VERSION=v0.1.0-rc.N` |
 | `EZYSHIELD_BASE_URL` | Install from a custom mirror (overrides version selection, forces binary mode). Requires `--local` + `EZYSHIELD_LOCAL_ACK=1` | `EZYSHIELD_BASE_URL=https://mirror.example.com/ezyshield/v0.1.0` |

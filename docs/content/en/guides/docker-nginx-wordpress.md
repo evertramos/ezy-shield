@@ -57,7 +57,7 @@ Two parts: the proxy must **record** the real IP, and EzyShield must be able to
 
 ### 3a. Expose the log file to the host
 
-You have **two options** — pick one:
+You have **three options** — pick one:
 
 **Option A — bind-mount the proxy's log dir (explicit, simplest to reason about):**
 
@@ -96,6 +96,11 @@ don't grow forever:
 > human-readable path independent of container IDs (which change on recreate).
 > If you recreate containers often, prefer A — the path in B changes with the
 > container ID.
+
+**Option C — a `kind: docker` collector** reads a container's logs through the
+Docker Engine socket instead of a file. It is the most convenient option and
+the most expensive one in privilege terms: see §4a before choosing it. Options
+A and B need nothing from Docker.
 
 ### 3b. Record the real client IP
 If clients hit nginx **directly**, default logs already contain the real IP — done.
@@ -185,6 +190,44 @@ are built into the shipped rules — no configuration needed. To customize
 thresholds, uncomment the relevant rule in
 `/etc/ezyshield/rules.d/10-wordpress.yaml` (written by `init`) and adjust —
 see [Customizing Detection Rules](rules-customization.md).
+
+### 4a. If you chose docker collectors: the `docker` group
+
+A `kind: docker` collector reads through the Docker Engine socket, and access
+to that socket comes from membership in the `docker` group. That group is the
+Engine API, not a read permission — a process that can reach it can start a
+container with the host filesystem mounted, which is root on the host. Putting
+the ezyshield service user in it makes the log-parsing daemon, the component
+that consumes attacker-controlled input all day, root-equivalent.
+
+So `init` asks, and defaults to no:
+
+```
+Grant the ezyshield service user access to the Docker socket? This adds it to
+the 'docker' group, which is root-equivalent on this host (any process running
+as ezyshield could start a privileged container). Required for docker log
+collectors. [y/N]
+```
+
+- Answer **no** and the collectors are still written — they simply read nothing
+  until the access exists. Use a file-based collector (§3a option A or B)
+  instead; it needs no Docker privileges at all.
+- Answer **yes** and the grant is a deliberate, documented trade-off.
+- Scripted installs opt in with `--docker-group`, or
+  `collectors.docker_group: true` in the answers file. `--yes` alone never
+  grants it.
+
+An install provisioned earlier may already be in the group: neither a package
+upgrade nor a re-run of `init` revokes it. Check and revoke with:
+
+```bash
+ezyshield doctor            # warns when the service user is in the docker group
+getent group docker         # is ezyshield listed?
+sudo gpasswd -d ezyshield docker
+sudo systemctl restart ezyshield
+```
+
+See the [security overview](../security/overview.md) for the full picture.
 
 Secrets go in an env file the systemd unit loads (`ezyshield init` creates it
 at mode 0600; `doctor` checks its permissions):
@@ -327,6 +370,7 @@ optionally — data).
 |---|---|---|
 | It's banning `172.x.x.x` / Docker IPs | proxy logs container IP, not client | configure nginx `real_ip` (§3b) |
 | Nothing is detected | wrong log path or the parser can't match it | `ezyshield doctor`; check the collector's `path`/`parser` in `config.yaml` |
+| A `kind: docker` collector reads nothing | the service user cannot reach the Docker socket | `ezyshield doctor`; grant the group deliberately (§4a) or switch to a file collector |
 | Got briefly locked out | allowlist missing your IP | anti-lockout should prevent it; add your IP to `allowlist` |
 | Telegram silent | token/chat_id or env not loaded | `ezyshield test notifier telegram`; check `.env` perms |
 | Real visitors blocked | proxy trusts XFF from untrusted source | tighten `set_real_ip_from` to upstreams you control |

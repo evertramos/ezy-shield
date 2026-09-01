@@ -108,6 +108,16 @@ Flags:
   override file values). Unknown keys are rejected.
 - `--force` — overwrite an existing `config.yaml`/`policy.yaml` (non-interactive
   only; without it a re-run refuses, same as the wizard).
+- `--docker-group` — add the ezyshield service user to the `docker` group so
+  docker log collectors can reach the Engine socket. **That group is
+  root-equivalent on the host** (its members can start a privileged
+  container), so the grant is never implied: interactively the wizard asks and
+  defaults to no, `--yes` alone never grants it, and this flag is the explicit
+  opt-in for scripted runs (answers key: `collectors.docker_group`). It only
+  takes effect when the run configures at least one docker collector; without
+  it those collectors are still written but cannot read container logs.
+  `ezyshield doctor` warns whenever the service user is in the group. To
+  revoke: `sudo gpasswd -d ezyshield docker && sudo systemctl restart ezyshield`.
 - `--admin-ips`, `--monitor-ssh`, `--enable-ai`, `--ai-provider`, `--ai-model`,
   `--ai-key-env` — per-answer overrides for the non-interactive path.
   `--ai-key-env` takes an env var **NAME**, never the key itself; a literal
@@ -663,6 +673,10 @@ Checks:
 - journald readable
 - enforcer socket reachable
 - docker socket present (when Docker collectors are configured)
+- service user docker group: **WARN** when `ezyshield` is a member of the
+  `docker` group — that group is root-equivalent on the host, so the hint says
+  whether the configured collectors justify it or it should be revoked
+  (`gpasswd -d ezyshield docker`); **N/A** when the host has no `docker` group
 - `.env` secret file permissions
 - allowlist breadth: **WARN** (not FAIL) when `policy.yaml`'s allowlist contains
   a private (RFC1918/ULA) range at `/16` or broader — such a range can never be

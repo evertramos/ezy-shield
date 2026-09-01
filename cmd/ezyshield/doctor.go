@@ -96,6 +96,10 @@ func runDoctor(cmd *cobra.Command, configDir, dbPath, socketPath string, jsonOut
 		checkJournaldReadable(),
 		checkEnforcerSocket(enforcerSockPath),
 		checkDockerSocket(),
+		// issue #574: the 'docker' group is root-equivalent — report the
+		// membership wherever it exists, since a package upgrade never
+		// revokes one granted by an older init.
+		checkServiceUserDockerGroup(configDir),
 		checkEnvFile(filepath.Join(configDir, envFileName)),
 	}
 	// issue #386: zero configured collectors means nothing is observed.
@@ -428,7 +432,10 @@ func checkDockerSocket() CheckResult {
 	conn, err := (&net.Dialer{Timeout: 2 * time.Second}).DialContext(ctx, "unix", path)
 	if err != nil {
 		return CheckResult{Name: name, Status: statusFail,
-			Hint: fmt.Sprintf("connect: %v -- add caller to 'docker' group (usermod -aG docker ezyshield)", err)}
+			Hint: fmt.Sprintf("connect: %v -- the caller cannot reach the Docker socket. "+
+				"Access is granted through the 'docker' group, which is root-equivalent on this host "+
+				"(members can start a privileged container); grant it deliberately, to the service user "+
+				"only, and only while docker collectors are configured -- see the security docs", err)}
 	}
 	defer conn.Close() //nolint:errcheck
 

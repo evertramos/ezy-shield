@@ -61,6 +61,15 @@ collectors:
       container: my-nginx               # obrigatório para kind: docker
       parser: nginx
 
+  # Adiciona o usuário de serviço ezyshield ao grupo 'docker' para que os
+  # coletores kind: docker alcancem o socket do Engine. Padrão: false — esse
+  # grupo é equivalente a root no host (seus membros podem iniciar um
+  # container privilegiado), então nunca é implícito por nada. Sem ele, os
+  # coletores docker são escritos mas não conseguem ler os logs dos
+  # containers. Equivale a --docker-group. Para revogar:
+  #   sudo gpasswd -d ezyshield docker && sudo systemctl restart ezyshield
+  docker_group: false
+
 # ── Allowlist: IPs/CIDRs que NUNCA podem ser banidos (anti-lockout) ────────
 allowlist:
   # Fortemente recomendado: seu(s) IP(s) de gerência. Omitir isto deixa

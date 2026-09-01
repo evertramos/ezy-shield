@@ -20,7 +20,9 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"path"
@@ -88,8 +90,14 @@ func (w *DockerExecWatcher) endpoint() (DockerEndpoint, error) {
 func (w *DockerExecWatcher) Name() string { return "docker-exec-watch" }
 
 // Run streams docker events until ctx is done, reporting each accepted exec
-// to sink. It reconnects with capped backoff when the stream drops (docker
+// to sink. It reconnects with capped backoff when a live stream drops (docker
 // restarts) and returns nil only on context cancellation.
+//
+// A connect failure is different from a stream drop (issue #580): if the
+// watcher never reaches the events API — permission denied on the socket, a
+// filtering proxy answering 403 — retrying here forever means the daemon
+// believes exec activity is being watched while nothing is. Those failures
+// are returned so the daemon records them like any other observation gap.
 func (w *DockerExecWatcher) Run(ctx context.Context, sink func(ExecEvent)) error {
 	logger := w.Logger
 	if logger == nil {
@@ -103,10 +111,28 @@ func (w *DockerExecWatcher) Run(ctx context.Context, sink func(ExecEvent)) error
 	defer client.CloseIdleConnections()
 
 	backoff := dockerBackoffBase
+	everConnected := false // at least one 200 response during this Run
+	failures := 0          // consecutive attempts that never got a stream
 	for {
-		err := w.streamEvents(ctx, client, logger, sink)
+		connected, err := w.streamEvents(ctx, client, logger, sink)
 		if ctx.Err() != nil {
 			return nil
+		}
+		if connected {
+			everConnected = true
+			failures = 0
+		} else {
+			failures++
+		}
+		if errors.Is(err, fs.ErrPermission) {
+			return dockerPermissionError(ep.String(), err)
+		}
+		limit := maxDockerConnectAttempts
+		if everConnected {
+			limit = maxDockerReconnectAttempts
+		}
+		if failures >= limit {
+			return fmt.Errorf("docker-exec: events API unreachable after %d attempts: %w", failures, err)
 		}
 		logger.Warn("docker-exec: event stream dropped; reconnecting",
 			"err", err, "backoff", backoff)
@@ -133,38 +159,42 @@ type dockerEventEnvelope struct {
 }
 
 // streamEvents holds one connection to GET /events and processes the
-// newline-delimited JSON stream.
+// newline-delimited JSON stream. connected reports whether the Engine served
+// the stream (200), which is what tells the caller apart a watcher that never
+// started from one whose live stream dropped (issue #580).
 func (w *DockerExecWatcher) streamEvents(ctx context.Context, client *http.Client,
-	logger *slog.Logger, sink func(ExecEvent)) error {
+	logger *slog.Logger, sink func(ExecEvent)) (connected bool, err error) {
 	// Host portion is ignored — the unix transport dials the docker socket.
 	// The container-type filter narrows the stream server-side; exec actions
 	// are still matched client-side (filter grammar varies across engines).
 	url := `http://docker/events?filters=` + `{"type":["container"]}`
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return fmt.Errorf("docker-exec: build request: %w", err)
+		return false, fmt.Errorf("docker-exec: build request: %w", err)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("docker-exec: connect events API: %w", err)
+		return false, fmt.Errorf("docker-exec: connect events API: %w", err)
 	}
 	defer resp.Body.Close() //nolint:errcheck
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("docker-exec: events API status %s", resp.Status)
+		// The status line is engine-controlled but bounded; the body is
+		// never echoed (SECURITY-REVIEW.md §1).
+		return false, fmt.Errorf("docker-exec: events API status %s", resp.Status)
 	}
 
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 0, 64*1024), maxExecEventLineBytes)
 	for sc.Scan() {
 		if ctx.Err() != nil {
-			return nil
+			return true, nil
 		}
 		w.handleEventLine(sc.Bytes(), logger, sink)
 	}
 	if err := sc.Err(); err != nil {
-		return fmt.Errorf("docker-exec: read events: %w", err)
+		return true, fmt.Errorf("docker-exec: read events: %w", err)
 	}
-	return fmt.Errorf("docker-exec: events stream ended")
+	return true, fmt.Errorf("docker-exec: events stream ended")
 }
 
 // handleEventLine decodes one stream line and reports it when it is a

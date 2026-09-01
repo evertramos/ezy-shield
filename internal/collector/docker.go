@@ -8,7 +8,9 @@ package collector
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -22,6 +24,41 @@ const (
 	dockerBackoffBase = time.Second
 	dockerBackoffMax  = 30 * time.Second
 )
+
+// Bounds for the Docker API in-loop retry (issue #580). Retrying forever
+// inside a collector hides the failure from the daemon supervisor, so status
+// keeps reporting a healthy observation path while nothing is read.
+const (
+	// maxDockerConnectAttempts bounds the retry for a collector that has
+	// never reached the Engine API during this Run. Three attempts (~1s + 2s
+	// of backoff) absorb a socket blip while docker restarts; past that the
+	// error is returned to the supervisor.
+	maxDockerConnectAttempts = 3
+	// maxDockerReconnectAttempts bounds consecutive reconnect failures after
+	// at least one stream worked. A container restart reconnects long before
+	// this; a docker engine that stays unreachable eventually surfaces.
+	maxDockerReconnectAttempts = 10
+)
+
+// dockerServiceUser is the account the daemon unit runs as
+// (configs/systemd/ezyshield.service `User=`). It is named in the permission
+// error so the operator sees whose access is missing — not the (usually root)
+// identity that ran the check by hand.
+const dockerServiceUser = "ezyshield"
+
+// dockerPermissionError turns an EACCES/EPERM on the Docker Engine socket
+// into an operator-actionable error (issue #580). The three access paths are
+// spelled out with their privilege cost, because the cheapest one to type is
+// the most expensive one to own: the 'docker' group is root-equivalent.
+func dockerPermissionError(socketPath string, err error) error {
+	return fmt.Errorf("docker: permission denied on %s — the service user %q cannot reach the Docker Engine API, "+
+		"so this collector observes nothing. Access paths: "+
+		"(1) collect a host-mounted log file instead (no docker privilege at all); "+
+		"(2) expose a read-only, filtered socket proxy to %s; "+
+		"(3) put %s in the 'docker' group — root-equivalent on this host (a member can start a privileged "+
+		"container), so grant it deliberately and only while docker collectors are configured: %w",
+		socketPath, dockerServiceUser, dockerServiceUser, dockerServiceUser, err)
+}
 
 // DockerCollector streams a container's logs and emits one RawLine per line.
 //
@@ -107,8 +144,19 @@ func (c *DockerCollector) Run(ctx context.Context, out chan<- sdk.RawLine) error
 	// proxy): there is no filesystem to fall back to and silently reading
 	// /var/lib/docker instead would defeat the point, so the API path is the
 	// only path. A unix endpoint keeps the historical probe-then-fall-back
-	// behaviour.
-	if ep.IsTCP() || isUnixSocket(ep.SocketPath) {
+	// behaviour — except on a permission denial (issue #580): the socket
+	// exists but its path is closed to us, and the filesystem fallback reads
+	// /var/lib/docker, which is closed for the same reason, so falling back
+	// would only turn a clear denial into a second, murkier one.
+	useAPI := ep.IsTCP()
+	if !useAPI {
+		sock, statErr := isUnixSocket(ep.SocketPath)
+		if errors.Is(statErr, fs.ErrPermission) {
+			return dockerPermissionError(ep.SocketPath, statErr)
+		}
+		useAPI = sock
+	}
+	if useAPI {
 		logger.Info("docker: using Engine API",
 			slog.String("container", c.Container),
 			slog.String("endpoint", ep.String()),
@@ -392,13 +440,16 @@ func redactPath(s string) string {
 	return s
 }
 
-// isUnixSocket reports whether path exists and is a unix socket. Tests on
-// hosts that happen to have a real /var/run/docker.sock can override
+// isUnixSocket reports whether path exists and is a unix socket, plus the
+// stat error when there was one. The error matters for EACCES (issue #580):
+// "cannot look at the socket" is a permission problem to report, not the
+// "no socket here" that justifies the filesystem fallback. Tests on hosts
+// that happen to have a real /var/run/docker.sock can override
 // DockerCollector.DockerSocketPath to a missing path to bypass the API path.
-func isUnixSocket(path string) bool {
+func isUnixSocket(path string) (bool, error) {
 	info, err := os.Stat(path)
 	if err != nil {
-		return false
+		return false, err
 	}
-	return info.Mode()&os.ModeSocket != 0
+	return info.Mode()&os.ModeSocket != 0, nil
 }

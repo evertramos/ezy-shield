@@ -44,8 +44,12 @@ const (
 	dockerCollectorConfig = "data_dir: /tmp/x\ncollectors:\n  - kind: docker\n    container: proxy\n    parser: nginx\n"
 	fileCollectorConfig   = "data_dir: /tmp/x\ncollectors:\n  - kind: file\n    path: /var/log/nginx/access.log\n    parser: nginx\n"
 	// ezyshield: uid 999, own group 999. dockerd owns the socket as root:994.
-	// The 'x' password field is the standard shadow marker, not a secret.
-	passwdFixture = "root:x:0:0:root:/root:/bin/bash\nezyshield:x:999:999::/nonexistent:/usr/sbin/nologin\n" //nolint:gosec // G101: /etc/passwd fixture, no credential
+	// The 'x' password field is the standard shadow marker, not a secret. The
+	// GECOS field is filled in rather than left empty so that the uid/gid
+	// pair is not followed by a double colon, which the IP-hygiene gate reads
+	// as an IPv6 literal.
+	passwdFixture = "root:x:0:0:root:/root:/bin/bash\n" + //nolint:gosec // G101: /etc/passwd fixture, no credential
+		"ezyshield:x:999:999:EzyShield service:/nonexistent:/usr/sbin/nologin\n"
 )
 
 func TestDockerSocketAccessCheck_FailsWhenServiceUserCannotReachAConfiguredSocket(t *testing.T) {

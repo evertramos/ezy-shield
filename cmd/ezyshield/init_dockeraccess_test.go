@@ -269,6 +269,73 @@ func TestRenderGeneratedConfig_DockerHost(t *testing.T) {
 	}
 }
 
+// TestDockerHostLogPath_IgnoresTheHostFilesystem: the pre-selection must not
+// depend on what happens to be installed on the machine running init. Only a
+// file collector this run configured counts as evidence that a host-side log
+// exists for that web server.
+func TestDockerHostLogPath_IgnoresTheHostFilesystem(t *testing.T) {
+	t.Parallel()
+
+	onlyDocker := &wizardState{webCollectors: []webServerCollector{
+		{Kind: "docker", Container: "proxy", Parser: "nginx"},
+	}}
+	if got := dockerHostLogPath(onlyDocker); got != "" {
+		t.Errorf("dockerHostLogPath = %q, want empty (nothing in this run reads a host log)", got)
+	}
+	if got := defaultDockerAccess(dockerHostLogPath(onlyDocker)); got != dockerAccessProxy {
+		t.Errorf("pre-selection = %q, want %q", got, dockerAccessProxy)
+	}
+
+	withFile := &wizardState{webCollectors: []webServerCollector{
+		{Kind: "file", Path: "/srv/site/logs/access.log", Parser: "nginx"},
+		{Kind: "docker", Container: "proxy", Parser: "nginx"},
+	}}
+	if got := dockerHostLogPath(withFile); got != "/srv/site/logs/access.log" {
+		t.Errorf("dockerHostLogPath = %q, want the configured file collector's path", got)
+	}
+
+	otherParser := &wizardState{webCollectors: []webServerCollector{
+		{Kind: "file", Path: "/var/log/apache2/access.log", Parser: "apache"},
+		{Kind: "docker", Container: "proxy", Parser: "nginx"},
+	}}
+	if got := dockerHostLogPath(otherParser); got != "" {
+		t.Errorf("dockerHostLogPath = %q, want empty (a different web server's log is not this one's)", got)
+	}
+
+	if got := dockerHostLogPath(nil); got != "" {
+		t.Errorf("nil state: dockerHostLogPath = %q, want empty", got)
+	}
+}
+
+// TestAskDockerAccess_YesModeConfiguresNothing: an unattended run that was not
+// pre-answered must grant no access and must not rewrite a docker collector
+// into a file collector pointing at a path the wizard cannot verify.
+func TestAskDockerAccess_YesModeConfiguresNothing(t *testing.T) {
+	state := &wizardState{webServers: []detectedWebServer{{
+		Kind:      "nginx",
+		Location:  "docker",
+		Parser:    "nginx",
+		Container: "proxy",
+		Image:     "nginx:latest",
+	}}}
+	captureStdout(t, func() {
+		askQuestions(os.Stdout, nil, state, true, styler{}, t.TempDir())
+	})
+
+	if n := dockerLogSources(state); n != 1 {
+		t.Fatalf("dockerLogSources = %d, want 1 (--yes accepts the detected collector as a docker one)", n)
+	}
+	if state.dockerHost != "" {
+		t.Errorf("dockerHost = %q, want empty (--yes must not point at a proxy nobody asked for)", state.dockerHost)
+	}
+	if state.dockerGroupOptIn {
+		t.Error("--yes granted the docker group")
+	}
+	if state.dockerAccess != "" {
+		t.Errorf("dockerAccess = %q, want empty (no path chosen)", state.dockerAccess)
+	}
+}
+
 // TestNonInteractive_DockerHostPrecedence: the answers file supplies the
 // endpoint, and --docker-host overrides it — the same layering every other
 // scripted answer follows.

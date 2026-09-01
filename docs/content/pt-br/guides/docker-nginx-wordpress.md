@@ -205,9 +205,9 @@ quando detecta collectors docker, nesta ordem:
 **1. Um arquivo de log no host (nenhum acesso ao Docker).** As opções A e B da
 §3a já fazem isso: o container grava o access log em um caminho bind-mountado
 do host e um collector `kind: file` o lê. Nada do Docker é concedido. Considere
-isso primeiro. O `init` pré-seleciona essa opção quando encontra um log do lado
-do host já existente; ele imprime o volume de compose necessário, mas nunca
-edita a sua stack.
+isso primeiro. O `init` pré-seleciona essa opção quando a mesma execução já lê
+o log daquele servidor web a partir de um arquivo do host; ele imprime o volume
+de compose necessário, mas nunca edita a sua stack.
 
 **2. Um proxy somente-leitura do socket (o caminho restrito).** Um container
 pequeno com filtro fica na frente do socket do Engine, serve logs e eventos de

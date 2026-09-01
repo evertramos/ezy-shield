@@ -118,11 +118,16 @@ func validateDockerProxyHost(host string) error {
 	return nil
 }
 
-// dockerHostLogPath returns the first standard host-side access-log path that
-// exists for the docker collectors this run configured, or "" when none does.
-// It is only a default-picking hint: a compose stack that bind-mounts its logs
-// to the conventional host path is the case where option 1 is free, and if
-// the guess is wrong the operator retypes the path at the prompt.
+// dockerHostLogPath returns a host-side access-log path this run already reads
+// with a file collector for the same parser, or "" when there is none.
+//
+// It deliberately does NOT stat the conventional paths (/var/log/nginx/... and
+// friends): that file existing says nothing about whether THIS container's log
+// lands there — a host that merely has the package installed would make the
+// wizard propose a log belonging to something else. The only signal used is a
+// file collector the run itself configured, which detection produces only for a
+// web server actually running on the host with a log present. Anything weaker
+// is left to the operator, who types the path at the prompt.
 func dockerHostLogPath(state *wizardState) string {
 	if state == nil {
 		return ""
@@ -131,12 +136,9 @@ func dockerHostLogPath(state *wizardState) string {
 		if wc.Kind != "docker" {
 			continue
 		}
-		for _, spec := range webServerSpecs {
-			if spec.parser != wc.Parser {
-				continue
-			}
-			if path, exists := resolveLocalLogPath(spec); exists {
-				return path
+		for _, other := range state.webCollectors {
+			if other.Kind == "file" && other.Parser == wc.Parser && other.Path != "" {
+				return other.Path
 			}
 		}
 	}
@@ -206,8 +208,18 @@ func dockerSocketProxyCompose(host string) string {
 func askDockerAccess(p *wPrinter, st styler,
 	ask func(question, def string) string,
 	askBool func(question string, def bool) bool,
-	state *wizardState,
+	state *wizardState, yes bool,
 ) {
+	// --yes accepts safe defaults, and none of these three is one: two are
+	// privilege grants and the third rewrites a collector to read a file the
+	// wizard cannot know exists. An unattended run that was not pre-answered
+	// therefore configures no access at all and falls through to the honest
+	// "collectors cannot read anything yet" warning — the same rule #574
+	// applied to the group.
+	if yes && state.dockerAccess == "" {
+		return
+	}
+
 	hostLogPath := dockerHostLogPath(state)
 	def := defaultDockerAccess(hostLogPath)
 	// A pre-answered run (--docker-host / --docker-group) has already made

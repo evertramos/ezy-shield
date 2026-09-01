@@ -785,7 +785,7 @@ func askQuestions(out io.Writer, sc *bufio.Scanner, state *wizardState, yes bool
 	// picks one explicitly and the root-equivalent one is never a default
 	// (issues #574, #579).
 	if dockerLogSources(state) > 0 {
-		askDockerAccess(p, st, ask, askBool, state)
+		askDockerAccess(p, st, ask, askBool, state, yes)
 	}
 
 	// SSH monitoring

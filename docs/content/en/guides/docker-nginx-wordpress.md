@@ -200,8 +200,9 @@ three when it detects docker collectors, in this order:
 **1. A host log file (no Docker access at all).** §3a options A and B already
 do this: the container writes its access log to a bind-mounted host path and a
 `kind: file` collector reads it. Nothing about Docker is granted. Reach for
-this first. `init` pre-selects it when it finds a host-side log already in
-place; it prints the compose volume you need but never edits your stack.
+this first. `init` pre-selects it when the same run already reads that web
+server's log from a host file; it prints the compose volume you need but never
+edits your stack.
 
 **2. A read-only socket proxy (the scoped path).** A small filtering container
 sits in front of the Engine socket, serves container logs and events, and

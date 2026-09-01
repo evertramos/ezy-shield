@@ -27,9 +27,9 @@ func TestGroupFileMembership(t *testing.T) {
 
 	const groups = `root:x:0:
 # a comment line
-adm:x:4:syslog,evert
+adm:x:4:syslog,admin
 
-docker:x:989:evert,ezyshield
+docker:x:989:admin,ezyshield
 systemd-journal:x:101:ezyshield
 plugdev:x:46:
 `
@@ -41,7 +41,7 @@ plugdev:x:46:
 		wantIsMember bool
 	}{
 		{"member of docker", "docker", "ezyshield", true, true},
-		{"other member of docker", "docker", "evert", true, true},
+		{"other member of docker", "docker", "admin", true, true},
 		{"group exists, user is not a member", "docker", "nobody", true, false},
 		{"group with an empty member list", "plugdev", "ezyshield", true, false},
 		{"group absent", "lxd", "ezyshield", false, false},
@@ -74,9 +74,9 @@ plugdev:x:46:
 func TestServiceUserDockerGroupCheck(t *testing.T) {
 	t.Parallel()
 
-	const withMembership = "docker:x:989:evert,ezyshield\n"
-	const withoutMembership = "docker:x:989:evert\n"
-	const noDockerGroup = "adm:x:4:evert\n"
+	const withMembership = "docker:x:989:admin,ezyshield\n"
+	const withoutMembership = "docker:x:989:admin\n"
+	const noDockerGroup = "adm:x:4:admin\n"
 
 	dockerCollectorCfg := "data_dir: /tmp/x\ncollectors:\n  - kind: docker\n    container: proxy\n    parser: nginx\n"
 	dockerExecCfg := "data_dir: /tmp/x\ncollectors:\n  - kind: journald\n    unit: sshd\ndocker_exec:\n  enabled: true\n"

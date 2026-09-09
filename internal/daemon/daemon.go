@@ -4,6 +4,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/netip"
@@ -303,6 +304,10 @@ type Daemon struct {
 	// sshRecheck holds the per-IP deferred re-checks armed after SSH-peer
 	// anti-lockout refusals that suppressed a would-be ban (issue #420).
 	sshRecheck sshRecheckQueue
+	// gatedBanRetry holds the per-IP deferred enforcement retries armed when
+	// the enforce-side gate refused a ban the store already holds (issue
+	// #583). Same queue type and cadence as sshRecheck; see gatedban.go.
+	gatedBanRetry sshRecheckQueue
 	// ineffDedup deduplicates ban_ineffective notifications systemically
 	// (ADR-0009 §4, issue #146).
 	ineffDedup ineffDedup
@@ -453,11 +458,20 @@ func New(dcfg Config) (*Daemon, error) {
 	decEng, err := decision.New(dcfg.Policy, dcfg.Store)
 	if err == nil && dcfg.Policy != nil && dcfg.Policy.RequireAuthenticatedPeer() {
 		// ADR-0013 (issue #560): narrow SSH-peer immunity to authenticated
-		// peers (logind-verified, fail-open). Installed at the probe source
-		// so both immunity layers (engine + enforcement gate) see it.
+		// peers (logind-verified, fail-open). Installed in BOTH immunity
+		// layers from one filter: the decision engine here, and the
+		// enforcement gate through its SSHPeerProbeSetter facet (issue
+		// #583) — a gate left on the raw kernel probe would refuse to apply
+		// exactly the bans the narrowed engine commits.
 		filter := decision.NewAuthenticatedPeerFilter(
 			decision.ProcSSHPeers, decision.NewLogindSessionProbe(), decision.AuthPeerGraceWindow)
 		decEng.SetSSHPeerProbe(filter.Peers)
+		if s, ok := dcfg.Enforcer.(enforce.SSHPeerProbeSetter); ok {
+			s.SetSSHPeerProbe(filter.Peers)
+		} else if dcfg.Enforcer != nil {
+			slog.Warn("daemon: enforcement gate does not accept the authenticated-peer probe — gate keeps ESTABLISHED-only immunity",
+				"enforcer", dcfg.Enforcer.Name())
+		}
 		slog.Info("daemon: anti-lockout authenticated-peer mode ON (ADR-0013) — logind failures fall back to ESTABLISHED-only immunity")
 	}
 	if err != nil {
@@ -1379,14 +1393,22 @@ func (d *Daemon) dispatch(ctx context.Context, action sdk.Action) {
 		d.enforceMu.Lock()
 		err := d.enforcer.Ban(ctx, t)
 		d.enforceMu.Unlock()
-		if err != nil {
+		switch {
+		case err == nil:
+			banApplied = true
+		case errors.Is(err, enforce.ErrGateRefused):
+			// Not an enforcer failure: the allowlist/anti-lockout gate did
+			// its job, and it already audited the refusal. But Decide has
+			// committed this ban to the store, so the entry is stranded
+			// until enforcement is retried — defer it (issue #583).
+			d.deferGatedBan(ctx, action.IP, err)
+		default:
 			slog.ErrorContext(ctx, "daemon: enforcer ban failed", "ip", action.IP, "err", err)
 			d.notifyCritical(ctx, fmt.Sprintf("enforcer ban failed for %s: %v", action.IP, err))
-		} else {
-			banApplied = true
 		}
 		// Enforcement-state health (issue #174): a failed ban flips the
-		// daemon to DEGRADED so status/doctor stop claiming protection.
+		// daemon to DEGRADED so status/doctor stop claiming protection
+		// (a gate refusal is exempt inside).
 		d.recordEnforceResult(ctx, "ban", err)
 	}
 	d.recordActionMetrics(action, banApplied)

@@ -233,7 +233,9 @@ func elevatedAIVerdict(verdicts []sdk.Verdict, banThreshold int) *sdk.Verdict {
 }
 
 // runSSHRecheck is the re-check loop goroutine: it pops due entries every
-// tick and re-evaluates them. Exits when ctx is cancelled (no leak).
+// tick and re-evaluates them. The deferred-enforcement retries of issue
+// #583 (gatedban.go) share the ticker: same cadence, same budget, one
+// goroutine. Exits when ctx is cancelled (no leak).
 func (d *Daemon) runSSHRecheck(ctx context.Context) {
 	tick := d.sshRecheckTick
 	if tick <= 0 {
@@ -248,6 +250,9 @@ func (d *Daemon) runSSHRecheck(ctx context.Context) {
 		case now := <-t.C:
 			for _, it := range d.sshRecheck.due(now) {
 				d.recheckAfterAntiLockout(ctx, it)
+			}
+			for _, it := range d.gatedBanRetry.due(now) {
+				d.retryGatedBan(ctx, it)
 			}
 		}
 	}

@@ -57,6 +57,21 @@ ban and every reconcile before it can reach nftables or any edge platform.
 Even a backend with no allowlist logic of its own can never receive a
 protected address — including via a sync that would re-introduce it.
 
+Both layers judge by the same peer-immunity predicate: with
+`anti_lockout.require_authenticated` on, the gate narrows to authenticated
+peers exactly as the decision engine does, so a ban the engine decides is one
+the gate will apply. The two can still briefly disagree about a
+fast-reconnecting attacker — the engine reads a short-lived cached peer list,
+the gate probes live — and then the engine has already recorded the ban when
+the gate refuses to apply it. That refusal is not an enforcer failure and
+raises no alert: the ban stays recorded, and the daemon retries enforcement
+shortly afterwards, through the same gate and with the ban's remaining time,
+until the connection is gone or the retry budget runs out (a warning, an
+`enforce_deferred_exhausted` audit entry, and the periodic reconcile picks
+it up). A ban lifted or expired in the meantime is never re-applied, and an
+operator's session is refused on every retry — nothing on this path can apply
+a ban the gate would not.
+
 **The live SSH re-check protects a *connection*, not an address forever.** A
 bruteforcer that reconnects faster than the peer table is re-read keeps an
 established connection visible at every evaluation, so each attempt in its

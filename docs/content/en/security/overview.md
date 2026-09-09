@@ -142,7 +142,7 @@ When AI is enabled for ambiguous events (scores inside the configurable `ambiguo
 ## Privilege separation
 
 - **Main daemon** (`ezyshield`): runs as unprivileged user, reads logs, makes decisions, communicates via unix socket
-- **Enforcer** (`ezyshield-enforcer`): holds `CAP_NET_ADMIN` only, accepts a fixed, typed verb set (`ping`, `add`, `del`, `list`, `flush`, and the allowlist verbs), mutates nftables in a safe, idempotent way
+- **Enforcer** (`ezyshield-enforcer`): holds `CAP_NET_ADMIN` only, accepts a fixed, typed verb set (`ping`, `add`, `del`, `list`, `flush`, and the allowlist verbs), mutates nftables in a safe, idempotent way. Every blocked-set element keeps its **own** timeout: the sets are created without nftables' `auto-merge`, because a merged interval carries a single timer and a neighbouring ban would silently rewrite yours (a permanent ban next to a five-minute one would expire in five minutes). A set left over from an older layout is rebuilt without the flag, elements preserved, the first time the helper starts
 
 The enforcer is not a library. It's a separate process. The main daemon cannot directly modify the firewall.
 

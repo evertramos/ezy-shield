@@ -47,6 +47,10 @@ type Server struct {
 	// `nft list set` exec). Injectable so unit tests can exercise the
 	// name-switch path without a real nft binary on the host.
 	listFn func(ctx context.Context, n nftnames.Names) ([]setElem, error)
+	// autoMergeFn reports whether a live blocked set still carries the
+	// `auto-merge` flag (defaults to setHasAutoMerge; tests inject) —
+	// the migration trigger of issue #588.
+	autoMergeFn func(ctx context.Context, n nftnames.Names, set string) (bool, error)
 
 	// nowFn is the clock behind cache-expiry decisions (defaults to
 	// time.Now). Injectable so tests can drive an entry past its kernel
@@ -97,13 +101,14 @@ type Server struct {
 func newServer(socketPath string, run nftRunner) *Server {
 	defaults, _ := nftnames.Resolve("", "") // cannot fail for empty inputs
 	return &Server{
-		socketPath: socketPath,
-		run:        run,
-		runSs:      realSsRunner,
-		listFn:     nftList,
-		nowFn:      time.Now,
-		blocked:    make(map[string]time.Time),
-		names:      defaults,
+		socketPath:  socketPath,
+		run:         run,
+		runSs:       realSsRunner,
+		listFn:      nftList,
+		autoMergeFn: setHasAutoMerge,
+		nowFn:       time.Now,
+		blocked:     make(map[string]time.Time),
+		names:       defaults,
 	}
 }
 
@@ -147,6 +152,9 @@ func (s *Server) listen(ctx context.Context) error {
 func (s *Server) init(ctx context.Context) error {
 	if err := initTable(ctx, s.run, s.names); err != nil {
 		return fmt.Errorf("enforcer: init nft table: %w", err)
+	}
+	if err := s.migrateAutoMerge(ctx, s.names); err != nil {
+		return err
 	}
 	els, err := s.listFn(ctx, s.names)
 	if err != nil {
@@ -352,7 +360,13 @@ func (s *Server) dispatch(ctx context.Context, req enforce.Request) enforce.Resp
 			}
 			deleted = true
 		}
-		if err := nftAdd(ctx, s.run, names, req.IP, req.TTLSeconds); err != nil {
+		err := nftAdd(ctx, s.run, names, req.IP, req.TTLSeconds)
+		if err != nil && isNftOverlapErr(err.Error()) {
+			// No auto-merge (issue #588): the kernel refuses an element that
+			// overlaps an existing interval instead of merging them.
+			err = s.addOverlapping(ctx, names, req)
+		}
+		if err != nil {
 			// Watchdog for the interrupted replace (issue #214): the delete
 			// half landed but the add failed — without recovery the kernel
 			// would silently hold LESS than either the old or the new state.
@@ -509,6 +523,9 @@ func (s *Server) switchNamesLocked(ctx context.Context, want nftnames.Names) err
 	old := s.names
 	if err := initTable(ctx, s.run, want); err != nil {
 		return fmt.Errorf("enforcer: init table %q: %w", want.Table, err)
+	}
+	if err := s.migrateAutoMerge(ctx, want); err != nil {
+		return err
 	}
 	els, err := s.listFn(ctx, want)
 	if err != nil {

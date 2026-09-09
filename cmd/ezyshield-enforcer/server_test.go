@@ -55,6 +55,9 @@ func startTestServer(t *testing.T, mock *mockNftCalls) *Server {
 	// `ss -K` on the host during add verb coverage. Individual tests that
 	// need to assert kill-behaviour override srv.runSs after construction.
 	srv.runSs = func(_ context.Context, _ []string) error { return nil }
+	// No live nft to inspect: the boot-time auto-merge probe (issue #588)
+	// answers "already migrated" unless a test overrides it.
+	srv.autoMergeFn = func(_ context.Context, _ nftnames.Names, _ string) (bool, error) { return false, nil }
 
 	lc := &net.ListenConfig{}
 	ln, err := lc.Listen(context.Background(), "unix", sockPath)

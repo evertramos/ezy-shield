@@ -332,6 +332,10 @@ func (s *Server) dispatch(ctx context.Context, req enforce.Request) enforce.Resp
 		if err := validateIP(req.IP); err != nil {
 			return enforce.Response{OK: false, Error: err.Error()}
 		}
+		// One spelling per element (issue #592): the cache key and the
+		// kernel element must not depend on whether the client wrote
+		// 192.0.2.10 or 192.0.2.10/32.
+		req.IP = enforce.CanonicalIPKey(req.IP)
 		// Hold mutateMu across BOTH the kernel add and the cache write so a
 		// concurrent del for the same IP cannot interleave between them and
 		// desync the cache from the kernel (issue #418). See the mutateMu
@@ -416,6 +420,10 @@ func (s *Server) dispatch(ctx context.Context, req enforce.Request) enforce.Resp
 		if err := validateIP(req.IP); err != nil {
 			return enforce.Response{OK: false, Error: err.Error()}
 		}
+		// One spelling per element (issue #592): the cache key and the
+		// kernel element must not depend on whether the client wrote
+		// 192.0.2.10 or 192.0.2.10/32.
+		req.IP = enforce.CanonicalIPKey(req.IP)
 		// Serialize the kernel delete + cache write against a concurrent add
 		// for the same IP so the two mutations' kernel order and cache order
 		// can never diverge (issue #418).
@@ -444,6 +452,10 @@ func (s *Server) dispatch(ctx context.Context, req enforce.Request) enforce.Resp
 		if err := validateIP(req.IP); err != nil {
 			return enforce.Response{OK: false, Error: err.Error()}
 		}
+		// One spelling per element (issue #592): the cache key and the
+		// kernel element must not depend on whether the client wrote
+		// 192.0.2.10 or 192.0.2.10/32.
+		req.IP = enforce.CanonicalIPKey(req.IP)
 		if err := nftAddAllow(ctx, s.run, names, req.IP); err != nil {
 			return enforce.Response{OK: false, Error: err.Error()}
 		}
@@ -453,6 +465,10 @@ func (s *Server) dispatch(ctx context.Context, req enforce.Request) enforce.Resp
 		if err := validateIP(req.IP); err != nil {
 			return enforce.Response{OK: false, Error: err.Error()}
 		}
+		// One spelling per element (issue #592): the cache key and the
+		// kernel element must not depend on whether the client wrote
+		// 192.0.2.10 or 192.0.2.10/32.
+		req.IP = enforce.CanonicalIPKey(req.IP)
 		if err := nftDelAllow(ctx, s.run, names, req.IP); err != nil {
 			// Symmetric with "del": already-absent maps to the typed OK code.
 			if errors.Is(err, errElementAbsent) {

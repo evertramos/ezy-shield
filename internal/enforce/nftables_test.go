@@ -357,11 +357,12 @@ func TestSyncAllowlist_AddsMissingRemovesStale(t *testing.T) {
 	sort.Strings(adds)
 	sort.Strings(dels)
 
-	if len(adds) != 1 || adds[0] != "3.3.3.3/32" {
-		t.Errorf("expected allow_add 3.3.3.3/32, got %v", adds)
+	// Single hosts travel in nftables' own spelling (bare address, issue #592).
+	if len(adds) != 1 || adds[0] != "3.3.3.3" {
+		t.Errorf("expected allow_add 3.3.3.3, got %v", adds)
 	}
-	if len(dels) != 1 || dels[0] != "2.2.2.2/32" {
-		t.Errorf("expected allow_del 2.2.2.2/32, got %v", dels)
+	if len(dels) != 1 || dels[0] != "2.2.2.2" {
+		t.Errorf("expected allow_del 2.2.2.2, got %v", dels)
 	}
 }
 
@@ -399,7 +400,7 @@ func TestSyncAllowlist_Issue37_PolicyPrefixesReachHelper(t *testing.T) {
 		}
 	}
 	for _, p := range want {
-		if !got[p.String()] {
+		if !got[enforce.CanonicalIPKey(p.String())] { // bare spelling for single hosts (issue #592)
 			t.Errorf("expected allow_add for %s, but helper never saw it", p)
 		}
 	}
@@ -429,8 +430,8 @@ func TestSyncAllowlist_EmptyWantRemovesAll(t *testing.T) {
 		}
 	}
 	sort.Strings(dels)
-	if len(dels) != 2 || dels[0] != "10.0.0.0/8" || dels[1] != "192.0.2.1/32" {
-		t.Errorf("expected both prefixes removed, got %v", dels)
+	if len(dels) != 2 || dels[0] != "10.0.0.0/8" || dels[1] != "192.0.2.1" {
+		t.Errorf("expected both prefixes removed (single host in bare spelling, issue #592), got %v", dels)
 	}
 }
 

@@ -248,3 +248,38 @@ func TestParseSetElements_ReportsMergedIntervals(t *testing.T) {
 		t.Fatalf("skipped = %v, want the merged interval token", skipped)
 	}
 }
+
+// TestDispatch_SpellingsShareOneCacheKey (issue #592): an add written as a
+// /32 and a del written as a bare address must hit the same cache row and
+// the same kernel element — otherwise the del removes the element and
+// leaves a cache ghost. `list` reports the bare spelling.
+func TestDispatch_SpellingsShareOneCacheKey(t *testing.T) {
+	mock := &mockNftCalls{}
+	srv := startTestServer(t, mock)
+
+	if resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "add", IP: "192.0.2.10/32", TTLSeconds: 60}); !resp.OK {
+		t.Fatalf("add: %s", resp.Error)
+	}
+	if resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "list"}); !resp.OK || len(resp.IPs) != 1 || resp.IPs[0] != "192.0.2.10" {
+		t.Fatalf("list = %v, want [192.0.2.10]", resp.IPs)
+	}
+	if !strings.Contains(strings.Join(mock.scripts, ""), "add element inet ezyshield blocked { 192.0.2.10 timeout 60s }") {
+		t.Fatalf("kernel add must use the bare spelling; scripts:\n%s", strings.Join(mock.scripts, ""))
+	}
+	if resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "del", IP: "192.0.2.10"}); !resp.OK {
+		t.Fatalf("del: %s", resp.Error)
+	}
+	srv.mu.RLock()
+	n := len(srv.blocked)
+	srv.mu.RUnlock()
+	if n != 0 {
+		t.Fatalf("cache still holds %d row(s) after del of the other spelling: %v", n, srv.blocked)
+	}
+	// Allowlist verbs canonicalize the same way.
+	if resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "allow_add", IP: "2001:db8::7/128"}); !resp.OK {
+		t.Fatalf("allow_add: %s", resp.Error)
+	}
+	if !strings.Contains(strings.Join(mock.scripts, ""), "add element inet ezyshield allowed6 { 2001:db8::7 }") {
+		t.Fatalf("allow_add must use the bare spelling; scripts:\n%s", strings.Join(mock.scripts, ""))
+	}
+}

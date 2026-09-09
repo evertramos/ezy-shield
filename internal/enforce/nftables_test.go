@@ -333,13 +333,13 @@ func TestSync_EmptyWant_RemovesAll(t *testing.T) {
 // allow_del. Mirrors TestSync_AddsMissingRemovesStale for the ban set.
 func TestSyncAllowlist_AddsMissingRemovesStale(t *testing.T) {
 	ms := newMockHelper(t)
-	// Current nft @allowed state: 1.1.1.1/32 (keep) and 2.2.2.2/32 (stale).
-	ms.setAllowListIPs([]string{"1.1.1.1/32", "2.2.2.2/32"})
+	// Current nft @allowed state: 192.0.2.1/32 (keep) and 192.0.2.2/32 (stale).
+	ms.setAllowListIPs([]string{"192.0.2.1/32", "192.0.2.2/32"})
 	e := enforce.New(ms.sock, nil)
 
 	want := []netip.Prefix{
-		netip.MustParsePrefix("1.1.1.1/32"),
-		netip.MustParsePrefix("3.3.3.3/32"), // missing → must be added
+		netip.MustParsePrefix("192.0.2.1/32"),
+		netip.MustParsePrefix("192.0.2.3/32"), // missing → must be added
 	}
 	if err := e.SyncAllowlist(context.Background(), want); err != nil {
 		t.Fatal(err)
@@ -358,11 +358,11 @@ func TestSyncAllowlist_AddsMissingRemovesStale(t *testing.T) {
 	sort.Strings(dels)
 
 	// Single hosts travel in nftables' own spelling (bare address, issue #592).
-	if len(adds) != 1 || adds[0] != "3.3.3.3" {
-		t.Errorf("expected allow_add 3.3.3.3, got %v", adds)
+	if len(adds) != 1 || adds[0] != "192.0.2.3" {
+		t.Errorf("expected allow_add 192.0.2.3, got %v", adds)
 	}
-	if len(dels) != 1 || dels[0] != "2.2.2.2" {
-		t.Errorf("expected allow_del 2.2.2.2, got %v", dels)
+	if len(dels) != 1 || dels[0] != "192.0.2.2" {
+		t.Errorf("expected allow_del 192.0.2.2, got %v", dels)
 	}
 }
 

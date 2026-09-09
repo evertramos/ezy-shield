@@ -222,6 +222,9 @@ Safety properties (the reason this is opt-in and safe to try):
   failure can enable a ban today's code would refuse.
 - `allowlist` / `admin_cidrs` are checked **before** any of this and
   remain your durable protection — put your fixed IPs there.
+- The narrowing applies to **both** immunity layers — the decision engine
+  and the enforcement gate ahead of every backend — from one shared
+  predicate, so a ban the engine decides is one the gate applies.
 - Known limitation: an **idle** `ControlPersist` master (no open
   channel) has no logind session and loses immunity while idle; active
   work always has a channel. `ezyshield doctor` reports the effective

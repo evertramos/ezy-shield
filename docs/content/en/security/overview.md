@@ -209,8 +209,11 @@ a verb added in the future is refused on the read-only socket until it is
 deliberately classified as read-only. Membership in `ezyshield-view` can
 never mutate state — no unban, no disarm, no allowlist edits.
 
-Both packages' postinstall create the two groups; add a monitoring user
-with `usermod -aG ezyshield-view <user>`. The CLI falls back to the
+Both packages' postinstall create the two groups, and the daemon's unit
+makes the service user a member of `ezyshield-view` (an unprivileged
+process can only hand a socket to a group it belongs to — that membership
+is what lets the daemon group-own the read-only socket). Add a monitoring
+user with `usermod -aG ezyshield-view <user>`. The CLI falls back to the
 read-only socket automatically when the operator socket denies permission,
 so viewer-tier users run `ezyshield status`, `list`, `watch`, and `report`
 with no extra flags.

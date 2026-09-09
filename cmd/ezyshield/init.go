@@ -1312,6 +1312,13 @@ func createEzyshieldUser(out io.Writer) error {
 // applyDockerGroupDecision (issue #574).
 func addJournalAccessGroup() {
 	_ = runCmdSilent("usermod", "-aG", "systemd-journal", "ezyshield")
+	// Read-only control tier (issue #594): the daemon can only group-own
+	// ezyshield-ro.sock if the service user is a member of ezyshield-view.
+	// The packaged unit declares it as SupplementaryGroups=; this covers
+	// hand installs. Grants no privilege: the group is a viewer tier the
+	// daemon itself serves. Idempotent.
+	_ = runCmdSilent("groupadd", "--system", "-f", "ezyshield-view")
+	_ = runCmdSilent("usermod", "-aG", "ezyshield-view", "ezyshield")
 }
 
 // dockerGroupPrompt is the interactive opt-in question. It names the

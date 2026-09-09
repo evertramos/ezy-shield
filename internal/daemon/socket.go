@@ -192,7 +192,9 @@ func (d *Daemon) bindControlSocket(ctx context.Context, path, group string) net.
 	// without sudo — see issues #6 and #212. When the group does not exist
 	// the socket stays root-owned 0660: fail closed, root-only access.
 	if err := ownership.ChownToGroup(path, group); err != nil {
-		slog.WarnContext(ctx, "daemon: could not set control socket group; only root can use it until the group exists",
+		// An unprivileged process may only chown to a group it is a member
+		// of (issue #594): say so, or the operator chases a missing group.
+		slog.WarnContext(ctx, "daemon: could not set control socket group — the group must exist and the service user must be a member of it (unit SupplementaryGroups= or usermod -aG); only root and the service group can use the socket until then",
 			"path", path, "group", group, "err", err)
 	}
 	if err := os.Chmod(path, socketPerm); err != nil {

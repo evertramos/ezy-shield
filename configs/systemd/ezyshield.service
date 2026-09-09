@@ -14,7 +14,13 @@ Group=ezyshield
 # it the collector is permanently blind while status reports ACTIVE). The
 # group is created by the systemd package itself on every supported distro,
 # and systemd is already a hard requirement of this unit.
-SupplementaryGroups=systemd-journal
+#
+# ezyshield-view is the read-only control tier (issue #212): the daemon
+# group-owns ezyshield-ro.sock with it at startup, and an unprivileged
+# process can only chown to a group it is a MEMBER of — without this
+# membership the chown fails and the viewer socket stays root/service-only
+# (issue #594). The group is created by the package postinstall / init.
+SupplementaryGroups=systemd-journal ezyshield-view
 # Load the AI API key (and any other secret) from /etc/ezyshield/.env. The
 # file is written by `ezyshield init` with 0600 root:ezyshield permissions.
 # Leading `-` means "don't fail the unit if the file is missing" — a fresh

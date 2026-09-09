@@ -361,10 +361,14 @@ func (s *Server) dispatch(ctx context.Context, req enforce.Request) enforce.Resp
 			deleted = true
 		}
 		err := nftAdd(ctx, s.run, names, req.IP, req.TTLSeconds)
+		covered := false
 		if err != nil && isNftOverlapErr(err.Error()) {
 			// No auto-merge (issue #588): the kernel refuses an element that
 			// overlaps an existing interval instead of merging them.
 			err = s.addOverlapping(ctx, names, req)
+			if errors.Is(err, errCoveredByInterval) {
+				covered, err = true, nil
+			}
 		}
 		if err != nil {
 			// Watchdog for the interrupted replace (issue #214): the delete
@@ -398,7 +402,14 @@ func (s *Server) dispatch(ctx context.Context, req enforce.Request) enforce.Resp
 			return enforce.Response{OK: false, Error: err.Error()}
 		}
 		s.mu.Lock()
-		s.blocked[req.IP] = s.deadline(time.Duration(req.TTLSeconds) * time.Second)
+		if covered {
+			// Not ours to claim (issue #590): the covering element enforces
+			// it, and a stale cache row from the delete-before-add path
+			// above would be exactly the ghost the code exists to prevent.
+			delete(s.blocked, req.IP)
+		} else {
+			s.blocked[req.IP] = s.deadline(time.Duration(req.TTLSeconds) * time.Second)
+		}
 		s.mu.Unlock()
 		s.mutateMu.Unlock()
 		// Kill any TCP sessions already established from this peer (issue #30).
@@ -409,6 +420,9 @@ func (s *Server) dispatch(ctx context.Context, req enforce.Request) enforce.Resp
 		// the committed nft ban (Hard Rule §1: safety invariant).
 		if _, err := netip.ParseAddr(req.IP); err == nil && s.runSs != nil {
 			_ = killSocketsForIP(ctx, s.runSs, req.IP)
+		}
+		if covered {
+			return enforce.Response{OK: true, Code: enforce.CodeCoveredByInterval}
 		}
 		return enforce.Response{OK: true}
 

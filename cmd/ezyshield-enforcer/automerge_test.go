@@ -164,21 +164,39 @@ func overlapRunner(mock *mockNftCalls, failOn func(script string) bool) nftRunne
 
 // TestDispatch_Add_AddressCoveredByPrefix: an address inside an existing
 // prefix ban is refused by the kernel but already enforced — the verb
-// succeeds and the address is cached so reconcile stops re-adding it.
+// succeeds with CodeCoveredByInterval and the address is NOT cached (issue
+// #590): the covering element may be removed as stale by the caller's very
+// next step, and a cached address with its cover gone is a ghost ban.
 func TestDispatch_Add_AddressCoveredByPrefix(t *testing.T) {
 	mock := &mockNftCalls{}
 	srv := startTestServer(t, mock)
 	srv.run = overlapRunner(mock, func(sc string) bool { return strings.Contains(sc, "198.51.100.5") })
 
 	resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "add", IP: "198.51.100.5", TTLSeconds: 300})
-	if !resp.OK {
-		t.Fatalf("covered address add failed: %s", resp.Error)
+	if !resp.OK || resp.Code != enforce.CodeCoveredByInterval {
+		t.Fatalf("covered address add: ok=%v code=%q err=%q, want OK + covered", resp.OK, resp.Code, resp.Error)
 	}
 	srv.mu.RLock()
-	dl, ok := srv.blocked["198.51.100.5"]
+	_, cached := srv.blocked["198.51.100.5"]
 	srv.mu.RUnlock()
-	if !ok || dl.IsZero() {
-		t.Fatalf("covered address not cached with its own deadline: ok=%v dl=%v", ok, dl)
+	if cached {
+		t.Fatalf("covered address was cached — ghost ban once its cover is removed")
+	}
+
+	// A stale cache row for the same address (delete-before-add path) is
+	// dropped, not refreshed.
+	srv.mu.Lock()
+	srv.blocked["198.51.100.5"] = time.Now().Add(time.Hour)
+	srv.mu.Unlock()
+	resp = doRPC(t, srv.sockPath(), enforce.Request{Verb: "add", IP: "198.51.100.5", TTLSeconds: 300})
+	if !resp.OK || resp.Code != enforce.CodeCoveredByInterval {
+		t.Fatalf("second covered add: ok=%v code=%q", resp.OK, resp.Code)
+	}
+	srv.mu.RLock()
+	_, cached = srv.blocked["198.51.100.5"]
+	srv.mu.RUnlock()
+	if cached {
+		t.Fatalf("stale cache row survived a covered add")
 	}
 }
 

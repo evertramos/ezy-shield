@@ -15,8 +15,9 @@ package main
 //   - Without the flag the kernel refuses an add that overlaps an existing
 //     interval instead of merging. addOverlapping keeps the two legitimate
 //     shapes working: an address already covered by a broader element is
-//     already enforced (record it, succeed), and a prefix that covers
-//     existing single elements absorbs them (delete, retry once).
+//     already enforced (succeed with CodeCoveredByInterval, do NOT cache —
+//     issue #590), and a prefix that covers existing single elements
+//     absorbs them (delete, retry once).
 
 import (
 	"context"
@@ -79,18 +80,27 @@ func elemsOfFamily(els []setElem, v4 bool) []setElem {
 	return out
 }
 
+// errCoveredByInterval reports a single-address add that an existing
+// broader element already enforces (issue #590): success for the caller,
+// but nothing to cache.
+var errCoveredByInterval = errors.New("address covered by an existing blocked interval")
+
 // addOverlapping resolves an `add` the kernel refused for overlapping an
 // existing interval. Caller holds mutateMu. req.IP passed validateIP, so it
 // is a bare address or a prefix.
 func (s *Server) addOverlapping(ctx context.Context, names nftnames.Names, req enforce.Request) error {
 	if _, err := netip.ParseAddr(req.IP); err == nil {
 		// Covered by a broader element (a prefix ban): the address is
-		// already dropped. Record it under its own deadline so `list`
-		// reports it and the daemon stops re-adding it every reconcile; a
-		// later del finds it absent from the kernel, which is fine.
-		slog.InfoContext(ctx, "enforcer: address already covered by a broader blocked interval — recorded without a kernel add",
+		// already dropped. It must NOT enter the cache (issue #590): the
+		// daemon's reconcile may delete the covering element as stale in
+		// the same pass (the #589 migration leaves aligned merged pairs
+		// behind as /31 prefixes the store never held), and a cached
+		// address with its cover gone is a ghost — `list` claims it,
+		// nothing enforces it, nothing ever re-adds it. The typed code
+		// lets the daemon retry after its remove pass.
+		slog.InfoContext(ctx, "enforcer: address already covered by a broader blocked interval — not recorded, caller may retry",
 			"ip", req.IP)
-		return nil
+		return errCoveredByInterval
 	}
 	pfx, _ := netip.ParsePrefix(req.IP)
 	var contained []string

@@ -29,6 +29,7 @@ type mockHelper struct {
 	responses map[string]enforce.Response
 	sock      string
 	ln        net.Listener
+	handlers  map[string]func(enforce.Request) enforce.Response
 }
 
 func newMockHelper(t *testing.T) *mockHelper {
@@ -94,6 +95,17 @@ func (ms *mockHelper) setAllowListIPs(ips []string) {
 	ms.responses["allow_list"] = enforce.Response{OK: true, IPs: ips}
 }
 
+// setHandler installs a per-request responder for verb (issue #590 tests
+// need "add" to answer differently depending on what was deleted before).
+func (ms *mockHelper) setHandler(verb string, fn func(req enforce.Request) enforce.Response) {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	if ms.handlers == nil {
+		ms.handlers = map[string]func(enforce.Request) enforce.Response{}
+	}
+	ms.handlers[verb] = fn
+}
+
 func (ms *mockHelper) recorded() []enforce.Request {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
@@ -123,6 +135,9 @@ func (ms *mockHelper) handle(conn net.Conn) {
 		ms.mu.Lock()
 		ms.requests = append(ms.requests, req)
 		resp := ms.responses[req.Verb]
+		if h, ok := ms.handlers[req.Verb]; ok {
+			resp = h(req)
+		}
 		ms.mu.Unlock()
 		if err := json.NewEncoder(conn).Encode(resp); err != nil {
 			return
@@ -661,5 +676,88 @@ func TestWithNames_OldHelperIsFatal(t *testing.T) {
 		if r.Verb == "add" {
 			t.Error("add reached the helper despite failed capability probe")
 		}
+	}
+}
+
+// TestSync_CoveredAddRetriedAfterStaleIntervalRemoved is the issue #590
+// shape the #589 migration produces: the kernel holds a /31 the store never
+// had, the store wants its two members. The members are "covered" on the
+// first pass, the /31 is removed as stale, and the members are added on the
+// retry — never left as ghosts, and counted as real repairs.
+func TestSync_CoveredAddRetriedAfterStaleIntervalRemoved(t *testing.T) {
+	ms := newMockHelper(t)
+	ms.setListIPs([]string{"198.51.100.66/31"})
+	// The mock holds the "kernel": covered while the /31 is present.
+	present := map[string]bool{"198.51.100.66/31": true}
+	ms.setHandler("del", func(req enforce.Request) enforce.Response {
+		delete(present, req.IP)
+		return enforce.Response{OK: true}
+	})
+	ms.setHandler("add", func(req enforce.Request) enforce.Response {
+		if present["198.51.100.66/31"] {
+			return enforce.Response{OK: true, Code: enforce.CodeCoveredByInterval}
+		}
+		present[req.IP] = true
+		return enforce.Response{OK: true}
+	})
+	e := enforce.New(ms.sock, nil)
+
+	want := []sdk.Target{
+		{IP: netip.MustParseAddr("198.51.100.66")},
+		{IP: netip.MustParseAddr("198.51.100.67")},
+	}
+	if err := e.Sync(context.Background(), want); err != nil {
+		t.Fatal(err)
+	}
+	if !present["198.51.100.66"] || !present["198.51.100.67"] || present["198.51.100.66/31"] {
+		t.Fatalf("end state %v: want both members present and the /31 gone", present)
+	}
+	var adds, dels int
+	for _, r := range ms.recorded() {
+		switch r.Verb {
+		case "add":
+			adds++
+		case "del":
+			dels++
+		}
+	}
+	if adds != 4 || dels != 1 {
+		t.Errorf("adds=%d dels=%d, want 2 covered + 2 retried adds and 1 del", adds, dels)
+	}
+	if a, r, _ := e.LastSyncRepairs(); a != 2 || r != 1 {
+		t.Errorf("repairs added=%d removed=%d, want 2/1 (covered passes are not repairs)", a, r)
+	}
+}
+
+// TestSync_CoveredAddByWantedPrefix_IsNotDrift: an address inside a prefix
+// the store also wants stays covered — no retry (nothing was removed), no
+// repair counted, no error.
+func TestSync_CoveredAddByWantedPrefix_IsNotDrift(t *testing.T) {
+	ms := newMockHelper(t)
+	ms.setListIPs([]string{"198.51.100.0/24"})
+	ms.setResponse("add", enforce.Response{OK: true, Code: enforce.CodeCoveredByInterval})
+	e := enforce.New(ms.sock, nil)
+
+	want := []sdk.Target{
+		{Prefix: netip.MustParsePrefix("198.51.100.0/24")},
+		{IP: netip.MustParseAddr("198.51.100.5"), TTL: time.Hour},
+	}
+	if err := e.Sync(context.Background(), want); err != nil {
+		t.Fatal(err)
+	}
+	var adds, dels int
+	for _, r := range ms.recorded() {
+		switch r.Verb {
+		case "add":
+			adds++
+		case "del":
+			dels++
+		}
+	}
+	if adds != 1 || dels != 0 {
+		t.Errorf("adds=%d dels=%d, want exactly one covered add and no del", adds, dels)
+	}
+	if a, r, _ := e.LastSyncRepairs(); a != 0 || r != 0 {
+		t.Errorf("repairs added=%d removed=%d, want 0/0", a, r)
 	}
 }

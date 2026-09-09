@@ -84,3 +84,13 @@ const FeatureFeedsSync = "feeds_sync"
 // delete. The end state (absent) is what the caller wanted, so OK is still
 // true; the code lets the client log this at DEBUG instead of ERROR.
 const CodeAlreadyAbsent = "already_absent"
+
+// CodeCoveredByInterval is returned on a successful "add" of a single
+// address that the kernel refused because an existing broader element
+// (a prefix ban) already covers it (blocked sets do not auto-merge, issue
+// #588). The address IS dropped — by the covering element — but the helper
+// does NOT record it: whether the covering element survives the caller's
+// reconcile is the caller's decision, and a cached address whose cover is
+// then removed would be a ghost ban (issue #590). Sync retries such adds
+// after its remove pass and never counts them as repaired drift.
+const CodeCoveredByInterval = "covered"

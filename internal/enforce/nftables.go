@@ -179,11 +179,21 @@ func (e *NftablesEnforcer) Sync(ctx context.Context, want []sdk.Target) error {
 
 	// Add entries missing from nftables.
 	added, removed := 0, 0
+	var covered []string // adds the helper answered CodeCoveredByInterval
 	for k, t := range wantSet {
 		if !currentSet[k] {
 			slog.InfoContext(ctx, "enforce/nftables Sync: adding", "ip", k)
-			if err := e.rpc(ctx, Request{Verb: "add", IP: k, TTLSeconds: int64(t.TTL.Seconds())}); err != nil {
+			resp, err := e.rpcResp(ctx, Request{Verb: "add", IP: k, TTLSeconds: int64(t.TTL.Seconds())})
+			if err != nil {
 				return fmt.Errorf("enforce/nftables Sync add %s: %w", k, err)
+			}
+			if resp.Code == CodeCoveredByInterval {
+				// Enforced by a broader element the helper did not cache
+				// (issue #590). Not drift: the address is dropped. But if
+				// the covering element is stale it goes away below, so the
+				// add is retried after the remove pass.
+				covered = append(covered, k)
+				continue
 			}
 			added++
 		}
@@ -209,6 +219,27 @@ func (e *NftablesEnforcer) Sync(ctx context.Context, want []sdk.Target) error {
 			} else {
 				removed++
 			}
+		}
+	}
+
+	// Covered adds whose cover may just have been removed (issue #590): the
+	// #589 migration leaves an aligned merged pair behind as a /31 the store
+	// never held — its members were "covered" above, the /31 was stale.
+	// One retry per address, only when something was removed; an address
+	// still covered by a WANTED prefix stays covered and is never drift.
+	if removed > 0 {
+		for _, k := range covered {
+			t := wantSet[k]
+			resp, err := e.rpcResp(ctx, Request{Verb: "add", IP: k, TTLSeconds: int64(t.TTL.Seconds())})
+			if err != nil {
+				return fmt.Errorf("enforce/nftables Sync add %s after stale-interval removal: %w", k, err)
+			}
+			if resp.Code == CodeCoveredByInterval {
+				slog.DebugContext(ctx, "enforce/nftables Sync: still covered by a wanted interval", "ip", k)
+				continue
+			}
+			slog.InfoContext(ctx, "enforce/nftables Sync: added after its stale covering interval was removed", "ip", k)
+			added++
 		}
 	}
 

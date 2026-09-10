@@ -319,15 +319,33 @@ func (s *DB) RecordStrike(ctx context.Context, a sdk.Action) error {
 // interpolated into the query string (Hard Rule §4).
 func (s *DB) GetBanInfo(ctx context.Context, ip netip.Addr) (time.Time, int, bool, bool, error) {
 	var bannedAtStr string
+	var expiresAt sql.NullString
 	var strike, dryRun int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT banned_at, strike_num, dry_run FROM bans_active WHERE ip = ?`,
-		ip.String()).Scan(&bannedAtStr, &strike, &dryRun)
+		`SELECT banned_at, expires_at, strike_num, dry_run FROM bans_active WHERE ip = ?`,
+		ip.String()).Scan(&bannedAtStr, &expiresAt, &strike, &dryRun)
 	if err == sql.ErrNoRows {
 		return time.Time{}, 0, false, false, nil
 	}
 	if err != nil {
 		return time.Time{}, 0, false, false, fmt.Errorf("store: GetBanInfo %s: %w", ip, err)
+	}
+	// A row past its expires_at is a ban the KERNEL has already dropped
+	// (nft per-element timeout is exact); only the minute-cadence reaper
+	// has not removed the row yet. Reporting it as active would make the
+	// decision engine swallow up to a minute of post-expiry attempts as
+	// already_banned — no new strike — and count them as a leak on a ban
+	// that expired correctly (issue #603). Same predicate as ActiveBans
+	// (#279): not active, so the strike path runs and RecordStrike's upsert
+	// replaces the row. Permanent bans (NULL) are unaffected.
+	if expiresAt.Valid {
+		et, perr := time.Parse(time.RFC3339Nano, expiresAt.String)
+		if perr != nil {
+			return time.Time{}, 0, false, false, fmt.Errorf("store: GetBanInfo parse expires_at: %w", perr)
+		}
+		if !et.After(time.Now()) {
+			return time.Time{}, 0, false, false, nil
+		}
 	}
 	bannedAt, err := time.Parse(time.RFC3339Nano, bannedAtStr)
 	if err != nil {

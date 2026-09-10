@@ -1472,6 +1472,39 @@ func TestRecordSuppressed_RearmsAfterQuietPeriod(t *testing.T) {
 	}
 }
 
+// TestGetBanInfo_ExpiredRowIsNotActive (issue #603): a row whose expires_at
+// has passed — the kernel already dropped the element, the reaper has not
+// run yet — must not read as an active ban, or the decision engine swallows
+// up to a minute of post-expiry attempts as already_banned. Future and
+// permanent rows stay active.
+func TestGetBanInfo_ExpiredRowIsNotActive(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	if err := db.RecordStrike(ctx, action(ip1, 1, time.Millisecond)); err != nil {
+		t.Fatalf("RecordStrike: %v", err)
+	}
+	time.Sleep(5 * time.Millisecond)
+	if _, _, _, found, err := db.GetBanInfo(ctx, ip1); err != nil || found {
+		t.Fatalf("expired-but-unreaped row: found=%v err=%v, want found=false", found, err)
+	}
+
+	if err := db.RecordStrike(ctx, action(ip2, 2, time.Hour)); err != nil {
+		t.Fatalf("RecordStrike: %v", err)
+	}
+	if _, strike, _, found, err := db.GetBanInfo(ctx, ip2); err != nil || !found || strike != 2 {
+		t.Fatalf("future row: found=%v strike=%d err=%v, want found=true strike=2", found, strike, err)
+	}
+
+	permanent := netip.MustParseAddr("203.0.113.3")
+	if err := db.RecordStrike(ctx, action(permanent, 5, 0)); err != nil {
+		t.Fatalf("RecordStrike: %v", err)
+	}
+	if _, _, _, found, err := db.GetBanInfo(ctx, permanent); err != nil || !found {
+		t.Fatalf("permanent row: found=%v err=%v, want found=true", found, err)
+	}
+}
+
 // TestRecordSuppressed_RearmsNullTimestamp (issue #600): a row flagged before
 // last_suppressed_at existed (NULL) is re-armed by its next suppressed
 // event exactly like a quiet-for-24h row, so a new leak fires again and the

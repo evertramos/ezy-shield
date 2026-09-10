@@ -16,6 +16,21 @@ import (
 	"github.com/evertramos/ezy-shield/pkg/sdk"
 )
 
+// JournalctlFollowArgs builds the argv (after the binary) both journald
+// readers use: the given match arguments, then follow mode with NO backlog.
+// `journalctl -f` alone prints the last 10 entries before following, so
+// every daemon restart replayed ten already-processed lines into an empty
+// aggregator as fresh evidence — false ban_ineffective firings, hourly
+// counters incremented twice, and a burst that already earned a strike
+// re-sentenced from the same lines (issue #599). `-n 0` starts at the live
+// tail, matching FileTailCollector's seek-to-end: a line emitted during the
+// seconds of a restart is not replayed, which at worst delays a strike by
+// one event, whereas a replayed line convicts twice.
+func JournalctlFollowArgs(match ...string) []string {
+	args := append([]string{}, match...)
+	return append(args, "-n", "0", "-f", "-o", "cat", "--no-pager")
+}
+
 // JournaldCollector reads log entries for a systemd unit via journalctl.
 // It executes journalctl as a subprocess (no CGO, no CGO dependency on libsystemd).
 type JournaldCollector struct {
@@ -51,7 +66,7 @@ func (c *JournaldCollector) Run(ctx context.Context, out chan<- sdk.RawLine) err
 
 	// Build command; args are validated — no shell expansion.
 	//nolint:gosec // bin is either the default "journalctl" or a test override; Unit is validated above.
-	cmd := exec.CommandContext(ctx, bin, "-u", c.Unit, "-f", "-o", "cat", "--no-pager")
+	cmd := exec.CommandContext(ctx, bin, JournalctlFollowArgs("-u", c.Unit)...)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {

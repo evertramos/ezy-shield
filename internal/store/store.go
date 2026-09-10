@@ -369,7 +369,10 @@ func (s *DB) GetBanInfo(ctx context.Context, ip netip.Addr) (time.Time, int, boo
 // a permanent ban (never replaced by RecordStrike) could fire exactly once
 // in its lifetime and every later leak would be swallowed by the fire-once
 // CAS. last_suppressed_at records this event's time for the doctor's
-// "still leaking" window.
+// "still leaking" window. A flagged row with a NULL timestamp (flagged
+// before the column existed) is re-armed the same way (issue #600): its
+// last leak time is unknown, so the next event is a new case and stamps
+// the first real timestamp.
 func (s *DB) RecordSuppressed(ctx context.Context, ip netip.Addr, afterGrace bool) (int, int, bool, error) {
 	ag := 0
 	if afterGrace {
@@ -388,7 +391,7 @@ func (s *DB) RecordSuppressed(ctx context.Context, ip netip.Addr, afterGrace boo
 			ineffective_fired      = 0,
 			suppressed_after_grace = 0
 		WHERE ip = ? AND ineffective_fired = 1
-		  AND last_suppressed_at IS NOT NULL AND last_suppressed_at < ?
+		  AND (last_suppressed_at IS NULL OR last_suppressed_at < ?)
 	`, ip.String(), rearmBefore); err != nil {
 		return 0, 0, false, fmt.Errorf("store: RecordSuppressed re-arm %s: %w", ip, err)
 	}

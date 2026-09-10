@@ -1504,3 +1504,41 @@ func TestGetBanInfo_ExpiredRowIsNotActive(t *testing.T) {
 		t.Fatalf("permanent row: found=%v err=%v, want found=true", found, err)
 	}
 }
+
+// TestRecordSuppressed_RearmsNullTimestamp (issue #600): a row flagged before
+// last_suppressed_at existed (NULL) is re-armed by its next suppressed
+// event exactly like a quiet-for-24h row, so a new leak fires again and the
+// row earns its first real timestamp.
+func TestRecordSuppressed_RearmsNullTimestamp(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	ip := netip.MustParseAddr("203.0.113.88")
+	if err := db.RecordStrike(ctx, action(ip, 5, 0)); err != nil { // permanent
+		t.Fatalf("RecordStrike: %v", err)
+	}
+	// Pre-migration shape: fired, counters from the old leak, no timestamp.
+	if err := db.SetIneffectiveRowForTest(ctx, ip, 26); err != nil {
+		t.Fatal(err)
+	}
+	if _, valid, err := db.LastSuppressedAtForTest(ctx, ip); err != nil || valid {
+		t.Fatalf("precondition: last_suppressed_at should be NULL (valid=%v err=%v)", valid, err)
+	}
+
+	t0 := time.Date(2026, 9, 10, 8, 0, 0, 0, time.UTC)
+	db.SetClock(func() time.Time { return t0 })
+	total, after, fired, err := db.RecordSuppressed(ctx, ip, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fired || after != 1 {
+		t.Fatalf("NULL-stamped flagged row: after=%d fired=%v; want 1/false (re-armed before counting)", after, fired)
+	}
+	_ = total
+	if newly, err := db.MarkBanIneffective(ctx, ip); err != nil || !newly {
+		t.Fatalf("MarkBanIneffective = %v, %v; want true (fires again on the new leak)", newly, err)
+	}
+	last, valid, err := db.LastSuppressedAtForTest(ctx, ip)
+	if err != nil || !valid || last[:19] != "2026-09-10T08:00:00" {
+		t.Fatalf("last_suppressed_at = %q (valid=%v, err=%v), want the clock's time", last, valid, err)
+	}
+}

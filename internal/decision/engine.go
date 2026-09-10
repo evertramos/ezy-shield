@@ -539,11 +539,13 @@ func (e *Engine) escalationExempt(ctx context.Context, ip netip.Addr) bool {
 
 // trackSuppressedEvent records a suppressed event on ip's active ban and
 // emits the ban_ineffective diagnostic when ≥ BanIneffectiveMinEvents arrive
-// after the BanIneffectiveGrace period (ADR-0009). The counters live on the
-// ban row; MarkBanIneffective's compare-and-set makes the diagnostic fire
-// exactly once per ban, across concurrent calls and daemon restarts. All
-// failures are non-fatal: the diagnostic must never break the suppression
-// path.
+// after the BanIneffectiveGrace period (ADR-0009), or — issue #586 — when
+// ≥ ban_ineffective_min_events_in_grace arrive INSIDE the grace: the grace
+// absorbs latency, not a flood. Both triggers feed the same fire-once
+// MarkBanIneffective compare-and-set, so a ban fires at most once whichever
+// path wins. The counters live on the ban row, so the guarantee holds
+// across concurrent calls and daemon restarts. All failures are non-fatal:
+// the diagnostic must never break the suppression path.
 //
 // The store I/O (counters + fire-once CAS) runs synchronously — the caller
 // holds the per-IP strike lock and that is where the atomicity matters. The
@@ -562,10 +564,18 @@ func (e *Engine) trackSuppressedEvent(ctx context.Context, ip netip.Addr, banned
 	// traffic is EXPECTED (nothing blocks it), not an enforcement anomaly.
 	// Counters above are still recorded so dry-run observability shows what
 	// a real ban would have suppressed.
-	if !e.policy.IsArmed() {
+	if !e.policy.IsArmed() || fired {
 		return nil
 	}
-	if !afterGrace || fired || afterCount < e.policy.BanIneffectiveMinEvents {
+	inGraceCount := total - afterCount
+	var phase string
+	switch {
+	case afterGrace && afterCount >= e.policy.BanIneffectiveMinEvents:
+		phase = PhasePostGrace
+	case !afterGrace && e.policy.InGraceIneffectiveThreshold() > 0 &&
+		inGraceCount >= e.policy.InGraceIneffectiveThreshold():
+		phase = PhaseInGrace
+	default:
 		return nil
 	}
 
@@ -598,9 +608,11 @@ func (e *Engine) trackSuppressedEvent(ctx context.Context, ip netip.Addr, banned
 
 	slog.WarnContext(ctx, "decision: ban_ineffective — traffic flowing despite active ban",
 		"ip", ip,
+		"phase", phase,
 		"strike", fmt.Sprintf("%d/%d", banStrike, ladderLen),
 		"next_rungs", nextRungs,
 		"events_after_grace", afterCount,
+		"events_in_grace", inGraceCount,
 		"total_suppressed", total,
 		"grace_seconds", int(grace.Seconds()),
 	)
@@ -621,6 +633,8 @@ func (e *Engine) trackSuppressedEvent(ctx context.Context, ip netip.Addr, banned
 		EventsAfterGrace: afterCount,
 		TotalSuppressed:  total,
 		GraceSeconds:     int(grace.Seconds()),
+		Phase:            phase,
+		EventsInGrace:    inGraceCount,
 	}
 	return func() { e.diag.BanIneffective(ctx, diag) }
 }

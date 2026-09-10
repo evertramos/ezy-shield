@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/evertramos/ezy-shield/internal/store"
 )
@@ -134,5 +135,68 @@ func TestDoctorRODSN_AppliesBusyTimeoutAndStaysReadOnly(t *testing.T) {
 	// daemon's database, so any write on this connection must fail.
 	if _, err := db.ExecContext(ctx, `CREATE TABLE doctor_ro_probe (x INTEGER)`); err == nil {
 		t.Error("write succeeded on the doctor connection, want read-only failure")
+	}
+}
+
+// seedFlaggedBanAt seeds a flagged ban whose last suppressed event is at
+// last (RFC 3339) — the issue #587 "still leaking?" input.
+func seedFlaggedBanAt(t *testing.T, db *sql.DB, ip string, last string) {
+	t.Helper()
+	_, err := db.ExecContext(context.Background(), `INSERT INTO bans_active
+		(ip, banned_at, expires_at, strike_num, reason, suppressed_after_grace, ineffective_fired, last_suppressed_at)
+		VALUES (?, '2026-07-22T00:00:00Z', NULL, 5, 'test', 26, 1, ?)`, ip, last)
+	if err != nil {
+		t.Fatalf("seed ban %s: %v", ip, err)
+	}
+}
+
+// TestCheckBanIneffective_QuietFlaggedBanWarns (issue #587): a permanent ban
+// that leaked once and has been silent for the re-arm window is a past
+// incident — WARN naming it, never an eternal FAIL.
+func TestCheckBanIneffective_QuietFlaggedBanWarns(t *testing.T) {
+	path, db := newDoctorDB(t)
+	quiet := time.Now().UTC().Add(-3 * 24 * time.Hour).Format(time.RFC3339Nano)
+	seedFlaggedBanAt(t, db, "203.0.113.20", quiet)
+	res := checkBanIneffective(path)
+	if res.Status != statusWarn {
+		t.Fatalf("quiet flagged ban: status = %s (%s), want WARN", res.Status, res.Hint)
+	}
+	for _, want := range []string{"203.0.113.20", "quiet", "no ban is leaking now"} {
+		if !strings.Contains(res.Hint, want) {
+			t.Errorf("hint missing %q:\n%s", want, res.Hint)
+		}
+	}
+}
+
+// TestCheckBanIneffective_RecentLeakFails: an event inside the window is a
+// current leak → FAIL, with quiet ones reported separately and not counted.
+func TestCheckBanIneffective_RecentLeakFails(t *testing.T) {
+	path, db := newDoctorDB(t)
+	recent := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339Nano)
+	quiet := time.Now().UTC().Add(-3 * 24 * time.Hour).Format(time.RFC3339Nano)
+	seedFlaggedBanAt(t, db, "203.0.113.21", recent)
+	seedFlaggedBanAt(t, db, "203.0.113.22", quiet)
+	res := checkBanIneffective(path)
+	if res.Status != statusFail {
+		t.Fatalf("recent leak: status = %s (%s), want FAIL", res.Status, res.Hint)
+	}
+	for _, want := range []string{"1 active ban(s) leaking", "203.0.113.21", "plus 1 flagged ban(s) quiet"} {
+		if !strings.Contains(res.Hint, want) {
+			t.Errorf("hint missing %q:\n%s", want, res.Hint)
+		}
+	}
+	if strings.Contains(res.Hint, "203.0.113.22 (strike") {
+		t.Errorf("quiet ban must not be listed as current:\n%s", res.Hint)
+	}
+}
+
+// TestCheckBanIneffective_UnknownTimestampFailsClosed: a row flagged before
+// the column existed has no timestamp — unknown is treated as current.
+func TestCheckBanIneffective_UnknownTimestampFailsClosed(t *testing.T) {
+	path, db := newDoctorDB(t)
+	seedIneffectiveBan(t, db, "203.0.113.23", 5, 26) // last_suppressed_at NULL
+	res := checkBanIneffective(path)
+	if res.Status != statusFail {
+		t.Fatalf("NULL timestamp: status = %s (%s), want FAIL (fail closed)", res.Status, res.Hint)
 	}
 }

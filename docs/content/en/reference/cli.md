@@ -475,9 +475,12 @@ Flags:
 
 Honest limitation (also printed on every run): evaluation uses the stored
 hourly aggregates, so granularity is bounded by 1-hour buckets and by
-retention; only kinds referenced by long-window (>1h) rules are persisted,
-and field-level matchers cannot be applied to counts — such rules are
-reported as a loudly-marked kind-level upper bound.
+retention; only kinds referenced by long-window (>1h) rules are persisted.
+A field-level matcher on a window of 1h or less cannot be applied to
+counts — such rules are reported as a loudly-marked kind-level upper bound.
+A field-level rule with a window above 1h is evaluated exactly, from the
+matcher counter the daemon keeps under the rule's own name (written only
+while a rule of that name is loaded).
 
 ## ezyshield ban
 

@@ -270,6 +270,9 @@ type Daemon struct {
 	// Empty maps = no long-window rules loaded (feature dormant).
 	longRuleWindows map[time.Duration][]string
 	longKinds       map[string]bool
+	// longFieldKinds is the parser kinds long-window field rules match on
+	// (issue #585) — the hot-path prefilter for LongCounterKinds.
+	longFieldKinds map[string]bool
 	// retention, when non-nil, enables the daily prune job (issue #184;
 	// built in New from cfg.Retention). maintenanceTick overrides the
 	// interval in tests (0 = default 24h, jittered first run).
@@ -444,9 +447,15 @@ func New(dcfg Config) (*Daemon, error) {
 	longKinds := map[string]bool{}
 	for _, kinds := range longRuleWindows {
 		for _, k := range kinds {
-			longKinds[k] = true
+			if !rules.IsLongCounterKind(k) {
+				longKinds[k] = true
+			}
 		}
 	}
+	// Parser kinds that long-window FIELD rules match on (issue #585): an
+	// event of one of these kinds is run through those rules' matchers on
+	// the hot path and, on a hit, counted under the rule's own counter kind.
+	longFieldKinds := ruleEng.LongFieldEventKinds()
 
 	maxIPs := dcfg.MaxIPs
 	if maxIPs <= 0 {
@@ -522,6 +531,7 @@ func New(dcfg Config) (*Daemon, error) {
 		feedStatus:       map[string]FeedStatusEntry{},
 		longRuleWindows:  longRuleWindows,
 		longKinds:        longKinds,
+		longFieldKinds:   longFieldKinds,
 		maintenanceTick:  dcfg.MaintenanceTick,
 		execActivity:     dcfg.ExecActivity,
 		webshellActivity: dcfg.WebshellActivity,
@@ -968,6 +978,20 @@ func (d *Daemon) processRaw(ctx context.Context, raw sdk.RawLine) {
 			if err := d.store.IncrEventCount(ctx, ev.SourceIP, ev.Kind, store.HourBucket(time.Now())); err != nil {
 				slog.WarnContext(ctx, "daemon: event counter increment failed",
 					"ip", ev.SourceIP, "kind", ev.Kind, "err", err)
+			}
+		}
+		// Long-window field-level rules (issue #585): the rule's matcher
+		// runs here — a few substring checks, no I/O — and only a HIT is
+		// counted, under the rule's own counter kind. An HTTP request that
+		// matches nothing never touches the counter table nor triggers a
+		// long-window query.
+		if d.longFieldKinds[ev.Kind] {
+			for _, ck := range d.ruleEng.LongCounterKinds(ev) {
+				if err := d.store.IncrEventCount(ctx, ev.SourceIP, ck, store.HourBucket(time.Now())); err != nil {
+					slog.WarnContext(ctx, "daemon: event counter increment failed",
+						"ip", ev.SourceIP, "kind", ck, "err", err)
+				}
+				longRelevant = true
 			}
 		}
 

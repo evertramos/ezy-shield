@@ -39,6 +39,27 @@ type DB struct {
 	// the store's lifetime (nil for file-backed stores) — see Open, issue #474.
 	keepAlive   *sql.Conn
 	keepAliveDB *sql.DB
+	// now is the clock behind the suppression timestamps (issue #587); nil
+	// means time.Now. Tests set it through SetClock to age a ban's last
+	// suppressed event without sleeping.
+	now func() time.Time
+}
+
+// IneffectiveRearmAfter is how long a ban flagged ineffective must stay
+// quiet (no suppressed event) before a new suppressed event re-arms the
+// ban_ineffective diagnostic (issue #587). It doubles as the doctor's
+// "still leaking" window: a flagged ban whose last suppressed event is
+// older than this is reported as a past leak, not a current one.
+const IneffectiveRearmAfter = 24 * time.Hour
+
+// SetClock replaces the store's clock (tests only). nil restores time.Now.
+func (s *DB) SetClock(now func() time.Time) { s.now = now }
+
+func (s *DB) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
 }
 
 // memDBSeq names each in-memory database uniquely so two Open(":memory:")
@@ -273,7 +294,8 @@ func (s *DB) RecordStrike(ctx context.Context, a sdk.Action) error {
 			dry_run                = excluded.dry_run,
 			suppressed_total       = 0,
 			suppressed_after_grace = 0,
-			ineffective_fired      = 0
+			ineffective_fired      = 0,
+			last_suppressed_at     = NULL
 	`, ip, now, expiresAt, a.Strike, a.Reason, dryRun); err != nil {
 		return fmt.Errorf("store: upsert ban: %w", err)
 	}
@@ -320,6 +342,16 @@ func (s *DB) GetBanInfo(ctx context.Context, ip netip.Addr) (time.Time, int, boo
 // the ban: the RecordStrike upsert resets them, expiry removes them. If ip
 // has no active ban row (expiry race), zero counts are returned — the caller
 // treats that as "nothing to diagnose".
+//
+// Re-arm (issue #587): a ban that already fired the diagnostic and then went
+// quiet for IneffectiveRearmAfter is treated as a fresh case when the next
+// suppressed event arrives — ineffective_fired and the after-grace counter
+// are reset BEFORE this event is counted, so the counters and the fired flag
+// the caller evaluates describe the new leak, not the old one. Without this,
+// a permanent ban (never replaced by RecordStrike) could fire exactly once
+// in its lifetime and every later leak would be swallowed by the fire-once
+// CAS. last_suppressed_at records this event's time for the doctor's
+// "still leaking" window.
 func (s *DB) RecordSuppressed(ctx context.Context, ip netip.Addr, afterGrace bool) (int, int, bool, error) {
 	ag := 0
 	if afterGrace {
@@ -331,12 +363,25 @@ func (s *DB) RecordSuppressed(ctx context.Context, ip netip.Addr, afterGrace boo
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	now := s.clock().UTC()
+	rearmBefore := now.Add(-IneffectiveRearmAfter).Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE bans_active SET
+			ineffective_fired      = 0,
+			suppressed_after_grace = 0
+		WHERE ip = ? AND ineffective_fired = 1
+		  AND last_suppressed_at IS NOT NULL AND last_suppressed_at < ?
+	`, ip.String(), rearmBefore); err != nil {
+		return 0, 0, false, fmt.Errorf("store: RecordSuppressed re-arm %s: %w", ip, err)
+	}
+
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE bans_active SET
 			suppressed_total       = suppressed_total + 1,
-			suppressed_after_grace = suppressed_after_grace + ?
+			suppressed_after_grace = suppressed_after_grace + ?,
+			last_suppressed_at     = ?
 		WHERE ip = ?
-	`, ag, ip.String()); err != nil {
+	`, ag, now.Format(time.RFC3339Nano), ip.String()); err != nil {
 		return 0, 0, false, fmt.Errorf("store: RecordSuppressed update %s: %w", ip, err)
 	}
 
@@ -643,7 +688,8 @@ func (s *DB) RecordManualBan(ctx context.Context, ip netip.Addr, ttl time.Durati
 			dry_run                = excluded.dry_run,
 			suppressed_total       = 0,
 			suppressed_after_grace = 0,
-			ineffective_fired      = 0
+			ineffective_fired      = 0,
+			last_suppressed_at     = NULL
 	`, ipStr, now, expiresAt, reason, dry); err != nil {
 		return fmt.Errorf("store: upsert manual ban: %w", err)
 	}

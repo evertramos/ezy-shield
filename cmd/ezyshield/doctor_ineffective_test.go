@@ -39,7 +39,24 @@ func newDoctorDB(t *testing.T) (string, *sql.DB) {
 	return path, db
 }
 
+// seedIneffectiveBan seeds a flagged ban that is leaking NOW: its last
+// suppressed event is minutes old (the shape a live leak has since
+// migration 010). A row without a timestamp is the pre-migration/unknown
+// shape — see seedIneffectiveBanUnknown.
 func seedIneffectiveBan(t *testing.T, db *sql.DB, ip string, strike, events int) {
+	t.Helper()
+	recent := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339Nano)
+	_, err := db.ExecContext(context.Background(), `INSERT INTO bans_active
+		(ip, banned_at, expires_at, strike_num, reason, suppressed_after_grace, ineffective_fired, last_suppressed_at)
+		VALUES (?, '2026-07-22T00:00:00Z', NULL, ?, 'test', ?, 1, ?)`, ip, strike, events, recent)
+	if err != nil {
+		t.Fatalf("seed ban %s: %v", ip, err)
+	}
+}
+
+// seedIneffectiveBanUnknown seeds a flagged ban with NO last_suppressed_at —
+// a row flagged before the column existed (issue #600).
+func seedIneffectiveBanUnknown(t *testing.T, db *sql.DB, ip string, strike, events int) {
 	t.Helper()
 	_, err := db.ExecContext(context.Background(), `INSERT INTO bans_active
 		(ip, banned_at, expires_at, strike_num, reason, suppressed_after_grace, ineffective_fired)
@@ -161,7 +178,7 @@ func TestCheckBanIneffective_QuietFlaggedBanWarns(t *testing.T) {
 	if res.Status != statusWarn {
 		t.Fatalf("quiet flagged ban: status = %s (%s), want WARN", res.Status, res.Hint)
 	}
-	for _, want := range []string{"203.0.113.20", "quiet", "no ban is leaking now"} {
+	for _, want := range []string{"203.0.113.20", "quiet", "no ban is known to be leaking now"} {
 		if !strings.Contains(res.Hint, want) {
 			t.Errorf("hint missing %q:\n%s", want, res.Hint)
 		}
@@ -190,13 +207,44 @@ func TestCheckBanIneffective_RecentLeakFails(t *testing.T) {
 	}
 }
 
-// TestCheckBanIneffective_UnknownTimestampFailsClosed: a row flagged before
-// the column existed has no timestamp — unknown is treated as current.
-func TestCheckBanIneffective_UnknownTimestampFailsClosed(t *testing.T) {
+// TestCheckBanIneffective_UnknownTimestampWarns (issue #600): a row flagged
+// before last_suppressed_at existed says nothing about NOW — it is a past
+// incident with an unknown time: WARN, labelled as unknown, never "within
+// the last 24h".
+func TestCheckBanIneffective_UnknownTimestampWarns(t *testing.T) {
 	path, db := newDoctorDB(t)
-	seedIneffectiveBan(t, db, "203.0.113.23", 5, 26) // last_suppressed_at NULL
+	seedIneffectiveBanUnknown(t, db, "203.0.113.23", 5, 26)
+	res := checkBanIneffective(path)
+	if res.Status != statusWarn {
+		t.Fatalf("NULL timestamp: status = %s (%s), want WARN", res.Status, res.Hint)
+	}
+	for _, want := range []string{"203.0.113.23", "last leak time unknown", "flagged before this version"} {
+		if !strings.Contains(res.Hint, want) {
+			t.Errorf("hint missing %q:\n%s", want, res.Hint)
+		}
+	}
+	if strings.Contains(res.Hint, "leaking within the last") {
+		t.Errorf("unknown timestamp must not be reported as a current leak:\n%s", res.Hint)
+	}
+}
+
+// TestCheckBanIneffective_RecentPlusUnknown: a real current leak still
+// FAILs, counting only itself; the unknown row is mentioned apart.
+func TestCheckBanIneffective_RecentPlusUnknown(t *testing.T) {
+	path, db := newDoctorDB(t)
+	recent := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339Nano)
+	seedFlaggedBanAt(t, db, "203.0.113.24", recent)
+	seedIneffectiveBanUnknown(t, db, "203.0.113.25", 5, 26)
 	res := checkBanIneffective(path)
 	if res.Status != statusFail {
-		t.Fatalf("NULL timestamp: status = %s (%s), want FAIL (fail closed)", res.Status, res.Hint)
+		t.Fatalf("recent + unknown: status = %s (%s), want FAIL", res.Status, res.Hint)
+	}
+	for _, want := range []string{"1 active ban(s) leaking", "203.0.113.24", "plus 1 flagged ban(s)", "unknown last leak time"} {
+		if !strings.Contains(res.Hint, want) {
+			t.Errorf("hint missing %q:\n%s", want, res.Hint)
+		}
+	}
+	if strings.Contains(res.Hint, "203.0.113.25 (strike") {
+		t.Errorf("unknown row must not be listed as current:\n%s", res.Hint)
 	}
 }

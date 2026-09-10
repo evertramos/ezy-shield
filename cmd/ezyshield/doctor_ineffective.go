@@ -22,7 +22,8 @@ import (
 // ineffectiveRemedy is the hint shared by both failure shapes: the signal
 // is systemic, the fix is the enforcement path — never per-IP sentencing.
 const ineffectiveRemedy = "traffic flows despite active bans — fix the enforcement path: " +
-	"edge enforcement (Cloudflare/Bunny), real-IP parsing behind a CDN/proxy, or enforcer health. " +
+	"edge enforcement (Cloudflare/Bunny), real-IP parsing behind a CDN/proxy, or enforcer health; " +
+	"a firing logged with phase=in_grace points instead to HTTP connection reuse or a late enforcer. " +
 	"Per-IP action will not help (ADR-0009)"
 
 // doctorRODSN builds the DSN for the doctor's read-only diagnostics

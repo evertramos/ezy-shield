@@ -48,12 +48,12 @@ func TestKindsForLongWindows_EmbeddedBase(t *testing.T) {
 	}
 }
 
-func TestValidate_LongWindowFieldRuleRejected(t *testing.T) {
+func TestValidate_LongWindowFieldRuleAccepted(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	writeDropin(t, dir, "50-bad.yaml", `
+	writeDropin(t, dir, "50-long-field.yaml", `
 rules:
-  - name: bad_long_field
+  - name: admin_probe_daily
     kinds: [http_request]
     field: path
     contains: /admin
@@ -62,12 +62,90 @@ rules:
     score: 70
     category: scanner
 `)
-	_, err := rules.New("", dir)
-	if err == nil || !strings.Contains(err.Error(), "persistent counters") {
-		t.Fatalf("err = %v, want the kind-level-only rejection for long windows", err)
+	e, err := rules.New("", dir)
+	if err != nil {
+		t.Fatalf("a long-window field-level rule must load (issue #585): %v", err)
 	}
-	if !strings.Contains(err.Error(), "50-bad.yaml") {
-		t.Fatalf("err = %v, must name the offending drop-in", err)
+	// It is served by its own counter kind, not by http_request wholesale.
+	daily := e.KindsForLongWindows()[24*time.Hour]
+	found := map[string]bool{}
+	for _, k := range daily {
+		found[k] = true
+	}
+	if !found[rules.LongCounterKind("admin_probe_daily")] {
+		t.Fatalf("24h counter kinds = %v, want %q", daily, rules.LongCounterKind("admin_probe_daily"))
+	}
+	if found["http_request"] {
+		t.Fatalf("24h counter kinds = %v: a field rule must not persist http_request wholesale", daily)
+	}
+	if !e.LongFieldEventKinds()["http_request"] {
+		t.Fatalf("LongFieldEventKinds = %v, want http_request", e.LongFieldEventKinds())
+	}
+}
+
+func TestValidate_ReservedCounterPrefixRejected(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeDropin(t, dir, "50-bad.yaml", `
+rules:
+  - name: "rule:sneaky"
+    kinds: [ssh_fail]
+    window: 60s
+    threshold: 5
+    score: 70
+    category: bruteforce
+`)
+	if _, err := rules.New("", dir); err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("err = %v, want the reserved-prefix rejection", err)
+	}
+}
+
+// TestLongCounterKinds_MatcherDrivesTheCounter: only an event the rule's
+// matcher accepts increments the rule's counter (issue #585) — an unrelated
+// HTTP request increments nothing.
+func TestLongCounterKinds_MatcherDrivesTheCounter(t *testing.T) {
+	t.Parallel()
+	e, err := rules.New("", "")
+	if err != nil {
+		t.Fatalf("rules.New: %v", err)
+	}
+	ip := netip.MustParseAddr("203.0.113.9")
+	hit := sdk.Event{SourceIP: ip, Kind: "http_request", Fields: map[string]string{"path": "/wp-login.php", "status": "200"}}
+	miss := sdk.Event{SourceIP: ip, Kind: "http_request", Fields: map[string]string{"path": "/index.html", "status": "200"}}
+	other := sdk.Event{SourceIP: ip, Kind: "ssh_fail"}
+	if got := e.LongCounterKinds(hit); len(got) != 1 || got[0] != rules.LongCounterKind("http_wp_probe_daily") {
+		t.Fatalf("hit → %v, want [%s]", got, rules.LongCounterKind("http_wp_probe_daily"))
+	}
+	if got := e.LongCounterKinds(miss); len(got) != 0 {
+		t.Fatalf("miss → %v, want none", got)
+	}
+	if got := e.LongCounterKinds(other); len(got) != 0 {
+		t.Fatalf("ssh event → %v, want none", got)
+	}
+}
+
+// TestEvaluate_LongFieldRuleReadsItsCounter: the aggregate shape the daemon
+// builds from the store — the rule's counter kind, no Sample — fires the
+// daily wp-login rule at its threshold; below it, nothing.
+func TestEvaluate_LongFieldRuleReadsItsCounter(t *testing.T) {
+	t.Parallel()
+	e, err := rules.New("", "")
+	if err != nil {
+		t.Fatalf("rules.New: %v", err)
+	}
+	ip := netip.MustParseAddr("203.0.113.9")
+	ck := rules.LongCounterKind("http_wp_probe_daily")
+	fire := sdk.Aggregate{IP: ip, Window: 24 * time.Hour, Count: 25, Kinds: map[string]int{ck: 25}}
+	var got []string
+	for _, v := range e.Evaluate(context.Background(), fire) {
+		got = append(got, v.Reason)
+	}
+	if len(got) != 1 || !strings.Contains(got[0], "rule/http_wp_probe_daily: 25 events") {
+		t.Fatalf("verdicts = %v, want exactly the daily wp-login rule", got)
+	}
+	quiet := sdk.Aggregate{IP: ip, Window: 24 * time.Hour, Count: 24, Kinds: map[string]int{ck: 24}}
+	if v := e.Evaluate(context.Background(), quiet); len(v) != 0 {
+		t.Fatalf("24 events fired %v, want nothing (threshold 25)", v)
 	}
 }
 

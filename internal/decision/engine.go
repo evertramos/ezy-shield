@@ -104,6 +104,10 @@ type Engine struct {
 	mu          sync.Mutex
 	bansInWin   int
 	windowStart time.Time
+	// now is the engine clock (rate-limit window, escalation exemption,
+	// ban_ineffective grace). nil = time.Now; tests and the integration
+	// harness inject a virtual clock so timing rules are deterministic.
+	now func() time.Time
 
 	// strikeLocks serialise the strike-writing critical section of Decide
 	// (the active-ban guard through RecordStrike) per IP. The guard and the
@@ -161,6 +165,26 @@ func New(policy *config.Policy, st Store) (*Engine, error) {
 		allow:       allow,
 		windowStart: time.Now(),
 	}, nil
+}
+
+// SetClock replaces the engine clock (tests / integration harness). nil
+// restores time.Now. It never changes a decision by itself: every guard
+// (allowlist, anti-lockout, active ban, rate limit) still runs; only the
+// notion of "now" the timing rules compare against moves.
+func (e *Engine) SetClock(now func() time.Time) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.now = now
+	if now != nil {
+		e.windowStart = now()
+	}
+}
+
+func (e *Engine) clock() time.Time {
+	if e.now != nil {
+		return e.now()
+	}
+	return time.Now()
 }
 
 // Decide evaluates verdicts for a single IP and returns the Action to take.
@@ -503,8 +527,8 @@ func (e *Engine) checkRateLimit() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	if time.Since(e.windowStart) > time.Minute {
-		e.windowStart = time.Now()
+	if now := e.clock(); now.Sub(e.windowStart) > time.Minute {
+		e.windowStart = now
 		e.bansInWin = 0
 	}
 	e.bansInWin++
@@ -534,7 +558,7 @@ func (e *Engine) escalationExempt(ctx context.Context, ip netip.Addr) bool {
 		return false
 	}
 	banEnd := recordedAt.Add(ttl)
-	return time.Since(banEnd) <= e.policy.EscalationExemptWindow.AsDuration()
+	return e.clock().Sub(banEnd) <= e.policy.EscalationExemptWindow.AsDuration()
 }
 
 // trackSuppressedEvent records a suppressed event on ip's active ban and
@@ -553,7 +577,7 @@ func (e *Engine) escalationExempt(ctx context.Context, ip netip.Addr) bool {
 // so the caller can run it after releasing the lock (issue #441).
 func (e *Engine) trackSuppressedEvent(ctx context.Context, ip netip.Addr, bannedAt time.Time, banStrike int) func() {
 	grace := e.policy.BanIneffectiveGrace.AsDuration()
-	afterGrace := time.Since(bannedAt) >= grace
+	afterGrace := e.clock().Sub(bannedAt) >= grace
 
 	total, afterCount, fired, err := e.store.RecordSuppressed(ctx, ip, afterGrace)
 	if err != nil {

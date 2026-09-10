@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-package main
+package enforcerd
 
 import (
 	"bufio"
@@ -96,9 +96,9 @@ type Server struct {
 	ln net.Listener
 }
 
-// newServer creates a Server with the given socket path and nft runner.
+// NewServer creates a Server with the given socket path and nft runner.
 // Call listen() then serve() to start handling requests.
-func newServer(socketPath string, run nftRunner) *Server {
+func NewServer(socketPath string, run nftRunner) *Server {
 	defaults, _ := nftnames.Resolve("", "") // cannot fail for empty inputs
 	return &Server{
 		socketPath:  socketPath,
@@ -115,10 +115,10 @@ func newServer(socketPath string, run nftRunner) *Server {
 // socketPath returns the unix socket path (for tests to connect to).
 func (s *Server) sockPath() string { return s.socketPath }
 
-// listen creates the unix socket with 0660 permissions and group=ezyshield.
+// Listen creates the unix socket with 0660 permissions and group=ezyshield.
 // The socket is root-owned so only root (or group ezyshield) can connect
 // (issue #92, SECURITY-REVIEW.md §3).
-func (s *Server) listen(ctx context.Context) error {
+func (s *Server) Listen(ctx context.Context) error {
 	// Remove a stale socket from a previous run.
 	_ = os.Remove(s.socketPath)
 
@@ -147,9 +147,9 @@ func (s *Server) listen(ctx context.Context) error {
 	return nil
 }
 
-// init initialises the nftables table/set/chain and loads the current set
+// Init initialises the nftables table/set/chain and loads the current set
 // state into the in-memory cache.
-func (s *Server) init(ctx context.Context) error {
+func (s *Server) Init(ctx context.Context) error {
 	if err := initTable(ctx, s.run, s.names); err != nil {
 		return fmt.Errorf("enforcer: init nft table: %w", err)
 	}
@@ -178,8 +178,8 @@ func (s *Server) deadline(ttl time.Duration) time.Time {
 	return s.nowFn().Add(ttl)
 }
 
-// serve accepts connections until ctx is cancelled.
-func (s *Server) serve(ctx context.Context) error {
+// Serve accepts connections until ctx is cancelled.
+func (s *Server) Serve(ctx context.Context) error {
 	go func() {
 		<-ctx.Done()
 		_ = s.ln.Close()

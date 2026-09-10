@@ -62,7 +62,12 @@ func checkBanIneffective(dbPath string) CheckResult {
 	// current — FAIL; older means it leaked once and went quiet — WARN, so
 	// the check can return to a non-failing state without an operator
 	// touching a permanent ban. A NULL timestamp (row flagged before the
-	// column existed) is unknown and fails closed as current.
+	// column existed) says nothing about NOW: it is reported as unknown in
+	// the past bucket (issue #600) — filing it as current kept the exact
+	// eternal FAIL #587 set out to remove, and a diagnostic FAIL enforces
+	// nothing, so there is no safety to buy by failing closed here. The
+	// store re-arms such a row on its next suppressed event, which is when
+	// it earns a real timestamp.
 	rows, err := db.QueryContext(ctx, `
 		SELECT ip, strike_num, suppressed_after_grace, last_suppressed_at
 		FROM bans_active WHERE ineffective_fired = 1
@@ -81,13 +86,16 @@ func checkBanIneffective(dbPath string) CheckResult {
 		if err := rows.Scan(&h.ip, &h.strike, &h.evts, &last); err != nil {
 			return CheckResult{Name: name, Status: statusNA, Hint: "scan: " + err.Error()}
 		}
-		if last.Valid {
-			if ts, perr := time.Parse(time.RFC3339Nano, last.String); perr == nil {
-				if q := now.Sub(ts); q >= store.IneffectiveRearmAfter {
-					h.quietFor = q
-					past = append(past, h)
-					continue
-				}
+		if !last.Valid {
+			h.unknown = true
+			past = append(past, h)
+			continue
+		}
+		if ts, perr := time.Parse(time.RFC3339Nano, last.String); perr == nil {
+			if q := now.Sub(ts); q >= store.IneffectiveRearmAfter {
+				h.quietFor = q
+				past = append(past, h)
+				continue
 			}
 		}
 		current = append(current, h)
@@ -105,7 +113,7 @@ func checkBanIneffective(dbPath string) CheckResult {
 	if len(current) == 0 {
 		if len(past) > 0 {
 			return CheckResult{Name: name, Status: statusWarn,
-				Hint: fmt.Sprintf("no ban is leaking now; %d flagged ban(s) leaked in the past and have been quiet for %s or more: %s — a new leak on any of them fires ban_ineffective again",
+				Hint: fmt.Sprintf("no ban is known to be leaking now; %d flagged ban(s) leaked in the past (quiet for %s or more, or with an unknown last leak time): %s — a new leak on any of them fires ban_ineffective again",
 					len(past), store.IneffectiveRearmAfter, describeHits(past.labels(true), 10))}
 		}
 		if everHad > 0 {
@@ -118,7 +126,7 @@ func checkBanIneffective(dbPath string) CheckResult {
 	hint := fmt.Sprintf("%d active ban(s) leaking within the last %s: %s — %s",
 		len(current), store.IneffectiveRearmAfter, describeHits(current.labels(false), 10), ineffectiveRemedy)
 	if len(past) > 0 {
-		hint += fmt.Sprintf(" (plus %d flagged ban(s) quiet for %s or more, not counted)", len(past), store.IneffectiveRearmAfter)
+		hint += fmt.Sprintf(" (plus %d flagged ban(s) quiet for %s or more or with an unknown last leak time, not counted)", len(past), store.IneffectiveRearmAfter)
 	}
 	return CheckResult{Name: name, Status: statusFail, Hint: hint}
 }
@@ -133,11 +141,13 @@ func describeHits(labels []string, limit int) string {
 }
 
 // ineffectiveHit is one flagged ban; quietFor is zero for a current leak
-// (recent event, or unknown timestamp) and the silence length for a past one.
+// and the silence length for a past one; unknown marks a row flagged before
+// last_suppressed_at existed (issue #600) — past bucket, no silence length.
 type ineffectiveHit struct {
 	ip           string
 	strike, evts int
 	quietFor     time.Duration
+	unknown      bool
 }
 
 type ineffectiveHits []ineffectiveHit
@@ -147,9 +157,12 @@ type ineffectiveHits []ineffectiveHit
 func (hs ineffectiveHits) labels(quiet bool) []string {
 	out := make([]string, 0, len(hs))
 	for _, h := range hs {
-		if quiet {
+		switch {
+		case quiet && h.unknown:
+			out = append(out, fmt.Sprintf("%s (strike %d, last leak time unknown — flagged before this version)", h.ip, h.strike))
+		case quiet:
 			out = append(out, fmt.Sprintf("%s (strike %d, quiet %s)", h.ip, h.strike, h.quietFor.Round(time.Hour)))
-		} else {
+		default:
 			out = append(out, fmt.Sprintf("%s (strike %d, %d post-grace events)", h.ip, h.strike, h.evts))
 		}
 	}

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-package main
+package enforcerd
 
 // Tests for the feeds_sync verb (issue #195): atomic desired-state replace
 // of the reputation-feed sets.

@@ -285,7 +285,7 @@ func (e *NftablesEnforcer) listVerb(ctx context.Context, verb string) ([]string,
 
 // Allow adds prefix to the nftables @allowed set via the enforcer helper.
 // The allowlist supremacy invariant (AGENTS.md §2) is enforced at the same
-// hook where drops happen — see initTable in cmd/ezyshield-enforcer/nft.go.
+// hook where drops happen — see initTable in internal/enforcerd/nft.go.
 // Called by the daemon whenever an allowlist entry is added.
 func (e *NftablesEnforcer) Allow(ctx context.Context, prefix netip.Prefix) error {
 	return e.rpc(ctx, Request{Verb: "allow_add", IP: CanonicalIPKey(prefix.String())})

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-package main
+package enforcerd
 
 // automerge.go — issue #588: the blocked sets no longer carry nft's
 // `auto-merge` flag, because a merged interval has ONE timeout (the last

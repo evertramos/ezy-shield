@@ -10,7 +10,7 @@
 // allow_list, allow_flush} with typed, validated arguments — no raw nft
 // syntax is ever
 // passed from caller to helper (the authoritative list is validVerbs in
-// cmd/ezyshield-enforcer/server.go; issue #351 caught this doc understating
+// internal/enforcerd/server.go; issue #351 caught this doc understating
 // the privilege surface).
 package enforce
 

@@ -14,12 +14,12 @@
 // real binary, (b) needs CAP_NET_ADMIN or root to actually SOCK_DESTROY, and
 // (c) is inherently timing-sensitive. Run with:
 //
-//	sudo -E env "PATH=$PATH" go test -tags 'linux integration' -run TestKillSockets ./cmd/ezyshield-enforcer/
+//	sudo -E env "PATH=$PATH" go test -tags 'linux integration' -run TestKillSockets ./internal/enforcerd/
 //
 // The test skips (not fails) when `ss` is missing or when the process lacks
 // the capability required to destroy sockets, so CI without root still passes.
 
-package main
+package enforcerd
 
 import (
 	"context"

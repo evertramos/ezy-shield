@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-package main
+package enforcerd
 
 // Regression tests for issue #588: the blocked sets must not auto-merge
 // (a merged interval has one timeout — the last add's — so a neighbour's
@@ -88,7 +88,7 @@ func TestInit_MigratesAutoMergeSet(t *testing.T) {
 			{ip: "2001:db8::7", ttl: time.Hour}, // lives in the v6 set — not part of the v4 rebuild
 		}, nil
 	}
-	if err := srv.init(context.Background()); err != nil {
+	if err := srv.Init(context.Background()); err != nil {
 		t.Fatalf("init: %v", err)
 	}
 
@@ -139,7 +139,7 @@ func TestInit_NoMigrationWithoutFlag(t *testing.T) {
 	mock := &mockNftCalls{}
 	srv := startTestServer(t, mock)
 	srv.listFn = func(_ context.Context, _ nftnames.Names) ([]setElem, error) { return nil, nil }
-	if err := srv.init(context.Background()); err != nil {
+	if err := srv.Init(context.Background()); err != nil {
 		t.Fatalf("init: %v", err)
 	}
 	for _, sc := range mock.scripts {

@@ -504,7 +504,7 @@ jobs:
           changed=$(git diff --name-only "$base"...HEAD)
           echo "Changed files:"; echo "$changed"
           # critical areas mapped to SECURITY-REVIEW.md red sections
-          if echo "$changed" | grep -Eq '^internal/(parser|rules|decision|enforce|ai|plugin)/|^cmd/ezyshield-enforcer/'; then
+          if echo "$changed" | grep -Eq '^internal/(parser|rules|decision|enforce|ai|plugin)/|^internal/enforcerd/|^cmd/ezyshield-enforcer/'; then
             echo "::notice::PR touches a 🔴 critical area — security review required."
             # crude but effective: the template's section markers must be present and not all empty
             if ! echo "$BODY" | grep -q 'Security review (per docs/internal/SECURITY-REVIEW.md)'; then

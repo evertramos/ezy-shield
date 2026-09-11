@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-package main
+package enforcerd
 
 import (
 	"bufio"
@@ -50,7 +50,7 @@ func startTestServer(t *testing.T, mock *mockNftCalls) *Server {
 	}
 
 	run := mock.runner()
-	srv := newServer(sockPath, run)
+	srv := NewServer(sockPath, run)
 	// Default to a no-op ssRunner so tests do not shell out to a real
 	// `ss -K` on the host during add verb coverage. Individual tests that
 	// need to assert kill-behaviour override srv.runSs after construction.
@@ -71,7 +71,7 @@ func startTestServer(t *testing.T, mock *mockNftCalls) *Server {
 		cancel()
 		_ = os.Remove(sockPath)
 	})
-	go func() { _ = srv.serve(ctx) }() //nolint:errcheck
+	go func() { _ = srv.Serve(ctx) }() //nolint:errcheck
 
 	return srv
 }
@@ -576,7 +576,7 @@ func TestDispatch_Del_AlreadyAbsent_TypedCode(t *testing.T) {
 	_ = f.Close()
 	_ = os.Remove(sockPath)
 
-	srv := newServer(sockPath, nftFail)
+	srv := NewServer(sockPath, nftFail)
 	srv.runSs = func(_ context.Context, _ []string) error { return nil }
 	// Pre-populate the in-memory cache to prove the already-absent branch
 	// still evicts the entry (otherwise Sync would keep retrying every tick).
@@ -590,7 +590,7 @@ func TestDispatch_Del_AlreadyAbsent_TypedCode(t *testing.T) {
 	srv.ln = ln
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() { cancel(); _ = os.Remove(sockPath) })
-	go func() { _ = srv.serve(ctx) }() //nolint:errcheck
+	go func() { _ = srv.Serve(ctx) }() //nolint:errcheck
 
 	resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "del", IP: "192.0.2.4"})
 	if !resp.OK {
@@ -625,7 +625,7 @@ func TestDispatch_Del_RealError_NoTypedCode(t *testing.T) {
 	_ = f.Close()
 	_ = os.Remove(sockPath)
 
-	srv := newServer(sockPath, nftFail)
+	srv := NewServer(sockPath, nftFail)
 	srv.runSs = func(_ context.Context, _ []string) error { return nil }
 
 	lc := &net.ListenConfig{}
@@ -636,7 +636,7 @@ func TestDispatch_Del_RealError_NoTypedCode(t *testing.T) {
 	srv.ln = ln
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() { cancel(); _ = os.Remove(sockPath) })
-	go func() { _ = srv.serve(ctx) }() //nolint:errcheck
+	go func() { _ = srv.Serve(ctx) }() //nolint:errcheck
 
 	resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "del", IP: "192.0.2.4"})
 	if resp.OK {
@@ -659,10 +659,10 @@ func TestDispatch_Del_RealError_NoTypedCode(t *testing.T) {
 func TestListen_SocketPermissions(t *testing.T) {
 	sockPath := t.TempDir() + "/enforcer.sock"
 
-	srv := newServer(sockPath, (&mockNftCalls{}).runner())
+	srv := NewServer(sockPath, (&mockNftCalls{}).runner())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if err := srv.listen(ctx); err != nil {
+	if err := srv.Listen(ctx); err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	defer srv.ln.Close() //nolint:errcheck
@@ -697,11 +697,11 @@ func TestIntegration_BanUnban(t *testing.T) {
 	// Use real nft runner; nft will modify the host netns.
 	// This test is intentionally guarded: it only runs as root with nft present.
 	ctx := context.Background()
-	srv := newServer("", realNftRunner)
+	srv := NewServer("", RealNftRunner)
 	srv.blocked = make(map[string]time.Time)
 
 	// init: create the table/set/chain
-	if err := srv.init(ctx); err != nil {
+	if err := srv.Init(ctx); err != nil {
 		t.Fatalf("init: %v", err)
 	}
 
@@ -832,7 +832,7 @@ func TestDispatch_AddNftFailure_SkipsKill(t *testing.T) {
 	_ = f.Close()
 	_ = os.Remove(sockPath)
 
-	srv := newServer(sockPath, failing)
+	srv := NewServer(sockPath, failing)
 	ssMock := &mockSsCalls{}
 	srv.runSs = ssMock.runner()
 
@@ -844,7 +844,7 @@ func TestDispatch_AddNftFailure_SkipsKill(t *testing.T) {
 	srv.ln = ln
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() { cancel(); _ = os.Remove(sockPath) })
-	go func() { _ = srv.serve(ctx) }() //nolint:errcheck
+	go func() { _ = srv.Serve(ctx) }() //nolint:errcheck
 
 	resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "add", IP: "192.0.2.4"})
 	if resp.OK {

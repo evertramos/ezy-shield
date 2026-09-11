@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-package main
+package enforcerd
 
 // cache_consistency_test.go — regression tests for issue #418 (family: #383,
 // #318): after strike→expire→re-ban cycles on a native IPv6 address, the
@@ -186,7 +186,7 @@ func parseElementLine(rest string) (set, el string, ttl time.Duration, err error
 // of Server.handle).
 func newFakeServer(t *testing.T, f *fakeNft) *Server {
 	t.Helper()
-	srv := newServer("unused.sock", f.runner())
+	srv := NewServer("unused.sock", f.runner())
 	srv.runSs = func(_ context.Context, _ []string) error { return nil }
 	return srv
 }

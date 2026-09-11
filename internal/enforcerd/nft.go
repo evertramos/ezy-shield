@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-package main
+package enforcerd
 
 // Atomicity contract (issue #214). One `nft` invocation applies its whole
 // script as a single kernel transaction, so a crash/OOM-kill of this helper
@@ -111,10 +111,10 @@ func isNftAbsentErr(msg string) bool {
 // nftRunner abstracts nft execution so tests can inject a mock.
 type nftRunner func(ctx context.Context, script []byte) error
 
-// realNftRunner writes script to a temp file and executes `nft -f <file>`.
+// RealNftRunner writes script to a temp file and executes `nft -f <file>`.
 // Using -f ensures atomic application: nft parses the whole file before
 // committing any changes, satisfying the crash-safety requirement.
-func realNftRunner(ctx context.Context, script []byte) error {
+func RealNftRunner(ctx context.Context, script []byte) error {
 	f, err := os.CreateTemp("", "ezyshield-enforcer-*.nft")
 	if err != nil {
 		return fmt.Errorf("nft: create temp: %w", err)

@@ -488,7 +488,7 @@ func TestSync_DelAlreadyAbsent_NotAnError(t *testing.T) {
 	// fired). After list, the timeout expires and the delete finds nothing.
 	ms.setListIPs([]string{"1.1.1.1", "2.2.2.2"})
 	// Helper reports a typed "already absent" success on del — the wire-format
-	// contract from cmd/ezyshield-enforcer/server.go. The client MUST rely on
+	// contract from internal/enforcerd/server.go. The client MUST rely on
 	// this stable code, never on the free-form nft stderr text.
 	ms.setResponse("del", enforce.Response{OK: true, Code: enforce.CodeAlreadyAbsent})
 
@@ -604,7 +604,7 @@ func TestNetns_BanUnban(t *testing.T) {
 			t.Skip("nft binary not found")
 		}
 	}
-	// Actual test is in cmd/ezyshield-enforcer/server_test.go (integration).
+	// Actual test is in internal/enforcerd/server_test.go (integration).
 	t.Log("root + nft detected; full integration test lives in cmd/ezyshield-enforcer")
 }
 

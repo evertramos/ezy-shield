@@ -1722,7 +1722,11 @@ func (d *Daemon) runFlush(ctx context.Context) {
 // still see, and prune persistent counter buckets past the longest long
 // window (one extra hour of slack keeps the boundary bucket whole).
 func (d *Daemon) flushAggregates(ctx context.Context, now time.Time) {
-	d.agg.Flush(ctx, now.Add(-d.agg.Windows()[len(d.agg.Windows())-1]))
+	// The cutoff is the LONGEST in-memory window (issue #610). Windows()
+	// is in rule order; the last entry happened to be the mail rules'
+	// 300 s, so every hourly *_sustained rule saw at most one flush
+	// interval of history and a 1-per-5-minutes attacker was invisible.
+	d.agg.Flush(ctx, now.Add(-d.agg.MaxWindow()))
 	var longest time.Duration
 	for w := range d.longRuleWindows {
 		if w > longest {

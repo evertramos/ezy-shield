@@ -49,6 +49,10 @@ func (d *Daemon) ExpireOnce(ctx context.Context) (int, error) {
 	return n, nil
 }
 
+// FlushOnce runs the aggregator flush tick body once at the daemon clock —
+// what runFlush does every flushInterval.
+func (d *Daemon) FlushOnce(ctx context.Context) { d.flushAggregates(ctx, d.clock()) }
+
 // RunDeferredOnce pops and runs every SSH re-check (#420) and deferred
 // enforcement retry (#583) that is due at the daemon clock — one tick of
 // the re-check loop.

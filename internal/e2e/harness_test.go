@@ -163,6 +163,16 @@ func (s *system) sshBurst(ip netip.Addr, n int) {
 	}
 }
 
+// httpHit feeds one nginx access-log request from ip for path at the
+// current clock (the nginx parser stamps events with the collection time).
+func (s *system) httpHit(ip netip.Addr, path string) {
+	s.daemon.ProcessRaw(s.ctx, sdk.RawLine{
+		Source: "file:/var/log/nginx/access.log",
+		Line:   []byte(ip.String() + ` - - [10/Sep/2026:12:00:00 +0000] "POST ` + path + ` HTTP/1.1" 200 4128 "-" "Mozilla/5.0"`),
+		At:     s.clock.now(),
+	})
+}
+
 // lastAction drains the sink and returns the last action for ip with op.
 func (s *system) lastAction(ip netip.Addr, op string) (sdk.Action, bool) {
 	var got sdk.Action

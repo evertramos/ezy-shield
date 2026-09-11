@@ -709,14 +709,14 @@ func (d *Daemon) handleAllow(ctx context.Context, req SocketRequest) SocketRespo
 		if dur <= 0 {
 			return SocketResponse{Error: fmt.Sprintf("duration must be positive: %q", req.For)}
 		}
-		t := time.Now().UTC().Add(dur)
+		t := d.clock().UTC().Add(dur)
 		expiresAt = &t
 	case req.Until != "":
 		t, err := parseUntil(req.Until)
 		if err != nil {
 			return SocketResponse{Error: fmt.Sprintf("invalid until %q: %v", req.Until, err)}
 		}
-		if !t.After(time.Now()) {
+		if !t.After(d.clock()) {
 			return SocketResponse{Error: fmt.Sprintf("until is in the past: %q", req.Until)}
 		}
 		expiresAt = &t
@@ -728,7 +728,7 @@ func (d *Daemon) handleAllow(ctx context.Context, req SocketRequest) SocketRespo
 
 	var ttl time.Duration
 	if expiresAt != nil {
-		ttl = time.Until(*expiresAt)
+		ttl = expiresAt.Sub(d.clock())
 	}
 	if err := d.store.AuditOp(ctx, "allow", prefix, ttl, req.Reason); err != nil {
 		slog.ErrorContext(ctx, "daemon: audit allow", "prefix", prefix, "err", err)
@@ -886,7 +886,7 @@ func (d *Daemon) handleListAllow(ctx context.Context) SocketResponse {
 		return SocketResponse{Error: fmt.Sprintf("list allow: %v", err)}
 	}
 
-	now := time.Now()
+	now := d.clock()
 	out := make([]AllowEntry, 0, len(entries))
 	for _, e := range entries {
 		out = append(out, AllowEntry{

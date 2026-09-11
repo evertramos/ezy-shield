@@ -35,7 +35,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
-	"time"
 
 	"github.com/evertramos/ezy-shield/internal/enforce"
 	"github.com/evertramos/ezy-shield/pkg/sdk"
@@ -48,7 +47,7 @@ func (d *Daemon) deferGatedBan(ctx context.Context, ip netip.Addr, cause error) 
 	delay := d.sshRecheckDelayVal()
 	slog.WarnContext(ctx, "daemon: enforcement gate refused a stored ban — deferring enforcement",
 		"ip", ip, "retry_in", delay, "err", cause)
-	if !d.gatedBanRetry.schedule(ip, time.Now().Add(delay), nil) {
+	if !d.gatedBanRetry.schedule(ip, d.clock().Add(delay), nil) {
 		slog.WarnContext(ctx, "daemon: deferred-enforcement queue full — retry dropped, the reconcile will apply the ban",
 			"ip", ip)
 	}
@@ -95,7 +94,7 @@ func (d *Daemon) retryGatedBan(ctx context.Context, it sshRecheckItem) {
 	case errors.Is(err, enforce.ErrGateRefused):
 		// Still guarded (peer still present, or the target became
 		// allowlisted): the invariant held. Re-arm within the budget.
-		if !d.gatedBanRetry.requeue(ip, attempts, time.Now().Add(d.sshRecheckDelayVal()), nil) {
+		if !d.gatedBanRetry.requeue(ip, attempts, d.clock().Add(d.sshRecheckDelayVal()), nil) {
 			d.noteGatedBanExhausted(ctx, ip, attempts)
 		}
 	default:

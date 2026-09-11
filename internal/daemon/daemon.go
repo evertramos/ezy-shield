@@ -153,6 +153,12 @@ type Config struct {
 	// 0 = default 24h with a jittered first run). See maintenance.go
 	// (issue #184).
 	MaintenanceTick time.Duration
+	// Now overrides the daemon clock (tests / integration harness; nil =
+	// time.Now). It is propagated to the decision engine and, when the
+	// store supports it, to the store, so every timing rule — hourly
+	// counter buckets, re-check deadlines, ban TTLs, grace windows — moves
+	// on one virtual clock.
+	Now func() time.Time
 	// SSHRecheckTick / SSHRecheckDelay override the deferred anti-lockout
 	// re-evaluation poll interval and refusal→re-check delay (tests only;
 	// 0 = defaults). See sshrecheck.go (issue #420).
@@ -261,6 +267,8 @@ type Daemon struct {
 	// re-evaluation (0 = defaults; see sshrecheck.go, issue #420).
 	sshRecheckTick  time.Duration
 	sshRecheckDelay time.Duration
+	// now is the daemon clock (see Config.Now); nil = time.Now.
+	now func() time.Time
 	// siemEmit / siemTailTick drive the SIEM audit tail (issue #203;
 	// see siem.go). siemEmit nil = forwarding disabled.
 	siemEmit     func(siem.Event)
@@ -486,6 +494,12 @@ func New(dcfg Config) (*Daemon, error) {
 	if err != nil {
 		return nil, fmt.Errorf("daemon: decision engine: %w", err)
 	}
+	if dcfg.Now != nil {
+		decEng.SetClock(dcfg.Now)
+		if c, ok := dcfg.Store.(interface{ SetClock(func() time.Time) }); ok {
+			c.SetClock(dcfg.Now)
+		}
+	}
 
 	socketPath := dcfg.SocketPath
 	if socketPath == "" {
@@ -518,6 +532,7 @@ func New(dcfg Config) (*Daemon, error) {
 		expireTick:      dcfg.ExpireTick,
 		sshRecheckTick:  dcfg.SSHRecheckTick,
 		sshRecheckDelay: dcfg.SSHRecheckDelay,
+		now:             dcfg.Now,
 		metrics:         newDaemonMetrics(dcfg.Version),
 		siemEmit:        dcfg.SIEMEmit,
 		siemTailTick:    dcfg.SIEMTailTick,
@@ -717,7 +732,7 @@ func (d *Daemon) Run(parentCtx context.Context) error {
 
 	// Settle an arm window whose deadline passed while the daemon was down,
 	// then keep watching it (issue #228).
-	d.checkArmWindow(ctx, time.Now())
+	d.checkArmWindow(ctx, d.clock())
 	go d.runArmWindow(ctx)
 
 	// Keep the enforcement state fresh on quiet hosts (issue #174).
@@ -975,7 +990,7 @@ func (d *Daemon) processRaw(ctx context.Context, raw sdk.RawLine) {
 		// high-volume HTTP traffic never touches the counter table.
 		longRelevant := d.longKinds[ev.Kind]
 		if longRelevant {
-			if err := d.store.IncrEventCount(ctx, ev.SourceIP, ev.Kind, store.HourBucket(time.Now())); err != nil {
+			if err := d.store.IncrEventCount(ctx, ev.SourceIP, ev.Kind, store.HourBucket(d.clock())); err != nil {
 				slog.WarnContext(ctx, "daemon: event counter increment failed",
 					"ip", ev.SourceIP, "kind", ev.Kind, "err", err)
 			}
@@ -987,7 +1002,7 @@ func (d *Daemon) processRaw(ctx context.Context, raw sdk.RawLine) {
 		// long-window query.
 		if d.longFieldKinds[ev.Kind] {
 			for _, ck := range d.ruleEng.LongCounterKinds(ev) {
-				if err := d.store.IncrEventCount(ctx, ev.SourceIP, ck, store.HourBucket(time.Now())); err != nil {
+				if err := d.store.IncrEventCount(ctx, ev.SourceIP, ck, store.HourBucket(d.clock())); err != nil {
 					slog.WarnContext(ctx, "daemon: event counter increment failed",
 						"ip", ev.SourceIP, "kind", ck, "err", err)
 				}
@@ -1176,7 +1191,7 @@ func (d *Daemon) aiEligible(ctx context.Context, ip netip.Addr, highScore int) b
 // collectAIAggregates snapshots the IP's aggregates for all windows, with
 // enrichment when available.
 func (d *Daemon) collectAIAggregates(ip netip.Addr) []sdk.Aggregate {
-	now := time.Now()
+	now := d.clock()
 	windows := d.agg.Windows()
 	aggs := make([]sdk.Aggregate, 0, len(windows))
 	for _, w := range windows {
@@ -1325,7 +1340,7 @@ func (d *Daemon) parse(raw sdk.RawLine) ([]sdk.Event, error) {
 // context is long-window-relevant (an SSH-kind event, an SSH re-check) so the
 // per-event hot path never runs counter queries for high-volume HTTP kinds.
 func (d *Daemon) evaluateRules(ctx context.Context, ip netip.Addr, withLong bool) []sdk.Verdict {
-	now := time.Now()
+	now := d.clock()
 	var verdicts []sdk.Verdict
 	for _, w := range d.agg.Windows() {
 		agg := d.agg.Aggregate(ip, w, now)
@@ -1800,6 +1815,14 @@ func (d *Daemon) notifyPanic(ctx context.Context, source, msg string) {
 		Title:    "daemon panic recovered (" + source + ")",
 		Body:     msg,
 	})
+}
+
+// clock returns the daemon clock (Config.Now, or time.Now).
+func (d *Daemon) clock() time.Time {
+	if d.now != nil {
+		return d.now()
+	}
+	return time.Now()
 }
 
 // notifyCritical sends a critical system notification.

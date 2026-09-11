@@ -38,7 +38,7 @@ func (s *DB) UnbanAll(ctx context.Context, reason string) (int, error) {
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO audit_log (recorded_at, op, ip, ttl_seconds, strike_num, reason)
 		VALUES (?, 'disable_all', '-', 0, 0, ?)
-	`, nowRFC3339(), fmt.Sprintf("%s (removed %d active bans)", reason, n)); err != nil {
+	`, s.nowRFC3339(), fmt.Sprintf("%s (removed %d active bans)", reason, n)); err != nil {
 		return 0, fmt.Errorf("store: UnbanAll audit: %w", err)
 	}
 	if err := tx.Commit(); err != nil {

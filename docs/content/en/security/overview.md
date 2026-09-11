@@ -89,6 +89,10 @@ operator's session remains unbannable for as long as it is open.
 
 The allowlist is checked FIRST, before any rule engine decision. An allowlisted IP cannot be banned by any rule, AI decision, or manual ban attempt.
 
+It also wins over bans that already exist. `ezyshield allow <ip-or-cidr>` lifts every active ban the entry covers — from the kernel, the edge platforms and the store, each one audited as an `unban` — and the reconcile never re-applies a ban to an allowed address. Reputation feeds honour the runtime allowlist the same way the policy file's allowlist is honoured, and `disable --all` empties the feed sets along with the ban sets.
+
+In the kernel, the `@allowed` sets are accepted before any drop in **every** chain EzyShield installs (prerouting, input and forward): an `accept` in the prerouting hook ends only that chain, and a packet for a local service still traverses the input hook, so the same accept-before-drop pair sits there too.
+
 ```yaml
 allowlist:
   - 10.0.0.0/8       # internal network

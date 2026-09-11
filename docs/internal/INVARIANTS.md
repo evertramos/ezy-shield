@@ -91,20 +91,20 @@ is no backlog.
 
 **A5. Reconcile repairs drift and never creates it.** Holds for single-IP bans. Violated for: manual CIDR bans (no row → deleted as stale, #609); sub-second TTLs (#615); a failing add aborts before the removal pass (skip, not creation).
 
-Gaps (open): #608 (allow never lifts a ban), #609 (CIDR ban reverted), #615 (sub-second TTL), B3 `unban <cidr>` leaves contained elements until reconcile, B4 edge removals lag but report success, B6 string-compared expiry, B7 report readers without the expiry predicate, B9 store-failure fallback strands the kernel element.
+Gaps (open): #609 (CIDR ban reverted), #615 (sub-second TTL), B3 `unban <cidr>` leaves contained elements until reconcile, B4 edge removals lag but report success, B6 string-compared expiry, B7 report readers without the expiry predicate, B9 store-failure fallback strands the kernel element.
 
 ## B — Operator immunity
 
-**B1. The allowlist wins over every rule, AI verdict, feed, geo/ASN block and manual ban, in every layer.**
+**B1. The allowlist wins over every rule, AI verdict, feed, geo/ASN block and manual ban, in every layer — and over bans that already exist.** `allow` lifts the covered bans (kernel/edge first, then store rows audited as `unban`), `syncEnforcer` excludes runtime-allowed addresses from the desired state, `disable --all` empties the feed sets (#608). Harness: `e2e/TestAllow_LiftsExistingBanEverywhere`.
 
 | layer | reader | source | note |
 |---|---|---|---|
 | decision | `decision.Engine` (allowlist, admin_cidrs, `SSH_CLIENT`, CDN ranges, verified bots) | static, frozen at `New` | runtime allowlist checked *before* `Decide` in the pipeline, re-check and async AI |
 | manual ban | `AuthorizeManualBan` | static + runtime (`Overlaps`) | `--force` only overrides CDN ranges |
-| gate | `enforce.Gate.refuse` | **static only** | no runtime setter — #608 |
+| gate | `enforce.Gate.refuse` | static + runtime (`SetExtraAllowlist`, fed by `reloadAllowlist`) | fixed by #608 |
 | enforcers / edge | `NftablesEnforcer`, Cloudflare, Bunny, AWS | static only | |
-| feeds | `feedEntryGuarded` | static + raw peers + CDN | no runtime — #608 |
-| kernel | `@allowed accept` | `prerouting` only; `input`/`forward` drop unconditionally — #608 | |
+| feeds | `feedEntryGuarded` | static + runtime + raw peers + CDN | runtime added by #608 |
+| kernel | `@allowed accept` | first rule pair in `prerouting`, `input` and `forward` | fixed by #608 |
 
 **B2. An operator's live SSH session cannot be banned by any path.** Engine probe (2 s cache) and gate probe (fresh) share one predicate under ADR-0013; re-check (#420) and deferred enforcement (#583) re-run the full guards; manual bans (#211), `arm` preflight, AI verdicts (inline and async) go through `Decide`. Gaps: engine cache vs fresh gate can commit a row for the operator that the reconcile enforces after the session ends (A-G5); async AI never arms the re-check (D3-1); ADR-0013 `firstSeen` can give a reconnect zero grace (A-G6).
 

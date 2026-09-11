@@ -106,4 +106,4 @@ When the TTL lapses the ban expires everywhere (kernel timeout + reconcile); the
 
 ## If something looks wrong
 
-Banned a legitimate user? `sudo ezyshield allow <ip>` (allowlist wins over everything) or `sudo ezyshield unban <ip>`. Everything misbehaving? `sudo ezyshield disable --all` removes every block and disarms, preserving history. Diagnosis paths live in the [troubleshooting guide](troubleshooting.md).
+Banned a legitimate user? `sudo ezyshield allow <ip>` — the allowlist wins over everything, including the ban that already exists: the entry is lifted from the kernel and the edge, the store row is removed and audited as an `unban`, and no reconcile brings it back. `sudo ezyshield unban <ip>` lifts the ban without allowlisting. Everything misbehaving? `sudo ezyshield disable --all` removes every block and disarms, preserving history. Diagnosis paths live in the [troubleshooting guide](troubleshooting.md).

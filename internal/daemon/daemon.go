@@ -74,6 +74,9 @@ type daemonStore interface {
 	ExpireBans(ctx context.Context, now time.Time) (int, error)
 	Unban(ctx context.Context, ip netip.Addr) error
 	UnbanPrefix(ctx context.Context, prefix netip.Prefix) (int, error)
+	// UnbanCovered removes every active ban prefix covers, audits each as
+	// an unban with reason, and returns the addresses lifted (issue #608).
+	UnbanCovered(ctx context.Context, prefix netip.Prefix, reason string) ([]netip.Addr, error)
 	AuditOp(ctx context.Context, op string, prefix netip.Prefix, ttl time.Duration, reason string) error
 	// Arm/disarm support (issue #228): persisted runtime state + system audits.
 	SetState(ctx context.Context, key, value string) error
@@ -1523,6 +1526,13 @@ func (d *Daemon) reloadAllowlist(ctx context.Context) error {
 	d.mu.Lock()
 	d.runtimeAllowlist = prefixes
 	d.mu.Unlock()
+	// The enforcement gate refuses on the runtime allowlist too (issue
+	// #608): a reconcile must never re-apply a ban the operator lifted with
+	// `allow`, and a manual/ pipeline ban of an allowed address is refused
+	// at the last step as well as the first.
+	if g, ok := d.enforcer.(enforce.ExtraAllowlister); ok {
+		g.SetExtraAllowlist(prefixes)
+	}
 	return nil
 }
 
@@ -1550,6 +1560,12 @@ func (d *Daemon) syncEnforcer(ctx context.Context) error {
 	targets := make([]sdk.Target, 0, len(bans))
 	for _, b := range bans {
 		if b.Op != "ban" {
+			continue
+		}
+		// Runtime-allowed addresses are never part of the desired state
+		// (issue #608): `allow` lifts their rows, but a row that raced the
+		// allow — or an older store — must not be re-applied by reconcile.
+		if d.isRuntimeAllowlisted(b.IP) {
 			continue
 		}
 		targets = append(targets, sdk.Target{IP: b.IP, TTL: b.TTL})

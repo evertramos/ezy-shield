@@ -83,15 +83,15 @@ is no backlog.
 | helper truth | `enforcerd.Server` cache with deadlines (#383), rebuilt from `nft list set … expires` on start; auto-merge migration (#588) | | `nowFn` | |
 | edge | `CloudflareListsEnforcer.Sync` (removals deferred ≤ 3 min), Bunny/AWS wholesale (capacity overflow keeps newest) | | | |
 
-**A2. A ban lasts exactly its TTL in every layer.** Ladder → store `expires_at` → helper deadline → nft `timeout` → edge (no TTL). Known divergences: client truncates `int64(TTL.Seconds())` so < 1 s → permanent (#615); reaper compares RFC3339 strings lexicographically (gap B6); edge lifetime = TTL + ≤ 1 min + ≤ 3 min.
+**A2. A ban lasts exactly its TTL in every layer.** Ladder → store `expires_at` → helper deadline → nft `timeout` → edge (no TTL). Known divergences: (fixed #615 — the enforcer client now rounds a positive remaining TTL up, never to 0; harness `TestBanLifecycle_SubSecondTTLNeverBecomesPermanent`); reaper compares RFC3339 strings lexicographically (gap B6); edge lifetime = TTL + ≤ 1 min + ≤ 3 min.
 
 **A3. Every element is spelled canonically everywhere.** `decision` unmaps; `enforce.CanonicalIPKey` (bare address for /32 and /128, masked prefix otherwise) on both sides of every reconcile; helper canonicalises verbs and trusts nft's own rendering on init. Edge list items compared verbatim (only bare spellings are ever sent).
 
 **A4. Enforcement happens only through the helper and only for gate-accepted targets.** Every `d.enforcer` writer goes through `enforce.Gate` (static allowlist + SSH-peer probe, narrowed under ADR-0013 via `SSHPeerProbeSetter`, #583). **Exception:** reputation feeds write through the raw enforcer with their own filter (`feeds.go`), static allowlist and the raw `/proc` peer probe only (gap B8).
 
-**A5. Reconcile repairs drift and never creates it.** Holds for single-IP bans. Violated for: manual CIDR bans (no row → deleted as stale, #609); sub-second TTLs (#615); a failing add aborts before the removal pass (skip, not creation).
+**A5. Reconcile repairs drift and never creates it.** Holds for single-IP bans. Violated for: manual CIDR bans (no row → deleted as stale, #609); a failing add aborts before the removal pass (skip, not creation). Sub-second TTLs no longer become permanent (#615).
 
-Gaps (open): #608 (allow never lifts a ban), #609 (CIDR ban reverted), #615 (sub-second TTL), B3 `unban <cidr>` leaves contained elements until reconcile, B4 edge removals lag but report success, B6 string-compared expiry, B7 report readers without the expiry predicate, B9 store-failure fallback strands the kernel element.
+Gaps (open): #608 (allow never lifts a ban), #609 (CIDR ban reverted), B3 `unban <cidr>` leaves contained elements until reconcile, B4 edge removals lag but report success, B6 string-compared expiry, B7 report readers without the expiry predicate, B9 store-failure fallback strands the kernel element.
 
 ## B — Operator immunity
 

@@ -242,3 +242,23 @@ func TestAggregator_Windows(t *testing.T) {
 		}
 	}
 }
+
+// TestReset_DropsOnlyThatIP (issue #621): a strike consumes an IP's retained
+// events; other IPs keep theirs.
+func TestReset_DropsOnlyThatIP(t *testing.T) {
+	a := aggregate.New([]time.Duration{time.Minute}, 0)
+	now := time.Now()
+	x, y := netip.MustParseAddr("203.0.113.1"), netip.MustParseAddr("203.0.113.2")
+	for i := 0; i < 3; i++ {
+		a.Add(sdk.Event{SourceIP: x, Kind: "k", Time: now})
+		a.Add(sdk.Event{SourceIP: y, Kind: "k", Time: now})
+	}
+	a.Reset(x)
+	if got := a.Aggregate(x, time.Minute, now).Count; got != 0 {
+		t.Fatalf("reset IP still has %d events", got)
+	}
+	if got := a.Aggregate(y, time.Minute, now).Count; got != 3 {
+		t.Fatalf("other IP lost events: %d", got)
+	}
+	a.Reset(x) // idempotent on a missing bucket
+}

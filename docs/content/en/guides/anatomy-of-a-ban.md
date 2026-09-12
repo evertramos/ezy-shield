@@ -102,7 +102,7 @@ Strike history (newest first)
         | Failed password for root from 203.0.113.66 port 40122 ssh2
 ```
 
-When the TTL lapses the ban expires everywhere (kernel timeout + reconcile); the strike history stays, so the next offense from this IP starts at strike 3.
+When the TTL lapses the ban expires everywhere (kernel timeout + reconcile); the strike history stays, so the next offense from this IP starts at strike 3. "Next offense" means new evidence: a strike consumes the requests that earned it, so after the ban ends the IP needs to cross a threshold again — a single page load does not re-fire the rules on the previous hour of history.
 
 ## If something looks wrong
 

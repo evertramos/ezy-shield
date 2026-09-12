@@ -319,21 +319,11 @@ func (p *NginxParser) isTrustedProxy(ip netip.Addr) bool {
 	return false
 }
 
-// firstUntrustedFromXFF extracts the leftmost non-trusted IP from an
-// X-Forwarded-For header value (format: "client, proxy1, proxy2").
+// firstUntrustedFromXFF returns the client address behind the trusted
+// proxy chain — the rightmost untrusted hop (see clientFromXFF, issue #612).
 func (p *NginxParser) firstUntrustedFromXFF(xff string) (netip.Addr, error) {
-	for _, part := range strings.Split(xff, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" || part == "-" {
-			continue
-		}
-		ip, err := parseIP(part)
-		if err != nil {
-			continue
-		}
-		if !p.isTrustedProxy(ip) {
-			return ip, nil
-		}
+	if ip, ok := clientFromXFF(xff, p.isTrustedProxy); ok {
+		return ip, nil
 	}
 	return netip.Addr{}, fmt.Errorf("nginx: no untrusted IP in XFF %q", redactForLog(xff))
 }

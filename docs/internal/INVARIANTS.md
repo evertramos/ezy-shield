@@ -120,7 +120,7 @@ Gaps (open): #608 (allow never lifts a ban), #609 (CIDR ban reverted), #615 (sub
 
 **C3. A rule fires on exactly the events it claims.** Violations: aggregator flushed with the last window instead of the longest — every hourly tier sees ≤ 10 min (#610); `Sample` keeps the oldest 4096, so busy IPs are blind to field-level sustained rules (E3-2); drop-in overrides keep the old `rule:` counter history (E3-3); validation accepts duplicate names, unreachable thresholds and unknown kinds (E3-4).
 
-**C4. Hostile input never produces wrong attribution.** Violation: leftmost X-Forwarded-For hop (#612). Combined/vhost formats behind a CDN attribute everything to the edge (E4-2, config/doc). IPv4-mapped forms split aggregator buckets (E4-3).
+**C4. Hostile input never produces wrong attribution.** Fixed: X-Forwarded-For resolves to the rightmost untrusted hop (#612; parser tests `TestXFF_RightmostUntrustedHop`). Note: production wires the HTTP parsers with an empty trusted-proxy list — there is no config key yet — so header resolution is unreachable until #626. Combined/vhost formats behind a CDN attribute everything to the edge (E4-2, config/doc). IPv4-mapped forms split aggregator buckets (E4-3).
 
 ## D — Diagnostics, audit, gates, notifications
 

@@ -184,7 +184,7 @@ func (p *TraefikParser) parseJSON(raw string, at time.Time, origin string) (sdk.
 }
 
 // resolveXFF returns the effective client IP. If ip is a trusted proxy and xff
-// contains a routable non-trusted address, that address is returned instead.
+// contains a non-trusted address, the rightmost such hop is returned instead.
 // Falls back to ip on any resolution failure.
 func (p *TraefikParser) resolveXFF(ip netip.Addr, xff string) netip.Addr {
 	if xff == "" || xff == "-" || len(p.trustedProxies) == 0 {
@@ -193,18 +193,10 @@ func (p *TraefikParser) resolveXFF(ip netip.Addr, xff string) netip.Addr {
 	if !p.isTrustedProxy(ip) {
 		return ip
 	}
-	for _, part := range strings.Split(xff, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" || part == "-" {
-			continue
-		}
-		cand, err := parseIP(part)
-		if err != nil {
-			continue
-		}
-		if !p.isTrustedProxy(cand) {
-			return cand
-		}
+	// Rightmost untrusted hop (issue #612): the proxies' appended suffix
+	// is the only part of the header the client did not write.
+	if cand, ok := clientFromXFF(xff, p.isTrustedProxy); ok {
+		return cand
 	}
 	p.logger.Debug("traefik: no untrusted IP in XFF, using client addr",
 		slog.String("xff", redactForLog(xff)),

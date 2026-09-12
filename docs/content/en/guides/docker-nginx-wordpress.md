@@ -120,7 +120,11 @@ real_ip_recursive on;
 > actually control (the `set_real_ip_from` ranges above). If the proxy trusts it
 > from everyone, attackers spoof the header and can get *innocent* IPs banned.
 > EzyShield reads whatever real IP the proxy resolves into the log line — get the
-> nginx side right and EzyShield bans the right address.
+> nginx side right and EzyShield bans the right address. When EzyShield itself
+> resolves the header (JSON/custom nginx, Caddy or Traefik formats with trusted
+> proxies configured), it takes the **rightmost** hop that is not a trusted
+> proxy: proxies append the address they accepted the connection from, so that
+> suffix is the only part of the header the client did not write.
 
 ### 3c. Per-container WordPress logs (optional)
 If you'd rather read each WordPress container's own access log, bind-mount each

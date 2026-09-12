@@ -114,7 +114,7 @@ Gaps (open): #608 (allow never lifts a ban), #609 (CIDR ban reverted), #615 (sub
 
 ## C — Event pipeline
 
-**C1. One log line is counted exactly once.** Collectors start at the live tail (`-n 0`, `tail=0`, seek EOF — #599). Violations: file-tail rotation replay and copytruncate blindness (#611); `events_agg` has no idempotency key (any replay double-counts long rules with threshold 5); the same evidence is `Decide`d up to three times (pipeline, async AI, re-check) and each hit bumps the suppressed counters (E1-5).
+**C1. One log line is counted exactly once.** Collectors start at the live tail (`-n 0`, `tail=0`, seek EOF — #599). Fixed: file-tail rotation replay and copytruncate blindness (#611; `TestFileTailCollector_RenameRotationThenDeleteDoesNotReplay`, `TestFileTailCollector_CopytruncateWithAppendWriter`). Violations: `events_agg` has no idempotency key (any replay double-counts long rules with threshold 5); the same evidence is `Decide`d up to three times (pipeline, async AI, re-check) and each hit bumps the suppressed counters (E1-5).
 
 **C2. Evidence is judged at the time it happened.** Only the SSH parser keeps the log timestamp (and interprets an unzoned stamp in the daemon's zone — E2-1); every other parser stamps collection time. Aggregator windows use `ev.Time`; counters, grace, rate limits and re-check deadlines use processing time. Under a backlog: SSH bursts processed late count zero, HTTP trickles compress into false bursts (E2-2), pre-ban lines processed after the ban fire `ban_ineffective` (E2-3).
 

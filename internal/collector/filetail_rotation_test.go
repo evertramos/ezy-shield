@@ -23,7 +23,7 @@ import (
 // per write, so the writer's offset never masks a truncation.
 func appendLine(t *testing.T, path, line string) {
 	t.Helper()
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644) //nolint:gosec // test temp file
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // test temp file
 	if err != nil {
 		t.Fatalf("open for append: %v", err)
 	}
@@ -82,7 +82,7 @@ func startTail(t *testing.T, path string) (<-chan sdk.RawLine, context.CancelFun
 func TestFileTailCollector_RenameRotationThenDeleteDoesNotReplay(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "access.log")
-	if err := os.WriteFile(path, nil, 0o644); err != nil {
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	out, _ := startTail(t, path)
@@ -93,7 +93,7 @@ func TestFileTailCollector_RenameRotationThenDeleteDoesNotReplay(t *testing.T) {
 	if err := os.Rename(path, rotated); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, nil, 0o644); err != nil {
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(300 * time.Millisecond) // reopen retry window
@@ -123,7 +123,7 @@ func TestFileTailCollector_RenameRotationThenDeleteDoesNotReplay(t *testing.T) {
 func TestFileTailCollector_CopytruncateWithAppendWriter(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "auth.log")
-	if err := os.WriteFile(path, nil, 0o644); err != nil {
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	out, _ := startTail(t, path)

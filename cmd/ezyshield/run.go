@@ -245,6 +245,9 @@ func runDaemon(configPath, policyPath, dbPath, socketPath string) error {
 			}
 			disp = notify.New(notifiers, cfg.Notify.RateLimitPerMinute,
 				time.Duration(dedupSec)*time.Second, sevs)
+			if !disp.AcceptsCritical() {
+				slog.Warn("run: no notification channel accepts severity 'critical' — enforcement outages (DEGRADED) will not be reported anywhere; add 'critical' to at least one channel's severity list (issue #613)")
+			}
 		}
 	}
 

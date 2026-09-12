@@ -130,7 +130,7 @@ Gaps (open): #608 (allow never lifts a ban), #609 (CIDR ban reverted), #615 (sub
 
 **D3. The AI layer is consulted only when it can change the outcome and never bypasses policy.** Verified: AI verdicts pass the identical guards. Open: async path never arms the anti-lockout re-check (D3-1) and swallows `ErrRateLimited` (D3-2); budget-exhausted "rules-only" is invisible to `status`/`doctor` (D3-3).
 
-**D4. Notifications never hide a critical event.** Violation: severity-blind rate limiter and pre-send dedup (#613); severity allowlists may exclude `critical` silently (D4-3).
+**D4. Notifications never hide a critical event.** Fixed (#613): criticals use a reserved per-channel quota, the dedup key is claimed only by a delivered message, per-IP enforcer failures fold into one systemic critical, drops are counted (`ezyshield_notifications_dropped_total`), and `doctor`/startup warn when no channel accepts `critical` (D4-3). Open: no recovery notification (D4-4).
 
 ## What the tests cover today (and with what)
 

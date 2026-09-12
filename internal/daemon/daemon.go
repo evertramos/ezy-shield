@@ -604,6 +604,7 @@ func New(dcfg Config) (*Daemon, error) {
 		if dcfg.Cfg.AI.Async {
 			d.aiQueue = newAIAsyncQueue(dcfg.Cfg.AI.AsyncQueueSize)
 			d.registerAICleanerGauge()
+			d.registerNotifyDroppedGauge()
 		}
 	}
 
@@ -1443,7 +1444,7 @@ func (d *Daemon) dispatch(ctx context.Context, action sdk.Action) {
 			d.deferGatedBan(ctx, action.IP, err)
 		default:
 			slog.ErrorContext(ctx, "daemon: enforcer ban failed", "ip", action.IP, "err", err)
-			d.notifyCritical(ctx, fmt.Sprintf("enforcer ban failed for %s: %v", action.IP, err))
+			d.notifyEnforcerFailure(ctx, action.IP, err)
 		}
 		// Enforcement-state health (issue #174): a failed ban flips the
 		// daemon to DEGRADED so status/doctor stop claiming protection
@@ -1834,6 +1835,25 @@ func (d *Daemon) notifyCritical(ctx context.Context, msg string) {
 		Severity: "critical",
 		Title:    msg,
 		Body:     msg,
+	})
+}
+
+// notifyEnforcerFailure reports a ban the enforcer could not apply. The
+// notification is SYSTEMIC, not per IP (issue #613): during an enforcer
+// outage every ban fails, and a title carrying the IP made each failure a
+// distinct critical that flooded the channel quota — the one alert that
+// mattered, the DEGRADED transition, was dropped behind them. The IP stays
+// in the body; the dedup key (severity+title) folds repeats within the
+// dedup window into the first one. The per-IP detail is in the ERROR log
+// and, for the enforcement state, in the audit trail.
+func (d *Daemon) notifyEnforcerFailure(ctx context.Context, ip netip.Addr, err error) {
+	if d.notifier == nil {
+		return
+	}
+	_ = d.notifier.Send(ctx, sdk.Notification{
+		Severity: "critical",
+		Title:    "enforcer ban failed — bans may not be applied; check the enforcer",
+		Body:     fmt.Sprintf("first failing target %s: %v (repeats within the dedup window are folded into this alert)", ip, err),
 	})
 }
 

@@ -143,6 +143,8 @@ func runDoctor(cmd *cobra.Command, configDir, dbPath, socketPath string, jsonOut
 	checks = append(checks, checkFirewallCoexistence(doctorCtx, dbPath)...)
 	// issue #146: fired ban_ineffective diagnostics (read-only DB query).
 	checks = append(checks, checkBanIneffective(dbPath))
+	// issue #613: the DEGRADED alert is critical — some channel must route it.
+	checks = append(checks, checkNotifyCriticalRoute(configDir))
 	// issue #174: honest enforcement state from the running daemon.
 	checks = append(checks, checkEnforcementState(socketPath))
 

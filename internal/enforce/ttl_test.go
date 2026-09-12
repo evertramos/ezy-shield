@@ -25,7 +25,8 @@ func TestBan_SubSecondTTLRoundsUpToOneSecond(t *testing.T) {
 		{time.Second, 1},
 		{90*time.Second + 200*time.Millisecond, 91},
 		{time.Hour, 3600},
-		{0, 0}, // permanent stays permanent
+		{0, 0},                // permanent stays permanent
+		{-3 * time.Second, 1}, // already elapsed: expire at once, never permanent
 	} {
 		ms := newMockHelper(t)
 		e := enforce.New(ms.sock, nil)

@@ -145,8 +145,14 @@ func (e *NftablesEnforcer) Ban(ctx context.Context, t sdk.Target) error {
 // timeout" to the helper, so a ban with 600 ms left at reconcile time
 // became a permanent kernel element (issue #615).
 func ttlSeconds(ttl time.Duration) int64 {
-	if ttl <= 0 {
-		return 0
+	switch {
+	case ttl == 0:
+		return 0 // permanent (store NULL expires_at)
+	case ttl < 0:
+		// Already elapsed. No caller should hand this over (ActiveBans skips
+		// expired rows), but if one ever does, a one-second element that
+		// the kernel drops on its own is the fail-safe — never permanent.
+		return 1
 	}
 	secs := int64(math.Ceil(ttl.Seconds()))
 	if secs < 1 {

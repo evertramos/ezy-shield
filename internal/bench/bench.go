@@ -198,16 +198,7 @@ func runScenario(sc *Scenario) (*ScenarioResult, error) {
 	clock := benchEpoch
 	interval := time.Duration(sc.IntervalMS) * time.Millisecond
 
-	// Flush on the daemon's cadence so the corpus also covers what the
-	// flush evicts (issue #610); the aggregator's longest window is the
-	// horizon, exactly as in the daemon.
-	const benchFlushInterval = 10 * time.Minute
-	lastFlush := clock
 	for _, line := range sc.Lines {
-		if clock.Sub(lastFlush) >= benchFlushInterval {
-			agg.Flush(ctx, clock.Add(-agg.MaxWindow()))
-			lastFlush = clock
-		}
 		raw := sdk.RawLine{Source: sc.Source, Line: []byte(line), At: clock}
 		var events []sdk.Event
 		for _, p := range parsers {

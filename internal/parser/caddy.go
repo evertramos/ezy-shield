@@ -197,8 +197,32 @@ func extractCaddyHeaders(req map[string]json.RawMessage) (ua, xff string) {
 		return "", ""
 	}
 	ua = headerFirstString(headers, "User-Agent", "user-agent")
-	xff = headerFirstString(headers, "X-Forwarded-For", "x-forwarded-for")
+	// Every value of a repeated X-Forwarded-For header is one hop list;
+	// a trusted proxy that adds its own header line (HAProxy's default)
+	// makes the client's line come FIRST. Join them in order so the
+	// rightmost-hop rule (issue #612) sees the proxies' suffix last.
+	xff = headerJoined(headers, "X-Forwarded-For", "x-forwarded-for")
 	return ua, xff
+}
+
+// headerJoined returns every value of the first matching header name,
+// joined with ", " (RFC 7230 list semantics); a bare string is tolerated.
+func headerJoined(headers map[string]json.RawMessage, keys ...string) string {
+	for _, k := range keys {
+		v, ok := headers[k]
+		if !ok {
+			continue
+		}
+		var arr []string
+		if err := json.Unmarshal(v, &arr); err == nil && len(arr) > 0 {
+			return strings.Join(arr, ", ")
+		}
+		var s string
+		if err := json.Unmarshal(v, &s); err == nil {
+			return s
+		}
+	}
+	return ""
 }
 
 // headerFirstString returns the first value of the first matching header name.

@@ -124,7 +124,10 @@ real_ip_recursive on;
 > resolves the header (JSON/custom nginx, Caddy or Traefik formats with trusted
 > proxies configured), it takes the **rightmost** hop that is not a trusted
 > proxy: proxies append the address they accepted the connection from, so that
-> suffix is the only part of the header the client did not write.
+> suffix is the only part of the header the client did not write. If the
+> proxy appended something that is not an address (`unknown`, an obfuscated
+> identifier), EzyShield stops there and keeps the proxy's own address rather
+> than trusting the part the client wrote.
 
 ### 3c. Per-container WordPress logs (optional)
 If you'd rather read each WordPress container's own access log, bind-mount each

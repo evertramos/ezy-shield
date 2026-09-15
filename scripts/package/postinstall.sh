@@ -54,6 +54,10 @@ fi
 if getent group systemd-journal >/dev/null 2>&1; then
 	usermod -aG systemd-journal ezyshield || true
 fi
+# Same shape for the read-only tier (issue #594): the daemon can only chown
+# ezyshield-ro.sock to ezyshield-view if the service user is a member. The
+# unit declares SupplementaryGroups=ezyshield-view; this is the fallback.
+usermod -aG ezyshield-view ezyshield || true
 
 install -d -m 0750 -o root -g ezyshield /etc/ezyshield
 install -d -m 0750 -o ezyshield -g ezyshield /var/lib/ezyshield

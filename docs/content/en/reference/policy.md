@@ -39,6 +39,7 @@ escalation_exempt_window: 24h
 # Both values are floors: policy may raise them, never lower them.
 ban_ineffective_grace: 90s
 ban_ineffective_min_events: 3
+ban_ineffective_min_events_in_grace: 200
 
 # IPs/CIDRs that can NEVER be banned. Allowlist wins over everything.
 allowlist: []
@@ -110,8 +111,9 @@ In a healthy armed setup, a banned IP cannot produce new log lines — packets d
 |-------|------|---------------|-------------|
 | `ban_ineffective_grace` | duration | 90s | Events within this window after a ban are counted but never trigger the diagnostic (in-flight requests, proxy buffering, log latency) |
 | `ban_ineffective_min_events` | int | 3 | Suppressed events after the grace period needed to fire the WARN |
+| `ban_ineffective_min_events_in_grace` | int | 200 | Suppressed events **inside** the grace window that fire the WARN by volume — the grace absorbs latency, not a flood. `0` disables this trigger |
 
-Both are floors: policy may raise them, never lower them. The diagnostic never escalates a ban — the remedy it points to is edge enforcement or real-IP parsing, not harsher sentencing.
+The first two are floors: policy may raise them, never lower them. The diagnostic fires once per ban whichever trigger wins, and names its `phase`: `post_grace` (traffic keeps arriving after the grace — the CDN / real-IP / broken-enforcer signature) or `in_grace` (a burst right after the ban — an already-established connection still being served, or the enforcer applying the ban late). It never escalates a ban — the remedy it points to is the enforcement path, not harsher sentencing.
 
 ## allowlist & admin_cidrs
 
@@ -222,6 +224,9 @@ Safety properties (the reason this is opt-in and safe to try):
   failure can enable a ban today's code would refuse.
 - `allowlist` / `admin_cidrs` are checked **before** any of this and
   remain your durable protection — put your fixed IPs there.
+- The narrowing applies to **both** immunity layers — the decision engine
+  and the enforcement gate ahead of every backend — from one shared
+  predicate, so a ban the engine decides is one the gate applies.
 - Known limitation: an **idle** `ControlPersist` master (no open
   channel) has no logind session and loses immunity while idle; active
   work always has a channel. `ezyshield doctor` reports the effective

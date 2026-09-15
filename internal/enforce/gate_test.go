@@ -504,3 +504,52 @@ func TestGateAllowlistForwardingCanonicalizesMapped(t *testing.T) {
 		t.Errorf("inner SyncAllowlist received %v, want one call with %v", local.syncAllows, wantSync)
 	}
 }
+
+// TestGateSetSSHPeerProbe covers the SSHPeerProbeSetter facet (issue #583):
+// the daemon installs the ADR-0013 authenticated-peer predicate after
+// construction, and the gate must judge Ban AND Sync by the replacement —
+// a held-but-unauthenticated socket the narrowed engine bans is one the
+// narrowed gate applies. The probe is consulted once per Sync, not once
+// per target.
+func TestGateSetSSHPeerProbe(t *testing.T) {
+	peer := netip.MustParseAddr("203.0.113.9")
+	target := sdk.Target{IP: peer, TTL: time.Hour}
+	inner := &unguardedEnforcer{}
+	g := NewGate(inner, nil, func() []netip.Addr { return []netip.Addr{peer} })
+
+	if err := g.Ban(context.Background(), target); !errors.Is(err, ErrGateRefused) {
+		t.Fatalf("raw probe: Ban = %v, want ErrGateRefused", err)
+	}
+
+	// The narrowed probe (no authenticated session for peer) removes it.
+	calls := 0
+	g.SetSSHPeerProbe(func() []netip.Addr { calls++; return nil })
+	if err := g.Ban(context.Background(), target); err != nil {
+		t.Fatalf("narrowed probe: Ban = %v, want nil", err)
+	}
+	if len(inner.bans) != 1 {
+		t.Fatalf("inner got %d bans, want 1", len(inner.bans))
+	}
+	want := []sdk.Target{target, {IP: netip.MustParseAddr("233.252.0.77")}, {IP: netip.MustParseAddr("233.252.0.78")}}
+	calls = 0
+	if err := g.Sync(context.Background(), want); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if len(inner.syncs) != 1 || len(inner.syncs[0]) != len(want) {
+		t.Fatalf("inner Sync received %+v, want all %d targets", inner.syncs, len(want))
+	}
+	if calls != 1 {
+		t.Fatalf("probe consulted %d times during one Sync, want exactly 1", calls)
+	}
+
+	// nil disables the peer check; the allowlist check still runs.
+	g2 := NewGate(&unguardedEnforcer{}, []netip.Prefix{mustPrefix(t, "192.0.2.0/24")},
+		func() []netip.Addr { return []netip.Addr{peer} })
+	g2.SetSSHPeerProbe(nil)
+	if err := g2.Ban(context.Background(), target); err != nil {
+		t.Fatalf("nil probe: Ban = %v, want nil", err)
+	}
+	if err := g2.Ban(context.Background(), sdk.Target{IP: netip.MustParseAddr("192.0.2.1")}); !errors.Is(err, ErrGateRefused) {
+		t.Fatalf("nil probe must keep the allowlist refusal, got %v", err)
+	}
+}

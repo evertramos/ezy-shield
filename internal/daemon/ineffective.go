@@ -64,8 +64,22 @@ func (dd *ineffDedup) shouldNotify(now time.Time) (send bool, carried int) {
 // — so it is forwarded to the notifier verbatim.
 func (d *Daemon) BanIneffective(ctx context.Context, diag decision.BanIneffectiveDiag) {
 	ladder := fmt.Sprintf("strike %d/%d — next rungs: %s", diag.Strike, diag.LadderLen, diag.NextRungs)
-	reason := fmt.Sprintf("%s; %d events ≥%ds after the ban (total suppressed: %d)",
-		ladder, diag.EventsAfterGrace, diag.GraceSeconds, diag.TotalSuppressed)
+	var reason, causes string
+	if diag.Phase == decision.PhaseInGrace {
+		// Volume trigger (issue #586): a flood inside the grace is not
+		// latency — the entry is not dropping packets yet, or an already
+		// established connection keeps serving requests past the ban.
+		reason = fmt.Sprintf("%s; %d events within the first %ds after the ban (total suppressed: %d)",
+			ladder, diag.EventsInGrace, diag.GraceSeconds, diag.TotalSuppressed)
+		causes = "an already-established connection still being served after the ban " +
+			"(HTTP/2 or keep-alive reuse — the enforcer's pre-ban TCP teardown may be unavailable), " +
+			"or the enforcer applying the ban late (helper latency, entry not yet in the kernel)"
+	} else {
+		reason = fmt.Sprintf("%s; %d events ≥%ds after the ban (total suppressed: %d)",
+			ladder, diag.EventsAfterGrace, diag.GraceSeconds, diag.TotalSuppressed)
+		causes = "a CDN/proxy in front of the server (local bans never see the client IP), " +
+			"missing real-IP parsing, or a broken enforcer"
+	}
 
 	// Stream event: one per firing, never deduplicated — subscribers do
 	// their own aggregation.
@@ -82,11 +96,10 @@ func (d *Daemon) BanIneffective(ctx context.Context, diag decision.BanIneffectiv
 	}
 	body := fmt.Sprintf(
 		"Traffic from %s is flowing DESPITE an active ban (%s).\n"+
-			"This signal is systemic — likely causes: a CDN/proxy in front of the server "+
-			"(local bans never see the client IP), missing real-IP parsing, or a broken enforcer.\n"+
+			"This signal is systemic — likely causes: %s.\n"+
 			"Fix the enforcement path (edge enforcement, real-IP config, enforcer health) — "+
 			"per-IP sentencing will not help.",
-		diag.IP, reason)
+		diag.IP, reason, causes)
 	if carried > 0 {
 		body += fmt.Sprintf("\n%d additional firing(s) were aggregated since the previous alert.", carried)
 	}

@@ -5,6 +5,7 @@
     "attack-ssh-burst": true,
     "attack-ssh-sustained": true,
     "attack-wp-scan": true,
+    "attack-wp-lowslow": true,
     "attack-env-probe": true,
     "attack-rce-probe": true,
     "attack-404-scan": true,

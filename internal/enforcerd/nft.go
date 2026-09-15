@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-package main
+package enforcerd
 
 // Atomicity contract (issue #214). One `nft` invocation applies its whole
 // script as a single kernel transaction, so a crash/OOM-kill of this helper
@@ -32,6 +32,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -74,6 +75,24 @@ var nftAbsentSignals = []string{
 // isNftAbsentErr reports whether msg contains any known nft "already absent"
 // signal. Substring match is intentional: nft prefixes with "Error: " and
 // often includes file:line context and the offending script line.
+// nftOverlapSignals are nft's messages for an add that collides with an
+// existing interval element (no auto-merge, issue #588): a single element
+// covered by / covering an existing one, or a batch with internal overlaps.
+var nftOverlapSignals = []string{
+	"interval overlaps with an existing one",
+	"conflicting intervals specified",
+}
+
+// isNftOverlapErr reports whether msg carries an interval-overlap signal.
+func isNftOverlapErr(msg string) bool {
+	for _, s := range nftOverlapSignals {
+		if strings.Contains(msg, s) {
+			return true
+		}
+	}
+	return false
+}
+
 func isNftAbsentErr(msg string) bool {
 	for _, s := range nftAbsentSignals {
 		if strings.Contains(msg, s) {
@@ -92,10 +111,10 @@ func isNftAbsentErr(msg string) bool {
 // nftRunner abstracts nft execution so tests can inject a mock.
 type nftRunner func(ctx context.Context, script []byte) error
 
-// realNftRunner writes script to a temp file and executes `nft -f <file>`.
+// RealNftRunner writes script to a temp file and executes `nft -f <file>`.
 // Using -f ensures atomic application: nft parses the whole file before
 // committing any changes, satisfying the crash-safety requirement.
-func realNftRunner(ctx context.Context, script []byte) error {
+func RealNftRunner(ctx context.Context, script []byte) error {
 	f, err := os.CreateTemp("", "ezyshield-enforcer-*.nft")
 	if err != nil {
 		return fmt.Errorf("nft: create temp: %w", err)
@@ -128,8 +147,11 @@ func realNftRunner(ctx context.Context, script []byte) error {
 //     Podman rootless slirp4netns/pasta. This is the canonical placement per
 //     the nftables wiki for pure-drop blocklists and matches the design of
 //     CrowdSec's cs-firewall-bouncer.
-//   - Allowlist rules (@allowed / @allowed6) come first — anti-lockout
-//     invariant (AGENTS.md §2): allowlist ALWAYS wins on the same hook.
+//   - Allowlist rules (@allowed / @allowed6) come first IN EVERY CHAIN —
+//     anti-lockout invariant (AGENTS.md §2): allowlist ALWAYS wins on the
+//     same hook. An `accept` in prerouting ends only that chain; the packet
+//     still traverses input (local) and forward, so those chains carry the
+//     same accept-before-drop pair (issue #608).
 //   - `notrack` before `drop` skips conntrack for packets we're about to
 //     drop, saving state entries under scanner floods (recommended pattern
 //     in the netfilter wiki).
@@ -140,13 +162,32 @@ func realNftRunner(ctx context.Context, script []byte) error {
 // The allowed sets do not use `timeout` — allowlist TTLs are enforced by the
 // daemon which syncs the set on entry expiration. Blocked sets do use nft's
 // native `timeout` for ban expiry.
+//
+// The blocked sets deliberately carry NO `auto-merge` (issue #588): with it,
+// nft collapses adjacent elements into one interval that has exactly one
+// timeout — the last add's — so a permanent ban next to a fresh 5-minute
+// ban expired in 5 minutes while the helper's cache still called it
+// permanent. Without the flag every element keeps its own timer, and a
+// re-add of the same element updates the timer in place. The allowed sets
+// (no timeouts) and the feed sets (rebuilt wholesale with one TTL per feed,
+// routinely overlapping CIDRs) keep the flag. Existing installs are migrated
+// by Server.migrateAutoMerge on the next helper start.
 func initTable(ctx context.Context, run nftRunner, n nftnames.Names) error {
-	// The %[1]s..%[5]s values come exclusively from nftnames.Resolve — the
+	return run(ctx, []byte(initTableScript(n)))
+}
+
+// blockedSetDecl is the declaration of one blocked set: interval (bare IPs
+// and CIDRs), per-element timeout, no auto-merge (issue #588).
+func blockedSetDecl(n nftnames.Names, set, family string) string {
+	return fmt.Sprintf("add set %s %s { type %s ; flags interval,timeout ; }\n", n.Table, set, family)
+}
+
+// initTableScript renders the idempotent layout script initTable applies.
+func initTableScript(n nftnames.Names) string {
+	// The %[1]s..%[7]s values come exclusively from nftnames.Resolve — the
 	// strict identifier charset there is the injection barrier.
-	script := fmt.Sprintf(`add table %[1]s
-add set %[1]s %[2]s { type ipv4_addr ; flags interval,timeout ; auto-merge ; }
-add set %[1]s %[3]s { type ipv6_addr ; flags interval,timeout ; auto-merge ; }
-add set %[1]s %[4]s { type ipv4_addr ; flags interval ; auto-merge ; }
+	return fmt.Sprintf(`add table %[1]s
+`+blockedSetDecl(n, n.Set4, "ipv4_addr")+blockedSetDecl(n, n.Set6, "ipv6_addr")+`add set %[1]s %[4]s { type ipv4_addr ; flags interval ; auto-merge ; }
 add set %[1]s %[5]s { type ipv6_addr ; flags interval ; auto-merge ; }
 add set %[1]s %[6]s { type ipv4_addr ; flags interval,timeout ; auto-merge ; }
 add set %[1]s %[7]s { type ipv6_addr ; flags interval,timeout ; auto-merge ; }
@@ -164,18 +205,21 @@ add rule %[1]s prerouting ip saddr @%[6]s drop
 add rule %[1]s prerouting ip6 saddr @%[7]s drop
 add chain %[1]s input { type filter hook input priority filter ; policy accept ; }
 flush chain %[1]s input
+add rule %[1]s input ip saddr @%[4]s accept
+add rule %[1]s input ip6 saddr @%[5]s accept
 add rule %[1]s input ip saddr @%[2]s drop
 add rule %[1]s input ip6 saddr @%[3]s drop
 add rule %[1]s input ip saddr @%[6]s drop
 add rule %[1]s input ip6 saddr @%[7]s drop
 add chain %[1]s forward { type filter hook forward priority filter ; policy accept ; }
 flush chain %[1]s forward
+add rule %[1]s forward ip saddr @%[4]s accept
+add rule %[1]s forward ip6 saddr @%[5]s accept
 add rule %[1]s forward ip saddr @%[2]s drop
 add rule %[1]s forward ip6 saddr @%[3]s drop
 add rule %[1]s forward ip saddr @%[6]s drop
 add rule %[1]s forward ip6 saddr @%[7]s drop
 `, n.Table, n.Set4, n.Set6, n.Allow4, n.Allow6, n.Feeds4, n.Feeds6)
-	return run(ctx, []byte(script))
 }
 
 // nftFeedsSync atomically replaces the reputation-feed sets with exactly the
@@ -359,7 +403,58 @@ func listSet(ctx context.Context, n nftnames.Names, set string) ([]setElem, erro
 		}
 		return nil, fmt.Errorf("nft list set %s: %w", set, err)
 	}
-	return parseSetElements(out), nil
+	els, skipped := parseSetElementsDetail(out)
+	if len(skipped) > 0 {
+		// A merged interval (`a-b`) from a pre-#588 auto-merge set. It is
+		// not cached; the daemon's reconcile re-adds its members from the
+		// store as individual elements.
+		slog.Warn("enforcer: unparseable set elements skipped — merged intervals from an auto-merge set?",
+			"set", set, "elements", skipped)
+	}
+	return els, nil
+}
+
+// setHasAutoMerge reports whether the live set was created with the
+// `auto-merge` flag (rendered by `nft list set` as its own line). A set that
+// does not exist yet has nothing to migrate.
+func setHasAutoMerge(ctx context.Context, n nftnames.Names, set string) (bool, error) {
+	family, tbl, _ := strings.Cut(n.Table, " ")
+	out, err := listSetOutput(ctx, family, tbl, set)
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && isNftAbsentErr(string(exitErr.Stderr)) {
+			return false, nil
+		}
+		return false, fmt.Errorf("nft list set %s: %w", set, err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(line) == "auto-merge" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// migrateAutoMergeScript is the single transaction that rebuilds set
+// without `auto-merge` (issue #588): the chains referencing it are flushed,
+// the set is deleted and re-declared by the layout script (which also
+// restores every rule), and the elements the helper could parse are
+// re-added with their remaining lifetimes. nft -f applies it atomically, so
+// enforcement never observes the half-rebuilt state.
+func migrateAutoMergeScript(n nftnames.Names, set string, els []setElem) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "flush chain %[1]s prerouting\nflush chain %[1]s input\nflush chain %[1]s forward\n", n.Table)
+	fmt.Fprintf(&b, "delete set %s %s\n", n.Table, set)
+	b.WriteString(initTableScript(n))
+	for _, el := range els {
+		entry := el.ip
+		if el.ttl > 0 {
+			// Ceil: a lifetime of 0.3s must not become "timeout 0s" (permanent).
+			entry = fmt.Sprintf("%s timeout %ds", el.ip, int64(math.Ceil(el.ttl.Seconds())))
+		}
+		fmt.Fprintf(&b, "add element %s %s { %s }\n", n.Table, set, entry)
+	}
+	return b.String()
 }
 
 // setElem is one element of a blocked set: the canonical IP/CIDR string plus
@@ -377,19 +472,28 @@ type setElem struct {
 // `expires` annotation (falling back to `timeout` when nft omits `expires`,
 // which it does in the brief window right after an element is added).
 func parseSetElements(out []byte) []setElem {
+	els, _ := parseSetElementsDetail(out)
+	return els
+}
+
+// parseSetElementsDetail is parseSetElements plus the tokens it could NOT
+// parse — merged intervals (`a-b`) left behind by an auto-merge set (issue
+// #588) — so callers can say what was dropped instead of hiding it.
+func parseSetElementsDetail(out []byte) ([]setElem, []string) {
 	s := string(out)
 	start := strings.Index(s, "elements = {")
 	if start < 0 {
-		return nil
+		return nil, nil
 	}
 	start += len("elements = {")
 	end := strings.Index(s[start:], "}")
 	if end < 0 {
-		return nil
+		return nil, nil
 	}
 	block := s[start : start+end]
 
 	var elems []setElem
+	var skipped []string
 	for _, part := range strings.Split(block, ",") {
 		fields := strings.Fields(strings.TrimSpace(part))
 		if len(fields) == 0 {
@@ -402,9 +506,11 @@ func parseSetElements(out []byte) []setElem {
 		}
 		if pfx, err := netip.ParsePrefix(tok); err == nil {
 			elems = append(elems, setElem{ip: pfx.String(), ttl: elemTTL(fields[1:])})
+			continue
 		}
+		skipped = append(skipped, tok)
 	}
-	return elems
+	return elems, skipped
 }
 
 // elemTTL extracts the remaining lifetime from an element's annotation

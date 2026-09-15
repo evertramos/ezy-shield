@@ -57,6 +57,21 @@ ban and every reconcile before it can reach nftables or any edge platform.
 Even a backend with no allowlist logic of its own can never receive a
 protected address — including via a sync that would re-introduce it.
 
+Both layers judge by the same peer-immunity predicate: with
+`anti_lockout.require_authenticated` on, the gate narrows to authenticated
+peers exactly as the decision engine does, so a ban the engine decides is one
+the gate will apply. The two can still briefly disagree about a
+fast-reconnecting attacker — the engine reads a short-lived cached peer list,
+the gate probes live — and then the engine has already recorded the ban when
+the gate refuses to apply it. That refusal is not an enforcer failure and
+raises no alert: the ban stays recorded, and the daemon retries enforcement
+shortly afterwards, through the same gate and with the ban's remaining time,
+until the connection is gone or the retry budget runs out (a warning, an
+`enforce_deferred_exhausted` audit entry, and the periodic reconcile picks
+it up). A ban lifted or expired in the meantime is never re-applied, and an
+operator's session is refused on every retry — nothing on this path can apply
+a ban the gate would not.
+
 **The live SSH re-check protects a *connection*, not an address forever.** A
 bruteforcer that reconnects faster than the peer table is re-read keeps an
 established connection visible at every evaluation, so each attempt in its
@@ -73,6 +88,10 @@ operator's session remains unbannable for as long as it is open.
 ## Allowlist supremacy
 
 The allowlist is checked FIRST, before any rule engine decision. An allowlisted IP cannot be banned by any rule, AI decision, or manual ban attempt.
+
+It also wins over bans that already exist. `ezyshield allow <ip-or-cidr>` lifts every active ban the entry covers — from the kernel, the edge platforms and the store, each one audited as an `unban` — and the reconcile never re-applies a ban to an allowed address. Reputation feeds honour the runtime allowlist the same way the policy file's allowlist is honoured, and `disable --all` empties the feed sets along with the ban sets.
+
+In the kernel, the `@allowed` sets are accepted before any drop in **every** chain EzyShield installs (prerouting, input and forward): an `accept` in the prerouting hook ends only that chain, and a packet for a local service still traverses the input hook, so the same accept-before-drop pair sits there too.
 
 ```yaml
 allowlist:
@@ -127,7 +146,7 @@ When AI is enabled for ambiguous events (scores inside the configurable `ambiguo
 ## Privilege separation
 
 - **Main daemon** (`ezyshield`): runs as unprivileged user, reads logs, makes decisions, communicates via unix socket
-- **Enforcer** (`ezyshield-enforcer`): holds `CAP_NET_ADMIN` only, accepts a fixed, typed verb set (`ping`, `add`, `del`, `list`, `flush`, and the allowlist verbs), mutates nftables in a safe, idempotent way
+- **Enforcer** (`ezyshield-enforcer`): holds `CAP_NET_ADMIN` only, accepts a fixed, typed verb set (`ping`, `add`, `del`, `list`, `flush`, and the allowlist verbs), mutates nftables in a safe, idempotent way. Every blocked-set element keeps its **own** timeout: the sets are created without nftables' `auto-merge`, because a merged interval carries a single timer and a neighbouring ban would silently rewrite yours (a permanent ban next to a five-minute one would expire in five minutes). A set left over from an older layout is rebuilt without the flag, elements preserved, the first time the helper starts
 
 The enforcer is not a library. It's a separate process. The main daemon cannot directly modify the firewall.
 
@@ -194,8 +213,11 @@ a verb added in the future is refused on the read-only socket until it is
 deliberately classified as read-only. Membership in `ezyshield-view` can
 never mutate state — no unban, no disarm, no allowlist edits.
 
-Both packages' postinstall create the two groups; add a monitoring user
-with `usermod -aG ezyshield-view <user>`. The CLI falls back to the
+Both packages' postinstall create the two groups, and the daemon's unit
+makes the service user a member of `ezyshield-view` (an unprivileged
+process can only hand a socket to a group it belongs to — that membership
+is what lets the daemon group-own the read-only socket). Add a monitoring
+user with `usermod -aG ezyshield-view <user>`. The CLI falls back to the
 read-only socket automatically when the operator socket denies permission,
 so viewer-tier users run `ezyshield status`, `list`, `watch`, and `report`
 with no extra flags.

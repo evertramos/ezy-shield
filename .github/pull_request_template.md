@@ -11,6 +11,14 @@ Closes #
 - [ ] Parser change? fuzz test present (`go test -fuzz`)
 - [ ] `make lint test` green locally (`-race`)
 
+## Blast radius (per docs/internal/INVARIANTS.md)
+<!-- Which invariant(s) does this touch (A1…D4)? List every OTHER reader/writer of that invariant
+     and how each was re-verified (test name, or "unchanged path, covered by X"). Write "none" only
+     if the change touches no path named in INVARIANTS.md. -->
+- Invariant(s):
+- Other readers/writers re-verified:
+- Harness scenario that failed before the fix:
+
 ## Security review (per docs/internal/SECURITY-REVIEW.md)
 <!-- For each section: FINDING (file:line + why + fix), OK, or N/A. -->
 - §1 Input handling (hostile logs):

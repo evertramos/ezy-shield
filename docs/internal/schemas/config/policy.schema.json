@@ -78,6 +78,11 @@
       "minimum": 1,
       "description": "Suppressed events after the grace period that trigger the ban_ineffective diagnostic. Floor and default: 3; lower values are raised."
     },
+    "ban_ineffective_min_events_in_grace": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Suppressed events INSIDE the grace window that trigger the ban_ineffective diagnostic by volume (a flood is not latency). Default: 200; 0 disables the volume trigger."
+    },
     "allowlist": {
       "type": "array",
       "description": "IPs and CIDRs that can never be banned. The allowlist wins over every other decision.",

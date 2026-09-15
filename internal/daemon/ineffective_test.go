@@ -23,6 +23,31 @@ func diag(ip string, strike int) decision.BanIneffectiveDiag {
 	return decision.BanIneffectiveDiag{
 		IP: netip.MustParseAddr(ip), Strike: strike, LadderLen: 5,
 		NextRungs: "7d, permanent", EventsAfterGrace: 4, TotalSuppressed: 12, GraceSeconds: 90,
+		Phase: decision.PhasePostGrace,
+	}
+}
+
+// TestBanIneffective_InGracePhaseNamesItsRemedy (issue #586): an in_grace
+// firing must tell the operator about connection reuse / enforcer latency,
+// not the CDN / real-IP hint of the post-grace signature.
+func TestBanIneffective_InGracePhaseNamesItsRemedy(t *testing.T) {
+	d, notif := newDiagDaemon(t, time.Hour)
+	in := diag("203.0.113.9", 1)
+	in.Phase, in.EventsInGrace, in.EventsAfterGrace = decision.PhaseInGrace, 1443, 0
+	d.BanIneffective(context.Background(), in)
+	if notif.Count() != 1 {
+		t.Fatalf("notifications = %d, want 1", notif.Count())
+	}
+	notif.mu.Lock()
+	body := notif.msgs[0].Body
+	notif.mu.Unlock()
+	for _, want := range []string{"1443 events within the first 90s", "connection", "late"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("in_grace body missing %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "real-IP parsing, or a broken enforcer") {
+		t.Errorf("in_grace body carries the post-grace remedy:\n%s", body)
 	}
 }
 

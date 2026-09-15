@@ -80,6 +80,13 @@ auth log — `/var/log/auth.log` (Debian/Ubuntu) or `/var/log/secure`
 format (`Jan  1 12:00:00`) and modern ISO-8601
 (`2026-07-13T22:57:35+00:00`).
 
+Every collector starts at the **live tail** of its source when the daemon
+(re)starts — the file tail seeks to the end, and the journald readers
+follow with no backlog. Lines written during the seconds of a restart are
+not replayed: a missed line at worst delays a detection by one event,
+whereas replaying already-processed lines would count the same evidence
+twice.
+
 > **Configure only one SSH collector per host** — journald **or** the
 > file it feeds, never both. Reading both ingests every event twice,
 > which double-counts toward detection thresholds. (An already-banned

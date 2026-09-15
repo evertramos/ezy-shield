@@ -39,6 +39,27 @@ type DB struct {
 	// the store's lifetime (nil for file-backed stores) — see Open, issue #474.
 	keepAlive   *sql.Conn
 	keepAliveDB *sql.DB
+	// now is the clock behind the suppression timestamps (issue #587); nil
+	// means time.Now. Tests set it through SetClock to age a ban's last
+	// suppressed event without sleeping.
+	now func() time.Time
+}
+
+// IneffectiveRearmAfter is how long a ban flagged ineffective must stay
+// quiet (no suppressed event) before a new suppressed event re-arms the
+// ban_ineffective diagnostic (issue #587). It doubles as the doctor's
+// "still leaking" window: a flagged ban whose last suppressed event is
+// older than this is reported as a past leak, not a current one.
+const IneffectiveRearmAfter = 24 * time.Hour
+
+// SetClock replaces the store's clock (tests only). nil restores time.Now.
+func (s *DB) SetClock(now func() time.Time) { s.now = now }
+
+func (s *DB) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
 }
 
 // memDBSeq names each in-memory database uniquely so two Open(":memory:")
@@ -182,7 +203,7 @@ func (s *DB) migrate(ctx context.Context) error {
 		}
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)`,
-			version, nowRFC3339()); err != nil {
+			version, s.nowRFC3339()); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("record migration %d: %w", version, err)
 		}
@@ -218,7 +239,7 @@ func parseMigrationVersion(name string) (int, error) {
 // overwrites the row with dry_run=0 via the upsert.
 func (s *DB) RecordStrike(ctx context.Context, a sdk.Action) error {
 	ip := a.IP.String()
-	now := nowRFC3339()
+	now := s.nowRFC3339()
 	ttlSec := int64(a.TTL.Seconds())
 	dryRun := 0
 	if a.Op == "dry_ban" {
@@ -257,7 +278,7 @@ func (s *DB) RecordStrike(ctx context.Context, a sdk.Action) error {
 	// expires_at is NULL for permanent bans (TTL == 0).
 	var expiresAt *string
 	if a.TTL > 0 {
-		t := time.Now().UTC().Add(a.TTL).Format(time.RFC3339Nano)
+		t := s.clock().UTC().Add(a.TTL).Format(time.RFC3339Nano)
 		expiresAt = &t
 	}
 	// A new ban resets the suppression counters: they are per-ban state for
@@ -273,7 +294,8 @@ func (s *DB) RecordStrike(ctx context.Context, a sdk.Action) error {
 			dry_run                = excluded.dry_run,
 			suppressed_total       = 0,
 			suppressed_after_grace = 0,
-			ineffective_fired      = 0
+			ineffective_fired      = 0,
+			last_suppressed_at     = NULL
 	`, ip, now, expiresAt, a.Strike, a.Reason, dryRun); err != nil {
 		return fmt.Errorf("store: upsert ban: %w", err)
 	}
@@ -297,15 +319,33 @@ func (s *DB) RecordStrike(ctx context.Context, a sdk.Action) error {
 // interpolated into the query string (Hard Rule §4).
 func (s *DB) GetBanInfo(ctx context.Context, ip netip.Addr) (time.Time, int, bool, bool, error) {
 	var bannedAtStr string
+	var expiresAt sql.NullString
 	var strike, dryRun int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT banned_at, strike_num, dry_run FROM bans_active WHERE ip = ?`,
-		ip.String()).Scan(&bannedAtStr, &strike, &dryRun)
+		`SELECT banned_at, expires_at, strike_num, dry_run FROM bans_active WHERE ip = ?`,
+		ip.String()).Scan(&bannedAtStr, &expiresAt, &strike, &dryRun)
 	if err == sql.ErrNoRows {
 		return time.Time{}, 0, false, false, nil
 	}
 	if err != nil {
 		return time.Time{}, 0, false, false, fmt.Errorf("store: GetBanInfo %s: %w", ip, err)
+	}
+	// A row past its expires_at is a ban the KERNEL has already dropped
+	// (nft per-element timeout is exact); only the minute-cadence reaper
+	// has not removed the row yet. Reporting it as active would make the
+	// decision engine swallow up to a minute of post-expiry attempts as
+	// already_banned — no new strike — and count them as a leak on a ban
+	// that expired correctly (issue #603). Same predicate as ActiveBans
+	// (#279): not active, so the strike path runs and RecordStrike's upsert
+	// replaces the row. Permanent bans (NULL) are unaffected.
+	if expiresAt.Valid {
+		et, perr := time.Parse(time.RFC3339Nano, expiresAt.String)
+		if perr != nil {
+			return time.Time{}, 0, false, false, fmt.Errorf("store: GetBanInfo parse expires_at: %w", perr)
+		}
+		if !et.After(s.clock()) {
+			return time.Time{}, 0, false, false, nil
+		}
 	}
 	bannedAt, err := time.Parse(time.RFC3339Nano, bannedAtStr)
 	if err != nil {
@@ -320,6 +360,19 @@ func (s *DB) GetBanInfo(ctx context.Context, ip netip.Addr) (time.Time, int, boo
 // the ban: the RecordStrike upsert resets them, expiry removes them. If ip
 // has no active ban row (expiry race), zero counts are returned — the caller
 // treats that as "nothing to diagnose".
+//
+// Re-arm (issue #587): a ban that already fired the diagnostic and then went
+// quiet for IneffectiveRearmAfter is treated as a fresh case when the next
+// suppressed event arrives — ineffective_fired and the after-grace counter
+// are reset BEFORE this event is counted, so the counters and the fired flag
+// the caller evaluates describe the new leak, not the old one. Without this,
+// a permanent ban (never replaced by RecordStrike) could fire exactly once
+// in its lifetime and every later leak would be swallowed by the fire-once
+// CAS. last_suppressed_at records this event's time for the doctor's
+// "still leaking" window. A flagged row with a NULL timestamp (flagged
+// before the column existed) is re-armed the same way (issue #600): its
+// last leak time is unknown, so the next event is a new case and stamps
+// the first real timestamp.
 func (s *DB) RecordSuppressed(ctx context.Context, ip netip.Addr, afterGrace bool) (int, int, bool, error) {
 	ag := 0
 	if afterGrace {
@@ -331,12 +384,25 @@ func (s *DB) RecordSuppressed(ctx context.Context, ip netip.Addr, afterGrace boo
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	now := s.clock().UTC()
+	rearmBefore := now.Add(-IneffectiveRearmAfter).Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE bans_active SET
+			ineffective_fired      = 0,
+			suppressed_after_grace = 0
+		WHERE ip = ? AND ineffective_fired = 1
+		  AND (last_suppressed_at IS NULL OR last_suppressed_at < ?)
+	`, ip.String(), rearmBefore); err != nil {
+		return 0, 0, false, fmt.Errorf("store: RecordSuppressed re-arm %s: %w", ip, err)
+	}
+
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE bans_active SET
 			suppressed_total       = suppressed_total + 1,
-			suppressed_after_grace = suppressed_after_grace + ?
+			suppressed_after_grace = suppressed_after_grace + ?,
+			last_suppressed_at     = ?
 		WHERE ip = ?
-	`, ag, ip.String()); err != nil {
+	`, ag, now.Format(time.RFC3339Nano), ip.String()); err != nil {
 		return 0, 0, false, fmt.Errorf("store: RecordSuppressed update %s: %w", ip, err)
 	}
 
@@ -442,7 +508,7 @@ func (s *DB) LastStrike(ctx context.Context, ip netip.Addr) (time.Time, time.Dur
 // race during manual bans), the row is inserted with total_strikes=0.
 // All SQL uses parameterized queries (Hard Rule §4).
 func (s *DB) BumpLastSeen(ctx context.Context, ip netip.Addr) error {
-	now := nowRFC3339()
+	now := s.nowRFC3339()
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO offenders (ip, first_seen, last_seen, total_strikes)
 		VALUES (?, ?, ?, 0)
@@ -509,7 +575,7 @@ func (s *DB) ActiveBans(ctx context.Context) ([]sdk.Action, error) {
 			if err != nil {
 				return nil, fmt.Errorf("store: parse expires_at: %w", err)
 			}
-			remaining := time.Until(et)
+			remaining := et.Sub(s.clock())
 			if remaining <= 0 {
 				// Expired but not yet removed by the ban-expiry tick: not an
 				// active ban — skip it. Clamping to 0 here (the old
@@ -569,7 +635,7 @@ func (s *DB) ExpireBans(ctx context.Context, now time.Time) (int, error) {
 // Unban removes ip from bans_active and appends an audit entry.
 // It is idempotent: if ip is not in bans_active it still audits and returns nil.
 func (s *DB) Unban(ctx context.Context, ip netip.Addr) error {
-	now := nowRFC3339()
+	now := s.nowRFC3339()
 	ipStr := ip.String()
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -610,12 +676,12 @@ func (s *DB) RecordManualBan(ctx context.Context, ip netip.Addr, ttl time.Durati
 		return fmt.Errorf("store: negative ttl %s not allowed for manual ban", ttl)
 	}
 	ipStr := ip.String()
-	now := nowRFC3339()
+	now := s.nowRFC3339()
 	ttlSec := int64(ttl.Seconds())
 
 	var expiresAt *string
 	if ttl > 0 {
-		t := time.Now().UTC().Add(ttl).Format(time.RFC3339Nano)
+		t := s.clock().UTC().Add(ttl).Format(time.RFC3339Nano)
 		expiresAt = &t
 	}
 
@@ -643,7 +709,8 @@ func (s *DB) RecordManualBan(ctx context.Context, ip netip.Addr, ttl time.Durati
 			dry_run                = excluded.dry_run,
 			suppressed_total       = 0,
 			suppressed_after_grace = 0,
-			ineffective_fired      = 0
+			ineffective_fired      = 0,
+			last_suppressed_at     = NULL
 	`, ipStr, now, expiresAt, reason, dry); err != nil {
 		return fmt.Errorf("store: upsert manual ban: %w", err)
 	}
@@ -668,7 +735,7 @@ func (s *DB) Audit(ctx context.Context, a sdk.Action) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO audit_log (recorded_at, op, ip, ttl_seconds, strike_num, reason)
 		VALUES (?, ?, ?, ?, ?, ?)
-	`, nowRFC3339(), a.Op, a.IP.String(), int64(a.TTL.Seconds()), a.Strike, a.Reason)
+	`, s.nowRFC3339(), a.Op, a.IP.String(), int64(a.TTL.Seconds()), a.Strike, a.Reason)
 	if err != nil {
 		return fmt.Errorf("store: Audit: %w", err)
 	}
@@ -683,7 +750,7 @@ func (s *DB) AuditOp(ctx context.Context, op string, prefix netip.Prefix, ttl ti
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO audit_log (recorded_at, op, ip, ttl_seconds, strike_num, reason)
 		VALUES (?, ?, ?, ?, 0, ?)
-	`, nowRFC3339(), op, prefix.Masked().String(), int64(ttl.Seconds()), reason)
+	`, s.nowRFC3339(), op, prefix.Masked().String(), int64(ttl.Seconds()), reason)
 	if err != nil {
 		return fmt.Errorf("store: AuditOp: %w", err)
 	}
@@ -799,7 +866,7 @@ func (s *DB) AddAllow(ctx context.Context, prefix netip.Prefix, expiresAt *time.
 			expires_at = excluded.expires_at,
 			reason     = excluded.reason,
 			created_at = excluded.created_at
-	`, prefix.Masked().String(), expStr, reason, nowRFC3339())
+	`, prefix.Masked().String(), expStr, reason, s.nowRFC3339())
 	if err != nil {
 		return fmt.Errorf("store: AddAllow: %w", err)
 	}
@@ -893,60 +960,70 @@ func (s *DB) ExpireAllows(ctx context.Context, now time.Time) (int, error) {
 // removed ban is appended to audit_log. Returns the number of bans removed.
 // Single-host prefixes (/32 or /128) are equivalent to Unban for that IP.
 func (s *DB) UnbanPrefix(ctx context.Context, prefix netip.Prefix) (int, error) {
+	ips, err := s.UnbanCovered(ctx, prefix, "manual unban via "+prefix.Masked().String())
+	return len(ips), err
+}
+
+// UnbanCovered removes every bans_active row whose address prefix covers
+// (a single-host prefix covers exactly its address), audits each as an
+// `unban` with reason, and returns the addresses removed so the caller can
+// lift the same entries from the enforcers. Issue #608: the runtime
+// allowlist uses it so `allow` lifts existing bans instead of only
+// preventing new ones.
+func (s *DB) UnbanCovered(ctx context.Context, prefix netip.Prefix, reason string) ([]netip.Addr, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT ip FROM bans_active`)
 	if err != nil {
-		return 0, fmt.Errorf("store: UnbanPrefix scan: %w", err)
+		return nil, fmt.Errorf("store: UnbanCovered scan: %w", err)
 	}
-	var matches []string
+	var matches []netip.Addr
 	for rows.Next() {
 		var ipStr string
 		if err := rows.Scan(&ipStr); err != nil {
 			_ = rows.Close()
-			return 0, fmt.Errorf("store: UnbanPrefix scan row: %w", err)
+			return nil, fmt.Errorf("store: UnbanCovered scan row: %w", err)
 		}
 		ip, perr := netip.ParseAddr(ipStr)
 		if perr != nil {
 			continue // skip malformed rows rather than failing the whole op
 		}
 		if prefix.Contains(ip) {
-			matches = append(matches, ipStr)
+			matches = append(matches, ip)
 		}
 	}
 	if err := rows.Close(); err != nil {
-		return 0, fmt.Errorf("store: UnbanPrefix close: %w", err)
+		return nil, fmt.Errorf("store: UnbanCovered close: %w", err)
 	}
 	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("store: UnbanPrefix err: %w", err)
+		return nil, fmt.Errorf("store: UnbanCovered err: %w", err)
 	}
 
 	if len(matches) == 0 {
-		return 0, nil
+		return nil, nil
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, fmt.Errorf("store: UnbanPrefix begin: %w", err)
+		return nil, fmt.Errorf("store: UnbanCovered begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	now := nowRFC3339()
-	pfxStr := prefix.Masked().String()
-	for _, ipStr := range matches {
+	now := s.nowRFC3339()
+	for _, ip := range matches {
 		if _, err := tx.ExecContext(ctx,
-			`DELETE FROM bans_active WHERE ip = ?`, ipStr); err != nil {
-			return 0, fmt.Errorf("store: UnbanPrefix delete: %w", err)
+			`DELETE FROM bans_active WHERE ip = ?`, ip.String()); err != nil {
+			return nil, fmt.Errorf("store: UnbanCovered delete: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO audit_log (recorded_at, op, ip, ttl_seconds, strike_num, reason)
 			VALUES (?, 'unban', ?, 0, 0, ?)
-		`, now, ipStr, "manual unban via "+pfxStr); err != nil {
-			return 0, fmt.Errorf("store: UnbanPrefix audit: %w", err)
+		`, now, ip.String(), reason); err != nil {
+			return nil, fmt.Errorf("store: UnbanCovered audit: %w", err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("store: UnbanPrefix commit: %w", err)
+		return nil, fmt.Errorf("store: UnbanCovered commit: %w", err)
 	}
-	return len(matches), nil
+	return matches, nil
 }
 
 // RecordUsage inserts a row into ai_usage for a single AI provider call.
@@ -962,7 +1039,7 @@ func (s *DB) RecordUsage(ctx context.Context, provider string, usage sdk.Usage, 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO ai_usage (called_at, provider, input_tokens, output_tokens, cost_usd, ip)
 		VALUES (?, ?, ?, ?, ?, ?)
-	`, nowRFC3339(), provider, usage.InputTokens, usage.OutputTokens, usage.CostUSD, ipVal)
+	`, s.nowRFC3339(), provider, usage.InputTokens, usage.OutputTokens, usage.CostUSD, ipVal)
 	if err != nil {
 		return fmt.Errorf("store: RecordUsage: %w", err)
 	}
@@ -972,7 +1049,7 @@ func (s *DB) RecordUsage(ctx context.Context, provider string, usage sdk.Usage, 
 // TodayUsage returns the sum of input_tokens, output_tokens, and cost_usd
 // recorded in ai_usage for provider since UTC midnight today.
 func (s *DB) TodayUsage(ctx context.Context, provider string) (sdk.Usage, error) {
-	today := time.Now().UTC().Format("2006-01-02")
+	today := s.clock().UTC().Format("2006-01-02")
 	var u sdk.Usage
 	err := s.db.QueryRowContext(ctx, `
 		SELECT
@@ -989,8 +1066,9 @@ func (s *DB) TodayUsage(ctx context.Context, provider string) (sdk.Usage, error)
 	return u, nil
 }
 
-func nowRFC3339() string {
-	return time.Now().UTC().Format(time.RFC3339Nano)
+// nowRFC3339 renders the store clock (injectable, tests) as the column format.
+func (s *DB) nowRFC3339() string {
+	return s.clock().UTC().Format(time.RFC3339Nano)
 }
 
 // SetState upserts a daemon_state key/value pair. Keys are engine-internal
@@ -1003,7 +1081,7 @@ func (s *DB) SetState(ctx context.Context, key, value string) error {
 		ON CONFLICT(key) DO UPDATE SET
 			value      = excluded.value,
 			updated_at = excluded.updated_at
-	`, key, value, nowRFC3339())
+	`, key, value, s.nowRFC3339())
 	if err != nil {
 		return fmt.Errorf("store: SetState %s: %w", key, err)
 	}
@@ -1041,7 +1119,7 @@ func (s *DB) AuditSystem(ctx context.Context, op, reason string) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO audit_log (recorded_at, op, ip, ttl_seconds, strike_num, reason)
 		VALUES (?, ?, 'system', 0, 0, ?)
-	`, nowRFC3339(), op, reason)
+	`, s.nowRFC3339(), op, reason)
 	if err != nil {
 		return fmt.Errorf("store: AuditSystem %s: %w", op, err)
 	}

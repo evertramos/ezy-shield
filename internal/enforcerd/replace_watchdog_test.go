@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-package main
+package enforcerd
 
 // Watchdog tests for the non-atomic replace path (issue #214): the dispatch
 // "add" of an element the cache holds runs delete-then-add — two nft

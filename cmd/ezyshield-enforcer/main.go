@@ -1,15 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-// ezyshield-enforcer is the privileged helper that applies nftables rules on
-// behalf of the main ezyshield daemon.
-//
-// It holds CAP_NET_ADMIN (via systemd AmbientCapabilities) while the main
-// daemon runs as an unprivileged user.  Communication is over a root-owned
-// unix socket (mode 0660, group ezyshield) using newline-delimited JSON.
-//
-// Accepted verbs: add, del, flush, list, ping — anything else is rejected.
-// IP arguments are validated as netip.Addr / netip.Prefix; raw nft syntax
-// is never accepted (AGENTS.md §3 / SECURITY-REVIEW.md §3).
+// Command ezyshield-enforcer is the privileged nftables helper. All logic
+// lives in internal/enforcerd so the integration harness can run the real
+// helper in-process against a scripted kernel (issue #605); this file only
+// parses flags and wires signals.
 package main
 
 import (
@@ -22,9 +16,10 @@ import (
 	"os/exec"
 	"os/signal"
 	"syscall"
+
+	"github.com/evertramos/ezy-shield/internal/enforcerd"
 )
 
-// Injected via -ldflags at build time; see Makefile.
 var (
 	version   = "dev"
 	commit    = "none"
@@ -46,34 +41,25 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	srv := newServer(*socketPath, realNftRunner)
-
-	if err := srv.listen(ctx); err != nil {
+	srv := enforcerd.NewServer(*socketPath, enforcerd.RealNftRunner)
+	if err := srv.Listen(ctx); err != nil {
 		slog.Error("enforcer: listen", "err", err)
 		os.Exit(1)
 	}
-
-	if err := srv.init(ctx); err != nil {
+	if err := srv.Init(ctx); err != nil {
 		slog.Error("enforcer: init", "err", err)
 		os.Exit(1)
 	}
-
-	// One-shot probe for iproute2 `ss` — required to tear down pre-ban TCP
-	// sessions (issue #30). Missing binary is not fatal: killSocketsForIP is
-	// best-effort per Hard Rule §1, so we log at WARN and keep serving.
 	if ssPath, err := exec.LookPath("ss"); err == nil {
 		slog.Info("enforcer: ss detected; pre-ban TCP session teardown enabled", "path", ssPath)
 	} else {
 		slog.Warn("enforcer: ss binary not found on PATH; pre-ban TCP sessions will NOT be torn down (install iproute2)",
 			"err", err.Error())
 	}
-
 	slog.Info("enforcer: ready", "socket", *socketPath)
-
-	if err := srv.serve(ctx); err != nil && !errors.Is(err, context.Canceled) {
+	if err := srv.Serve(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		slog.Error("enforcer: serve", "err", err)
 		os.Exit(1)
 	}
-
 	slog.Info("enforcer: shutdown complete")
 }

@@ -210,11 +210,13 @@ func TestFileTailCollector_CopytruncateRotation(t *testing.T) {
 	// Give the truncation a moment to be visible via Stat, then write post-rotation lines.
 	time.Sleep(150 * time.Millisecond)
 
+	// Post-rotation writes go through a fresh O_APPEND descriptor, as
+	// rsyslog/nginx do (issue #611): the original test wrote through the
+	// pre-truncate descriptor, whose offset happened to still be 16, so a
+	// 16-byte hole hid the fact that the collector never rewound.
 	postLines := []string{"after-rotation-1", "after-rotation-2"}
 	for _, l := range postLines {
-		if _, werr := f.WriteString(l + "\n"); werr != nil {
-			t.Fatalf("write after rotation: %v", werr)
-		}
+		appendLine(t, f.Name(), l)
 	}
 
 	// All post-rotation lines must arrive within the deadline.

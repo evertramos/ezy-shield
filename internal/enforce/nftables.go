@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/netip"
 	"strings"
@@ -134,7 +135,30 @@ func (e *NftablesEnforcer) Ban(ctx context.Context, t sdk.Target) error {
 	if err != nil {
 		return fmt.Errorf("enforce/nftables Ban: %w", err)
 	}
-	return e.rpc(ctx, Request{Verb: "add", IP: ip, TTLSeconds: int64(t.TTL.Seconds())})
+	return e.rpc(ctx, Request{Verb: "add", IP: ip, TTLSeconds: ttlSeconds(t.TTL)})
+}
+
+// ttlSeconds converts a target's remaining lifetime into the helper's
+// whole-second timeout. 0 stays 0 (permanent — the store's NULL expires_at
+// maps to TTL 0). A positive lifetime rounds UP and never below 1: the
+// previous truncation sent 0 for anything under a second, and 0 means "no
+// timeout" to the helper, so a ban with 600 ms left at reconcile time
+// became a permanent kernel element (issue #615).
+func ttlSeconds(ttl time.Duration) int64 {
+	switch {
+	case ttl == 0:
+		return 0 // permanent (store NULL expires_at)
+	case ttl < 0:
+		// Already elapsed. No caller should hand this over (ActiveBans skips
+		// expired rows), but if one ever does, a one-second element that
+		// the kernel drops on its own is the fail-safe — never permanent.
+		return 1
+	}
+	secs := int64(math.Ceil(ttl.Seconds()))
+	if secs < 1 {
+		secs = 1
+	}
+	return secs
 }
 
 // Unban removes the target from the nftables blocked set via the enforcer helper.
@@ -161,7 +185,7 @@ func (e *NftablesEnforcer) Sync(ctx context.Context, want []sdk.Target) error {
 
 	currentSet := make(map[string]bool, len(current))
 	for _, ip := range current {
-		currentSet[ip] = true
+		currentSet[CanonicalIPKey(ip)] = true
 	}
 
 	wantSet := make(map[string]sdk.Target, len(want))
@@ -179,11 +203,21 @@ func (e *NftablesEnforcer) Sync(ctx context.Context, want []sdk.Target) error {
 
 	// Add entries missing from nftables.
 	added, removed := 0, 0
+	var covered []string // adds the helper answered CodeCoveredByInterval
 	for k, t := range wantSet {
 		if !currentSet[k] {
 			slog.InfoContext(ctx, "enforce/nftables Sync: adding", "ip", k)
-			if err := e.rpc(ctx, Request{Verb: "add", IP: k, TTLSeconds: int64(t.TTL.Seconds())}); err != nil {
+			resp, err := e.rpcResp(ctx, Request{Verb: "add", IP: k, TTLSeconds: ttlSeconds(t.TTL)})
+			if err != nil {
 				return fmt.Errorf("enforce/nftables Sync add %s: %w", k, err)
+			}
+			if resp.Code == CodeCoveredByInterval {
+				// Enforced by a broader element the helper did not cache
+				// (issue #590). Not drift: the address is dropped. But if
+				// the covering element is stale it goes away below, so the
+				// add is retried after the remove pass.
+				covered = append(covered, k)
+				continue
 			}
 			added++
 		}
@@ -209,6 +243,27 @@ func (e *NftablesEnforcer) Sync(ctx context.Context, want []sdk.Target) error {
 			} else {
 				removed++
 			}
+		}
+	}
+
+	// Covered adds whose cover may just have been removed (issue #590): the
+	// #589 migration leaves an aligned merged pair behind as a /31 the store
+	// never held — its members were "covered" above, the /31 was stale.
+	// One retry per address, only when something was removed; an address
+	// still covered by a WANTED prefix stays covered and is never drift.
+	if removed > 0 {
+		for _, k := range covered {
+			t := wantSet[k]
+			resp, err := e.rpcResp(ctx, Request{Verb: "add", IP: k, TTLSeconds: ttlSeconds(t.TTL)})
+			if err != nil {
+				return fmt.Errorf("enforce/nftables Sync add %s after stale-interval removal: %w", k, err)
+			}
+			if resp.Code == CodeCoveredByInterval {
+				slog.DebugContext(ctx, "enforce/nftables Sync: still covered by a wanted interval", "ip", k)
+				continue
+			}
+			slog.InfoContext(ctx, "enforce/nftables Sync: added after its stale covering interval was removed", "ip", k)
+			added++
 		}
 	}
 
@@ -254,17 +309,17 @@ func (e *NftablesEnforcer) listVerb(ctx context.Context, verb string) ([]string,
 
 // Allow adds prefix to the nftables @allowed set via the enforcer helper.
 // The allowlist supremacy invariant (AGENTS.md §2) is enforced at the same
-// hook where drops happen — see initTable in cmd/ezyshield-enforcer/nft.go.
+// hook where drops happen — see initTable in internal/enforcerd/nft.go.
 // Called by the daemon whenever an allowlist entry is added.
 func (e *NftablesEnforcer) Allow(ctx context.Context, prefix netip.Prefix) error {
-	return e.rpc(ctx, Request{Verb: "allow_add", IP: prefix.String()})
+	return e.rpc(ctx, Request{Verb: "allow_add", IP: CanonicalIPKey(prefix.String())})
 }
 
 // Unallow removes prefix from the nftables @allowed set. Called when the
 // operator explicitly revokes an allowlist entry or when an entry expires.
 // Missing element is treated as success (idempotent, race-safe).
 func (e *NftablesEnforcer) Unallow(ctx context.Context, prefix netip.Prefix) error {
-	return e.rpc(ctx, Request{Verb: "allow_del", IP: prefix.String()})
+	return e.rpc(ctx, Request{Verb: "allow_del", IP: CanonicalIPKey(prefix.String())})
 }
 
 // SyncAllowlist reconciles the nftables @allowed sets with the desired list
@@ -275,13 +330,17 @@ func (e *NftablesEnforcer) SyncAllowlist(ctx context.Context, want []netip.Prefi
 	if err != nil {
 		return fmt.Errorf("enforce/nftables SyncAllowlist list: %w", err)
 	}
+	// Both sides in nftables' own spelling (issue #592): the listing prints
+	// a /32 as a bare address, the policy carries it as a prefix — compared
+	// verbatim they never match, and every reconcile deleted the kernel
+	// element it had just "added".
 	currentSet := make(map[string]bool, len(current))
 	for _, ip := range current {
-		currentSet[ip] = true
+		currentSet[CanonicalIPKey(ip)] = true
 	}
 	wantSet := make(map[string]bool, len(want))
 	for _, p := range want {
-		wantSet[p.String()] = true
+		wantSet[CanonicalIPKey(p.String())] = true
 	}
 	// Add missing.
 	for k := range wantSet {
@@ -471,10 +530,10 @@ func targetOverlapsAllowlist(t sdk.Target, allowlist []netip.Prefix) bool {
 // Returns an error for ASN/Country targets (not handled by nftables enforcer).
 func targetKey(t sdk.Target) (string, error) {
 	if t.IP.IsValid() {
-		return t.IP.String(), nil
+		return CanonicalIPKey(t.IP.String()), nil
 	}
 	if t.Prefix.IsValid() {
-		return t.Prefix.String(), nil
+		return CanonicalIPKey(t.Prefix.String()), nil
 	}
 	return "", fmt.Errorf("target must have IP or Prefix set (ASN/Country not supported by nftables enforcer)")
 }

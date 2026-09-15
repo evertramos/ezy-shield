@@ -192,7 +192,9 @@ func (d *Daemon) bindControlSocket(ctx context.Context, path, group string) net.
 	// without sudo — see issues #6 and #212. When the group does not exist
 	// the socket stays root-owned 0660: fail closed, root-only access.
 	if err := ownership.ChownToGroup(path, group); err != nil {
-		slog.WarnContext(ctx, "daemon: could not set control socket group; only root can use it until the group exists",
+		// An unprivileged process may only chown to a group it is a member
+		// of (issue #594): say so, or the operator chases a missing group.
+		slog.WarnContext(ctx, "daemon: could not set control socket group — the group must exist and the service user must be a member of it (unit SupplementaryGroups= or usermod -aG); only root and the service group can use the socket until then",
 			"path", path, "group", group, "err", err)
 	}
 	if err := os.Chmod(path, socketPerm); err != nil {
@@ -707,14 +709,14 @@ func (d *Daemon) handleAllow(ctx context.Context, req SocketRequest) SocketRespo
 		if dur <= 0 {
 			return SocketResponse{Error: fmt.Sprintf("duration must be positive: %q", req.For)}
 		}
-		t := time.Now().UTC().Add(dur)
+		t := d.clock().UTC().Add(dur)
 		expiresAt = &t
 	case req.Until != "":
 		t, err := parseUntil(req.Until)
 		if err != nil {
 			return SocketResponse{Error: fmt.Sprintf("invalid until %q: %v", req.Until, err)}
 		}
-		if !t.After(time.Now()) {
+		if !t.After(d.clock()) {
 			return SocketResponse{Error: fmt.Sprintf("until is in the past: %q", req.Until)}
 		}
 		expiresAt = &t
@@ -726,7 +728,7 @@ func (d *Daemon) handleAllow(ctx context.Context, req SocketRequest) SocketRespo
 
 	var ttl time.Duration
 	if expiresAt != nil {
-		ttl = time.Until(*expiresAt)
+		ttl = expiresAt.Sub(d.clock())
 	}
 	if err := d.store.AuditOp(ctx, "allow", prefix, ttl, req.Reason); err != nil {
 		slog.ErrorContext(ctx, "daemon: audit allow", "prefix", prefix, "err", err)
@@ -735,6 +737,12 @@ func (d *Daemon) handleAllow(ctx context.Context, req SocketRequest) SocketRespo
 	if err := d.reloadAllowlist(ctx); err != nil {
 		slog.ErrorContext(ctx, "daemon: reload allowlist after add", "err", err)
 	}
+
+	// The allowlist wins over existing bans too (issue #608): lift every
+	// ban the new entry covers from the enforcers and the store, in that
+	// order and under enforceMu so a reconcile cannot straddle the two
+	// (issue #575). Each lifted address is audited as an unban.
+	d.liftBansCoveredBy(ctx, prefix, "allowlisted: "+req.Reason)
 
 	// Push the new entry to the enforcer's @allowed set so the anti-lockout
 	// invariant (AGENTS.md §2) holds at the raw/prerouting hook too — where
@@ -768,6 +776,38 @@ func (d *Daemon) handleAllow(ctx context.Context, req SocketRequest) SocketRespo
 	d.publishActionEvent("allow", prefixDisplay(prefix), 0, ttl, req.Reason, "cli")
 
 	return SocketResponse{OK: true}
+}
+
+// liftBansCoveredBy removes every active ban prefix covers — kernel/edge
+// first, then the store rows (audited as `unban` with reason) — and
+// publishes an unban event per address (issue #608).
+func (d *Daemon) liftBansCoveredBy(ctx context.Context, prefix netip.Prefix, reason string) {
+	d.enforceMu.Lock()
+	defer d.enforceMu.Unlock()
+
+	bans, err := d.store.ActiveBans(ctx)
+	if err != nil {
+		slog.ErrorContext(ctx, "daemon: allow: cannot list active bans to lift", "prefix", prefix, "err", err)
+		return
+	}
+	for _, b := range bans {
+		if !prefix.Contains(b.IP.Unmap()) || d.enforcer == nil {
+			continue
+		}
+		if err := d.enforcer.Unban(ctx, sdk.Target{IP: b.IP}); err != nil {
+			slog.ErrorContext(ctx, "daemon: allow: enforcer unban failed", "ip", b.IP, "err", err)
+		}
+	}
+	lifted, err := d.store.UnbanCovered(ctx, prefix, reason)
+	if err != nil {
+		slog.ErrorContext(ctx, "daemon: allow: store unban failed", "prefix", prefix, "err", err)
+		return
+	}
+	for _, ip := range lifted {
+		slog.InfoContext(ctx, "daemon: action", "op", "unban", "ip", ip.String(), "ttl", time.Duration(0),
+			"reason", reason, "source", "cli")
+		d.publishActionEvent("unban", ip.String(), 0, 0, reason, "cli")
+	}
 }
 
 // handleUnallow removes prefix from the persistent runtime allowlist,
@@ -884,7 +924,7 @@ func (d *Daemon) handleListAllow(ctx context.Context) SocketResponse {
 		return SocketResponse{Error: fmt.Sprintf("list allow: %v", err)}
 	}
 
-	now := time.Now()
+	now := d.clock()
 	out := make([]AllowEntry, 0, len(entries))
 	for _, e := range entries {
 		out = append(out, AllowEntry{

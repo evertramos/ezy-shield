@@ -29,6 +29,7 @@ type mockHelper struct {
 	responses map[string]enforce.Response
 	sock      string
 	ln        net.Listener
+	handlers  map[string]func(enforce.Request) enforce.Response
 }
 
 func newMockHelper(t *testing.T) *mockHelper {
@@ -94,6 +95,17 @@ func (ms *mockHelper) setAllowListIPs(ips []string) {
 	ms.responses["allow_list"] = enforce.Response{OK: true, IPs: ips}
 }
 
+// setHandler installs a per-request responder for verb (issue #590 tests
+// need "add" to answer differently depending on what was deleted before).
+func (ms *mockHelper) setHandler(verb string, fn func(req enforce.Request) enforce.Response) {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	if ms.handlers == nil {
+		ms.handlers = map[string]func(enforce.Request) enforce.Response{}
+	}
+	ms.handlers[verb] = fn
+}
+
 func (ms *mockHelper) recorded() []enforce.Request {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
@@ -123,6 +135,9 @@ func (ms *mockHelper) handle(conn net.Conn) {
 		ms.mu.Lock()
 		ms.requests = append(ms.requests, req)
 		resp := ms.responses[req.Verb]
+		if h, ok := ms.handlers[req.Verb]; ok {
+			resp = h(req)
+		}
 		ms.mu.Unlock()
 		if err := json.NewEncoder(conn).Encode(resp); err != nil {
 			return
@@ -333,13 +348,13 @@ func TestSync_EmptyWant_RemovesAll(t *testing.T) {
 // allow_del. Mirrors TestSync_AddsMissingRemovesStale for the ban set.
 func TestSyncAllowlist_AddsMissingRemovesStale(t *testing.T) {
 	ms := newMockHelper(t)
-	// Current nft @allowed state: 1.1.1.1/32 (keep) and 2.2.2.2/32 (stale).
-	ms.setAllowListIPs([]string{"1.1.1.1/32", "2.2.2.2/32"})
+	// Current nft @allowed state: 192.0.2.1/32 (keep) and 192.0.2.2/32 (stale).
+	ms.setAllowListIPs([]string{"192.0.2.1/32", "192.0.2.2/32"})
 	e := enforce.New(ms.sock, nil)
 
 	want := []netip.Prefix{
-		netip.MustParsePrefix("1.1.1.1/32"),
-		netip.MustParsePrefix("3.3.3.3/32"), // missing → must be added
+		netip.MustParsePrefix("192.0.2.1/32"),
+		netip.MustParsePrefix("192.0.2.3/32"), // missing → must be added
 	}
 	if err := e.SyncAllowlist(context.Background(), want); err != nil {
 		t.Fatal(err)
@@ -357,11 +372,12 @@ func TestSyncAllowlist_AddsMissingRemovesStale(t *testing.T) {
 	sort.Strings(adds)
 	sort.Strings(dels)
 
-	if len(adds) != 1 || adds[0] != "3.3.3.3/32" {
-		t.Errorf("expected allow_add 3.3.3.3/32, got %v", adds)
+	// Single hosts travel in nftables' own spelling (bare address, issue #592).
+	if len(adds) != 1 || adds[0] != "192.0.2.3" {
+		t.Errorf("expected allow_add 192.0.2.3, got %v", adds)
 	}
-	if len(dels) != 1 || dels[0] != "2.2.2.2/32" {
-		t.Errorf("expected allow_del 2.2.2.2/32, got %v", dels)
+	if len(dels) != 1 || dels[0] != "192.0.2.2" {
+		t.Errorf("expected allow_del 192.0.2.2, got %v", dels)
 	}
 }
 
@@ -399,7 +415,7 @@ func TestSyncAllowlist_Issue37_PolicyPrefixesReachHelper(t *testing.T) {
 		}
 	}
 	for _, p := range want {
-		if !got[p.String()] {
+		if !got[enforce.CanonicalIPKey(p.String())] { // bare spelling for single hosts (issue #592)
 			t.Errorf("expected allow_add for %s, but helper never saw it", p)
 		}
 	}
@@ -429,8 +445,8 @@ func TestSyncAllowlist_EmptyWantRemovesAll(t *testing.T) {
 		}
 	}
 	sort.Strings(dels)
-	if len(dels) != 2 || dels[0] != "10.0.0.0/8" || dels[1] != "192.0.2.1/32" {
-		t.Errorf("expected both prefixes removed, got %v", dels)
+	if len(dels) != 2 || dels[0] != "10.0.0.0/8" || dels[1] != "192.0.2.1" {
+		t.Errorf("expected both prefixes removed (single host in bare spelling, issue #592), got %v", dels)
 	}
 }
 
@@ -472,7 +488,7 @@ func TestSync_DelAlreadyAbsent_NotAnError(t *testing.T) {
 	// fired). After list, the timeout expires and the delete finds nothing.
 	ms.setListIPs([]string{"1.1.1.1", "2.2.2.2"})
 	// Helper reports a typed "already absent" success on del — the wire-format
-	// contract from cmd/ezyshield-enforcer/server.go. The client MUST rely on
+	// contract from internal/enforcerd/server.go. The client MUST rely on
 	// this stable code, never on the free-form nft stderr text.
 	ms.setResponse("del", enforce.Response{OK: true, Code: enforce.CodeAlreadyAbsent})
 
@@ -588,7 +604,7 @@ func TestNetns_BanUnban(t *testing.T) {
 			t.Skip("nft binary not found")
 		}
 	}
-	// Actual test is in cmd/ezyshield-enforcer/server_test.go (integration).
+	// Actual test is in internal/enforcerd/server_test.go (integration).
 	t.Log("root + nft detected; full integration test lives in cmd/ezyshield-enforcer")
 }
 
@@ -661,5 +677,88 @@ func TestWithNames_OldHelperIsFatal(t *testing.T) {
 		if r.Verb == "add" {
 			t.Error("add reached the helper despite failed capability probe")
 		}
+	}
+}
+
+// TestSync_CoveredAddRetriedAfterStaleIntervalRemoved is the issue #590
+// shape the #589 migration produces: the kernel holds a /31 the store never
+// had, the store wants its two members. The members are "covered" on the
+// first pass, the /31 is removed as stale, and the members are added on the
+// retry — never left as ghosts, and counted as real repairs.
+func TestSync_CoveredAddRetriedAfterStaleIntervalRemoved(t *testing.T) {
+	ms := newMockHelper(t)
+	ms.setListIPs([]string{"198.51.100.66/31"})
+	// The mock holds the "kernel": covered while the /31 is present.
+	present := map[string]bool{"198.51.100.66/31": true}
+	ms.setHandler("del", func(req enforce.Request) enforce.Response {
+		delete(present, req.IP)
+		return enforce.Response{OK: true}
+	})
+	ms.setHandler("add", func(req enforce.Request) enforce.Response {
+		if present["198.51.100.66/31"] {
+			return enforce.Response{OK: true, Code: enforce.CodeCoveredByInterval}
+		}
+		present[req.IP] = true
+		return enforce.Response{OK: true}
+	})
+	e := enforce.New(ms.sock, nil)
+
+	want := []sdk.Target{
+		{IP: netip.MustParseAddr("198.51.100.66")},
+		{IP: netip.MustParseAddr("198.51.100.67")},
+	}
+	if err := e.Sync(context.Background(), want); err != nil {
+		t.Fatal(err)
+	}
+	if !present["198.51.100.66"] || !present["198.51.100.67"] || present["198.51.100.66/31"] {
+		t.Fatalf("end state %v: want both members present and the /31 gone", present)
+	}
+	var adds, dels int
+	for _, r := range ms.recorded() {
+		switch r.Verb {
+		case "add":
+			adds++
+		case "del":
+			dels++
+		}
+	}
+	if adds != 4 || dels != 1 {
+		t.Errorf("adds=%d dels=%d, want 2 covered + 2 retried adds and 1 del", adds, dels)
+	}
+	if a, r, _ := e.LastSyncRepairs(); a != 2 || r != 1 {
+		t.Errorf("repairs added=%d removed=%d, want 2/1 (covered passes are not repairs)", a, r)
+	}
+}
+
+// TestSync_CoveredAddByWantedPrefix_IsNotDrift: an address inside a prefix
+// the store also wants stays covered — no retry (nothing was removed), no
+// repair counted, no error.
+func TestSync_CoveredAddByWantedPrefix_IsNotDrift(t *testing.T) {
+	ms := newMockHelper(t)
+	ms.setListIPs([]string{"198.51.100.0/24"})
+	ms.setResponse("add", enforce.Response{OK: true, Code: enforce.CodeCoveredByInterval})
+	e := enforce.New(ms.sock, nil)
+
+	want := []sdk.Target{
+		{Prefix: netip.MustParsePrefix("198.51.100.0/24")},
+		{IP: netip.MustParseAddr("198.51.100.5"), TTL: time.Hour},
+	}
+	if err := e.Sync(context.Background(), want); err != nil {
+		t.Fatal(err)
+	}
+	var adds, dels int
+	for _, r := range ms.recorded() {
+		switch r.Verb {
+		case "add":
+			adds++
+		case "del":
+			dels++
+		}
+	}
+	if adds != 1 || dels != 0 {
+		t.Errorf("adds=%d dels=%d, want exactly one covered add and no del", adds, dels)
+	}
+	if a, r, _ := e.LastSyncRepairs(); a != 0 || r != 0 {
+		t.Errorf("repairs added=%d removed=%d, want 0/0", a, r)
 	}
 }

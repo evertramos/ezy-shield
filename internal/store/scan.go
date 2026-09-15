@@ -32,7 +32,7 @@ type ScanRecord struct {
 // all metadata columns so the baseline always reflects the latest observation.
 // All values are parameterized — log-derived data never reaches SQL as literals.
 func (s *DB) UpsertScanRecord(ctx context.Context, r ScanRecord) error {
-	now := nowRFC3339()
+	now := s.nowRFC3339()
 	isPublic := 0
 	if r.IsPublic {
 		isPublic = 1

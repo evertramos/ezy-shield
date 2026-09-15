@@ -567,6 +567,29 @@ func TestLoadPolicy_DefaultsApplied(t *testing.T) {
 		t.Errorf("EscalationExemptWindow = %v, want %v",
 			p.EscalationExemptWindow.AsDuration(), DefaultEscalationExemptWindow)
 	}
+	if p.BanIneffectiveMinEventsInGrace == nil || *p.BanIneffectiveMinEventsInGrace != DefaultBanIneffectiveMinEventsInGrace {
+		t.Errorf("BanIneffectiveMinEventsInGrace = %v, want default %d", p.BanIneffectiveMinEventsInGrace, DefaultBanIneffectiveMinEventsInGrace)
+	}
+}
+
+// TestLoadPolicy_BanIneffectiveInGrace pins the tri-state of the volume
+// trigger (issue #586): omitted → default, 0 → disabled, negative → 1.
+func TestLoadPolicy_BanIneffectiveInGrace(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		yaml string
+		want int
+	}{
+		{"armed: false\n", DefaultBanIneffectiveMinEventsInGrace},
+		{"armed: false\nban_ineffective_min_events_in_grace: 0\n", 0},
+		{"armed: false\nban_ineffective_min_events_in_grace: -3\n", 1},
+		{"armed: false\nban_ineffective_min_events_in_grace: 50\n", 50},
+	} {
+		p := mustLoadPolicy(t, tc.yaml)
+		if got := p.InGraceIneffectiveThreshold(); got != tc.want {
+			t.Errorf("%q: threshold = %d, want %d", tc.yaml, got, tc.want)
+		}
+	}
 }
 
 func TestLoadPolicy_EscalationExemptWindowBounds(t *testing.T) {

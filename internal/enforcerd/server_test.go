@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-package main
+package enforcerd
 
 import (
 	"bufio"
@@ -50,11 +50,14 @@ func startTestServer(t *testing.T, mock *mockNftCalls) *Server {
 	}
 
 	run := mock.runner()
-	srv := newServer(sockPath, run)
+	srv := NewServer(sockPath, run)
 	// Default to a no-op ssRunner so tests do not shell out to a real
 	// `ss -K` on the host during add verb coverage. Individual tests that
 	// need to assert kill-behaviour override srv.runSs after construction.
 	srv.runSs = func(_ context.Context, _ []string) error { return nil }
+	// No live nft to inspect: the boot-time auto-merge probe (issue #588)
+	// answers "already migrated" unless a test overrides it.
+	srv.autoMergeFn = func(_ context.Context, _ nftnames.Names, _ string) (bool, error) { return false, nil }
 
 	lc := &net.ListenConfig{}
 	ln, err := lc.Listen(context.Background(), "unix", sockPath)
@@ -68,7 +71,7 @@ func startTestServer(t *testing.T, mock *mockNftCalls) *Server {
 		cancel()
 		_ = os.Remove(sockPath)
 	})
-	go func() { _ = srv.serve(ctx) }() //nolint:errcheck
+	go func() { _ = srv.Serve(ctx) }() //nolint:errcheck
 
 	return srv
 }
@@ -573,7 +576,7 @@ func TestDispatch_Del_AlreadyAbsent_TypedCode(t *testing.T) {
 	_ = f.Close()
 	_ = os.Remove(sockPath)
 
-	srv := newServer(sockPath, nftFail)
+	srv := NewServer(sockPath, nftFail)
 	srv.runSs = func(_ context.Context, _ []string) error { return nil }
 	// Pre-populate the in-memory cache to prove the already-absent branch
 	// still evicts the entry (otherwise Sync would keep retrying every tick).
@@ -587,7 +590,7 @@ func TestDispatch_Del_AlreadyAbsent_TypedCode(t *testing.T) {
 	srv.ln = ln
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() { cancel(); _ = os.Remove(sockPath) })
-	go func() { _ = srv.serve(ctx) }() //nolint:errcheck
+	go func() { _ = srv.Serve(ctx) }() //nolint:errcheck
 
 	resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "del", IP: "192.0.2.4"})
 	if !resp.OK {
@@ -622,7 +625,7 @@ func TestDispatch_Del_RealError_NoTypedCode(t *testing.T) {
 	_ = f.Close()
 	_ = os.Remove(sockPath)
 
-	srv := newServer(sockPath, nftFail)
+	srv := NewServer(sockPath, nftFail)
 	srv.runSs = func(_ context.Context, _ []string) error { return nil }
 
 	lc := &net.ListenConfig{}
@@ -633,7 +636,7 @@ func TestDispatch_Del_RealError_NoTypedCode(t *testing.T) {
 	srv.ln = ln
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() { cancel(); _ = os.Remove(sockPath) })
-	go func() { _ = srv.serve(ctx) }() //nolint:errcheck
+	go func() { _ = srv.Serve(ctx) }() //nolint:errcheck
 
 	resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "del", IP: "192.0.2.4"})
 	if resp.OK {
@@ -656,10 +659,10 @@ func TestDispatch_Del_RealError_NoTypedCode(t *testing.T) {
 func TestListen_SocketPermissions(t *testing.T) {
 	sockPath := t.TempDir() + "/enforcer.sock"
 
-	srv := newServer(sockPath, (&mockNftCalls{}).runner())
+	srv := NewServer(sockPath, (&mockNftCalls{}).runner())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if err := srv.listen(ctx); err != nil {
+	if err := srv.Listen(ctx); err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	defer srv.ln.Close() //nolint:errcheck
@@ -694,11 +697,11 @@ func TestIntegration_BanUnban(t *testing.T) {
 	// Use real nft runner; nft will modify the host netns.
 	// This test is intentionally guarded: it only runs as root with nft present.
 	ctx := context.Background()
-	srv := newServer("", realNftRunner)
+	srv := NewServer("", RealNftRunner)
 	srv.blocked = make(map[string]time.Time)
 
 	// init: create the table/set/chain
-	if err := srv.init(ctx); err != nil {
+	if err := srv.Init(ctx); err != nil {
 		t.Fatalf("init: %v", err)
 	}
 
@@ -829,7 +832,7 @@ func TestDispatch_AddNftFailure_SkipsKill(t *testing.T) {
 	_ = f.Close()
 	_ = os.Remove(sockPath)
 
-	srv := newServer(sockPath, failing)
+	srv := NewServer(sockPath, failing)
 	ssMock := &mockSsCalls{}
 	srv.runSs = ssMock.runner()
 
@@ -841,7 +844,7 @@ func TestDispatch_AddNftFailure_SkipsKill(t *testing.T) {
 	srv.ln = ln
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() { cancel(); _ = os.Remove(sockPath) })
-	go func() { _ = srv.serve(ctx) }() //nolint:errcheck
+	go func() { _ = srv.Serve(ctx) }() //nolint:errcheck
 
 	resp := doRPC(t, srv.sockPath(), enforce.Request{Verb: "add", IP: "192.0.2.4"})
 	if resp.OK {
@@ -977,5 +980,33 @@ func TestDispatch_Caps(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("caps features = %v, want %q present", resp.Features, enforce.FeatureCustomNames)
+	}
+}
+
+// TestInitTable_AllowedAcceptInEveryHook (issue #608): an `accept` in the
+// prerouting hook ends that chain only — the packet still traverses input
+// (local) and forward, so those chains must accept @allowed before dropping
+// @blocked/@feeds too, or the kernel backstop covers no local traffic.
+func TestInitTable_AllowedAcceptInEveryHook(t *testing.T) {
+	s := initTableScript(defaultNames())
+	for _, chain := range []string{"input", "forward"} {
+		block := s[strings.Index(s, "flush chain inet ezyshield "+chain):]
+		if next := strings.Index(block[1:], "add chain "); next > 0 {
+			block = block[:next+1]
+		}
+		allow4 := strings.Index(block, chain+" ip saddr @allowed accept")
+		allow6 := strings.Index(block, chain+" ip6 saddr @allowed6 accept")
+		drop := strings.Index(block, "@blocked drop")
+		feeds := strings.Index(block, "@blocked_feeds drop")
+		if allow4 < 0 || allow6 < 0 {
+			t.Fatalf("%s chain has no @allowed accept rules:\n%s", chain, block)
+		}
+		if drop < 0 || feeds < 0 {
+			t.Fatalf("%s chain lost its drop rules:\n%s", chain, block)
+		}
+		if allow4 > drop || allow6 > drop || allow4 > feeds {
+			t.Errorf("%s chain: @allowed accept must precede every drop (allow4=%d allow6=%d drop=%d feeds=%d)\n%s",
+				chain, allow4, allow6, drop, feeds, block)
+		}
 	}
 }

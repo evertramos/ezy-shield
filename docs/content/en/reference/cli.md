@@ -488,9 +488,12 @@ Flags:
 
 Honest limitation (also printed on every run): evaluation uses the stored
 hourly aggregates, so granularity is bounded by 1-hour buckets and by
-retention; only kinds referenced by long-window (>1h) rules are persisted,
-and field-level matchers cannot be applied to counts — such rules are
-reported as a loudly-marked kind-level upper bound.
+retention; only kinds referenced by long-window (>1h) rules are persisted.
+A field-level matcher on a window of 1h or less cannot be applied to
+counts — such rules are reported as a loudly-marked kind-level upper bound.
+A field-level rule with a window above 1h is evaluated exactly, from the
+matcher counter the daemon keeps under the rule's own name (written only
+while a rule of that name is loaded).
 
 ## ezyshield ban
 
@@ -702,7 +705,7 @@ Checks:
   a private (RFC1918/ULA) range at `/16` or broader — such a range can never be
   banned, so it silently exempts a large chunk of address space from
   enforcement forever. See the allowlist section in [Policy Reference](policy.md).
-- ban_ineffective diagnostics: **FAIL** when an active ban is flagged ineffective (traffic flowing despite the ban) — names the IPs and points at the systemic remedy (edge enforcement / real-IP parsing / enforcer health); **WARN** when no ban is currently ineffective but some offender was flagged historically; **PASS** otherwise. Read-only query against the database at `--db`.
+- ban_ineffective diagnostics: **FAIL** when an active ban is flagged ineffective *and still leaking* — a suppressed event from that IP within the last 24 hours — naming the IPs and pointing at the systemic remedy (edge enforcement / real-IP parsing / enforcer health); **WARN** when the only flagged bans leaked in the past — quiet for 24 hours or more (listed with their silence length), or flagged before the last-leak timestamp existed (listed as "last leak time unknown") — or when no ban is currently flagged but some offender was flagged historically; **PASS** otherwise. A flagged ban that goes quiet for 24 hours is re-armed: a new leak on it fires `ban_ineffective` again, so a permanent ban is never a one-time signal. Read-only query against the database at `--db`.
 - cdn range data: **FAIL** when the embedded shared-CDN-range table (backing
   the ban-path anti-lockout guard, issue #178) fails to load — bans then
   proceed marked `[cdn-ranges-unverified]` in the audit log; **PASS** shows

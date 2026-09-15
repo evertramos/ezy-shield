@@ -90,9 +90,7 @@ func (c *FileTailCollector) Run(ctx context.Context, out chan<- sdk.RawLine) err
 		return fmt.Errorf("filetail: inotify_add_watch dir: %w", err)
 	}
 
-	// Suppress "declared and not used" if wd vars are only used in event handling.
-	_ = fileWd
-	_ = dirWd
+	_ = dirWd // directory events are not dispatched; the watch keeps the dir alive for rotation
 
 	source := "file:" + c.Path
 	if c.SourceOverride != "" {
@@ -105,14 +103,32 @@ func (c *FileTailCollector) Run(ctx context.Context, out chan<- sdk.RawLine) err
 		{Fd: int32(ifd), Events: unix.POLLIN}, //nolint:gosec // ifd is a valid non-negative fd from InotifyInit1
 	}
 
-	rotated := false // set when we see IN_MOVE_SELF / IN_DELETE_SELF
+	rotated := false // set when we see IN_MOVE_SELF / IN_DELETE_SELF on the CURRENT watch
 
-	// lastSize tracks the file size seen at the previous iteration for the
-	// stat-based fallback that fires when inotify events are not delivered to
-	// Poll (reproducible on Debian 12 kernel 6.1 with overlay2 storage).
+	// lastSize tracks the file size seen at the previous iteration. It
+	// drives copytruncate detection in BOTH branches (issue #611): a size
+	// smaller than the last one means the file was truncated in place and
+	// the read offset must go back to 0. It also feeds the stat-based
+	// fallback that fires when inotify events are not delivered to Poll
+	// (reproducible on Debian 12 kernel 6.1 with overlay2 storage).
 	var lastSize int64
 	if fi, statErr := f.Stat(); statErr == nil {
 		lastSize = fi.Size()
+	}
+
+	// rewindIfTruncated checks for copytruncate BEFORE any read: if the file
+	// shrank below the last size seen, the writer truncated it in place and
+	// our offset now points past EOF. Seek to 0 and drop any partial line.
+	rewindIfTruncated := func() {
+		fi, statErr := f.Stat()
+		if statErr != nil {
+			return
+		}
+		if fi.Size() < lastSize {
+			_, _ = f.Seek(0, io.SeekStart)
+			lastSize = 0
+			asm.discard()
+		}
 	}
 
 	for {
@@ -138,15 +154,8 @@ func (c *FileTailCollector) Run(ctx context.Context, out chan<- sdk.RawLine) err
 			// Timeout — no inotify event. Apply stat-based fallback so that
 			// growth is caught even when Poll does not surface the inotify fd
 			// as readable (observed on Debian 12 amd64, overlay2 filesystem).
+			rewindIfTruncated()
 			if fi, statErr := f.Stat(); statErr == nil {
-				if fi.Size() < lastSize {
-					// copytruncate: file was truncated in-place (logrotate).
-					// Seek to start so new content is not skipped, and discard
-					// any partial line from the old file that's still in buf.
-					_, _ = f.Seek(0, io.SeekStart)
-					lastSize = 0
-					asm.discard()
-				}
 				if fi.Size() > lastSize {
 					err = drainLines(ctx, f, asm, source, out, logger)
 					if err != nil {
@@ -168,6 +177,13 @@ func (c *FileTailCollector) Run(ctx context.Context, out chan<- sdk.RawLine) err
 				return fmt.Errorf("filetail: read inotify: %w", err)
 			}
 
+			// copytruncate emits IN_MODIFY, so this branch sees the
+			// truncation first: rewind BEFORE draining, or the read at the
+			// stale offset returns EOF and lastSize is reset to the new
+			// (smaller) size, hiding the truncation from the fallback for
+			// good (issue #611).
+			rewindIfTruncated()
+
 			// Drain any pending data first.
 			err = drainLines(ctx, f, asm, source, out, logger)
 			if err != nil {
@@ -177,17 +193,23 @@ func (c *FileTailCollector) Run(ctx context.Context, out chan<- sdk.RawLine) err
 				lastSize = fi.Size()
 			}
 
-			// Parse each inotify event. Only Mask and Len are needed: Mask
-			// drives rotation detection, Len skips the trailing name field.
-			// Wd and Cookie are intentionally not decoded (single watch, no
-			// rename tracking).
+			// Parse each inotify event. Mask drives rotation detection, Len
+			// skips the trailing name field, and Wd tells which watch the
+			// event belongs to: after a rotation the OLD inode keeps its
+			// watch until it is removed below, and a later IN_DELETE_SELF on
+			// it (logrotate compress, Docker max-file pruning) must not be
+			// mistaken for a rotation of the CURRENT file — that reopened
+			// the live file at offset 0 and replayed it (issue #611).
 			for offset := 0; offset+inotifyEventSize <= nr; {
-				// Use binary.NativeEndian (no unsafe) per the spec.
 				evBytes := ibuf[offset : offset+inotifyEventSize]
+				wd := int(int32(binary.NativeEndian.Uint32(evBytes[0:4]))) //nolint:gosec // inotify wd is a small non-negative int32
 				mask := binary.NativeEndian.Uint32(evBytes[4:8])
 				evLen := binary.NativeEndian.Uint32(evBytes[12:16])
 				offset += inotifyEventSize + int(evLen)
 
+				if wd != fileWd {
+					continue // directory watch, or a stale watch on a rotated inode
+				}
 				if mask&(unix.IN_MOVE_SELF|unix.IN_DELETE_SELF) != 0 {
 					rotated = true
 				}
@@ -197,6 +219,9 @@ func (c *FileTailCollector) Run(ctx context.Context, out chan<- sdk.RawLine) err
 			if rotated {
 				rotated = false
 				_ = f.Close()
+				// Drop the watch on the old inode so its later deletion is
+				// never reported (and the wd is not leaked per rotation).
+				_, _ = unix.InotifyRmWatch(ifd, uint32(fileWd)) //nolint:gosec // wd is a small non-negative watch descriptor
 
 				// Wait briefly for the new file to appear.
 				newF, openErr := reopenWithRetry(ctx, c.Path, 5, 100*time.Millisecond)
@@ -205,10 +230,18 @@ func (c *FileTailCollector) Run(ctx context.Context, out chan<- sdk.RawLine) err
 				}
 				f = newF
 				asm.discard()
+				lastSize = 0
 
-				// Update inotify watch to the new file.
-				_, _ = unix.InotifyAddWatch(ifd, c.Path,
+				// Watch the new inode; events are dispatched by this wd.
+				newWd, addErr := unix.InotifyAddWatch(ifd, c.Path,
 					unix.IN_MODIFY|unix.IN_MOVE_SELF|unix.IN_DELETE_SELF)
+				if addErr != nil {
+					logger.Warn("filetail: re-watch after rotation failed; relying on the stat fallback",
+						slog.String("path", c.Path), slog.String("err", addErr.Error()))
+					fileWd = -1
+				} else {
+					fileWd = newWd
+				}
 			}
 		}
 	}

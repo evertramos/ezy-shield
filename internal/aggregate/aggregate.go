@@ -81,10 +81,18 @@ func (a *Aggregator) Len() int {
 	return len(a.buckets)
 }
 
-// Windows returns the configured sliding windows.
-// Useful for callers that need to know which window durations to request.
+// Windows returns the configured sliding windows, in configuration order
+// (not sorted — use MaxWindow for the eviction horizon).
 func (a *Aggregator) Windows() []time.Duration {
 	return a.windows
+}
+
+// MaxWindow returns the longest configured window: the horizon before
+// which no rule can still see an event, hence the only correct flush
+// cutoff (issue #610 — flushing with any shorter window silently blinds
+// every rule with a longer one).
+func (a *Aggregator) MaxWindow() time.Duration {
+	return a.maxWindow
 }
 
 // Add records ev in the per-IP bucket, then evicts events older than the
@@ -176,6 +184,19 @@ func (a *Aggregator) Aggregate(ip netip.Addr, window time.Duration, now time.Tim
 		Kinds:  kinds,
 		Sample: samples,
 	}
+}
+
+// Reset drops every retained event of ip. The daemon calls it when a strike
+// is recorded for ip (issue #621): the events that earned the strike are
+// consumed by it, so once the ban expires only NEW evidence can earn the
+// next rung — otherwise the same hour of history re-fired the hourly rules
+// on the first request after expiry, benign or not, climbing the ladder
+// without any new offence. Long-window counters are not touched: they hold
+// kind-level or rule-matched hits only, which a benign request never adds.
+func (a *Aggregator) Reset(ip netip.Addr) {
+	a.mu.Lock()
+	delete(a.buckets, ip)
+	a.mu.Unlock()
 }
 
 // Flush evicts stale entries and removes IP buckets with no remaining events.

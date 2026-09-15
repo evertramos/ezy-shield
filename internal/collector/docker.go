@@ -360,9 +360,7 @@ func (c *DockerCollector) tailJournald(ctx context.Context, source string, out c
 	// CONTAINER_NAME= is a journald match field — safe with validated container name.
 	//nolint:gosec // c.Container validated against reDockerContainerName; exec.Command not shell
 	cmd := exec.CommandContext(ctx, "journalctl",
-		"-f", "-o", "cat", "--no-pager",
-		"CONTAINER_NAME="+c.Container,
-	)
+		JournalctlFollowArgs("CONTAINER_NAME="+c.Container)...)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {

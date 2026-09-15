@@ -81,6 +81,20 @@ auth log — `/var/log/auth.log` (Debian/Ubuntu) or `/var/log/secure`
 format (`Jan  1 12:00:00`) and modern ISO-8601
 (`2026-07-13T22:57:35+00:00`).
 
+Every collector starts at the **live tail** of its source when the daemon
+(re)starts — the file tail seeks to the end, and the journald readers
+follow with no backlog. Lines written during the seconds of a restart are
+not replayed: a missed line at worst delays a detection by one event,
+whereas replaying already-processed lines would count the same evidence
+twice.
+
+The file tail follows log rotation without replay: when the file is
+renamed and recreated it reopens the new file and stops watching the old
+inode, so the rotated copy being deleted later (`logrotate` `compress`,
+Docker's `max-file` pruning) does not re-read the live file; and when the
+file is truncated in place (`copytruncate`) it rewinds to the start and
+reads only the new lines, with no fragment of the old content.
+
 > **Configure only one SSH collector per host** — journald **or** the
 > file it feeds, never both. Reading both ingests every event twice,
 > which double-counts toward detection thresholds. (An already-banned
@@ -271,7 +285,7 @@ notify:
       Authorization: env:WEBHOOK_AUTH_TOKEN   # value must be a full env: reference
 ```
 
-Shared fields: `rate_limit_per_minute` (default 5) and `dedup_window_sec` (default 600) protect against notification storms. `notify_only_window_sec` (default 3600) additionally windows below-threshold `notify_only` events per (IP, rule): the first event notifies immediately and repeats within the window fold into a single summary notification — set it negative to disable. Audit log entries are never suppressed. Every channel accepts an optional `severity` list (`info` \| `warn` \| `critical`).
+Shared fields: `rate_limit_per_minute` (default 5) and `dedup_window_sec` (default 600) protect against notification storms. The per-minute cap applies to `info` and `warn` messages; **`critical` messages use a separate, reserved quota** (20 per channel per minute), so a burst of strike warnings can never silence the one `enforcement DEGRADED` alert. A message a rate limit dropped does not claim the dedup window — the same alert is delivered as soon as the quota frees up — and every dropped delivery is counted in the `ezyshield_notifications_dropped_total` metric. Repeated enforcer failures within one window are folded into a single systemic critical (the first failing target is in the body). At least one channel must accept `critical`; `ezyshield doctor` warns when none does. `notify_only_window_sec` (default 3600) additionally windows below-threshold `notify_only` events per (IP, rule): the first event notifies immediately and repeats within the window fold into a single summary notification — set it negative to disable. Audit log entries are never suppressed. Every channel accepts an optional `severity` list (`info` \| `warn` \| `critical`).
 
 > Secret-typed fields (`bot_token`, `password`, `webhook_url`, webhook `url`) only accept `env:VARNAME` references — inline values are rejected at load time. They are also **required** for their channel: a `telegram` block without `bot_token`, an `email` block without `password`, or a `slack`/`discord`/`webhook` block without its URL fails validation (the daemon resolves them at startup). Webhook header **values** are sent verbatim unless the entire value is an `env:` reference, which is resolved.
 

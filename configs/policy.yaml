@@ -31,6 +31,7 @@ escalation_exempt_window: 24h
 # Both values are floors: policy may raise them, never lower them.
 ban_ineffective_grace: 90s      # wait after a ban before counting events
 ban_ineffective_min_events: 3   # events after grace that trigger the WARN
+ban_ineffective_min_events_in_grace: 200  # events INSIDE the grace that trigger it by volume (0 = off)
 
 # Allowlist — IPs/CIDRs that can NEVER be banned (allowlist wins over everything)
 allowlist: []

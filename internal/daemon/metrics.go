@@ -67,6 +67,18 @@ func newDaemonMetrics(version string) *daemonMetrics {
 	}
 }
 
+// registerNotifyDroppedGauge exports the notifier's rate-limit drop count
+// (issue #613): a delivery suppressed by a channel quota was invisible, and
+// an enforcer outage went unreported because of it. Cumulative since start.
+func (d *Daemon) registerNotifyDroppedGauge() {
+	if d.notifier == nil {
+		return
+	}
+	d.metrics.reg.GaugeFunc("ezyshield_notifications_dropped_total",
+		"Notification deliveries suppressed by a per-channel rate limit since start (issue #613).",
+		d.notifier.Dropped)
+}
+
 // registerAICleanerGauge exports the Log Cleaner reduction ratio (issue
 // #222) in permille — the token-frugality claim as a scrapeable number.
 func (d *Daemon) registerAICleanerGauge() {

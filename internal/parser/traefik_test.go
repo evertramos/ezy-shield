@@ -327,7 +327,7 @@ func TestTraefikParser_XFF(t *testing.T) {
 		}
 	})
 
-	t.Run("multi-hop XFF: leftmost non-trusted", func(t *testing.T) {
+	t.Run("multi-hop XFF: rightmost non-trusted (all later hops trusted)", func(t *testing.T) {
 		line := sdk.RawLine{
 			Source: "traefik:traefik",
 			Line:   []byte(`{"ClientHost":"10.0.0.5","RequestMethod":"GET","RequestPath":"/","DownstreamStatus":200,"DownstreamContentSize":0,"RouterName":"r","ServiceName":"s","Duration":1,"request_X-Forwarded-For":"203.0.113.7, 10.0.0.99, 10.0.0.5"}`),

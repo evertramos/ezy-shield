@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/evertramos/ezy-shield/internal/enforce"
 	"log/slog"
 )
 
@@ -69,6 +70,23 @@ func (d *Daemon) handleDisableAll(ctx context.Context) SocketResponse {
 			raw, _ := json.Marshal(data)
 			return SocketResponse{
 				Error: fmt.Sprintf("daemon disarmed and %d bans cleared, but the enforcer sync failed: %v — existing kernel/edge blocks may linger until a reconcile succeeds", removed, err),
+				Data:  raw,
+			}
+		}
+	}
+
+	// 4. Reputation feeds drop packets too (issue #608): "every active
+	//    block" includes @feeds, which live outside the store.
+	if d.feedSyncer != nil {
+		d.feedMu.Lock()
+		d.feedBlockDesired = map[string][]enforce.FeedElement{}
+		d.feedMu.Unlock()
+		if err := d.feedSyncer.SyncFeeds(ctx, nil); err != nil {
+			slog.ErrorContext(ctx, "daemon: disable_all feed sync failed", "err", err)
+			data.EnforcersSynced = false
+			raw, _ := json.Marshal(data)
+			return SocketResponse{
+				Error: fmt.Sprintf("daemon disarmed and %d bans cleared, but clearing the reputation-feed sets failed: %v — feed entries may linger until their TTL", removed, err),
 				Data:  raw,
 			}
 		}

@@ -197,7 +197,7 @@ func (d *Daemon) maybeScheduleSSHRecheck(ctx context.Context, action sdk.Action,
 	if high < d.policy.BanThreshold {
 		return
 	}
-	if !d.sshRecheck.schedule(action.IP, time.Now().Add(d.sshRecheckDelayVal()),
+	if !d.sshRecheck.schedule(action.IP, d.clock().Add(d.sshRecheckDelayVal()),
 		elevatedAIVerdict(verdicts, d.policy.BanThreshold)) {
 		slog.WarnContext(ctx, "daemon: ssh re-check queue full — deferred re-evaluation dropped",
 			"ip", action.IP)
@@ -233,7 +233,9 @@ func elevatedAIVerdict(verdicts []sdk.Verdict, banThreshold int) *sdk.Verdict {
 }
 
 // runSSHRecheck is the re-check loop goroutine: it pops due entries every
-// tick and re-evaluates them. Exits when ctx is cancelled (no leak).
+// tick and re-evaluates them. The deferred-enforcement retries of issue
+// #583 (gatedban.go) share the ticker: same cadence, same budget, one
+// goroutine. Exits when ctx is cancelled (no leak).
 func (d *Daemon) runSSHRecheck(ctx context.Context) {
 	tick := d.sshRecheckTick
 	if tick <= 0 {
@@ -248,6 +250,9 @@ func (d *Daemon) runSSHRecheck(ctx context.Context) {
 		case now := <-t.C:
 			for _, it := range d.sshRecheck.due(now) {
 				d.recheckAfterAntiLockout(ctx, it)
+			}
+			for _, it := range d.gatedBanRetry.due(now) {
+				d.retryGatedBan(ctx, it)
 			}
 		}
 	}
@@ -300,7 +305,7 @@ func (d *Daemon) recheckAfterAntiLockout(ctx context.Context, it sshRecheckItem)
 			// retry later, bounded by the attempt budget.
 			slog.WarnContext(ctx, "daemon: ssh re-check hit ban rate limit — deferring", "ip", ip)
 			d.notifyCritical(ctx, "ban rate limit exceeded")
-			if !d.sshRecheck.requeue(ip, attempts+1, time.Now().Add(d.sshRecheckDelayVal()), it.aiVerdict) {
+			if !d.sshRecheck.requeue(ip, attempts+1, d.clock().Add(d.sshRecheckDelayVal()), it.aiVerdict) {
 				d.noteSSHRecheckDropped(ctx, ip, attempts+1)
 			}
 			return
@@ -317,7 +322,7 @@ func (d *Daemon) recheckAfterAntiLockout(ctx context.Context, it sshRecheckItem)
 		// Still ESTABLISHED — an operator session or an attacker holding the
 		// connection. The invariant held; re-arm within the retry budget,
 		// keeping the carried verdict for the next pass.
-		if !d.sshRecheck.requeue(ip, attempts+1, time.Now().Add(d.sshRecheckDelayVal()), it.aiVerdict) {
+		if !d.sshRecheck.requeue(ip, attempts+1, d.clock().Add(d.sshRecheckDelayVal()), it.aiVerdict) {
 			d.noteSSHRecheckDropped(ctx, ip, attempts+1)
 		}
 	}

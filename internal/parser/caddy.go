@@ -197,8 +197,32 @@ func extractCaddyHeaders(req map[string]json.RawMessage) (ua, xff string) {
 		return "", ""
 	}
 	ua = headerFirstString(headers, "User-Agent", "user-agent")
-	xff = headerFirstString(headers, "X-Forwarded-For", "x-forwarded-for")
+	// Every value of a repeated X-Forwarded-For header is one hop list;
+	// a trusted proxy that adds its own header line (HAProxy's default)
+	// makes the client's line come FIRST. Join them in order so the
+	// rightmost-hop rule (issue #612) sees the proxies' suffix last.
+	xff = headerJoined(headers, "X-Forwarded-For", "x-forwarded-for")
 	return ua, xff
+}
+
+// headerJoined returns every value of the first matching header name,
+// joined with ", " (RFC 7230 list semantics); a bare string is tolerated.
+func headerJoined(headers map[string]json.RawMessage, keys ...string) string {
+	for _, k := range keys {
+		v, ok := headers[k]
+		if !ok {
+			continue
+		}
+		var arr []string
+		if err := json.Unmarshal(v, &arr); err == nil && len(arr) > 0 {
+			return strings.Join(arr, ", ")
+		}
+		var s string
+		if err := json.Unmarshal(v, &s); err == nil {
+			return s
+		}
+	}
+	return ""
 }
 
 // headerFirstString returns the first value of the first matching header name.
@@ -222,7 +246,7 @@ func headerFirstString(headers map[string]json.RawMessage, keys ...string) strin
 }
 
 // resolveXFF returns the effective client IP. If ip is a trusted proxy and xff
-// contains a routable non-trusted address, that address is returned instead.
+// contains a non-trusted address, the rightmost such hop is returned instead.
 // Falls back to ip on any resolution failure.
 func (p *CaddyParser) resolveXFF(ip netip.Addr, xff string) netip.Addr {
 	if xff == "" || xff == "-" || len(p.trustedProxies) == 0 {
@@ -231,18 +255,10 @@ func (p *CaddyParser) resolveXFF(ip netip.Addr, xff string) netip.Addr {
 	if !p.isTrustedProxy(ip) {
 		return ip
 	}
-	for _, part := range strings.Split(xff, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" || part == "-" {
-			continue
-		}
-		cand, err := parseIP(part)
-		if err != nil {
-			continue
-		}
-		if !p.isTrustedProxy(cand) {
-			return cand
-		}
+	// Rightmost untrusted hop (issue #612): the proxies' appended suffix
+	// is the only part of the header the client did not write.
+	if cand, ok := clientFromXFF(xff, p.isTrustedProxy); ok {
+		return cand
 	}
 	p.logger.Debug("caddy: no untrusted IP in XFF, using remote_ip",
 		slog.String("xff", redactForLog(xff)),

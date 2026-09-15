@@ -22,11 +22,11 @@ make bench        # = go test -tags bench ./internal/bench/ -v
 
 ## Current numbers
 
-As of the corpus's introduction (10 scenarios):
+Current corpus (11 scenarios, including a low-and-slow WordPress login campaign paced under every short-window threshold):
 
 | Metric | Value |
 |---|---|
-| Detection rate | **6/6 attacks (100%)** |
+| Detection rate | **7/7 attacks (100%)** |
 | False positives | **0/4 legit scenarios** |
 
 | Scenario | Label | Result | Time to first strike | Rule |
@@ -34,6 +34,7 @@ As of the corpus's introduction (10 scenarios):
 | attack-ssh-burst | attack | detected | 8s | ssh_bruteforce |
 | attack-ssh-sustained | attack | detected | 36 min | ssh_bruteforce_sustained |
 | attack-wp-scan | attack | detected | 10s | http_wp_probe |
+| attack-wp-lowslow | attack | detected | 7.2 h | http_wp_probe_daily |
 | attack-env-probe | attack | detected | 0s | http_env_probe |
 | attack-rce-probe | attack | detected | 0s | http_rce_probe |
 | attack-404-scan | attack | detected | 19s | http_scanner |
@@ -42,7 +43,7 @@ As of the corpus's introduction (10 scenarios):
 | legit-api-client | legit | clean | — | — |
 | legit-admin-wp | legit | clean | — | — |
 
-A 100% rate on 10 scenarios is a **floor being guarded**, not a marketing claim: the corpus is small and grows over time; every addition re-runs against the whole rule set.
+A 100% rate on 11 scenarios is a **floor being guarded**, not a marketing claim: the corpus is small and grows over time; every addition re-runs against the whole rule set.
 
 ## Contributing a scenario
 

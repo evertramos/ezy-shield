@@ -143,6 +143,26 @@ rules:
     score: 75
     category: bruteforce
 
+  - name: http_wp_probe_daily
+    description: "Low-and-slow wp-login brute force (daily accumulation; counted by matcher, never by whole HTTP volume)"
+    kinds: [http_request]
+    field: path
+    contains: wp-login
+    window: 86400s
+    threshold: 25
+    score: 75
+    category: bruteforce
+
+  - name: http_xmlrpc_daily
+    description: "Low-and-slow xmlrpc abuse (daily accumulation)"
+    kinds: [http_request]
+    field: path
+    contains: xmlrpc.php
+    window: 86400s
+    threshold: 20
+    score: 75
+    category: bruteforce
+
   - name: http_scanner_sustained
     description: "Sustained 404 scanner (directory/endpoint enumeration)"
     kinds: [http_request]

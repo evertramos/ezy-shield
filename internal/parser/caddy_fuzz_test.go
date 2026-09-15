@@ -3,6 +3,7 @@
 package parser_test
 
 import (
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 // FuzzCaddyParser ensures the parser never panics on arbitrary input.
 func FuzzCaddyParser(f *testing.F) {
 	// Seed corpus: representative real and pathological inputs.
+	f.Add([]byte(`{"request":{"remote_ip":"10.0.0.5","method":"GET","uri":"/","host":"x","headers":{"X-Forwarded-For":["203.0.113.9","198.51.100.7:1"]}},"status":200,"size":0,"duration":0.001}`)) // X-Forwarded-For behind a trusted proxy (issue #612)
 	f.Add([]byte(`{"level":"info","ts":1719403200.123,"logger":"http.log.access","msg":"handled request","request":{"remote_ip":"203.0.113.1","remote_port":"5678","proto":"HTTP/2.0","method":"GET","host":"example.com","uri":"/","headers":{"User-Agent":["Mozilla/5.0"]}},"duration":0.005,"size":1234,"status":200}`))
 	f.Add([]byte(`{"request":{"remote_ip":"198.51.100.1","method":"GET","uri":"/wp-login.php","host":"x","headers":{"User-Agent":["python-requests/2.27.1"]}},"status":404,"size":0,"duration":0.012}`))
 	f.Add([]byte(`{"request":{"remote_ip":"2001:db8::1","method":"POST","uri":"/api/login","host":"x","headers":{"User-Agent":["axios"]}},"status":401,"size":89,"duration":0.234}`))
@@ -42,7 +44,7 @@ func FuzzCaddyParser(f *testing.F) {
 	f.Add([]byte(`{"request":{"remote_ip":"10.0.0.1","headers":{"X-Forwarded-For":["1.1.1.1, 2.2.2.2, 3.3.3.3"]}},"status":200}`))                                                                                                                               // multi-hop XFF
 
 	f.Fuzz(func(_ *testing.T, b []byte) {
-		p := parser.NewCaddyParser(fuzzDiscardLogger(), parser.CaddyConfig{})
+		p := parser.NewCaddyParser(fuzzDiscardLogger(), parser.CaddyConfig{TrustedProxies: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}})
 		line := sdk.RawLine{
 			Source: "caddy:caddy",
 			Line:   b,

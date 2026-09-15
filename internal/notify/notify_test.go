@@ -126,22 +126,16 @@ func TestDispatcher_DedupSuppressesRepeat(t *testing.T) {
 
 func TestDispatcher_DedupAllowsAfterWindowExpires(t *testing.T) {
 	n := &stubNotifier{name: "dedupExpiry"}
-	// Inject a controllable clock: first call returns t0, subsequent calls advance.
-	var callCount int
+	// Settable clock (the dispatcher reads it more than once per Send: dedup
+	// check, rate limiter, dedup record — a call-counting stub would drift).
 	t0 := time.Now()
-	clk := func() time.Time {
-		callCount++
-		// After the first "record" call, advance by 20ms.
-		if callCount > 1 {
-			return t0.Add(20 * time.Millisecond)
-		}
-		return t0
-	}
-	d := notify.NewWithClock([]sdk.Notifier{n}, 100, 10*time.Millisecond, nil, clk)
+	now := t0
+	d := notify.NewWithClock([]sdk.Notifier{n}, 100, 10*time.Millisecond, nil, func() time.Time { return now })
 
 	msg := makeMsg("warn", "expiry")
 	_ = d.Send(context.Background(), msg) // recorded at t0
-	_ = d.Send(context.Background(), msg) // clock now returns t0+20ms > window → allowed
+	now = t0.Add(20 * time.Millisecond)   // past the 10 ms window
+	_ = d.Send(context.Background(), msg) // allowed again
 
 	if got := n.sends.Load(); got != 2 {
 		t.Errorf("expected 2 sends after dedup window expired, got %d", got)

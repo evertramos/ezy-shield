@@ -101,6 +101,21 @@ strikes, missing history, and store errors all fail safe to "not exempt".
 Escalations outside the window are not dropped — they count against the cap
 like any fresh ban.
 
+## Amendment (2026-09-10): volume trigger inside the grace (issue #586)
+
+The `ban_ineffective` diagnostic only counted suppressed events **after**
+`ban_ineffective_grace`. The grace exists to absorb enforcer latency and
+in-flight requests — but a banned IP that serves 1,443 requests in the 71 s
+after its ban (observed on the dogfood host) is not latency, and it produced
+no diagnostic because it fit inside the 90 s. A second trigger now fires
+the same once-per-ban compare-and-set when the in-grace count reaches
+`ban_ineffective_min_events_in_grace` (default 200, `0` disables). The
+firing carries a `phase` (`post_grace` / `in_grace`) because the remedies
+differ: post-grace is the edge / real-IP / broken-enforcer family; in-grace
+points to an already-established connection still being served (HTTP/2,
+keep-alive) or the enforcer applying the entry late. Armed-only, like the
+original trigger.
+
 ## Consequences
 
 - The 1→5-in-seconds runaway is structurally impossible: rung advances require

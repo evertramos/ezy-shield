@@ -4,6 +4,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/netip"
@@ -73,6 +74,9 @@ type daemonStore interface {
 	ExpireBans(ctx context.Context, now time.Time) (int, error)
 	Unban(ctx context.Context, ip netip.Addr) error
 	UnbanPrefix(ctx context.Context, prefix netip.Prefix) (int, error)
+	// UnbanCovered removes every active ban prefix covers, audits each as
+	// an unban with reason, and returns the addresses lifted (issue #608).
+	UnbanCovered(ctx context.Context, prefix netip.Prefix, reason string) ([]netip.Addr, error)
 	AuditOp(ctx context.Context, op string, prefix netip.Prefix, ttl time.Duration, reason string) error
 	// Arm/disarm support (issue #228): persisted runtime state + system audits.
 	SetState(ctx context.Context, key, value string) error
@@ -152,6 +156,12 @@ type Config struct {
 	// 0 = default 24h with a jittered first run). See maintenance.go
 	// (issue #184).
 	MaintenanceTick time.Duration
+	// Now overrides the daemon clock (tests / integration harness; nil =
+	// time.Now). It is propagated to the decision engine and, when the
+	// store supports it, to the store, so every timing rule — hourly
+	// counter buckets, re-check deadlines, ban TTLs, grace windows — moves
+	// on one virtual clock.
+	Now func() time.Time
 	// SSHRecheckTick / SSHRecheckDelay override the deferred anti-lockout
 	// re-evaluation poll interval and refusal→re-check delay (tests only;
 	// 0 = defaults). See sshrecheck.go (issue #420).
@@ -260,6 +270,8 @@ type Daemon struct {
 	// re-evaluation (0 = defaults; see sshrecheck.go, issue #420).
 	sshRecheckTick  time.Duration
 	sshRecheckDelay time.Duration
+	// now is the daemon clock (see Config.Now); nil = time.Now.
+	now func() time.Time
 	// siemEmit / siemTailTick drive the SIEM audit tail (issue #203;
 	// see siem.go). siemEmit nil = forwarding disabled.
 	siemEmit     func(siem.Event)
@@ -269,6 +281,9 @@ type Daemon struct {
 	// Empty maps = no long-window rules loaded (feature dormant).
 	longRuleWindows map[time.Duration][]string
 	longKinds       map[string]bool
+	// longFieldKinds is the parser kinds long-window field rules match on
+	// (issue #585) — the hot-path prefilter for LongCounterKinds.
+	longFieldKinds map[string]bool
 	// retention, when non-nil, enables the daily prune job (issue #184;
 	// built in New from cfg.Retention). maintenanceTick overrides the
 	// interval in tests (0 = default 24h, jittered first run).
@@ -303,6 +318,10 @@ type Daemon struct {
 	// sshRecheck holds the per-IP deferred re-checks armed after SSH-peer
 	// anti-lockout refusals that suppressed a would-be ban (issue #420).
 	sshRecheck sshRecheckQueue
+	// gatedBanRetry holds the per-IP deferred enforcement retries armed when
+	// the enforce-side gate refused a ban the store already holds (issue
+	// #583). Same queue type and cadence as sshRecheck; see gatedban.go.
+	gatedBanRetry sshRecheckQueue
 	// ineffDedup deduplicates ban_ineffective notifications systemically
 	// (ADR-0009 §4, issue #146).
 	ineffDedup ineffDedup
@@ -439,9 +458,15 @@ func New(dcfg Config) (*Daemon, error) {
 	longKinds := map[string]bool{}
 	for _, kinds := range longRuleWindows {
 		for _, k := range kinds {
-			longKinds[k] = true
+			if !rules.IsLongCounterKind(k) {
+				longKinds[k] = true
+			}
 		}
 	}
+	// Parser kinds that long-window FIELD rules match on (issue #585): an
+	// event of one of these kinds is run through those rules' matchers on
+	// the hot path and, on a hit, counted under the rule's own counter kind.
+	longFieldKinds := ruleEng.LongFieldEventKinds()
 
 	maxIPs := dcfg.MaxIPs
 	if maxIPs <= 0 {
@@ -453,15 +478,30 @@ func New(dcfg Config) (*Daemon, error) {
 	decEng, err := decision.New(dcfg.Policy, dcfg.Store)
 	if err == nil && dcfg.Policy != nil && dcfg.Policy.RequireAuthenticatedPeer() {
 		// ADR-0013 (issue #560): narrow SSH-peer immunity to authenticated
-		// peers (logind-verified, fail-open). Installed at the probe source
-		// so both immunity layers (engine + enforcement gate) see it.
+		// peers (logind-verified, fail-open). Installed in BOTH immunity
+		// layers from one filter: the decision engine here, and the
+		// enforcement gate through its SSHPeerProbeSetter facet (issue
+		// #583) — a gate left on the raw kernel probe would refuse to apply
+		// exactly the bans the narrowed engine commits.
 		filter := decision.NewAuthenticatedPeerFilter(
 			decision.ProcSSHPeers, decision.NewLogindSessionProbe(), decision.AuthPeerGraceWindow)
 		decEng.SetSSHPeerProbe(filter.Peers)
+		if s, ok := dcfg.Enforcer.(enforce.SSHPeerProbeSetter); ok {
+			s.SetSSHPeerProbe(filter.Peers)
+		} else if dcfg.Enforcer != nil {
+			slog.Warn("daemon: enforcement gate does not accept the authenticated-peer probe — gate keeps ESTABLISHED-only immunity",
+				"enforcer", dcfg.Enforcer.Name())
+		}
 		slog.Info("daemon: anti-lockout authenticated-peer mode ON (ADR-0013) — logind failures fall back to ESTABLISHED-only immunity")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("daemon: decision engine: %w", err)
+	}
+	if dcfg.Now != nil {
+		decEng.SetClock(dcfg.Now)
+		if c, ok := dcfg.Store.(interface{ SetClock(func() time.Time) }); ok {
+			c.SetClock(dcfg.Now)
+		}
 	}
 
 	socketPath := dcfg.SocketPath
@@ -495,6 +535,7 @@ func New(dcfg Config) (*Daemon, error) {
 		expireTick:      dcfg.ExpireTick,
 		sshRecheckTick:  dcfg.SSHRecheckTick,
 		sshRecheckDelay: dcfg.SSHRecheckDelay,
+		now:             dcfg.Now,
 		metrics:         newDaemonMetrics(dcfg.Version),
 		siemEmit:        dcfg.SIEMEmit,
 		siemTailTick:    dcfg.SIEMTailTick,
@@ -508,6 +549,7 @@ func New(dcfg Config) (*Daemon, error) {
 		feedStatus:       map[string]FeedStatusEntry{},
 		longRuleWindows:  longRuleWindows,
 		longKinds:        longKinds,
+		longFieldKinds:   longFieldKinds,
 		maintenanceTick:  dcfg.MaintenanceTick,
 		execActivity:     dcfg.ExecActivity,
 		webshellActivity: dcfg.WebshellActivity,
@@ -528,6 +570,8 @@ func New(dcfg Config) (*Daemon, error) {
 	}
 	// The store-sourced active-bans gauge (issue #183) — evaluated only at
 	// scrape time, never on the hot path.
+	// The notifier drop counter is independent of the AI layer (#613).
+	d.registerNotifyDroppedGauge()
 	d.registerActiveBansGauge()
 
 	// Enforcement-anomaly delivery (ADR-0009 §4, issue #146): the engine
@@ -693,7 +737,7 @@ func (d *Daemon) Run(parentCtx context.Context) error {
 
 	// Settle an arm window whose deadline passed while the daemon was down,
 	// then keep watching it (issue #228).
-	d.checkArmWindow(ctx, time.Now())
+	d.checkArmWindow(ctx, d.clock())
 	go d.runArmWindow(ctx)
 
 	// Keep the enforcement state fresh on quiet hosts (issue #174).
@@ -951,9 +995,23 @@ func (d *Daemon) processRaw(ctx context.Context, raw sdk.RawLine) {
 		// high-volume HTTP traffic never touches the counter table.
 		longRelevant := d.longKinds[ev.Kind]
 		if longRelevant {
-			if err := d.store.IncrEventCount(ctx, ev.SourceIP, ev.Kind, store.HourBucket(time.Now())); err != nil {
+			if err := d.store.IncrEventCount(ctx, ev.SourceIP, ev.Kind, store.HourBucket(d.clock())); err != nil {
 				slog.WarnContext(ctx, "daemon: event counter increment failed",
 					"ip", ev.SourceIP, "kind", ev.Kind, "err", err)
+			}
+		}
+		// Long-window field-level rules (issue #585): the rule's matcher
+		// runs here — a few substring checks, no I/O — and only a HIT is
+		// counted, under the rule's own counter kind. An HTTP request that
+		// matches nothing never touches the counter table nor triggers a
+		// long-window query.
+		if d.longFieldKinds[ev.Kind] {
+			for _, ck := range d.ruleEng.LongCounterKinds(ev) {
+				if err := d.store.IncrEventCount(ctx, ev.SourceIP, ck, store.HourBucket(d.clock())); err != nil {
+					slog.WarnContext(ctx, "daemon: event counter increment failed",
+						"ip", ev.SourceIP, "kind", ck, "err", err)
+				}
+				longRelevant = true
 			}
 		}
 
@@ -1138,7 +1196,7 @@ func (d *Daemon) aiEligible(ctx context.Context, ip netip.Addr, highScore int) b
 // collectAIAggregates snapshots the IP's aggregates for all windows, with
 // enrichment when available.
 func (d *Daemon) collectAIAggregates(ip netip.Addr) []sdk.Aggregate {
-	now := time.Now()
+	now := d.clock()
 	windows := d.agg.Windows()
 	aggs := make([]sdk.Aggregate, 0, len(windows))
 	for _, w := range windows {
@@ -1287,7 +1345,7 @@ func (d *Daemon) parse(raw sdk.RawLine) ([]sdk.Event, error) {
 // context is long-window-relevant (an SSH-kind event, an SSH re-check) so the
 // per-event hot path never runs counter queries for high-volume HTTP kinds.
 func (d *Daemon) evaluateRules(ctx context.Context, ip netip.Addr, withLong bool) []sdk.Verdict {
-	now := time.Now()
+	now := d.clock()
 	var verdicts []sdk.Verdict
 	for _, w := range d.agg.Windows() {
 		agg := d.agg.Aggregate(ip, w, now)
@@ -1367,6 +1425,15 @@ func (d *Daemon) dispatch(ctx context.Context, action sdk.Action) {
 	d.publishActionEvent(action.Op, action.IP.String(), action.Strike,
 		action.TTL, action.Reason, "pipeline")
 
+	// A strike consumes the in-memory evidence that earned it (issue #621):
+	// the next rung needs new threshold-crossing evidence, not a benign
+	// request arriving after the ban expired with the old hour still in
+	// the window. Dry-run mirrors it — the simulated ladder must escalate
+	// exactly like the armed one.
+	if action.Op == "ban" || action.Op == "dry_ban" {
+		d.agg.Reset(action.IP)
+	}
+
 	banApplied := false
 	if action.Op == "ban" && d.enforcer != nil {
 		t := sdk.Target{IP: action.IP, TTL: action.TTL}
@@ -1379,14 +1446,22 @@ func (d *Daemon) dispatch(ctx context.Context, action sdk.Action) {
 		d.enforceMu.Lock()
 		err := d.enforcer.Ban(ctx, t)
 		d.enforceMu.Unlock()
-		if err != nil {
-			slog.ErrorContext(ctx, "daemon: enforcer ban failed", "ip", action.IP, "err", err)
-			d.notifyCritical(ctx, fmt.Sprintf("enforcer ban failed for %s: %v", action.IP, err))
-		} else {
+		switch {
+		case err == nil:
 			banApplied = true
+		case errors.Is(err, enforce.ErrGateRefused):
+			// Not an enforcer failure: the allowlist/anti-lockout gate did
+			// its job, and it already audited the refusal. But Decide has
+			// committed this ban to the store, so the entry is stranded
+			// until enforcement is retried — defer it (issue #583).
+			d.deferGatedBan(ctx, action.IP, err)
+		default:
+			slog.ErrorContext(ctx, "daemon: enforcer ban failed", "ip", action.IP, "err", err)
+			d.notifyEnforcerFailure(ctx, action.IP, err)
 		}
 		// Enforcement-state health (issue #174): a failed ban flips the
-		// daemon to DEGRADED so status/doctor stop claiming protection.
+		// daemon to DEGRADED so status/doctor stop claiming protection
+		// (a gate refusal is exempt inside).
 		d.recordEnforceResult(ctx, "ban", err)
 	}
 	d.recordActionMetrics(action, banApplied)
@@ -1462,6 +1537,13 @@ func (d *Daemon) reloadAllowlist(ctx context.Context) error {
 	d.mu.Lock()
 	d.runtimeAllowlist = prefixes
 	d.mu.Unlock()
+	// The enforcement gate refuses on the runtime allowlist too (issue
+	// #608): a reconcile must never re-apply a ban the operator lifted with
+	// `allow`, and a manual/ pipeline ban of an allowed address is refused
+	// at the last step as well as the first.
+	if g, ok := d.enforcer.(enforce.ExtraAllowlister); ok {
+		g.SetExtraAllowlist(prefixes)
+	}
 	return nil
 }
 
@@ -1489,6 +1571,12 @@ func (d *Daemon) syncEnforcer(ctx context.Context) error {
 	targets := make([]sdk.Target, 0, len(bans))
 	for _, b := range bans {
 		if b.Op != "ban" {
+			continue
+		}
+		// Runtime-allowed addresses are never part of the desired state
+		// (issue #608): `allow` lifts their rows, but a row that raced the
+		// allow — or an older store — must not be re-applied by reconcile.
+		if d.isRuntimeAllowlisted(b.IP) {
 			continue
 		}
 		targets = append(targets, sdk.Target{IP: b.IP, TTL: b.TTL})
@@ -1645,12 +1733,6 @@ func unionPrefixes(a, b []netip.Prefix) []netip.Prefix {
 // and prunes persistent long-window counter buckets past the longest long
 // window (issue #134) so events_agg can never grow unbounded.
 func (d *Daemon) runFlush(ctx context.Context) {
-	var longest time.Duration
-	for w := range d.longRuleWindows {
-		if w > longest {
-			longest = w
-		}
-	}
 	t := time.NewTicker(flushInterval)
 	defer t.Stop()
 	for {
@@ -1658,15 +1740,31 @@ func (d *Daemon) runFlush(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case now := <-t.C:
-			d.agg.Flush(ctx, now.Add(-d.agg.Windows()[len(d.agg.Windows())-1]))
-			if longest > 0 {
-				// One extra hour of slack keeps the boundary bucket whole.
-				if n, err := d.store.PruneEventCounts(ctx, store.HourBucket(now.Add(-longest-time.Hour))); err != nil {
-					slog.WarnContext(ctx, "daemon: event counter prune failed", "err", err)
-				} else if n > 0 {
-					slog.DebugContext(ctx, "daemon: pruned event counter buckets", "rows", n)
-				}
-			}
+			d.flushAggregates(ctx, now)
+		}
+	}
+}
+
+// flushAggregates is one flush tick: evict in-memory events no rule can
+// still see, and prune persistent counter buckets past the longest long
+// window (one extra hour of slack keeps the boundary bucket whole).
+func (d *Daemon) flushAggregates(ctx context.Context, now time.Time) {
+	// The cutoff is the LONGEST in-memory window (issue #610). Windows()
+	// is in rule order; the last entry happened to be the mail rules'
+	// 300 s, so every hourly *_sustained rule saw at most one flush
+	// interval of history and a 1-per-5-minutes attacker was invisible.
+	d.agg.Flush(ctx, now.Add(-d.agg.MaxWindow()))
+	var longest time.Duration
+	for w := range d.longRuleWindows {
+		if w > longest {
+			longest = w
+		}
+	}
+	if longest > 0 {
+		if n, err := d.store.PruneEventCounts(ctx, store.HourBucket(now.Add(-longest-time.Hour))); err != nil {
+			slog.WarnContext(ctx, "daemon: event counter prune failed", "err", err)
+		} else if n > 0 {
+			slog.DebugContext(ctx, "daemon: pruned event counter buckets", "rows", n)
 		}
 	}
 }
@@ -1756,6 +1854,14 @@ func (d *Daemon) notifyPanic(ctx context.Context, source, msg string) {
 	})
 }
 
+// clock returns the daemon clock (Config.Now, or time.Now).
+func (d *Daemon) clock() time.Time {
+	if d.now != nil {
+		return d.now()
+	}
+	return time.Now()
+}
+
 // notifyCritical sends a critical system notification.
 func (d *Daemon) notifyCritical(ctx context.Context, msg string) {
 	if d.notifier == nil {
@@ -1765,6 +1871,25 @@ func (d *Daemon) notifyCritical(ctx context.Context, msg string) {
 		Severity: "critical",
 		Title:    msg,
 		Body:     msg,
+	})
+}
+
+// notifyEnforcerFailure reports a ban the enforcer could not apply. The
+// notification is SYSTEMIC, not per IP (issue #613): during an enforcer
+// outage every ban fails, and a title carrying the IP made each failure a
+// distinct critical that flooded the channel quota — the one alert that
+// mattered, the DEGRADED transition, was dropped behind them. The IP stays
+// in the body; the dedup key (severity+title) folds repeats within the
+// dedup window into the first one. The per-IP detail is in the ERROR log
+// and, for the enforcement state, in the audit trail.
+func (d *Daemon) notifyEnforcerFailure(ctx context.Context, ip netip.Addr, err error) {
+	if d.notifier == nil {
+		return
+	}
+	_ = d.notifier.Send(ctx, sdk.Notification{
+		Severity: "critical",
+		Title:    "enforcer ban failed — bans may not be applied; check the enforcer",
+		Body:     fmt.Sprintf("first failing target %s: %v (repeats within the dedup window are folded into this alert)", ip, err),
 	})
 }
 

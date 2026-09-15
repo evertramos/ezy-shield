@@ -208,6 +208,16 @@ collectors: []
 #   ai_usage: 90d              # AI cost accounting (floor 7d)
 #   i_understand_the_risks: false      # allow windows below the floors (never below 24h)
 #   audit_export_not_required: false   # acknowledge audit rows are deleted with no export
+# Docker Engine API endpoint, shared by the docker log collectors, the exec
+# watcher and evidence extraction. Absent = unix:///var/run/docker.sock, which
+# requires the service user in the root-equivalent 'docker' group. Point it at
+# a filtering read-only proxy instead (published on loopback) to keep the
+# daemon out of that group. Verify with 'ezyshield doctor'.
+# Docs: reference/config, guides/docker-nginx-wordpress.
+# docker:
+#   host: tcp://127.0.0.1:2375
+#   # allow_remote: true       # accept a non-loopback tcp host (root-equivalent
+#                              # to anyone who reaches it; plaintext, no auth)
 # Docker exec activity watcher (issue #220) — post-exploitation visibility.
 # Observational ONLY: a `docker exec` into a container is audited, shown in
 # `ezyshield watch`, and notified (warn) — never a ban source (there is

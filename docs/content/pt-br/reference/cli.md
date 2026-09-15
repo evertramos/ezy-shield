@@ -126,6 +126,19 @@ Flags:
   escritos, mas não conseguem ler os logs dos containers. O `ezyshield doctor`
   avisa sempre que o usuário de serviço está no grupo. Para revogar:
   `sudo gpasswd -d ezyshield docker && sudo systemctl restart ezyshield`.
+- `--docker-host <endpoint>` — a alternativa restrita a esse grupo: aponta os
+  coletores docker, o observador de exec e a extração de evidências para um
+  **proxy somente-leitura com filtro** na frente do socket do Engine, por
+  exemplo `--docker-host tcp://127.0.0.1:2375`. Ela escreve `docker.host` no
+  `config.yaml` (chave do arquivo de respostas: `collectors.docker_host`) e não
+  concede nada ao usuário de serviço. `--docker-host` e `--docker-group` são
+  **mutuamente exclusivas** — o proxy substitui o grupo, não o acompanha. Um
+  endpoint `tcp://` precisa ser um endereço de loopback. O `init` nunca inicia o
+  proxy (isso é uma mudança na sua própria stack): ele imprime o trecho de
+  compose para você rodar e deixa a verificação para o `ezyshield doctor`. No
+  modo interativo, o assistente oferece três caminhos em ordem de privilégio —
+  um arquivo de log no host lido por um coletor `kind: file`, esse proxy, ou o
+  grupo `docker` — e pré-seleciona o de menor privilégio que se aplica.
 - `--admin-ips`, `--monitor-ssh`, `--enable-ai`, `--ai-provider`, `--ai-model`,
   `--ai-key-env` — sobrescritas por resposta para o caminho não-interativo. O
   `--ai-key-env` recebe um **NOME** de variável de ambiente, nunca a chave em
@@ -700,6 +713,14 @@ Verificações:
   grupo `docker` — esse grupo é equivalente a root no host, então a dica diz se
   os coletores configurados justificam isso ou se deve ser revogado
   (`gpasswd -d ezyshield docker`); **N/A** quando o host não tem o grupo `docker`
+- endpoint docker (quando o `docker.host` é um endpoint `tcp://`; **N/A** para
+  um socket unix, onde a verificação de socket acima já cobre): duas
+  verificações — *alcançável* (**PASS** quando `GET /_ping` responde 200) e
+  *somente-leitura* (**PASS** quando `POST /containers/create` é recusado,
+  **FAIL** quando o endpoint o aceita, o que significa acesso equivalente a
+  root a este host pela rede). Ambas as sondagens têm timeout e nunca imprimem
+  o corpo da resposta. O corpo da sondagem não nomeia imagem alguma, então nada
+  é criado.
 - permissões do arquivo de segredos `.env`
 - amplitude da allowlist: **WARN** (não FAIL) quando a allowlist do
   `policy.yaml` contém uma faixa privada (RFC1918/ULA) `/16` ou mais ampla —

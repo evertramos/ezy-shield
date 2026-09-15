@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -97,11 +98,12 @@ func dockerEvidenceFrame(streamType byte, payload string) []byte {
 }
 
 // startEvidenceDockerAPI serves GET /containers/<name>/logs on a unix socket
-// with the given status and body, recording the request URL. Unlike the
-// collector's mock it completes the response (no follow semantics).
-func startEvidenceDockerAPI(t *testing.T, status int, body []byte) (sockPath string, gotURL *string) {
+// with the given status and body, recording the request URL. It returns the
+// endpoint in docker.host syntax. Unlike the collector's mock it completes
+// the response (no follow semantics).
+func startEvidenceDockerAPI(t *testing.T, status int, body []byte) (host string, gotURL *string) {
 	t.Helper()
-	sockPath = filepath.Join(t.TempDir(), "docker.sock")
+	sockPath := filepath.Join(t.TempDir(), "docker.sock")
 	gotURL = new(string)
 
 	lc := &net.ListenConfig{}
@@ -124,7 +126,7 @@ func startEvidenceDockerAPI(t *testing.T, status int, body []byte) (sockPath str
 		defer cancel()
 		_ = srv.Shutdown(ctx)
 	})
-	return sockPath, gotURL
+	return "unix://" + sockPath, gotURL
 }
 
 func TestEvidenceFromDocker_Match(t *testing.T) {
@@ -132,9 +134,9 @@ func TestEvidenceFromDocker_Match(t *testing.T) {
 		dockerEvidenceFrame(1, "2026-07-13T10:00:01Z 203.0.113.7 - - \"GET /wp-login.php\" 404\r\n"),
 		dockerEvidenceFrame(2, "2026-07-13T10:00:02Z 198.51.100.9 - - \"GET /\" 200\n2026-07-13T10:00:03Z error from 203.0.113.7 upstream\n")...,
 	)
-	sock, gotURL := startEvidenceDockerAPI(t, http.StatusOK, payload)
+	host, gotURL := startEvidenceDockerAPI(t, http.StatusOK, payload)
 
-	ev := evidenceFromDocker(context.Background(), sock, "web", netip.MustParseAddr("203.0.113.7"))
+	ev := evidenceFromDocker(context.Background(), host, "web", netip.MustParseAddr("203.0.113.7"))
 	if ev.Source != "docker:web" {
 		t.Errorf("source: got %q, want docker:web", ev.Source)
 	}
@@ -155,9 +157,9 @@ func TestEvidenceFromDocker_Match(t *testing.T) {
 }
 
 func TestEvidenceFromDocker_ContainerNotFound(t *testing.T) {
-	sock, _ := startEvidenceDockerAPI(t, http.StatusNotFound, []byte(`{"message":"No such container"}`))
+	host, _ := startEvidenceDockerAPI(t, http.StatusNotFound, []byte(`{"message":"No such container"}`))
 
-	ev := evidenceFromDocker(context.Background(), sock, "gone", netip.MustParseAddr("203.0.113.7"))
+	ev := evidenceFromDocker(context.Background(), host, "gone", netip.MustParseAddr("203.0.113.7"))
 	if !strings.Contains(ev.Note, "container not found") {
 		t.Errorf("want not-found note, got %+v", ev)
 	}
@@ -167,11 +169,50 @@ func TestEvidenceFromDocker_ContainerNotFound(t *testing.T) {
 }
 
 func TestEvidenceFromDocker_SocketUnreachable(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "no-such.sock")
+	host := "unix://" + filepath.Join(t.TempDir(), "no-such.sock")
 
-	ev := evidenceFromDocker(context.Background(), sock, "web", netip.MustParseAddr("203.0.113.7"))
-	if !strings.Contains(ev.Note, "socket unreachable") {
+	ev := evidenceFromDocker(context.Background(), host, "web", netip.MustParseAddr("203.0.113.7"))
+	if !strings.Contains(ev.Note, "endpoint unreachable") {
 		t.Errorf("want unreachable note, got %+v", ev)
+	}
+}
+
+// TestEvidenceFromDocker_UnusableHost: an endpoint the config layer would
+// have rejected must degrade to a note, never silently fall back to the
+// default socket, and never echo the offending value into the report.
+func TestEvidenceFromDocker_UnusableHost(t *testing.T) {
+	ev := evidenceFromDocker(context.Background(), "ssh://docker@192.0.2.10", "web",
+		netip.MustParseAddr("203.0.113.7"))
+	if !strings.Contains(ev.Note, "not usable") {
+		t.Errorf("want an endpoint note, got %+v", ev)
+	}
+	if strings.Contains(ev.Note, "192.0.2.10") {
+		t.Errorf("the endpoint value must not be echoed into the report: %q", ev.Note)
+	}
+	if len(ev.Lines) != 0 {
+		t.Errorf("no lines expected, got %q", ev.Lines)
+	}
+}
+
+// TestEvidenceFromDocker_OverTCP: the same extraction through a read-only
+// socket proxy endpoint (issue #579).
+func TestEvidenceFromDocker_OverTCP(t *testing.T) {
+	payload := dockerEvidenceFrame(1, "2026-07-13T10:00:01Z 203.0.113.7 - - \"GET /wp-login.php\" 404\n")
+
+	var gotURL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotURL = r.URL.String()
+		_, _ = w.Write(payload)
+	}))
+	t.Cleanup(srv.Close)
+
+	ev := evidenceFromDocker(context.Background(), "tcp://"+srv.Listener.Addr().String(), "web",
+		netip.MustParseAddr("203.0.113.7"))
+	if len(ev.Lines) != 1 {
+		t.Fatalf("want 1 matching line, got %d: %q (note %q)", len(ev.Lines), ev.Lines, ev.Note)
+	}
+	if !strings.HasPrefix(gotURL, "/containers/web/logs?") {
+		t.Errorf("unexpected request URL: %q", gotURL)
 	}
 }
 
@@ -181,9 +222,9 @@ func TestEvidenceFromDocker_FrameCapRejected(t *testing.T) {
 	hdr := make([]byte, 8)
 	hdr[0] = 1
 	binary.BigEndian.PutUint32(hdr[4:8], 8*1024*1024)
-	sock, _ := startEvidenceDockerAPI(t, http.StatusOK, hdr)
+	host, _ := startEvidenceDockerAPI(t, http.StatusOK, hdr)
 
-	ev := evidenceFromDocker(context.Background(), sock, "web", netip.MustParseAddr("203.0.113.7"))
+	ev := evidenceFromDocker(context.Background(), host, "web", netip.MustParseAddr("203.0.113.7"))
 	if !strings.Contains(ev.Note, "log stream error") {
 		t.Errorf("want stream-error note, got %+v", ev)
 	}
@@ -195,10 +236,10 @@ func TestEvidenceFromDocker_FrameCapRejected(t *testing.T) {
 func TestEvidenceFromDocker_InvalidNameSkipped(t *testing.T) {
 	// Validation must run before any request: point at a live server and
 	// assert it was never hit.
-	sock, gotURL := startEvidenceDockerAPI(t, http.StatusOK, nil)
+	host, gotURL := startEvidenceDockerAPI(t, http.StatusOK, nil)
 
 	for _, name := range []string{"", "web app", "web/../etc", "web;rm", "-web"} {
-		ev := evidenceFromDocker(context.Background(), sock, name, netip.MustParseAddr("203.0.113.7"))
+		ev := evidenceFromDocker(context.Background(), host, name, netip.MustParseAddr("203.0.113.7"))
 		if ev.Note != "invalid container name; skipped" {
 			t.Errorf("container %q: want validation note, got %+v", name, ev)
 		}

@@ -11,26 +11,16 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
-	"net"
 	"net/http"
 	"time"
 
 	"github.com/evertramos/ezy-shield/pkg/sdk"
 )
 
-// newDockerAPIClient returns an http.Client whose transport dials the Docker
-// engine unix socket. The Host portion of URLs is ignored; the unix transport
-// always dials socketPath.
-func newDockerAPIClient(socketPath string) *http.Client {
-	return &http.Client{
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				d := net.Dialer{}
-				return d.DialContext(ctx, "unix", socketPath)
-			},
-		},
-	}
-}
+// The HTTP transport lives in dockerhost.go (NewDockerAPIClient) so the unix
+// and tcp variants — with their dial/header timeouts and their "never follow
+// a redirect" policy — are defined once and shared with the exec watcher, the
+// daemon's on-demand evidence extraction and doctor.
 
 // runAPI streams the container's stdout+stderr via the Docker Engine API and
 // emits one RawLine per '\n'-terminated line. It retries with exponential
@@ -43,8 +33,9 @@ func newDockerAPIClient(socketPath string) *http.Client {
 // nothing at all is being observed. A persistent connect failure is returned
 // so supervision, the DEGRADED state, the audit row and the critical
 // notification all fire, exactly as they do for journald.
-func (c *DockerCollector) runAPI(ctx context.Context, socketPath, source string, out chan<- sdk.RawLine, logger *slog.Logger) error {
-	client := newDockerAPIClient(socketPath)
+func (c *DockerCollector) runAPI(ctx context.Context, ep DockerEndpoint, source string, out chan<- sdk.RawLine, logger *slog.Logger) error {
+	client := NewDockerAPIClient(ep)
+	defer client.CloseIdleConnections()
 
 	backoff := dockerBackoffBase
 	everConnected := false // at least one 200 response during this Run
@@ -68,7 +59,7 @@ func (c *DockerCollector) runAPI(ctx context.Context, socketPath, source string,
 			if !connected {
 				failures++
 			}
-			if fatal := c.fatalAPIError(socketPath, everConnected, failures, err); fatal != nil {
+			if fatal := c.fatalAPIError(ep.String(), everConnected, failures, err); fatal != nil {
 				return fatal
 			}
 			logger.Warn("docker api: stream ended; retrying",
@@ -102,9 +93,9 @@ func (c *DockerCollector) runAPI(ctx context.Context, socketPath, source string,
 // situation — a short one while the collector has never connected (a socket
 // blip during `systemctl restart docker` still absorbs), a longer one after a
 // stream has worked at least once (a container restarting is normal).
-func (c *DockerCollector) fatalAPIError(socketPath string, everConnected bool, failures int, err error) error {
+func (c *DockerCollector) fatalAPIError(endpoint string, everConnected bool, failures int, err error) error {
 	if errors.Is(err, fs.ErrPermission) {
-		return dockerPermissionError(socketPath, err)
+		return dockerPermissionError(endpoint, err)
 	}
 	limit := maxDockerConnectAttempts
 	if everConnected {

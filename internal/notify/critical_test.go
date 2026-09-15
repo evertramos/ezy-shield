@@ -8,7 +8,10 @@ package notify_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -55,5 +58,56 @@ func TestDispatcher_DroppedCriticalDoesNotConsumeDedup(t *testing.T) {
 	_ = d.Send(context.Background(), makeMsg("critical", "enforcement DEGRADED"))
 	if got := n.sends.Load() - before; got != 1 {
 		t.Fatalf("re-sent critical after the quota freed: delivered %d, want 1 (a dropped send must not record the dedup key)", got)
+	}
+}
+
+// slowNotifier holds each delivery for a while so concurrent sends of the
+// same message overlap in flight.
+type slowNotifier struct {
+	sends atomic.Int32
+	hold  time.Duration
+}
+
+func (s *slowNotifier) Name() string { return "slow" }
+func (s *slowNotifier) Send(_ context.Context, _ sdk.Notification) error {
+	s.sends.Add(1)
+	time.Sleep(s.hold)
+	return nil
+}
+
+// TestDispatcher_ConcurrentSameMessageDeliveredOnce (adversarial review of
+// #613): the dedup check and the claim must be one atomic step, or two
+// goroutines alerting the same enforcer failure both pass the check while
+// the first is still in flight and the message goes out twice — and burns
+// the critical quota twice.
+func TestDispatcher_ConcurrentSameMessageDeliveredOnce(t *testing.T) {
+	n := &slowNotifier{hold: 150 * time.Millisecond}
+	d := notify.New([]sdk.Notifier{n}, 100, time.Hour, nil)
+	msg := makeMsg(notify.SeverityCritical, "enforcement DEGRADED")
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = d.Send(context.Background(), msg)
+		}()
+	}
+	wg.Wait()
+	if got := n.sends.Load(); got != 1 {
+		t.Fatalf("delivered %d times, want exactly 1", got)
+	}
+}
+
+// TestDispatcher_FailedSendReleasesClaim: a send that no channel delivered
+// gives the dedup window back, so the next attempt is not suppressed.
+func TestDispatcher_FailedSendReleasesClaim(t *testing.T) {
+	n := &stubNotifier{name: "n", retErr: errors.New("boom")}
+	d := notify.New([]sdk.Notifier{n}, 100, time.Hour, nil)
+	msg := makeMsg(notify.SeverityCritical, "enforcement DEGRADED")
+	_ = d.Send(context.Background(), msg)
+	n.retErr = nil
+	_ = d.Send(context.Background(), msg)
+	if got := n.sends.Load(); got != 2 {
+		t.Fatalf("second attempt after a failed one was suppressed: sends=%d, want 2", got)
 	}
 }

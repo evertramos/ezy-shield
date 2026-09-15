@@ -570,6 +570,8 @@ func New(dcfg Config) (*Daemon, error) {
 	}
 	// The store-sourced active-bans gauge (issue #183) — evaluated only at
 	// scrape time, never on the hot path.
+	// The notifier drop counter is independent of the AI layer (#613).
+	d.registerNotifyDroppedGauge()
 	d.registerActiveBansGauge()
 
 	// Enforcement-anomaly delivery (ADR-0009 §4, issue #146): the engine
@@ -607,7 +609,6 @@ func New(dcfg Config) (*Daemon, error) {
 		if dcfg.Cfg.AI.Async {
 			d.aiQueue = newAIAsyncQueue(dcfg.Cfg.AI.AsyncQueueSize)
 			d.registerAICleanerGauge()
-			d.registerNotifyDroppedGauge()
 		}
 	}
 

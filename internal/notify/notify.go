@@ -144,7 +144,13 @@ func (d *Dispatcher) AcceptsCritical() bool {
 // suppress the same alert when the quota frees up.
 func (d *Dispatcher) Send(ctx context.Context, msg sdk.Notification) error {
 	key := dedupKey(msg)
-	if d.seenRecently(key) {
+	// Claim the dedup window BEFORE sending, under the lock, so two
+	// concurrent sends of the same message (dispatch and the deferred retry
+	// both alerting an enforcer failure) cannot both pass the check while
+	// one is mid-flight; the claim is released below if no channel
+	// delivered, so a rate-limited or failed send can be retried (#613).
+	claim, ok := d.claimDedup(key)
+	if !ok {
 		slog.DebugContext(ctx, "notify: suppressed duplicate", "key", key)
 		return nil
 	}
@@ -172,8 +178,8 @@ func (d *Dispatcher) Send(ctx context.Context, msg sdk.Notification) error {
 		}
 		delivered = true
 	}
-	if delivered {
-		d.recordDedup(key)
+	if !delivered {
+		d.releaseDedup(key, claim)
 	}
 	if len(errs) == 1 {
 		return fmt.Errorf("notify: %s", errs[0])
@@ -184,21 +190,17 @@ func (d *Dispatcher) Send(ctx context.Context, msg sdk.Notification) error {
 	return nil
 }
 
-// seenRecently reports whether key was delivered within the dedup window.
-// It records nothing: only a delivered message claims the window
-// (recordDedup), so a rate-limited or failed send can be retried.
-func (d *Dispatcher) seenRecently(key string) bool {
-	d.dedupMu.Lock()
-	defer d.dedupMu.Unlock()
-	last, ok := d.dedup[key]
-	return ok && d.now().Sub(last) < d.dedupWindow
-}
-
-// recordDedup stamps key as delivered now.
-func (d *Dispatcher) recordDedup(key string) {
+// claimDedup atomically checks and claims the dedup window for key: false
+// when key was delivered (or is being delivered) within the window;
+// otherwise the window is stamped now and the stamp returned so the caller
+// can release it if nothing is delivered.
+func (d *Dispatcher) claimDedup(key string) (time.Time, bool) {
 	d.dedupMu.Lock()
 	defer d.dedupMu.Unlock()
 	now := d.now()
+	if last, ok := d.dedup[key]; ok && now.Sub(last) < d.dedupWindow {
+		return time.Time{}, false
+	}
 	d.dedup[key] = now
 	// GC: prune expired entries when the map grows large to bound memory.
 	if len(d.dedup) > 10000 {
@@ -208,6 +210,17 @@ func (d *Dispatcher) recordDedup(key string) {
 				delete(d.dedup, k)
 			}
 		}
+	}
+	return now, true
+}
+
+// releaseDedup gives the window back when no channel delivered — only if
+// the stamp is still ours (a newer claim by a concurrent sender stands).
+func (d *Dispatcher) releaseDedup(key string, claim time.Time) {
+	d.dedupMu.Lock()
+	defer d.dedupMu.Unlock()
+	if last, ok := d.dedup[key]; ok && last.Equal(claim) {
+		delete(d.dedup, key)
 	}
 }
 

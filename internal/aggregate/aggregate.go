@@ -186,6 +186,19 @@ func (a *Aggregator) Aggregate(ip netip.Addr, window time.Duration, now time.Tim
 	}
 }
 
+// Reset drops every retained event of ip. The daemon calls it when a strike
+// is recorded for ip (issue #621): the events that earned the strike are
+// consumed by it, so once the ban expires only NEW evidence can earn the
+// next rung — otherwise the same hour of history re-fired the hourly rules
+// on the first request after expiry, benign or not, climbing the ladder
+// without any new offence. Long-window counters are not touched: they hold
+// kind-level or rule-matched hits only, which a benign request never adds.
+func (a *Aggregator) Reset(ip netip.Addr) {
+	a.mu.Lock()
+	delete(a.buckets, ip)
+	a.mu.Unlock()
+}
+
 // Flush evicts stale entries and removes IP buckets with no remaining events.
 // cutoff should typically be time.Now().Add(-maxWindow).
 // Call periodically to bound memory growth (e.g. once per maxWindow).

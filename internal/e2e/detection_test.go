@@ -42,3 +42,39 @@ func TestDetection_HourlyTierSurvivesFlush(t *testing.T) {
 		t.Fatalf("kernel blocked set = %v, want %s", s.blocked(), attacker)
 	}
 }
+
+// #621 — evidence that earned a strike is consumed by it. After the 5-minute
+// strike-1 ban expires, a benign request must not turn the same hour of
+// wp-login hits into strike 2; only NEW threshold-crossing evidence may.
+func TestDecision_NoSecondStrikeOnSameEvidence(t *testing.T) {
+	s := start(t, options{armed: true})
+	attacker := netip.MustParseAddr("203.0.113.78")
+
+	for i := 0; i < 10; i++ { // 10 hits in 45 min → hourly tier fires
+		s.httpHit(attacker, "/wp-login.php")
+		s.clock.advance(5 * time.Minute)
+	}
+	first, ok := s.lastAction(attacker, "ban")
+	if !ok || first.Strike != 1 {
+		t.Fatalf("no strike-1 ban: %+v ok=%v", first, ok)
+	}
+	// Ban over (5 min TTL), reaper ran, attacker (or anyone at that IP)
+	// loads the home page once.
+	s.clock.advance(6 * time.Minute)
+	if _, err := s.daemon.ExpireOnce(s.ctx); err != nil {
+		t.Fatal(err)
+	}
+	s.httpHit(attacker, "/")
+	if a, ok := s.lastAction(attacker, "ban"); ok {
+		t.Fatalf("a benign request after the ban expired earned strike %d from evidence already consumed by strike 1: %+v", a.Strike, a)
+	}
+	// Ten NEW hits inside the hour: that is fresh evidence → strike 2.
+	for i := 0; i < 10; i++ {
+		s.httpHit(attacker, "/wp-login.php")
+		s.clock.advance(time.Minute)
+	}
+	second, ok := s.lastAction(attacker, "ban")
+	if !ok || second.Strike != 2 {
+		t.Fatalf("fresh evidence did not earn strike 2: %+v ok=%v", second, ok)
+	}
+}

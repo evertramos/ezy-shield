@@ -1423,6 +1423,15 @@ func (d *Daemon) dispatch(ctx context.Context, action sdk.Action) {
 	d.publishActionEvent(action.Op, action.IP.String(), action.Strike,
 		action.TTL, action.Reason, "pipeline")
 
+	// A strike consumes the in-memory evidence that earned it (issue #621):
+	// the next rung needs new threshold-crossing evidence, not a benign
+	// request arriving after the ban expired with the old hour still in
+	// the window. Dry-run mirrors it — the simulated ladder must escalate
+	// exactly like the armed one.
+	if action.Op == "ban" || action.Op == "dry_ban" {
+		d.agg.Reset(action.IP)
+	}
+
 	banApplied := false
 	if action.Op == "ban" && d.enforcer != nil {
 		t := sdk.Target{IP: action.IP, TTL: action.TTL}

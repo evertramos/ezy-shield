@@ -81,6 +81,17 @@ func (a *Aggregator) Len() int {
 	return len(a.buckets)
 }
 
+// Entries returns the number of raw events retained for ip (tests and
+// observability): the per-IP memory footprint is Entries × event size.
+func (a *Aggregator) Entries(ip netip.Addr) int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if b := a.buckets[ip]; b != nil {
+		return len(b.entries)
+	}
+	return 0
+}
+
 // Windows returns the configured sliding windows, in configuration order
 // (not sorted — use MaxWindow for the eviction horizon).
 func (a *Aggregator) Windows() []time.Duration {

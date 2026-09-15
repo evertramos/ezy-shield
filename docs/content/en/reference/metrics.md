@@ -30,6 +30,7 @@ for a page of writer code.
 | `ezyshield_ai_requests_total` | counter | `provider` | AI analyze calls per provider |
 | `ezyshield_ai_tokens_total` | counter | `provider` | AI tokens consumed (input+output) per provider |
 | `ezyshield_active_bans` | gauge | — | Active bans in the store at scrape time (−1 = store query failed) |
+| `ezyshield_notifications_dropped_total` | gauge (cumulative) | — | Notification deliveries suppressed by a per-channel rate limit since start; a non-zero value during an incident means alerts were lost |
 
 Label cardinality is **bounded by construction**: only enumerable labels
 exist (collector/parser types, operation names, strike levels, enforcer

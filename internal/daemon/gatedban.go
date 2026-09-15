@@ -101,7 +101,7 @@ func (d *Daemon) retryGatedBan(ctx context.Context, it sshRecheckItem) {
 		// A real enforcer failure on the retry path gets the same
 		// treatment the dispatch path gives it: loud, and DEGRADED.
 		slog.ErrorContext(ctx, "daemon: deferred enforcement failed", "ip", ip, "attempt", attempts, "err", err)
-		d.notifyCritical(ctx, fmt.Sprintf("enforcer ban failed for %s: %v", ip, err))
+		d.notifyEnforcerFailure(ctx, ip, err)
 		d.recordEnforceResult(ctx, "ban", err)
 	}
 }

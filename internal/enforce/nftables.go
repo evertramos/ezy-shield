@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/netip"
 	"strings"
@@ -134,7 +135,30 @@ func (e *NftablesEnforcer) Ban(ctx context.Context, t sdk.Target) error {
 	if err != nil {
 		return fmt.Errorf("enforce/nftables Ban: %w", err)
 	}
-	return e.rpc(ctx, Request{Verb: "add", IP: ip, TTLSeconds: int64(t.TTL.Seconds())})
+	return e.rpc(ctx, Request{Verb: "add", IP: ip, TTLSeconds: ttlSeconds(t.TTL)})
+}
+
+// ttlSeconds converts a target's remaining lifetime into the helper's
+// whole-second timeout. 0 stays 0 (permanent — the store's NULL expires_at
+// maps to TTL 0). A positive lifetime rounds UP and never below 1: the
+// previous truncation sent 0 for anything under a second, and 0 means "no
+// timeout" to the helper, so a ban with 600 ms left at reconcile time
+// became a permanent kernel element (issue #615).
+func ttlSeconds(ttl time.Duration) int64 {
+	switch {
+	case ttl == 0:
+		return 0 // permanent (store NULL expires_at)
+	case ttl < 0:
+		// Already elapsed. No caller should hand this over (ActiveBans skips
+		// expired rows), but if one ever does, a one-second element that
+		// the kernel drops on its own is the fail-safe — never permanent.
+		return 1
+	}
+	secs := int64(math.Ceil(ttl.Seconds()))
+	if secs < 1 {
+		secs = 1
+	}
+	return secs
 }
 
 // Unban removes the target from the nftables blocked set via the enforcer helper.
@@ -183,7 +207,7 @@ func (e *NftablesEnforcer) Sync(ctx context.Context, want []sdk.Target) error {
 	for k, t := range wantSet {
 		if !currentSet[k] {
 			slog.InfoContext(ctx, "enforce/nftables Sync: adding", "ip", k)
-			resp, err := e.rpcResp(ctx, Request{Verb: "add", IP: k, TTLSeconds: int64(t.TTL.Seconds())})
+			resp, err := e.rpcResp(ctx, Request{Verb: "add", IP: k, TTLSeconds: ttlSeconds(t.TTL)})
 			if err != nil {
 				return fmt.Errorf("enforce/nftables Sync add %s: %w", k, err)
 			}
@@ -230,7 +254,7 @@ func (e *NftablesEnforcer) Sync(ctx context.Context, want []sdk.Target) error {
 	if removed > 0 {
 		for _, k := range covered {
 			t := wantSet[k]
-			resp, err := e.rpcResp(ctx, Request{Verb: "add", IP: k, TTLSeconds: int64(t.TTL.Seconds())})
+			resp, err := e.rpcResp(ctx, Request{Verb: "add", IP: k, TTLSeconds: ttlSeconds(t.TTL)})
 			if err != nil {
 				return fmt.Errorf("enforce/nftables Sync add %s after stale-interval removal: %w", k, err)
 			}

@@ -78,3 +78,39 @@ func TestDecision_NoSecondStrikeOnSameEvidence(t *testing.T) {
 		t.Fatalf("fresh evidence did not earn strike 2: %+v ok=%v", second, ok)
 	}
 }
+
+// #636 — the persistent long-window counters must also treat evidence as
+// consumed by the strike it earned: after the strike-1 ban expires, ONE
+// more failure must not become strike 2 (ssh_bruteforce_daily, 5/24h);
+// five new failures must.
+func TestDecision_LongWindowNoSecondStrikeOnSameEvidence(t *testing.T) {
+	s := start(t, options{armed: true})
+	attacker := netip.MustParseAddr("203.0.113.79")
+
+	for i := 0; i < 5; i++ { // five failures 30 min apart → daily tier fires on the 5th
+		s.sshBurst(attacker, 1)
+		if i < 4 {
+			s.clock.advance(30 * time.Minute)
+		}
+	}
+	first, ok := s.lastAction(attacker, "ban")
+	if !ok || first.Strike != 1 {
+		t.Fatalf("no strike-1 ban from the daily tier: %+v ok=%v", first, ok)
+	}
+	s.clock.advance(6 * time.Minute)
+	if _, err := s.daemon.ExpireOnce(s.ctx); err != nil {
+		t.Fatal(err)
+	}
+	s.sshBurst(attacker, 1) // one more failure — five old ones are still inside 24 h
+	if a, ok := s.lastAction(attacker, "ban"); ok {
+		t.Fatalf("one failure after the ban expired earned strike %d from evidence already consumed: %+v", a.Strike, a)
+	}
+	for i := 0; i < 5; i++ { // five NEW failures → strike 2
+		s.clock.advance(30 * time.Minute)
+		s.sshBurst(attacker, 1)
+	}
+	second, ok := s.lastAction(attacker, "ban")
+	if !ok || second.Strike != 2 {
+		t.Fatalf("fresh evidence did not earn strike 2: %+v ok=%v", second, ok)
+	}
+}

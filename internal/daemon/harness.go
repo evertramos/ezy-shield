@@ -66,6 +66,13 @@ func (d *Daemon) RunDeferredOnce(ctx context.Context) {
 	}
 }
 
+// Allow runs the `allow` socket verb exactly as the CLI would (store row,
+// runtime allowlist, @allowed mirror, and — issue #608 — lifting any ban
+// the prefix covers). reason is free text; forDur == 0 means permanent.
+func (d *Daemon) Allow(ctx context.Context, target, reason, forDur string) SocketResponse {
+	return d.handleAllow(ctx, SocketRequest{Verb: "allow", IP: target, Reason: reason, For: forDur})
+}
+
 // SetSSHPeerProbe replaces the decision engine's SSH-peer probe (the
 // harness models operator sessions and the ADR-0013 narrowing with it).
 func (d *Daemon) SetSSHPeerProbe(fn func() []netip.Addr) { d.decEng.SetSSHPeerProbe(fn) }

@@ -982,3 +982,31 @@ func TestDispatch_Caps(t *testing.T) {
 		t.Errorf("caps features = %v, want %q present", resp.Features, enforce.FeatureCustomNames)
 	}
 }
+
+// TestInitTable_AllowedAcceptInEveryHook (issue #608): an `accept` in the
+// prerouting hook ends that chain only — the packet still traverses input
+// (local) and forward, so those chains must accept @allowed before dropping
+// @blocked/@feeds too, or the kernel backstop covers no local traffic.
+func TestInitTable_AllowedAcceptInEveryHook(t *testing.T) {
+	s := initTableScript(defaultNames())
+	for _, chain := range []string{"input", "forward"} {
+		block := s[strings.Index(s, "flush chain inet ezyshield "+chain):]
+		if next := strings.Index(block[1:], "add chain "); next > 0 {
+			block = block[:next+1]
+		}
+		allow4 := strings.Index(block, chain+" ip saddr @allowed accept")
+		allow6 := strings.Index(block, chain+" ip6 saddr @allowed6 accept")
+		drop := strings.Index(block, "@blocked drop")
+		feeds := strings.Index(block, "@blocked_feeds drop")
+		if allow4 < 0 || allow6 < 0 {
+			t.Fatalf("%s chain has no @allowed accept rules:\n%s", chain, block)
+		}
+		if drop < 0 || feeds < 0 {
+			t.Fatalf("%s chain lost its drop rules:\n%s", chain, block)
+		}
+		if allow4 > drop || allow6 > drop || allow4 > feeds {
+			t.Errorf("%s chain: @allowed accept must precede every drop (allow4=%d allow6=%d drop=%d feeds=%d)\n%s",
+				chain, allow4, allow6, drop, feeds, block)
+		}
+	}
+}

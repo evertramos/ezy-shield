@@ -137,6 +137,10 @@ func runDoctor(cmd *cobra.Command, configDir, dbPath, socketPath string, jsonOut
 	// issue #213: the systemd units still carry the hardening enforcement
 	// depends on (AF_NETLINK, RuntimeDirectory), plus a functional netlink
 	// probe through the running helper. Read-only; see doctor_units.go.
+	// issue #579: when docker.host is a tcp endpoint, prove it is reachable
+	// AND that it refuses container creation. New function + this single
+	// registration line only -- see doctor_dockerhost.go.
+	checks = append(checks, checkDockerHostEndpoint(doctorCtx, configDir)...)
 	checks = append(checks, checkUnitHardening(doctorCtx)...)
 	checks = append(checks, checkEnforcerNetlinkProbe(enforcerSockPath))
 	// issue #177: ufw/firewalld coexistence + the table-gone-with-active-bans

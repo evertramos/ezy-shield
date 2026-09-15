@@ -20,6 +20,7 @@ Referência completa de `/etc/ezyshield/config.yaml` — fontes de log, backends
 | `rules_path` | string | — | **Deprecated.** Substitui as rules embutidas por inteiro (sem merge; `rules.d` ignorado) — congela a instalação fora do tuning de regras do upstream |
 | `log.level` | string | `info` | `debug` \| `info` \| `warn` \| `error` |
 | `collectors` | lista | `[]` | Fontes de log a acompanhar (veja abaixo). Uma lista vazia é válida — o `config validate` emite um aviso e o daemon simplesmente não acompanha nada. |
+| `docker` | objeto | — | Endpoint da API do Docker Engine usado por todo consumidor docker (veja abaixo). Opcional; ausente significa o socket unix padrão. |
 | `enforce` | objeto | — | Backends de enforcement (opcional — sem ele, as decisões ficam só no log) |
 | `notify` | objeto | — | Canais de notificação (opcional) |
 | `ai` | objeto | — | Provedor de IA para tráfego ambíguo (opcional) |
@@ -82,6 +83,50 @@ o ISO-8601 moderno (`2026-07-13T22:57:35+00:00`).
 > ele alimenta, nunca os dois. Ler ambos ingere cada evento duas vezes, o que
 > conta em dobro para os limiares de detecção. (Um IP já banido nunca é banido de
 > novo, então isso nunca gera bans duplicados, apenas detecção mais cedo.)
+
+## docker
+
+Seleciona o endpoint da API do Docker Engine. Um único endpoint serve todos os
+consumidores docker — os coletores de log docker, o [observador de
+exec](../guides/docker-exec-watch.md) e a extração de evidências sob demanda —
+porque um host roda um engine. Omita a seção inteira para usar o socket unix
+padrão.
+
+```yaml
+docker:
+  host: tcp://127.0.0.1:2375     # um proxy somente-leitura em loopback
+  # allow_remote: false          # aceita um host tcp fora do loopback
+```
+
+| Campo | Tipo | Padrão | Descrição |
+|-------|------|--------|-----------|
+| `host` | string | `unix:///var/run/docker.sock` | `unix:///caminho/absoluto` ou `tcp://host:porta`. Qualquer outro esquema é rejeitado. |
+| `allow_remote` | bool | `false` | Aceita um host `tcp://` que não seja um literal de IP de loopback. |
+
+Isso é uma decisão de privilégio, não um detalhe de conectividade:
+
+- `unix:///var/run/docker.sock` é o próprio engine. Alcançá-lo significa que o
+  usuário de serviço está no grupo `docker`, que é equivalente a root no host.
+- `tcp://127.0.0.1:2375` é para um **proxy somente-leitura com filtro** na
+  frente do engine — ele serve logs e eventos de container e recusa criação de
+  container, exec e mounts. Esse é o caminho restrito, alternativo ao grupo.
+  Veja a [visão geral de segurança](../security/overview.md) e [Docker + nginx
+  + WordPress](../guides/docker-nginx-wordpress.md).
+
+O EzyShield aqui é sempre apenas **cliente**; ele não abre nenhum listener para
+isso. O proxy é um container da sua própria stack.
+
+Um host `tcp://` precisa ser um literal de IP de loopback (`127.0.0.0/8` ou
+`::1`). Nomes — inclusive `localhost` — não são aceitos como loopback, porque o
+que eles resolvem é decidido por `/etc/hosts` e DNS, não por este arquivo.
+Qualquer outro valor é recusado, a não ser com `allow_remote: true`, que aceita
+um endpoint do Engine em texto claro, sem autenticação e alcançável de fora do
+host. TLS para um engine remoto não é suportado.
+
+Verifique um endpoint TCP com `ezyshield doctor`: ele precisa responder
+`GET /_ping` e precisa **recusar** `POST /containers/create`. Um endpoint que
+aceita criação de container concede acesso equivalente a root ao host pela
+rede, e o doctor FALHA nele.
 
 ## enforce
 

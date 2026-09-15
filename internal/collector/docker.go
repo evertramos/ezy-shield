@@ -90,10 +90,28 @@ type DockerCollector struct {
 	// default. Tests set this to a missing path to force the filesystem
 	// fallback without touching the host's real socket.
 	DockerSocketPath string
+	// DockerHost is the configured Engine endpoint in docker.host syntax
+	// (unix:///path or tcp://host:port). When set it wins over
+	// DockerSocketPath; empty means DefaultDockerHost. See dockerhost.go.
+	DockerHost string
 }
 
 // defaultDockerSocketPath is the canonical Docker Engine API endpoint.
 const defaultDockerSocketPath = "/var/run/docker.sock"
+
+// endpoint resolves the Engine endpoint this collector talks to.
+// DockerHost (operator configuration) wins over DockerSocketPath (the unix
+// test hook), and an empty pair means the default socket — so an install
+// that never sets docker.host behaves exactly as it did before.
+func (c *DockerCollector) endpoint() (DockerEndpoint, error) {
+	if c.DockerHost != "" {
+		return ParseDockerHost(c.DockerHost)
+	}
+	if c.DockerSocketPath != "" {
+		return DockerEndpoint{Scheme: "unix", SocketPath: c.DockerSocketPath}, nil
+	}
+	return DockerEndpoint{Scheme: "unix", SocketPath: defaultDockerSocketPath}, nil
+}
 
 // Name returns a stable identity for supervision logs/alerts (issue #305).
 func (c *DockerCollector) Name() string { return "docker:" + c.Container }
@@ -118,28 +136,36 @@ func (c *DockerCollector) Run(ctx context.Context, out chan<- sdk.RawLine) error
 		source = c.Parser + ":" + c.Container
 	}
 
-	socketPath := c.DockerSocketPath
-	if socketPath == "" {
-		socketPath = defaultDockerSocketPath
+	ep, err := c.endpoint()
+	if err != nil {
+		return fmt.Errorf("docker: %w", err)
 	}
-	sock, statErr := isUnixSocket(socketPath)
-	if errors.Is(statErr, fs.ErrPermission) {
-		// The socket exists but its path is closed to us. The filesystem
-		// fallback reads /var/lib/docker, which is closed for the same
-		// reason — falling back would only turn a clear denial into a
-		// second, murkier one (issue #580).
-		return dockerPermissionError(socketPath, statErr)
+	// A tcp endpoint is an explicit operator choice (a read-only socket
+	// proxy): there is no filesystem to fall back to and silently reading
+	// /var/lib/docker instead would defeat the point, so the API path is the
+	// only path. A unix endpoint keeps the historical probe-then-fall-back
+	// behaviour — except on a permission denial (issue #580): the socket
+	// exists but its path is closed to us, and the filesystem fallback reads
+	// /var/lib/docker, which is closed for the same reason, so falling back
+	// would only turn a clear denial into a second, murkier one.
+	useAPI := ep.IsTCP()
+	if !useAPI {
+		sock, statErr := isUnixSocket(ep.SocketPath)
+		if errors.Is(statErr, fs.ErrPermission) {
+			return dockerPermissionError(ep.SocketPath, statErr)
+		}
+		useAPI = sock
 	}
-	if sock {
+	if useAPI {
 		logger.Info("docker: using Engine API",
 			slog.String("container", c.Container),
-			slog.String("socket", socketPath),
+			slog.String("endpoint", ep.String()),
 		)
-		return c.runAPI(ctx, socketPath, source, out, logger)
+		return c.runAPI(ctx, ep, source, out, logger)
 	}
 	logger.Warn("docker: engine socket unavailable, falling back to filesystem tail (see issue #93)",
 		slog.String("container", c.Container),
-		slog.String("socket", socketPath),
+		slog.String("endpoint", ep.String()),
 	)
 
 	backoff := dockerBackoffBase

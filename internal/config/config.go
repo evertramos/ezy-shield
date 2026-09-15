@@ -21,6 +21,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/evertramos/ezy-shield/internal/collector"
 	"github.com/evertramos/ezy-shield/internal/nftnames"
 	"github.com/evertramos/ezy-shield/internal/siem"
 )
@@ -59,6 +60,10 @@ type Config struct {
 	// Retention configures data-retention pruning (issue #184). Absent =
 	// never prune anything. See internal/config/retention.go.
 	Retention *RetentionCfg `yaml:"retention"`
+	// Docker selects the Docker Engine API endpoint every docker consumer
+	// uses (log collectors, exec watcher, evidence extraction). Absent =
+	// the default unix socket, i.e. the historical behaviour.
+	Docker *DockerCfg `yaml:"docker"`
 	// DockerExec enables the docker exec activity watcher (issue #220) —
 	// observational post-exploitation signal; never a ban source.
 	DockerExec *DockerExecCfg `yaml:"docker_exec"`
@@ -178,6 +183,44 @@ type FeedCfg struct {
 	// twice the refresh interval, so entries survive one missed refresh
 	// but drain on their own when a feed dies.
 	TTL Duration `yaml:"ttl,omitempty"`
+}
+
+// DockerCfg selects how EzyShield reaches the Docker Engine API. One
+// endpoint serves every docker consumer — the log collectors, the exec
+// watcher and on-demand evidence extraction — because a host runs one
+// engine.
+//
+// The choice is a privilege decision, not a connectivity detail:
+//
+//   - unix:///var/run/docker.sock (the default) is the engine itself.
+//     Reaching it means the service user is in the 'docker' group, which is
+//     root-equivalent on the host.
+//   - tcp://127.0.0.1:2375 is meant for a filtering, read-only proxy in
+//     front of the engine, which exposes container logs and events while
+//     refusing container creation, exec and mounts. That is the scoped
+//     alternative to the group.
+//
+// EzyShield never opens a listener for this: it is only ever the client
+// (Hard Rule 2). TLS to a remote engine is out of scope.
+type DockerCfg struct {
+	// Host is the endpoint: unix:///absolute/path or tcp://host:port.
+	// Empty means the default unix socket.
+	Host string `yaml:"host"`
+	// AllowRemote accepts a tcp:// host that is not a loopback literal.
+	// Off by default: an Engine endpoint reachable from off-host is
+	// root-equivalent to everyone who can reach it unless it is a
+	// filtering proxy, and the traffic is unauthenticated plaintext.
+	AllowRemote bool `yaml:"allow_remote"`
+}
+
+// DockerHost returns the configured Engine endpoint in docker.host syntax,
+// falling back to the default unix socket. Safe on a nil receiver so
+// call sites can stay unconditional.
+func (c *Config) DockerHost() string {
+	if c == nil || c.Docker == nil || c.Docker.Host == "" {
+		return collector.DefaultDockerHost
+	}
+	return c.Docker.Host
 }
 
 // DockerExecCfg configures the docker exec activity watcher (issue #220).
@@ -755,6 +798,11 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("retention: %w", err)
 		}
 	}
+	if c.Docker != nil {
+		if err := validateDocker(c.Docker); err != nil {
+			return fmt.Errorf("docker: %w", err)
+		}
+	}
 	if c.DockerExec != nil {
 		for i, pat := range c.DockerExec.Ignore {
 			if _, err := path.Match(pat, "probe"); err != nil {
@@ -771,6 +819,35 @@ func (c *Config) Validate() error {
 		if err := validateFeeds(c.Feeds); err != nil {
 			return fmt.Errorf("feeds: %w", err)
 		}
+	}
+	return nil
+}
+
+// validateDocker checks the Engine endpoint. Only unix:// and tcp:// are
+// accepted, and a tcp:// endpoint must be a loopback IP literal unless the
+// operator explicitly accepted the risk with allow_remote — an Engine
+// endpoint reachable off-host is root-equivalent to whoever reaches it
+// unless a filtering proxy stands in front, and nothing in this
+// configuration can prove that one does.
+func validateDocker(d *DockerCfg) error {
+	if d.Host == "" {
+		if d.AllowRemote {
+			return fmt.Errorf("'allow_remote' is set but no 'host' is configured; it only applies to a tcp:// endpoint")
+		}
+		return nil
+	}
+	ep, err := collector.ParseDockerHost(d.Host)
+	if err != nil {
+		return fmt.Errorf("'host': %w", err)
+	}
+	if ep.IsUnix() && d.AllowRemote {
+		return fmt.Errorf("'allow_remote' is set but 'host' is a unix socket; it only applies to a tcp:// endpoint")
+	}
+	if ep.IsTCP() && !ep.IsLoopback() && !d.AllowRemote {
+		return fmt.Errorf("'host': %s is not a loopback address — reaching a Docker Engine endpoint over the network "+
+			"is root-equivalent unless a filtering read-only proxy stands in front of it, and the traffic is "+
+			"unauthenticated plaintext; publish the proxy on 127.0.0.1 instead, or set docker.allow_remote: true "+
+			"to accept the risk", ep.String())
 	}
 	return nil
 }

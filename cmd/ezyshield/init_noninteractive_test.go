@@ -444,6 +444,32 @@ func TestValidateAnswers_TableDriven(t *testing.T) {
 				AdminIPs: []string{"not-an-ip"}}},
 			wantSub: "is not a valid IP or CIDR",
 		},
+		// issue #579: the scoped endpoint and the root-equivalent group are
+		// alternatives; asking for both must fail rather than silently pick.
+		{
+			name: "docker_host and docker_group together",
+			answers: initAnswers{Collectors: answersCollectors{
+				DockerHost: "tcp://127.0.0.1:2375", DockerGroup: true}},
+			wantSub: "mutually exclusive",
+		},
+		{
+			name: "docker_host with an unsupported scheme",
+			answers: initAnswers{Collectors: answersCollectors{
+				DockerHost: "http://127.0.0.1:2375"}},
+			wantSub: "unix:// or tcp://",
+		},
+		{
+			name: "docker_host off loopback",
+			answers: initAnswers{Collectors: answersCollectors{
+				DockerHost: "tcp://192.0.2.10:2375"}},
+			wantSub: "loopback",
+		},
+		{
+			name: "docker_host alone is valid",
+			answers: initAnswers{Collectors: answersCollectors{
+				DockerHost: "tcp://127.0.0.1:2375"}},
+			wantNone: true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -600,6 +600,22 @@
         }
       }
     },
+    "docker": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Docker Engine API endpoint shared by the docker log collectors, the exec watcher and on-demand evidence extraction (issue #579). Absent means the default unix socket. EzyShield is only ever a client here — it opens no listener.",
+      "properties": {
+        "host": {
+          "type": "string",
+          "pattern": "^(unix:///.*|tcp://.+:[0-9]{1,5})$",
+          "description": "unix:///absolute/path or tcp://host:port. A tcp endpoint is meant for a filtering read-only proxy in front of the Engine socket (the scoped alternative to the root-equivalent 'docker' group); it must be a loopback address unless allow_remote is set."
+        },
+        "allow_remote": {
+          "type": "boolean",
+          "description": "Accept a tcp:// host that is not a loopback literal. Off by default: an Engine endpoint reachable off-host is root-equivalent to whoever reaches it unless a filtering proxy stands in front, and the traffic is unauthenticated plaintext."
+        }
+      }
+    },
     "docker_exec": {
       "type": "object",
       "additionalProperties": false,

@@ -155,17 +155,18 @@ func TestDockerGroupPromptNamesTheConsequence(t *testing.T) {
 }
 
 // TestAskQuestions_DockerGroupOptIn drives the real prompt sequence: a
-// detected docker web server produces a docker collector, and the group is
-// granted only when the operator answers y.
+// detected docker web server produces a docker collector, the operator picks
+// the 'docker' group path out of the three offered (issue #579), and the
+// group is granted only when that path is then confirmed with y.
 func TestAskQuestions_DockerGroupOptIn(t *testing.T) {
 	tests := []struct {
 		name  string
-		input string // collector confirm, then the docker-group answer
+		input string // collector confirm, access path, then the docker-group answer
 		want  bool
 	}{
-		{"declined by default (empty answer)", "y\n\n", false},
-		{"declined explicitly", "y\nn\n", false},
-		{"accepted explicitly", "y\ny\n", true},
+		{"declined by default (empty answer)", "y\n3\n\n", false},
+		{"declined explicitly", "y\n3\nn\n", false},
+		{"accepted explicitly", "y\n3\ny\n", true},
 	}
 
 	for _, tc := range tests {

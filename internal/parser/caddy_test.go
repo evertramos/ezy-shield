@@ -318,7 +318,7 @@ func TestCaddyParser_XFF(t *testing.T) {
 		}
 	})
 
-	t.Run("multi-hop XFF: leftmost non-trusted", func(t *testing.T) {
+	t.Run("multi-hop XFF: rightmost non-trusted (all later hops trusted)", func(t *testing.T) {
 		line := sdk.RawLine{
 			Source: "caddy:caddy",
 			Line:   []byte(`{"request":{"remote_ip":"10.0.0.5","method":"GET","uri":"/","host":"x","headers":{"X-Forwarded-For":["203.0.113.7, 10.0.0.99, 10.0.0.5"]}},"status":200,"size":0,"duration":0.001}`),

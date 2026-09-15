@@ -1706,12 +1706,6 @@ func unionPrefixes(a, b []netip.Prefix) []netip.Prefix {
 // and prunes persistent long-window counter buckets past the longest long
 // window (issue #134) so events_agg can never grow unbounded.
 func (d *Daemon) runFlush(ctx context.Context) {
-	var longest time.Duration
-	for w := range d.longRuleWindows {
-		if w > longest {
-			longest = w
-		}
-	}
 	t := time.NewTicker(flushInterval)
 	defer t.Stop()
 	for {
@@ -1719,15 +1713,31 @@ func (d *Daemon) runFlush(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case now := <-t.C:
-			d.agg.Flush(ctx, now.Add(-d.agg.Windows()[len(d.agg.Windows())-1]))
-			if longest > 0 {
-				// One extra hour of slack keeps the boundary bucket whole.
-				if n, err := d.store.PruneEventCounts(ctx, store.HourBucket(now.Add(-longest-time.Hour))); err != nil {
-					slog.WarnContext(ctx, "daemon: event counter prune failed", "err", err)
-				} else if n > 0 {
-					slog.DebugContext(ctx, "daemon: pruned event counter buckets", "rows", n)
-				}
-			}
+			d.flushAggregates(ctx, now)
+		}
+	}
+}
+
+// flushAggregates is one flush tick: evict in-memory events no rule can
+// still see, and prune persistent counter buckets past the longest long
+// window (one extra hour of slack keeps the boundary bucket whole).
+func (d *Daemon) flushAggregates(ctx context.Context, now time.Time) {
+	// The cutoff is the LONGEST in-memory window (issue #610). Windows()
+	// is in rule order; the last entry happened to be the mail rules'
+	// 300 s, so every hourly *_sustained rule saw at most one flush
+	// interval of history and a 1-per-5-minutes attacker was invisible.
+	d.agg.Flush(ctx, now.Add(-d.agg.MaxWindow()))
+	var longest time.Duration
+	for w := range d.longRuleWindows {
+		if w > longest {
+			longest = w
+		}
+	}
+	if longest > 0 {
+		if n, err := d.store.PruneEventCounts(ctx, store.HourBucket(now.Add(-longest-time.Hour))); err != nil {
+			slog.WarnContext(ctx, "daemon: event counter prune failed", "err", err)
+		} else if n > 0 {
+			slog.DebugContext(ctx, "daemon: pruned event counter buckets", "rows", n)
 		}
 	}
 }

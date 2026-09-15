@@ -49,6 +49,10 @@ func (d *Daemon) ExpireOnce(ctx context.Context) (int, error) {
 	return n, nil
 }
 
+// FlushOnce runs the aggregator flush tick body once at the daemon clock —
+// what runFlush does every flushInterval.
+func (d *Daemon) FlushOnce(ctx context.Context) { d.flushAggregates(ctx, d.clock()) }
+
 // RunDeferredOnce pops and runs every SSH re-check (#420) and deferred
 // enforcement retry (#583) that is due at the daemon clock — one tick of
 // the re-check loop.
@@ -60,6 +64,13 @@ func (d *Daemon) RunDeferredOnce(ctx context.Context) {
 	for _, it := range d.gatedBanRetry.due(now) {
 		d.retryGatedBan(ctx, it)
 	}
+}
+
+// Allow runs the `allow` socket verb exactly as the CLI would (store row,
+// runtime allowlist, @allowed mirror, and — issue #608 — lifting any ban
+// the prefix covers). reason is free text; forDur == 0 means permanent.
+func (d *Daemon) Allow(ctx context.Context, target, reason, forDur string) SocketResponse {
+	return d.handleAllow(ctx, SocketRequest{Verb: "allow", IP: target, Reason: reason, For: forDur})
 }
 
 // SetSSHPeerProbe replaces the decision engine's SSH-peer probe (the

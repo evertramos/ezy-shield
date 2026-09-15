@@ -738,6 +738,12 @@ func (d *Daemon) handleAllow(ctx context.Context, req SocketRequest) SocketRespo
 		slog.ErrorContext(ctx, "daemon: reload allowlist after add", "err", err)
 	}
 
+	// The allowlist wins over existing bans too (issue #608): lift every
+	// ban the new entry covers from the enforcers and the store, in that
+	// order and under enforceMu so a reconcile cannot straddle the two
+	// (issue #575). Each lifted address is audited as an unban.
+	d.liftBansCoveredBy(ctx, prefix, "allowlisted: "+req.Reason)
+
 	// Push the new entry to the enforcer's @allowed set so the anti-lockout
 	// invariant (AGENTS.md §2) holds at the raw/prerouting hook too — where
 	// the block drops happen (issue #23). Only enforcers that manage local
@@ -770,6 +776,38 @@ func (d *Daemon) handleAllow(ctx context.Context, req SocketRequest) SocketRespo
 	d.publishActionEvent("allow", prefixDisplay(prefix), 0, ttl, req.Reason, "cli")
 
 	return SocketResponse{OK: true}
+}
+
+// liftBansCoveredBy removes every active ban prefix covers — kernel/edge
+// first, then the store rows (audited as `unban` with reason) — and
+// publishes an unban event per address (issue #608).
+func (d *Daemon) liftBansCoveredBy(ctx context.Context, prefix netip.Prefix, reason string) {
+	d.enforceMu.Lock()
+	defer d.enforceMu.Unlock()
+
+	bans, err := d.store.ActiveBans(ctx)
+	if err != nil {
+		slog.ErrorContext(ctx, "daemon: allow: cannot list active bans to lift", "prefix", prefix, "err", err)
+		return
+	}
+	for _, b := range bans {
+		if !prefix.Contains(b.IP.Unmap()) || d.enforcer == nil {
+			continue
+		}
+		if err := d.enforcer.Unban(ctx, sdk.Target{IP: b.IP}); err != nil {
+			slog.ErrorContext(ctx, "daemon: allow: enforcer unban failed", "ip", b.IP, "err", err)
+		}
+	}
+	lifted, err := d.store.UnbanCovered(ctx, prefix, reason)
+	if err != nil {
+		slog.ErrorContext(ctx, "daemon: allow: store unban failed", "prefix", prefix, "err", err)
+		return
+	}
+	for _, ip := range lifted {
+		slog.InfoContext(ctx, "daemon: action", "op", "unban", "ip", ip.String(), "ttl", time.Duration(0),
+			"reason", reason, "source", "cli")
+		d.publishActionEvent("unban", ip.String(), 0, 0, reason, "cli")
+	}
 }
 
 // handleUnallow removes prefix from the persistent runtime allowlist,

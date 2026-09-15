@@ -960,60 +960,70 @@ func (s *DB) ExpireAllows(ctx context.Context, now time.Time) (int, error) {
 // removed ban is appended to audit_log. Returns the number of bans removed.
 // Single-host prefixes (/32 or /128) are equivalent to Unban for that IP.
 func (s *DB) UnbanPrefix(ctx context.Context, prefix netip.Prefix) (int, error) {
+	ips, err := s.UnbanCovered(ctx, prefix, "manual unban via "+prefix.Masked().String())
+	return len(ips), err
+}
+
+// UnbanCovered removes every bans_active row whose address prefix covers
+// (a single-host prefix covers exactly its address), audits each as an
+// `unban` with reason, and returns the addresses removed so the caller can
+// lift the same entries from the enforcers. Issue #608: the runtime
+// allowlist uses it so `allow` lifts existing bans instead of only
+// preventing new ones.
+func (s *DB) UnbanCovered(ctx context.Context, prefix netip.Prefix, reason string) ([]netip.Addr, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT ip FROM bans_active`)
 	if err != nil {
-		return 0, fmt.Errorf("store: UnbanPrefix scan: %w", err)
+		return nil, fmt.Errorf("store: UnbanCovered scan: %w", err)
 	}
-	var matches []string
+	var matches []netip.Addr
 	for rows.Next() {
 		var ipStr string
 		if err := rows.Scan(&ipStr); err != nil {
 			_ = rows.Close()
-			return 0, fmt.Errorf("store: UnbanPrefix scan row: %w", err)
+			return nil, fmt.Errorf("store: UnbanCovered scan row: %w", err)
 		}
 		ip, perr := netip.ParseAddr(ipStr)
 		if perr != nil {
 			continue // skip malformed rows rather than failing the whole op
 		}
 		if prefix.Contains(ip) {
-			matches = append(matches, ipStr)
+			matches = append(matches, ip)
 		}
 	}
 	if err := rows.Close(); err != nil {
-		return 0, fmt.Errorf("store: UnbanPrefix close: %w", err)
+		return nil, fmt.Errorf("store: UnbanCovered close: %w", err)
 	}
 	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("store: UnbanPrefix err: %w", err)
+		return nil, fmt.Errorf("store: UnbanCovered err: %w", err)
 	}
 
 	if len(matches) == 0 {
-		return 0, nil
+		return nil, nil
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, fmt.Errorf("store: UnbanPrefix begin: %w", err)
+		return nil, fmt.Errorf("store: UnbanCovered begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
 	now := s.nowRFC3339()
-	pfxStr := prefix.Masked().String()
-	for _, ipStr := range matches {
+	for _, ip := range matches {
 		if _, err := tx.ExecContext(ctx,
-			`DELETE FROM bans_active WHERE ip = ?`, ipStr); err != nil {
-			return 0, fmt.Errorf("store: UnbanPrefix delete: %w", err)
+			`DELETE FROM bans_active WHERE ip = ?`, ip.String()); err != nil {
+			return nil, fmt.Errorf("store: UnbanCovered delete: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO audit_log (recorded_at, op, ip, ttl_seconds, strike_num, reason)
 			VALUES (?, 'unban', ?, 0, 0, ?)
-		`, now, ipStr, "manual unban via "+pfxStr); err != nil {
-			return 0, fmt.Errorf("store: UnbanPrefix audit: %w", err)
+		`, now, ip.String(), reason); err != nil {
+			return nil, fmt.Errorf("store: UnbanCovered audit: %w", err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("store: UnbanPrefix commit: %w", err)
+		return nil, fmt.Errorf("store: UnbanCovered commit: %w", err)
 	}
-	return len(matches), nil
+	return matches, nil
 }
 
 // RecordUsage inserts a row into ai_usage for a single AI provider call.

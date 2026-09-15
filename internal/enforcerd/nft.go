@@ -147,8 +147,11 @@ func RealNftRunner(ctx context.Context, script []byte) error {
 //     Podman rootless slirp4netns/pasta. This is the canonical placement per
 //     the nftables wiki for pure-drop blocklists and matches the design of
 //     CrowdSec's cs-firewall-bouncer.
-//   - Allowlist rules (@allowed / @allowed6) come first — anti-lockout
-//     invariant (AGENTS.md §2): allowlist ALWAYS wins on the same hook.
+//   - Allowlist rules (@allowed / @allowed6) come first IN EVERY CHAIN —
+//     anti-lockout invariant (AGENTS.md §2): allowlist ALWAYS wins on the
+//     same hook. An `accept` in prerouting ends only that chain; the packet
+//     still traverses input (local) and forward, so those chains carry the
+//     same accept-before-drop pair (issue #608).
 //   - `notrack` before `drop` skips conntrack for packets we're about to
 //     drop, saving state entries under scanner floods (recommended pattern
 //     in the netfilter wiki).
@@ -202,12 +205,16 @@ add rule %[1]s prerouting ip saddr @%[6]s drop
 add rule %[1]s prerouting ip6 saddr @%[7]s drop
 add chain %[1]s input { type filter hook input priority filter ; policy accept ; }
 flush chain %[1]s input
+add rule %[1]s input ip saddr @%[4]s accept
+add rule %[1]s input ip6 saddr @%[5]s accept
 add rule %[1]s input ip saddr @%[2]s drop
 add rule %[1]s input ip6 saddr @%[3]s drop
 add rule %[1]s input ip saddr @%[6]s drop
 add rule %[1]s input ip6 saddr @%[7]s drop
 add chain %[1]s forward { type filter hook forward priority filter ; policy accept ; }
 flush chain %[1]s forward
+add rule %[1]s forward ip saddr @%[4]s accept
+add rule %[1]s forward ip6 saddr @%[5]s accept
 add rule %[1]s forward ip saddr @%[2]s drop
 add rule %[1]s forward ip6 saddr @%[3]s drop
 add rule %[1]s forward ip saddr @%[6]s drop

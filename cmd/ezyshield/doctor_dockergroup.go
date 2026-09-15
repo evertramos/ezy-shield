@@ -58,6 +58,15 @@ func serviceUserDockerGroupCheck(groupFile, configPath string) CheckResult {
 	case !exists:
 		return CheckResult{Name: name, Status: statusNA,
 			Hint: "no '" + dockerGroupName + "' group on this host -- Docker not installed"}
+	case !member && configNeedsDockerSocket(configPath):
+		// Not a member is only good news when nothing needed the access
+		// (issue #580): with a docker collector configured, the absent grant
+		// may be exactly why that collector reads nothing. Whether another
+		// access path exists is the socket-access check's verdict, so this
+		// one steps aside instead of printing a PASS that contradicts it.
+		return CheckResult{Name: name, Status: statusNA,
+			Hint: serviceUser + " is not in the '" + dockerGroupName + "' group, but a docker collector is " +
+				"configured -- whether it can still reach the Engine socket is reported by 'docker: socket access'"}
 	case !member:
 		return CheckResult{Name: name, Status: statusPass,
 			Hint: serviceUser + " is not in the '" + dockerGroupName + "' group"}

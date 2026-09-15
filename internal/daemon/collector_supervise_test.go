@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/evertramos/ezy-shield/internal/notify"
+	"github.com/evertramos/ezy-shield/internal/store"
 	"github.com/evertramos/ezy-shield/pkg/sdk"
 )
 
@@ -391,5 +392,105 @@ func TestRunCollector_AlertsAfterConsecutiveFailures(t *testing.T) {
 	}
 	if got := sc.Attempts(); got < 3 {
 		t.Fatalf("expected at least the alert threshold of attempts, got %d", got)
+	}
+}
+
+// TestRunCollector_ConnectFailureDegradesAuditsAndAlertsOnce is the
+// supervisor half of issue #580: a collector that cannot reach its source
+// (the docker case — a socket the service user may not read) returns the
+// error from Run, and that single path must produce the whole visible
+// outcome: collectors_state DEGRADED, exactly one collector_degraded audit
+// row, exactly one critical notification. Not a WARN in the journal while
+// status keeps reporting a healthy observation path.
+func TestRunCollector_ConnectFailureDegradesAuditsAndAlertsOnce(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	db, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	rec := &recordingNotifier{}
+	sc := &scriptedCollector{
+		runFn: func(_ int, _ context.Context, _ chan<- sdk.RawLine) error {
+			return errors.New("docker: permission denied on /var/run/docker.sock")
+		},
+	}
+	d := &Daemon{
+		store:             db,
+		notifier:          notify.New([]sdk.Notifier{rec}, 0, time.Millisecond, nil),
+		collBackoffBase:   time.Millisecond,
+		collBackoffMax:    2 * time.Millisecond,
+		collStableRuntime: time.Hour, // every failure is short-lived
+		collFailureAlert:  3,
+		collectors:        []sdk.Collector{sc},
+	}
+
+	runCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	d.runCollector(runCtx, sc, nil)
+
+	state, detail := d.collectorsState()
+	if state != CollDegraded {
+		t.Fatalf("collectors_state = %q, want DEGRADED", state)
+	}
+	if !strings.Contains(detail, "scripted-collector") || !strings.Contains(detail, "permission denied") {
+		t.Errorf("collectors_detail %q must name the collector and its last error", detail)
+	}
+
+	entries, err := db.ListAuditLog(ctx, 100)
+	if err != nil {
+		t.Fatalf("ListAuditLog: %v", err)
+	}
+	degraded := 0
+	for _, e := range entries {
+		if e.Op == "collector_degraded" {
+			degraded++
+		}
+	}
+	if degraded != 1 {
+		t.Errorf("collector_degraded audit rows = %d, want exactly 1 (the transition, not every retry)", degraded)
+	}
+
+	critical := 0
+	for _, m := range rec.all() {
+		if m.Severity == "critical" {
+			critical++
+		}
+	}
+	if critical != 1 {
+		t.Errorf("critical notifications = %d, want exactly 1", critical)
+	}
+}
+
+// TestRunExecActivity_StoppedWatcherIsRecordedAsDegraded proves the docker
+// exec watcher is supervised like any other observation source (issue #580):
+// when it gives up, the daemon says so, instead of leaving one log line
+// behind while still claiming exec activity is watched.
+func TestRunExecActivity_StoppedWatcherIsRecordedAsDegraded(t *testing.T) {
+	t.Parallel()
+
+	d := &Daemon{
+		collBackoffBase:   time.Millisecond,
+		collBackoffMax:    2 * time.Millisecond,
+		collStableRuntime: time.Hour,
+		collFailureAlert:  2,
+		// The injected closure returns as soon as the watcher's Run returns
+		// an error (cmd/ezyshield/run.go logs the underlying cause).
+		execActivity: func(_ context.Context, _ func(ExecActivityReport)) {},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	d.runExecActivity(ctx)
+
+	state, detail := d.collectorsState()
+	if state != CollDegraded {
+		t.Fatalf("collectors_state = %q, want DEGRADED after the watcher stopped", state)
+	}
+	if !strings.Contains(detail, "docker-exec-watch") {
+		t.Errorf("collectors_detail %q must name the exec watcher", detail)
 	}
 }

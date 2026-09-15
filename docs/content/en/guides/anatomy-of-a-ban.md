@@ -102,8 +102,8 @@ Strike history (newest first)
         | Failed password for root from 203.0.113.66 port 40122 ssh2
 ```
 
-When the TTL lapses the ban expires everywhere (kernel timeout + reconcile); the strike history stays, so the next offense from this IP starts at strike 3.
+When the TTL lapses the ban expires everywhere (kernel timeout + reconcile); the strike history stays, so the next offense from this IP starts at strike 3. "Next offense" means new evidence: a strike consumes the requests that earned it, so after the ban ends the IP needs to cross a threshold again — a single page load does not re-fire the rules on the previous hour of history.
 
 ## If something looks wrong
 
-Banned a legitimate user? `sudo ezyshield allow <ip>` (allowlist wins over everything) or `sudo ezyshield unban <ip>`. Everything misbehaving? `sudo ezyshield disable --all` removes every block and disarms, preserving history. Diagnosis paths live in the [troubleshooting guide](troubleshooting.md).
+Banned a legitimate user? `sudo ezyshield allow <ip>` — the allowlist wins over everything, including the ban that already exists: the entry is lifted from the kernel and the edge, the store row is removed and audited as an `unban`, and no reconcile brings it back. `sudo ezyshield unban <ip>` lifts the ban without allowlisting. Everything misbehaving? `sudo ezyshield disable --all` removes every block and disarms, preserving history. Diagnosis paths live in the [troubleshooting guide](troubleshooting.md).

@@ -87,6 +87,13 @@ not replayed: a missed line at worst delays a detection by one event,
 whereas replaying already-processed lines would count the same evidence
 twice.
 
+The file tail follows log rotation without replay: when the file is
+renamed and recreated it reopens the new file and stops watching the old
+inode, so the rotated copy being deleted later (`logrotate` `compress`,
+Docker's `max-file` pruning) does not re-read the live file; and when the
+file is truncated in place (`copytruncate`) it rewinds to the start and
+reads only the new lines, with no fragment of the old content.
+
 > **Configure only one SSH collector per host** — journald **or** the
 > file it feeds, never both. Reading both ingests every event twice,
 > which double-counts toward detection thresholds. (An already-banned

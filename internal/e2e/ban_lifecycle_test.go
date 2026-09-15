@@ -158,3 +158,29 @@ func TestBanLifecycle_GateRefusalIsDeferredNotLost(t *testing.T) {
 		t.Fatalf("deferred ban TTL = %v, want the remaining ~4m50s", exp.Sub(s.clock.now()))
 	}
 }
+
+// #615 — a ban with less than a second left when the reconcile runs must
+// not become a permanent kernel element. Before the fix the enforcer sent
+// int64(TTL.Seconds()) == 0, and 0 means "no timeout" to the helper.
+func TestBanLifecycle_SubSecondTTLNeverBecomesPermanent(t *testing.T) {
+	s := start(t, options{armed: true})
+	ip := netip.MustParseAddr("203.0.113.90")
+	if err := s.store.RecordManualBan(s.ctx, ip, 5*time.Minute, "test", false); err != nil {
+		t.Fatal(err)
+	}
+	// 4m59.4s later the row has 600 ms left; the kernel never held it
+	// (the ban was recorded straight into the store), so the reconcile
+	// must either skip it or add it with a real, short timeout.
+	s.clock.advance(5*time.Minute - 600*time.Millisecond)
+	if err := s.daemon.Reconcile(s.ctx); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if exp, ok := s.kernel.Expiry("blocked", ip.String()); ok && exp.IsZero() {
+		t.Fatalf("sub-second remaining TTL produced a PERMANENT kernel element for %s", ip)
+	}
+	// Whatever the reconcile did, two seconds later nothing may remain.
+	s.clock.advance(2 * time.Second)
+	if contains(s.blocked(), ip.String()) {
+		t.Fatalf("kernel still holds %s after its TTL elapsed: %v", ip, s.blocked())
+	}
+}

@@ -71,6 +71,32 @@ type Gate struct {
 
 	mu       sync.RWMutex
 	sshPeers func() []netip.Addr // kernel-derived operator peers; nil = no peer check
+	// extra is the runtime allowlist (`ezyshield allow`), kept in sync by
+	// the daemon (issue #608): without it the gate, and therefore every
+	// reconcile, only knew the policy file's allowlist and kept re-applying
+	// bans the operator had just lifted with `allow`.
+	extra []netip.Prefix
+}
+
+// ExtraAllowlister is the facet through which the daemon pushes the runtime
+// allowlist into the gate (issue #608).
+type ExtraAllowlister interface {
+	SetExtraAllowlist(prefixes []netip.Prefix)
+}
+
+var _ ExtraAllowlister = (*Gate)(nil)
+
+// SetExtraAllowlist replaces the runtime allowlist the gate refuses on, in
+// addition to the static one it was built with. Canonicalized like the
+// static list. Safe for concurrent use with Ban/Sync.
+func (g *Gate) SetExtraAllowlist(prefixes []netip.Prefix) {
+	norm := make([]netip.Prefix, 0, len(prefixes))
+	for _, p := range prefixes {
+		norm = append(norm, normalizeGatePrefix(p))
+	}
+	g.mu.Lock()
+	g.extra = norm
+	g.mu.Unlock()
 }
 
 // NewGate wraps inner with the centralized guard. allowlist should carry the
@@ -112,6 +138,13 @@ func (g *Gate) currentPeers() []netip.Addr {
 		return nil
 	}
 	return probe()
+}
+
+// currentExtra snapshots the runtime allowlist for one operation.
+func (g *Gate) currentExtra() []netip.Prefix {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.extra
 }
 
 // Ban refuses guarded targets with an audited refusal before any enforcer
@@ -199,6 +232,11 @@ func (g *Gate) refuse(t sdk.Target, peers []netip.Addr) (string, bool) {
 	for _, a := range g.allowlist {
 		if a.Overlaps(p) {
 			return "allowlisted", true
+		}
+	}
+	for _, a := range g.currentExtra() {
+		if a.Overlaps(p) {
+			return "allowlisted (runtime)", true
 		}
 	}
 	for _, peer := range peers {

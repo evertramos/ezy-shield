@@ -201,6 +201,12 @@ func (d *Daemon) feedEntryGuarded(p netip.Prefix, peers []netip.Addr, cdn []neti
 			return true
 		}
 	}
+	// The runtime allowlist (`ezyshield allow`) guards feeds like the
+	// static one (issue #608): an allowed address must not be dropped by
+	// @feeds either.
+	if guarded, _ := d.runtimeAllowlistOverlap(p); guarded {
+		return true
+	}
 	for _, peer := range peers {
 		if p.Contains(peer.Unmap()) {
 			return true

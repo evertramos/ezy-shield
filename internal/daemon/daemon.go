@@ -74,6 +74,9 @@ type daemonStore interface {
 	ExpireBans(ctx context.Context, now time.Time) (int, error)
 	Unban(ctx context.Context, ip netip.Addr) error
 	UnbanPrefix(ctx context.Context, prefix netip.Prefix) (int, error)
+	// UnbanCovered removes every active ban prefix covers, audits each as
+	// an unban with reason, and returns the addresses lifted (issue #608).
+	UnbanCovered(ctx context.Context, prefix netip.Prefix, reason string) ([]netip.Addr, error)
 	AuditOp(ctx context.Context, op string, prefix netip.Prefix, ttl time.Duration, reason string) error
 	// Arm/disarm support (issue #228): persisted runtime state + system audits.
 	SetState(ctx context.Context, key, value string) error
@@ -1421,6 +1424,15 @@ func (d *Daemon) dispatch(ctx context.Context, action sdk.Action) {
 	d.publishActionEvent(action.Op, action.IP.String(), action.Strike,
 		action.TTL, action.Reason, "pipeline")
 
+	// A strike consumes the in-memory evidence that earned it (issue #621):
+	// the next rung needs new threshold-crossing evidence, not a benign
+	// request arriving after the ban expired with the old hour still in
+	// the window. Dry-run mirrors it — the simulated ladder must escalate
+	// exactly like the armed one.
+	if action.Op == "ban" || action.Op == "dry_ban" {
+		d.agg.Reset(action.IP)
+	}
+
 	banApplied := false
 	if action.Op == "ban" && d.enforcer != nil {
 		t := sdk.Target{IP: action.IP, TTL: action.TTL}
@@ -1524,6 +1536,13 @@ func (d *Daemon) reloadAllowlist(ctx context.Context) error {
 	d.mu.Lock()
 	d.runtimeAllowlist = prefixes
 	d.mu.Unlock()
+	// The enforcement gate refuses on the runtime allowlist too (issue
+	// #608): a reconcile must never re-apply a ban the operator lifted with
+	// `allow`, and a manual/ pipeline ban of an allowed address is refused
+	// at the last step as well as the first.
+	if g, ok := d.enforcer.(enforce.ExtraAllowlister); ok {
+		g.SetExtraAllowlist(prefixes)
+	}
 	return nil
 }
 
@@ -1551,6 +1570,12 @@ func (d *Daemon) syncEnforcer(ctx context.Context) error {
 	targets := make([]sdk.Target, 0, len(bans))
 	for _, b := range bans {
 		if b.Op != "ban" {
+			continue
+		}
+		// Runtime-allowed addresses are never part of the desired state
+		// (issue #608): `allow` lifts their rows, but a row that raced the
+		// allow — or an older store — must not be re-applied by reconcile.
+		if d.isRuntimeAllowlisted(b.IP) {
 			continue
 		}
 		targets = append(targets, sdk.Target{IP: b.IP, TTL: b.TTL})
@@ -1707,12 +1732,6 @@ func unionPrefixes(a, b []netip.Prefix) []netip.Prefix {
 // and prunes persistent long-window counter buckets past the longest long
 // window (issue #134) so events_agg can never grow unbounded.
 func (d *Daemon) runFlush(ctx context.Context) {
-	var longest time.Duration
-	for w := range d.longRuleWindows {
-		if w > longest {
-			longest = w
-		}
-	}
 	t := time.NewTicker(flushInterval)
 	defer t.Stop()
 	for {
@@ -1720,15 +1739,31 @@ func (d *Daemon) runFlush(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case now := <-t.C:
-			d.agg.Flush(ctx, now.Add(-d.agg.Windows()[len(d.agg.Windows())-1]))
-			if longest > 0 {
-				// One extra hour of slack keeps the boundary bucket whole.
-				if n, err := d.store.PruneEventCounts(ctx, store.HourBucket(now.Add(-longest-time.Hour))); err != nil {
-					slog.WarnContext(ctx, "daemon: event counter prune failed", "err", err)
-				} else if n > 0 {
-					slog.DebugContext(ctx, "daemon: pruned event counter buckets", "rows", n)
-				}
-			}
+			d.flushAggregates(ctx, now)
+		}
+	}
+}
+
+// flushAggregates is one flush tick: evict in-memory events no rule can
+// still see, and prune persistent counter buckets past the longest long
+// window (one extra hour of slack keeps the boundary bucket whole).
+func (d *Daemon) flushAggregates(ctx context.Context, now time.Time) {
+	// The cutoff is the LONGEST in-memory window (issue #610). Windows()
+	// is in rule order; the last entry happened to be the mail rules'
+	// 300 s, so every hourly *_sustained rule saw at most one flush
+	// interval of history and a 1-per-5-minutes attacker was invisible.
+	d.agg.Flush(ctx, now.Add(-d.agg.MaxWindow()))
+	var longest time.Duration
+	for w := range d.longRuleWindows {
+		if w > longest {
+			longest = w
+		}
+	}
+	if longest > 0 {
+		if n, err := d.store.PruneEventCounts(ctx, store.HourBucket(now.Add(-longest-time.Hour))); err != nil {
+			slog.WarnContext(ctx, "daemon: event counter prune failed", "err", err)
+		} else if n > 0 {
+			slog.DebugContext(ctx, "daemon: pruned event counter buckets", "rows", n)
 		}
 	}
 }

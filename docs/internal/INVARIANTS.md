@@ -83,28 +83,28 @@ is no backlog.
 | helper truth | `enforcerd.Server` cache with deadlines (#383), rebuilt from `nft list set … expires` on start; auto-merge migration (#588) | | `nowFn` | |
 | edge | `CloudflareListsEnforcer.Sync` (removals deferred ≤ 3 min), Bunny/AWS wholesale (capacity overflow keeps newest) | | | |
 
-**A2. A ban lasts exactly its TTL in every layer.** Ladder → store `expires_at` → helper deadline → nft `timeout` → edge (no TTL). Known divergences: client truncates `int64(TTL.Seconds())` so < 1 s → permanent (#615); reaper compares RFC3339 strings lexicographically (gap B6); edge lifetime = TTL + ≤ 1 min + ≤ 3 min.
+**A2. A ban lasts exactly its TTL in every layer.** Ladder → store `expires_at` → helper deadline → nft `timeout` → edge (no TTL). Known divergences: (fixed #615 — the enforcer client now rounds a positive remaining TTL up, never to 0; harness `TestBanLifecycle_SubSecondTTLNeverBecomesPermanent`); reaper compares RFC3339 strings lexicographically (gap B6); edge lifetime = TTL + ≤ 1 min + ≤ 3 min.
 
 **A3. Every element is spelled canonically everywhere.** `decision` unmaps; `enforce.CanonicalIPKey` (bare address for /32 and /128, masked prefix otherwise) on both sides of every reconcile; helper canonicalises verbs and trusts nft's own rendering on init. Edge list items compared verbatim (only bare spellings are ever sent).
 
 **A4. Enforcement happens only through the helper and only for gate-accepted targets.** Every `d.enforcer` writer goes through `enforce.Gate` (static allowlist + SSH-peer probe, narrowed under ADR-0013 via `SSHPeerProbeSetter`, #583). **Exception:** reputation feeds write through the raw enforcer with their own filter (`feeds.go`), static allowlist and the raw `/proc` peer probe only (gap B8).
 
-**A5. Reconcile repairs drift and never creates it.** Holds for single-IP bans. Violated for: manual CIDR bans (no row → deleted as stale, #609); sub-second TTLs (#615); a failing add aborts before the removal pass (skip, not creation).
+**A5. Reconcile repairs drift and never creates it.** Holds for single-IP bans. Violated for: manual CIDR bans (no row → deleted as stale, #609); a failing add aborts before the removal pass (skip, not creation). Sub-second TTLs no longer become permanent (#615).
 
-Gaps (open): #608 (allow never lifts a ban), #609 (CIDR ban reverted), #615 (sub-second TTL), B3 `unban <cidr>` leaves contained elements until reconcile, B4 edge removals lag but report success, B6 string-compared expiry, B7 report readers without the expiry predicate, B9 store-failure fallback strands the kernel element.
+Gaps (open): #609 (CIDR ban reverted), B3 `unban <cidr>` leaves contained elements until reconcile, B4 edge removals lag but report success, B6 string-compared expiry, B7 report readers without the expiry predicate, B9 store-failure fallback strands the kernel element. Residue filed: #632 (allow/disable --all), #633 (negative TTLs end to end).
 
 ## B — Operator immunity
 
-**B1. The allowlist wins over every rule, AI verdict, feed, geo/ASN block and manual ban, in every layer.**
+**B1. The allowlist wins over every rule, AI verdict, feed, geo/ASN block and manual ban, in every layer — and over bans that already exist.** `allow` lifts the covered bans (kernel/edge first, then store rows audited as `unban`), `syncEnforcer` excludes runtime-allowed addresses from the desired state, `disable --all` empties the feed sets (#608). Harness: `e2e/TestAllow_LiftsExistingBanEverywhere`.
 
 | layer | reader | source | note |
 |---|---|---|---|
 | decision | `decision.Engine` (allowlist, admin_cidrs, `SSH_CLIENT`, CDN ranges, verified bots) | static, frozen at `New` | runtime allowlist checked *before* `Decide` in the pipeline, re-check and async AI |
 | manual ban | `AuthorizeManualBan` | static + runtime (`Overlaps`) | `--force` only overrides CDN ranges |
-| gate | `enforce.Gate.refuse` | **static only** | no runtime setter — #608 |
+| gate | `enforce.Gate.refuse` | static + runtime (`SetExtraAllowlist`, fed by `reloadAllowlist`) | fixed by #608 |
 | enforcers / edge | `NftablesEnforcer`, Cloudflare, Bunny, AWS | static only | |
-| feeds | `feedEntryGuarded` | static + raw peers + CDN | no runtime — #608 |
-| kernel | `@allowed accept` | `prerouting` only; `input`/`forward` drop unconditionally — #608 | |
+| feeds | `feedEntryGuarded` | static + runtime + raw peers + CDN | runtime added by #608 |
+| kernel | `@allowed accept` | first rule pair in `prerouting`, `input` and `forward` | fixed by #608 |
 
 **B2. An operator's live SSH session cannot be banned by any path.** Engine probe (2 s cache) and gate probe (fresh) share one predicate under ADR-0013; re-check (#420) and deferred enforcement (#583) re-run the full guards; manual bans (#211), `arm` preflight, AI verdicts (inline and async) go through `Decide`. Gaps: engine cache vs fresh gate can commit a row for the operator that the reconcile enforces after the session ends (A-G5); async AI never arms the re-check (D3-1); ADR-0013 `firstSeen` can give a reconnect zero grace (A-G6).
 
@@ -114,11 +114,11 @@ Gaps (open): #608 (allow never lifts a ban), #609 (CIDR ban reverted), #615 (sub
 
 ## C — Event pipeline
 
-**C1. One log line is counted exactly once.** Collectors start at the live tail (`-n 0`, `tail=0`, seek EOF — #599). Violations: file-tail rotation replay and copytruncate blindness (#611); `events_agg` has no idempotency key (any replay double-counts long rules with threshold 5); the same evidence is `Decide`d up to three times (pipeline, async AI, re-check) and each hit bumps the suppressed counters (E1-5).
+**C1. One log line is counted exactly once.** Collectors start at the live tail (`-n 0`, `tail=0`, seek EOF — #599). Fixed: file-tail rotation replay and copytruncate blindness (#611; `TestFileTailCollector_RenameRotationThenDeleteDoesNotReplay`, `TestFileTailCollector_CopytruncateWithAppendWriter`). Violations: `events_agg` has no idempotency key (any replay double-counts long rules with threshold 5); the same evidence is `Decide`d up to three times (pipeline, async AI, re-check) and each hit bumps the suppressed counters (E1-5).
 
 **C2. Evidence is judged at the time it happened.** Only the SSH parser keeps the log timestamp (and interprets an unzoned stamp in the daemon's zone — E2-1); every other parser stamps collection time. Aggregator windows use `ev.Time`; counters, grace, rate limits and re-check deadlines use processing time. Under a backlog: SSH bursts processed late count zero, HTTP trickles compress into false bursts (E2-2), pre-ban lines processed after the ban fire `ban_ineffective` (E2-3).
 
-**C3. A rule fires on exactly the events it claims.** Violations: aggregator flushed with the last window instead of the longest — every hourly tier sees ≤ 10 min (#610); `Sample` keeps the oldest 4096, so busy IPs are blind to field-level sustained rules (E3-2); drop-in overrides keep the old `rule:` counter history (E3-3); validation accepts duplicate names, unreachable thresholds and unknown kinds (E3-4).
+**C3. A rule fires on exactly the events it claims.** Fixed: aggregator flush now uses the longest window (#610; harness `TestDetection_HourlyTierSurvivesFlush`). Consequences of restoring the hourly tier, found by the adversarial review of #618 and filed: consumed evidence re-firing the ladder after a 5-min ban expires (#621 — fixed: a strike resets the IP's in-memory evidence, harness `TestDecision_NoSecondStrikeOnSameEvidence`); per-IP retention is unbounded and a busy client costs hundreds of MB and most of a core (#622, high); the benchmark runs long windows in memory with no flush and has no hour-scale legit scenario (#623); future-dated events block eviction (#624). Violations: `Sample` keeps the oldest 4096, so busy IPs are blind to field-level sustained rules (E3-2); drop-in overrides keep the old `rule:` counter history (E3-3); validation accepts duplicate names, unreachable thresholds and unknown kinds (E3-4).
 
 **C4. Hostile input never produces wrong attribution.** Violation: leftmost X-Forwarded-For hop (#612). Combined/vhost formats behind a CDN attribute everything to the edge (E4-2, config/doc). IPv4-mapped forms split aggregator buckets (E4-3).
 

@@ -59,12 +59,26 @@ func sshFailLine(ip netip.Addr) sdk.RawLine {
 // score/category, so rule identity is asserted at the verdict layer).
 func assertLongRuleFired(t *testing.T, d *Daemon, ip netip.Addr, rule string) {
 	t.Helper()
-	for _, v := range d.evaluateLongRules(context.Background(), ip, time.Now()) {
+	// The strike consumed the counted history (issues #621/#636), so the
+	// live evaluation is empty by design after the ban: read the verdicts
+	// the strike persisted instead (ADR-0011 keeps them on the strike row).
+	type strikeReader interface {
+		StrikesForIP(ctx context.Context, ip netip.Addr, limit int) ([]store.StrikeRecord, error)
+	}
+	sr, ok := d.store.(strikeReader)
+	if !ok {
+		t.Fatalf("store %T cannot list strikes", d.store)
+	}
+	recs, err := sr.StrikesForIP(context.Background(), ip, 1)
+	if err != nil || len(recs) == 0 {
+		t.Fatalf("no strike recorded for %s (err=%v)", ip, err)
+	}
+	for _, v := range recs[0].Verdicts {
 		if strings.Contains(v.Reason, rule) {
 			return
 		}
 	}
-	t.Fatalf("long-window rule %q did not fire for %s", rule, ip)
+	t.Fatalf("long-window rule %q did not fire for %s (strike verdicts: %+v)", rule, ip, recs[0].Verdicts)
 }
 
 // seedHourlyFailures backdates n ssh_fail counter buckets, one per hour

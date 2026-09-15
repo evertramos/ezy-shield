@@ -84,6 +84,11 @@ func (s *DB) SumEventCounts(ctx context.Context, ip netip.Addr, kinds []string, 
 // its existing flush ticker with before = now - longest long window, so the
 // table can never grow unbounded.
 func (s *DB) PruneEventCounts(ctx context.Context, before int64) (int, error) {
+	// Watermarks recorded before the prune horizon cover only pruned
+	// buckets: drop them too (issue #636).
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM events_consumed WHERE recorded_at < ?`, before); err != nil {
+		return 0, fmt.Errorf("store: PruneEventCounts consumed: %w", err)
+	}
 	res, err := s.db.ExecContext(ctx,
 		`DELETE FROM events_agg WHERE bucket_start < ?`, before)
 	if err != nil {
@@ -94,4 +99,71 @@ func (s *DB) PruneEventCounts(ctx context.Context, before int64) (int, error) {
 		return 0, fmt.Errorf("store: PruneEventCounts rows affected: %w", err)
 	}
 	return int(n), nil
+}
+
+// ConsumeEventCounts records, for each long window, the counts ip has
+// accumulated in that window at now — the evidence the strike being
+// recorded consumed (issue #636). SumEventCounts callers subtract these
+// through ConsumedEventCounts, so the next rung needs threshold NEW events.
+// windows maps a rule window to the counter kinds its rules read.
+func (s *DB) ConsumeEventCounts(ctx context.Context, ip netip.Addr, windows map[time.Duration][]string, now time.Time) error {
+	// Read every window's sums BEFORE opening the write transaction: the
+	// pool hands out one connection, and a read issued while the
+	// transaction holds it would wait on itself.
+	snapshot := make(map[time.Duration]map[string]int, len(windows))
+	for w, kinds := range windows {
+		sums, err := s.SumEventCounts(ctx, ip, kinds, HourBucket(now.Add(-w)))
+		if err != nil {
+			return err
+		}
+		snapshot[w] = sums
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: ConsumeEventCounts begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	for w, kinds := range windows {
+		sums := snapshot[w]
+		for _, k := range kinds {
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO events_consumed (ip, window_s, kind, consumed, recorded_at)
+				VALUES (?, ?, ?, ?, ?)
+				ON CONFLICT(ip, window_s, kind) DO UPDATE SET consumed = excluded.consumed, recorded_at = excluded.recorded_at
+			`, ip.String(), int64(w/time.Second), k, sums[k], now.Unix()); err != nil {
+				return fmt.Errorf("store: ConsumeEventCounts: %w", err)
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: ConsumeEventCounts commit: %w", err)
+	}
+	return nil
+}
+
+// ConsumedEventCounts returns the per-kind counts consumed by ip's last
+// strike for window, ignoring a watermark older than the window itself
+// (every event it covered has aged out). Absent kinds map to 0.
+func (s *DB) ConsumedEventCounts(ctx context.Context, ip netip.Addr, window time.Duration, now time.Time) (map[string]int, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT kind, consumed FROM events_consumed
+		WHERE ip = ? AND window_s = ? AND recorded_at >= ?
+	`, ip.String(), int64(window/time.Second), now.Add(-window).Unix())
+	if err != nil {
+		return nil, fmt.Errorf("store: ConsumedEventCounts: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := map[string]int{}
+	for rows.Next() {
+		var kind string
+		var n int
+		if err := rows.Scan(&kind, &n); err != nil {
+			return nil, fmt.Errorf("store: ConsumedEventCounts scan: %w", err)
+		}
+		out[kind] = n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: ConsumedEventCounts rows: %w", err)
+	}
+	return out, nil
 }

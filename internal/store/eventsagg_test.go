@@ -98,3 +98,47 @@ func TestSumEventCounts_EmptyKinds(t *testing.T) {
 		t.Fatalf("empty kinds = (%v, %v), want empty map, nil error", sums, err)
 	}
 }
+
+// TestConsumeEventCounts_Watermark (issue #636): a strike records what each
+// long window had accumulated; reads subtract it; a watermark older than
+// its window is ignored; pruning drops it with the counters.
+func TestConsumeEventCounts_Watermark(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	ip := netip.MustParseAddr("203.0.113.55")
+	now := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	for i := 1; i <= 5; i++ {
+		if err := db.IncrEventCount(ctx, ip, "ssh_fail", store.HourBucket(now.Add(-time.Duration(i)*time.Hour))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	windows := map[time.Duration][]string{24 * time.Hour: {"ssh_fail"}, 7 * 24 * time.Hour: {"ssh_fail"}}
+	if err := db.ConsumeEventCounts(ctx, ip, windows, now); err != nil {
+		t.Fatalf("ConsumeEventCounts: %v", err)
+	}
+	got, err := db.ConsumedEventCounts(ctx, ip, 24*time.Hour, now)
+	if err != nil || got["ssh_fail"] != 5 {
+		t.Fatalf("consumed(24h) = %v err=%v, want ssh_fail=5", got, err)
+	}
+	// A second strike replaces the watermark with the new totals.
+	if err := db.IncrEventCount(ctx, ip, "ssh_fail", store.HourBucket(now)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ConsumeEventCounts(ctx, ip, windows, now); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := db.ConsumedEventCounts(ctx, ip, 24*time.Hour, now); got["ssh_fail"] != 6 {
+		t.Fatalf("consumed after second strike = %v, want 6", got)
+	}
+	// Older than its window: ignored.
+	if got, _ := db.ConsumedEventCounts(ctx, ip, 24*time.Hour, now.Add(25*time.Hour)); got["ssh_fail"] != 0 {
+		t.Fatalf("stale watermark still read: %v", got)
+	}
+	// Pruned with the counters.
+	if _, err := db.PruneEventCounts(ctx, store.HourBucket(now.Add(8*24*time.Hour))); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := db.ConsumedEventCounts(ctx, ip, 7*24*time.Hour, now); len(got) != 0 {
+		t.Fatalf("watermark survived the prune: %v", got)
+	}
+}

@@ -114,3 +114,25 @@ func TestDecision_LongWindowNoSecondStrikeOnSameEvidence(t *testing.T) {
 		t.Fatalf("fresh evidence did not earn strike 2: %+v ok=%v", second, ok)
 	}
 }
+
+// Dry-run variant of the consumed-evidence rule (#621/#636 review): the
+// simulated ladder must escalate exactly like the armed one.
+func TestDecision_NoSecondStrikeOnSameEvidence_DryRun(t *testing.T) {
+	s := start(t, options{armed: false})
+	attacker := netip.MustParseAddr("203.0.113.80")
+	for i := 0; i < 10; i++ {
+		s.httpHit(attacker, "/wp-login.php")
+		s.clock.advance(5 * time.Minute)
+	}
+	if a, ok := s.lastAction(attacker, "dry_ban"); !ok || a.Strike != 1 {
+		t.Fatalf("no simulated strike 1: %+v ok=%v", a, ok)
+	}
+	s.clock.advance(6 * time.Minute)
+	if _, err := s.daemon.ExpireOnce(s.ctx); err != nil {
+		t.Fatal(err)
+	}
+	s.httpHit(attacker, "/")
+	if a, ok := s.lastAction(attacker, "dry_ban"); ok {
+		t.Fatalf("dry-run re-struck on consumed evidence: %+v", a)
+	}
+}

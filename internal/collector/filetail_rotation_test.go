@@ -9,6 +9,7 @@ package collector_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -146,5 +147,52 @@ func TestFileTailCollector_CopytruncateWithAppendWriter(t *testing.T) {
 	got := collect(t, out, 4, 5*time.Second)
 	if strings.Join(got, ",") != "A1,A2,A3,A4" {
 		t.Fatalf("post-truncate lines = %v, want exactly [A1 A2 A3 A4] (no loss, no fragment)", got)
+	}
+}
+
+// TestFileTailCollector_CopytruncateDuringDrainStall (issue #634): the
+// pipeline is applying backpressure (out holds one line) while the
+// collector is mid-drain, and logrotate copytruncates the file in that
+// window. Truncation used to be detected against a size sampled AFTER the
+// drain returned, so a truncation landing while the drain was blocked (or
+// in the gap before that stat) was invisible until the file regrew past
+// the stale offset: A1..A4 never arrived.
+func TestFileTailCollector_CopytruncateDuringDrainStall(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "auth.log")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	out := make(chan sdk.RawLine, 1) // backpressure: the collector blocks on the 2nd line
+	c := &collector.FileTailCollector{Path: path, Logger: testLogger(t)}
+	done := make(chan error, 1)
+	go func() { done <- c.Run(ctx, out) }()
+	t.Cleanup(func() { cancel(); <-done })
+	time.Sleep(150 * time.Millisecond)
+
+	// One write of 60 lines: the collector reads the whole batch in one
+	// pass (offset 240), emits L00 and blocks on L01.
+	batch := make([]string, 0, 60)
+	for i := 0; i < 60; i++ {
+		batch = append(batch, fmt.Sprintf("L%02d", i))
+	}
+	appendLine(t, path, strings.Join(batch, "\n"))
+	time.Sleep(300 * time.Millisecond) // the collector has read the batch and is blocked on out
+
+	if err := os.Truncate(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	post := []string{"A1", "A2", "A3", "A4"}
+	for _, l := range post {
+		appendLine(t, path, l)
+	}
+
+	got := collect(t, out, 64, 8*time.Second)
+	if len(got) != 64 {
+		t.Fatalf("received %d lines, want 60 + %d post-truncate: %v", len(got), len(post), got)
+	}
+	if tail := got[60:]; strings.Join(tail, ",") != strings.Join(post, ",") {
+		t.Fatalf("post-truncate lines lost: last lines = %v, want %v", tail, post)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -55,15 +56,17 @@ type cfListsMock struct {
 	// rejectDuplicates mirrors the real Lists API refusing an add for an IP
 	// already present in the list (issue #486 concurrent-instance race).
 	rejectDuplicates bool
-	throttleAdds     int  // next N POST items answer a throttle instead
-	throttleDeletes  int  // next N DELETE items answer a throttle instead
-	throttleAs429    bool // throttle as raw HTTP 429 (non-JSON body) instead of JSON code 10040
-	failAddsCode     int  // when non-zero, next POST items fails with this (non-throttle) CF error code
-	opPendingPolls   int  // bulk-operation polls answering "pending" before "completed"
-	addCalls         int  // POST items requests observed (throttled ones included)
-	deleteCalls      int  // DELETE items requests observed (throttled ones included)
-	bulkOpPolls      int  // bulk-operation status requests observed
-	getItemsCalls    int  // GET items page requests observed (issue #491)
+	throttleAdds     int           // next N POST items answer a throttle instead
+	throttleDeletes  int           // next N DELETE items answer a throttle instead
+	throttleAs429    bool          // throttle as raw HTTP 429 (non-JSON body) instead of JSON code 10040
+	failAddsCode     int           // when non-zero, next POST items fails with this (non-throttle) CF error code
+	opPendingPolls   int           // bulk-operation polls answering "pending" before "completed"
+	addCalls         int           // POST items requests observed (throttled ones included)
+	deleteCalls      int           // DELETE items requests observed (throttled ones included)
+	bulkOpPolls      int           // bulk-operation status requests observed
+	getItemsCalls    int           // GET items page requests observed (issue #491)
+	stallGetItems    int           // next N GET items requests stall for stallFor (client timeout, issue #646)
+	stallFor         time.Duration // how long a stalled page sleeps before answering
 }
 
 func newCFListsMock(accountID string) *cfListsMock {
@@ -197,6 +200,16 @@ func (m *cfListsMock) handleGetItems(w http.ResponseWriter, r *http.Request, lis
 	}
 	m.mu.Lock()
 	m.getItemsCalls++
+	if m.stallGetItems > 0 {
+		// A slow page: the client's timeout fires first ("Client.Timeout
+		// exceeded while awaiting headers"), the production failure shape.
+		// net/http never retries a timed-out request on its own.
+		m.stallGetItems--
+		stall := m.stallFor
+		m.mu.Unlock()
+		time.Sleep(stall)
+		m.mu.Lock()
+	}
 	l, ok := m.lists[listID]
 	if !ok {
 		m.mu.Unlock()
@@ -1218,5 +1231,103 @@ func TestCFListsBan_AsyncAdd_PollsOperationToCompletion(t *testing.T) {
 	}
 	if _, _, polls := mock.counts(); polls < 3 {
 		t.Errorf("bulk-operation polls = %d, want >= 3 (2 pending + 1 completed)", polls)
+	}
+}
+
+// cfLevelRecorder captures the level of every slog record with a given
+// message so a test can pin the severity of an operational log line.
+type cfLevelRecorder struct {
+	msg    string
+	mu     sync.Mutex
+	levels []slog.Level
+}
+
+func (r *cfLevelRecorder) Enabled(context.Context, slog.Level) bool { return true }
+func (r *cfLevelRecorder) Handle(_ context.Context, rec slog.Record) error {
+	if rec.Message == r.msg {
+		r.mu.Lock()
+		r.levels = append(r.levels, rec.Level)
+		r.mu.Unlock()
+	}
+	return nil
+}
+func (r *cfLevelRecorder) WithAttrs([]slog.Attr) slog.Handler { return r }
+func (r *cfLevelRecorder) WithGroup(string) slog.Handler      { return r }
+
+func (r *cfLevelRecorder) seen() []slog.Level {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]slog.Level(nil), r.levels...)
+}
+
+// TestCFListsBan_PostAddRefreshTransportErrorRetriedPerPage (issue #646):
+// the async add succeeded; the post-add item refresh loses one page to a
+// transport error (a slow page past the client timeout). The page is
+// retried, the IDs are learned, Unban can delete.
+func TestCFListsBan_PostAddRefreshTransportErrorRetriedPerPage(t *testing.T) {
+	mock, ts := newMockCFListsServer(t)
+	mock.addReturnsAsync = true
+	mock.stallGetItems, mock.stallFor = 1, 400*time.Millisecond
+
+	e := enforce.NewCFListsEnforcerWithClientTimeout("tok", ts.URL, testCFAccount, testCFListName, 100*time.Millisecond)
+	if err := e.Ban(context.Background(), sdk.Target{IP: netip.MustParseAddr("192.0.2.10")}); err != nil {
+		t.Fatalf("Ban: %v", err)
+	}
+	if !mock.hasItem(testCFListName, "192.0.2.10") {
+		t.Fatal("expected 192.0.2.10 to be added")
+	}
+	if err := e.Unban(context.Background(), sdk.Target{IP: netip.MustParseAddr("192.0.2.10")}); err != nil {
+		t.Fatalf("Unban: %v", err)
+	}
+	if n := mock.itemCount(testCFListName); n != 0 {
+		t.Fatalf("expected the item deleted after a retried refresh, %d left", n)
+	}
+	if mock.getItemsCalls < 2 {
+		t.Fatalf("GET items calls = %d, want the dropped page retried", mock.getItemsCalls)
+	}
+}
+
+// TestCFListsBan_PostAddRefreshFailure_AddAppliedMirrorRecovers (issue
+// #646): every refresh attempt fails. The add itself succeeded, so Ban must
+// not fail and the failure must log at WARN, not ERROR; the local mirror is
+// marked stale and rebuilt on the next push, after which Unban deletes the
+// item whose ID was never learned by the refresh.
+func TestCFListsBan_PostAddRefreshFailure_AddAppliedMirrorRecovers(t *testing.T) {
+	rec := &cfLevelRecorder{msg: "enforce/cloudflare-lists: post-add refresh failed; edge mirror stale until the next push"}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(rec))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	mock, ts := newMockCFListsServer(t)
+	mock.addReturnsAsync = true
+	mock.stallGetItems, mock.stallFor = 10, 400*time.Millisecond // more than the per-page retry budget
+
+	e := enforce.NewCFListsEnforcerWithClientTimeout("tok", ts.URL, testCFAccount, testCFListName, 100*time.Millisecond)
+	if err := e.Ban(context.Background(), sdk.Target{IP: netip.MustParseAddr("192.0.2.11")}); err != nil {
+		t.Fatalf("Ban must succeed — the add was applied, only the refresh failed: %v", err)
+	}
+	if !mock.hasItem(testCFListName, "192.0.2.11") {
+		t.Fatal("expected 192.0.2.11 to be added")
+	}
+	levels := rec.seen()
+	if len(levels) != 1 || levels[0] != slog.LevelWarn {
+		t.Fatalf("refresh failure logged as %v, want exactly one WARN", levels)
+	}
+
+	// The API recovers; the next push must rebuild the mirror first.
+	mock.mu.Lock()
+	mock.stallGetItems = 0
+	mock.mu.Unlock()
+	if err := e.Ban(context.Background(), sdk.Target{IP: netip.MustParseAddr("192.0.2.12")}); err != nil {
+		t.Fatalf("second Ban: %v", err)
+	}
+	if err := e.Unban(context.Background(), sdk.Target{IP: netip.MustParseAddr("192.0.2.11")}); err != nil {
+		t.Fatalf("Unban: %v", err)
+	}
+	if mock.hasItem(testCFListName, "192.0.2.11") {
+		t.Fatal("192.0.2.11 still on the edge: its ID was not recovered by the mirror rebuild")
+	}
+	if !mock.hasItem(testCFListName, "192.0.2.12") {
+		t.Fatal("192.0.2.12 lost during the mirror rebuild")
 	}
 }

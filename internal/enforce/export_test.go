@@ -4,6 +4,7 @@ package enforce
 
 import (
 	"context"
+	"net/http"
 	"net/netip"
 	"time"
 )
@@ -158,5 +159,15 @@ func NewBunnyEnforcerWithRetryDelays(key, baseURL string, zoneIDs []int64, delay
 func NewBunnyEnforcerWithName(name, key, baseURL string, zoneIDs []int64) *BunnyEnforcer {
 	e := newBunnyEnforcerForTest(key, baseURL, zoneIDs)
 	e.instanceName = name
+	return e
+}
+
+// NewCFListsEnforcerWithClientTimeout constructs a synchronous test enforcer
+// whose HTTP client times out after timeout, with a millisecond page-retry
+// schedule, for the slow-page refresh tests (issue #646).
+func NewCFListsEnforcerWithClientTimeout(token, baseURL, accountID, listName string, timeout time.Duration) *CloudflareListsEnforcer {
+	e := newCFListsEnforcerForTest(token, baseURL, accountID, listName)
+	e.client = &http.Client{Timeout: timeout}
+	e.pageRetryDelays = []time.Duration{time.Millisecond, time.Millisecond}
 	return e
 }

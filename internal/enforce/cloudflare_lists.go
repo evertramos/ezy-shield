@@ -114,6 +114,9 @@ type CloudflareListsEnforcer struct {
 	// retryDelays is the backoff schedule between throttled mutation
 	// attempts; empty = fail on the first throttle (test mode).
 	retryDelays []time.Duration
+	// pageRetryDelays is the backoff between attempts of one item-list
+	// page that failed at the transport (timeout, reset) — issue #646.
+	pageRetryDelays []time.Duration
 	// opPollInterval is the async bulk-operation poll cadence.
 	opPollInterval time.Duration
 

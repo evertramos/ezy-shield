@@ -33,7 +33,11 @@ const (
 	defaultAIQueueCap = 256
 	// aiAsyncMinInterval is the floor between provider calls — the token
 	// spend rate cap.
-	aiAsyncMinInterval   = time.Second
+	aiAsyncMinInterval = time.Second
+	// aiAsyncPerIPCooldown is the floor between two analyses of the SAME
+	// IP (issue #648): a burst that stays in the grey zone after a verdict
+	// is the same episode on the same evidence, not a new question. A ban
+	// verdict ends the episode anyway; a runtime allowlist skips it.
 	aiAsyncPerIPCooldown = time.Minute
 )
 
@@ -45,7 +49,10 @@ type aiAsyncItem struct {
 }
 
 // aiAsyncQueue is the bounded drop-oldest queue. One entry per IP at a
-// time (pending map): a brute-force burst enqueues once, not per line.
+// time (pending map, held from push until the analysis is DONE — issue
+// #648): a brute-force burst enqueues once, not per line, and not again
+// while its analysis is in flight. lastDone enforces a per-IP cooldown
+// between analyses of the same IP.
 type aiAsyncQueue struct {
 	mu       sync.Mutex
 	items    []aiAsyncItem
@@ -54,14 +61,7 @@ type aiAsyncQueue struct {
 	cap      int
 	signal   chan struct{}
 	dropped  atomic.Uint64
-	now      func() time.Time
-}
-
-func (q *aiAsyncQueue) done(ip netip.Addr) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	delete(q.pending, ip)
-	q.lastDone[ip] = q.now()
+	now      func() time.Time // injectable clock (tests)
 }
 
 func newAIAsyncQueue(capacity int) *aiAsyncQueue {
@@ -77,14 +77,22 @@ func newAIAsyncQueue(capacity int) *aiAsyncQueue {
 	}
 }
 
-// push enqueues ip unless already pending. On overflow the OLDEST entry
-// is dropped (counted) — recent activity is the analyzable activity.
+// push enqueues ip unless it is pending (queued or in flight) or inside
+// its per-IP cooldown. On overflow the OLDEST entry is dropped (counted) —
+// recent activity is the analyzable activity. Cooldown skips are not
+// drops: nothing analyzable was lost.
 func (q *aiAsyncQueue) push(item aiAsyncItem) {
 	q.mu.Lock()
 	if q.pending[item.ip] {
 		q.mu.Unlock()
 		return
 	}
+	now := q.now()
+	if last, ok := q.lastDone[item.ip]; ok && now.Sub(last) < aiAsyncPerIPCooldown {
+		q.mu.Unlock()
+		return
+	}
+	q.pruneCooldownsLocked(now)
 	if len(q.items) >= q.cap {
 		oldest := q.items[0]
 		q.items = q.items[1:]
@@ -101,7 +109,8 @@ func (q *aiAsyncQueue) push(item aiAsyncItem) {
 	}
 }
 
-// pop removes the oldest entry; ok=false when empty.
+// pop removes the oldest entry; ok=false when empty. The IP stays pending
+// until done(ip) — the analysis is in flight, not finished.
 func (q *aiAsyncQueue) pop() (aiAsyncItem, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -110,8 +119,29 @@ func (q *aiAsyncQueue) pop() (aiAsyncItem, bool) {
 	}
 	item := q.items[0]
 	q.items = q.items[1:]
-	delete(q.pending, item.ip)
 	return item, true
+}
+
+// done ends ip's episode: it may be queued again after the cooldown.
+func (q *aiAsyncQueue) done(ip netip.Addr) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	delete(q.pending, ip)
+	q.lastDone[ip] = q.now()
+}
+
+// pruneCooldownsLocked drops expired cooldown marks so the map stays
+// bounded by the IPs analysed in the last cooldown window. Called with
+// q.mu held.
+func (q *aiAsyncQueue) pruneCooldownsLocked(now time.Time) {
+	if len(q.lastDone) < 1024 {
+		return
+	}
+	for ip, t := range q.lastDone {
+		if now.Sub(t) >= aiAsyncPerIPCooldown {
+			delete(q.lastDone, ip)
+		}
+	}
 }
 
 func (q *aiAsyncQueue) depth() int {
@@ -165,6 +195,7 @@ func (d *Daemon) runAIAsync(ctx context.Context) {
 		if d.processAIAsyncItem(ctx, item) {
 			lastCall = time.Now()
 		}
+		d.aiQueue.done(item.ip)
 	}
 }
 

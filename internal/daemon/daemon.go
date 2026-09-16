@@ -109,6 +109,10 @@ type daemonStore interface {
 	IncrEventCount(ctx context.Context, ip netip.Addr, kind string, bucketStart int64) error
 	SumEventCounts(ctx context.Context, ip netip.Addr, kinds []string, since int64) (map[string]int, error)
 	PruneEventCounts(ctx context.Context, before int64) (int, error)
+	// ConsumeEventCounts / ConsumedEventCounts are the since-strike watermark
+	// of the long-window counters (issue #636).
+	ConsumeEventCounts(ctx context.Context, ip netip.Addr, windows map[time.Duration][]string, now time.Time) error
+	ConsumedEventCounts(ctx context.Context, ip netip.Addr, window time.Duration, now time.Time) (map[string]int, error)
 	// Retention pruning (issue #184) — see internal/store/retention.go.
 	CountPruneCandidates(ctx context.Context, pol store.RetentionPolicy, now time.Time) ([]store.PruneStat, error)
 	PruneRetention(ctx context.Context, pol store.RetentionPolicy, now time.Time) ([]store.PruneStat, bool, error)
@@ -1391,8 +1395,24 @@ func (d *Daemon) evaluateLongRules(ctx context.Context, ip netip.Addr, now time.
 				"ip", ip, "window", w, "err", err)
 			continue
 		}
+		// Subtract what the last strike consumed (issue #636); a watermark
+		// older than the window is ignored by the store. Between the strike
+		// and the window's end this can undercount by up to the consumed
+		// amount as those events age out — conservative on purpose.
+		consumed, err := d.store.ConsumedEventCounts(ctx, ip, w, now)
+		if err != nil {
+			slog.WarnContext(ctx, "daemon: consumed long-window query failed", "ip", ip, "window", w, "err", err)
+			consumed = nil
+		}
 		total := 0
-		for _, n := range sums {
+		for k, n := range sums {
+			if c := consumed[k]; c > 0 {
+				n -= c
+				if n < 0 {
+					n = 0
+				}
+				sums[k] = n
+			}
 			total += n
 		}
 		if total == 0 {
@@ -1432,6 +1452,15 @@ func (d *Daemon) dispatch(ctx context.Context, action sdk.Action) {
 	// exactly like the armed one.
 	if action.Op == "ban" || action.Op == "dry_ban" {
 		d.agg.Reset(action.IP)
+		// Same for the persistent long-window counters (issue #636): record
+		// what each window had accumulated so the next evaluation counts
+		// only events after this strike. Failure is non-fatal: the ladder
+		// would then behave as before the fix, never less strictly.
+		if len(d.longRuleWindows) > 0 {
+			if err := d.store.ConsumeEventCounts(ctx, action.IP, d.longRuleWindows, d.clock()); err != nil {
+				slog.WarnContext(ctx, "daemon: recording consumed long-window evidence failed", "ip", action.IP, "err", err)
+			}
+		}
 	}
 
 	banApplied := false

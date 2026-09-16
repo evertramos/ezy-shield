@@ -47,6 +47,8 @@ A human who fat-fingers a password fails once or twice and then fixes it or give
 - 5 failures accumulated in a day (or across 5 days for the weekly tier): actioned — and the first strike is a 5-minute ban, so even a false positive is recoverable and self-clears.
 - For the WordPress tiers the daily bar is 25 login-page hits: a person logging in a few times a day loads `wp-login.php` a handful of times; 25 in a day is automation. Put the site admin's address in the allowlist regardless — allowlist supremacy applies before any rule.
 
+A strike consumes the history that earned it: after the ban ends, the daily and weekly counters start again from zero for that address, so the next rung needs another full threshold of new failures — one more typo after a 5-minute ban does not become a 1-hour one.
+
 **Detection latency is inherent**: a 1-attempt-per-hour attacker is caught on the 5th attempt (~5 hours in); a once-a-day retrier on day 5. Once on the strike ladder, repeat offenses escalate through the normal TTLs (5m → 1h → 24h → 7d → permanent).
 
 ## Tuning

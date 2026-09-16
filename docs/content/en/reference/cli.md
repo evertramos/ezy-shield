@@ -493,7 +493,10 @@ A field-level matcher on a window of 1h or less cannot be applied to
 counts — such rules are reported as a loudly-marked kind-level upper bound.
 A field-level rule with a window above 1h is evaluated exactly, from the
 matcher counter the daemon keeps under the rule's own name (written only
-while a rule of that name is loaded).
+while a rule of that name is loaded). The daemon additionally discounts the
+history a strike already consumed for an address; `rule test` reports the raw
+stored history, so it can say "would fire" for an address the daemon would not
+strike again until it has gathered a full threshold of new events.
 
 ## ezyshield ban
 

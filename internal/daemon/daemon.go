@@ -1131,7 +1131,8 @@ func (d *Daemon) maybeConsultAI(ctx context.Context, ip netip.Addr, verdicts []s
 		return verdicts
 	}
 	aggs := d.collectAIAggregates(ip)
-	return append(verdicts, d.consultProvider(ctx, ip, aggs)...)
+	aiVerdicts, _ := d.consultProvider(ctx, ip, aggs)
+	return append(verdicts, aiVerdicts...)
 }
 
 // highestScore returns the max verdict score (0 for none).
@@ -1225,14 +1226,19 @@ func (d *Daemon) collectAIAggregates(ip netip.Addr) []sdk.Aggregate {
 // consultProvider runs the cache → budget → Analyze → consume → bind →
 // cache-set round trip for one IP and returns the bound AI verdicts (an
 // empty slice on any failure — callers degrade to rules-only).
-func (d *Daemon) consultProvider(ctx context.Context, ip netip.Addr, aggs []sdk.Aggregate) []sdk.Verdict {
+// consultProvider returns the AI verdicts for ip and whether the layer
+// actually ANSWERED (cache hit or a successful provider call). A budget
+// query error or a failed/timed-out call returns answered=false: the async
+// worker then clears the episode without arming the per-IP cooldown, so a
+// transient provider failure never leaves a burst unanalysed (issue #648).
+func (d *Daemon) consultProvider(ctx context.Context, ip netip.Addr, aggs []sdk.Aggregate) ([]sdk.Verdict, bool) {
 	// Cache check — keyed on first (shortest) window aggregate behavior signature.
 	// Cache.Get already re-targets replayed verdicts to the requesting IP
 	// (issue #311); the bind below re-asserts that invariant at the chokepoint.
 	if len(aggs) > 0 {
 		if cached := d.aiCache.Get(aggs[0]); cached != nil {
 			slog.DebugContext(ctx, "daemon: ai cache hit", "ip", ip)
-			return bindVerdictsToIP(ctx, cached, ip)
+			return bindVerdictsToIP(ctx, cached, ip), true
 		}
 	}
 
@@ -1240,7 +1246,7 @@ func (d *Daemon) consultProvider(ctx context.Context, ip netip.Addr, aggs []sdk.
 	budget, err := d.aiBudget.Current(ctx)
 	if err != nil {
 		slog.WarnContext(ctx, "daemon: ai budget query failed", "err", err)
-		return nil
+		return nil, false
 	}
 
 	aiVerdicts, usage, err := d.aiProvider.Analyze(ctx, aggs, budget)
@@ -1249,7 +1255,7 @@ func (d *Daemon) consultProvider(ctx context.Context, ip netip.Addr, aggs []sdk.
 	}
 	if err != nil {
 		slog.WarnContext(ctx, "daemon: ai analyze failed", "ip", ip, "err", err)
-		return nil
+		return nil, false
 	}
 	if d.metrics != nil {
 		d.metrics.aiTokens.With(d.aiProvider.Name()).Add(int64(usage.InputTokens + usage.OutputTokens))
@@ -1279,7 +1285,7 @@ func (d *Daemon) consultProvider(ctx context.Context, ip netip.Addr, aggs []sdk.
 		d.aiCache.Set(aggs[0], aiVerdicts)
 	}
 
-	return aiVerdicts
+	return aiVerdicts, true
 }
 
 // maybeInjectGeoVerdict appends a synthetic "geo_block" verdict when the IP's

@@ -345,8 +345,9 @@ ai:
 
 With `async: true` the pipeline **never waits for a provider**: grey-zone
 episodes (scores inside the ambiguous band) are queued — one entry per IP
-at a time — and a background worker drains them, rate-capped at one
-provider call per second. How the layer stays token-frugal:
+at a time, held until its analysis has finished — and a background worker
+drains them, rate-capped at one provider call per second and at most one
+analysis per IP per minute (a failed call is retried after ten seconds). How the layer stays token-frugal:
 
 1. The rule engine decides the obvious cases; only the ambiguous band ever
    enqueues (the same #419 gates apply — decisive scores and already-banned

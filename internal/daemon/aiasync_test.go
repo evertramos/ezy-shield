@@ -312,7 +312,9 @@ func TestAIAsync_InFlightIPNotReenqueued(t *testing.T) {
 		t.Fatalf("queue depth = %d while %s is in flight, want 0 (same episode re-enqueued)", n, ip)
 	}
 	close(prov.release)
-	time.Sleep(200 * time.Millisecond)
+	if !waitForCond(t, 3*time.Second, func() bool { return !d.aiQueue.isPending(ip) }) {
+		t.Fatal("episode never ended: the IP is still pending after the analysis returned")
+	}
 	if n := prov.count(); n != 1 {
 		t.Fatalf("provider calls = %d, want 1", n)
 	}
@@ -335,7 +337,7 @@ func TestAIAsync_PerIPCooldown(t *testing.T) {
 	if !ok || item.ip != ip {
 		t.Fatalf("pop = %+v ok=%v", item, ok)
 	}
-	d.aiQueue.done(item.ip)
+	d.aiQueue.done(item.ip, true)
 
 	d.maybeEnqueueAI(context.Background(), ip, 50)
 	if n := d.aiQueue.depth(); n != 0 {
@@ -349,5 +351,38 @@ func TestAIAsync_PerIPCooldown(t *testing.T) {
 	d.maybeEnqueueAI(context.Background(), ip, 50)
 	if n := d.aiQueue.depth(); n != 2 {
 		t.Fatalf("depth = %d after the cooldown, want 2", n)
+	}
+}
+
+// TestAIAsync_NoAnswerArmsOnlyTheErrorBackoff (#650 review): a failed or
+// timed-out provider call must not silence the IP for the full cooldown —
+// a burst that ends inside the minute would never be analysed. Only the
+// short error backoff applies.
+func TestAIAsync_NoAnswerArmsOnlyTheErrorBackoff(t *testing.T) {
+	prov := &failingProvider{}
+	d := newAIDaemon(t, prov)
+	d.aiQueue = newAIAsyncQueue(8)
+	now := time.Date(2026, 9, 16, 19, 0, 0, 0, time.UTC)
+	d.aiQueue.now = func() time.Time { return now }
+	ip := netip.MustParseAddr("203.0.113.93")
+	seedHTTPActivity(d, ip, 20)
+
+	d.maybeEnqueueAI(context.Background(), ip, 50)
+	item, _ := d.aiQueue.pop()
+	called, answered := d.runAIAsyncItem(context.Background(), item)
+	if !called || answered {
+		t.Fatalf("called=%v answered=%v, want called without an answer", called, answered)
+	}
+	if d.aiQueue.isPending(ip) {
+		t.Fatal("IP left pending after the episode")
+	}
+	d.maybeEnqueueAI(context.Background(), ip, 50)
+	if n := d.aiQueue.depth(); n != 0 {
+		t.Fatalf("depth = %d right after a failed call, want 0 (error backoff)", n)
+	}
+	now = now.Add(aiAsyncErrorBackoff + time.Second)
+	d.maybeEnqueueAI(context.Background(), ip, 50)
+	if n := d.aiQueue.depth(); n != 1 {
+		t.Fatalf("depth = %d after the error backoff, want 1 — a failed call must not arm the full cooldown", n)
 	}
 }

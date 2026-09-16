@@ -477,6 +477,14 @@ func New(dcfg Config) (*Daemon, error) {
 		maxIPs = DefaultMaxIPs
 	}
 
+	// The classifier keeps field-level in-memory rule counts exact past
+	// the per-IP sample cap (issue #622). It reads d.ruleEng at call time.
+	// There is no rule reload today; if one is added, the swap must be
+	// synchronised with this closure and must Reset (or re-classify) every
+	// bucket — entries carry the counter kinds assigned at Add time, so a
+	// renamed or re-predicated rule would otherwise count stale matches
+	// and a newly added rule would read a partial counter instead of the
+	// sample (adversarial review of #638).
 	agg := aggregate.New(windows, 0).WithMaxIPs(maxIPs)
 
 	decEng, err := decision.New(dcfg.Policy, dcfg.Store)
@@ -558,6 +566,7 @@ func New(dcfg Config) (*Daemon, error) {
 		execActivity:     dcfg.ExecActivity,
 		webshellActivity: dcfg.WebshellActivity,
 	}
+	agg.WithClassifier(func(ev sdk.Event) []string { return d.ruleEng.MemoryCounterKinds(ev) })
 
 	// Retention pruning (issue #184): opt-in via the retention: section.
 	// Windows() cannot fail on a config that passed Validate; a nil result

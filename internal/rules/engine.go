@@ -292,10 +292,19 @@ func (e *Engine) LongFieldEventKinds() map[string]bool {
 // one per long-window field-level rule whose kinds include ev.Kind and
 // whose matcher ev satisfies (the identical predicate countMatches and
 // evidenceLines apply). Pure; a few substring checks per event, no I/O.
-func (e *Engine) LongCounterKinds(ev sdk.Event) []string {
+func (e *Engine) LongCounterKinds(ev sdk.Event) []string { return e.counterKinds(ev, true) }
+
+// MemoryCounterKinds is LongCounterKinds for the field-level rules served
+// by the in-memory aggregator (window ≤ LongWindowCutoff). The aggregator
+// runs it as its Classifier (issue #622): the count of a field-level rule
+// then survives the sample cap, because evicted matching events are still
+// counted under LongCounterKind(rule) and countMatches reads that key.
+func (e *Engine) MemoryCounterKinds(ev sdk.Event) []string { return e.counterKinds(ev, false) }
+
+func (e *Engine) counterKinds(ev sdk.Event, long bool) []string {
 	var out []string
 	for _, r := range e.rules {
-		if !isLongField(r) {
+		if r.Field == "" || isLongField(r) != long {
 			continue
 		}
 		hit := false
@@ -422,10 +431,14 @@ func fieldMatches(r spec, ev sdk.Event) bool {
 // For kind-only rules (no Field), Kinds counts are used directly — they are
 // exact even when Sample is capped.
 //
-// For field-level rules, Sample is scanned. The default sample cap (4096) is
-// large enough for all built-in rule thresholds. If the sample is saturated the
-// count is a lower bound: the rule still triggers correctly as long as the true
-// count exceeds the threshold.
+// For field-level rules, the rule's own counter kind (LongCounterKind) is
+// used when the aggregate carries it — the persisted counter of a
+// long-window rule (issue #585) or, for an in-memory window, the count the
+// aggregator kept through its Classifier (issue #622), which stays exact
+// after the sample cap evicted the matching events. Otherwise Sample is
+// scanned; it holds the NEWEST events of the window (issue #622), so a
+// saturated sample is a lower bound over the most recent traffic and a
+// busy client's current attack is never hidden behind its older requests.
 func countMatches(r spec, agg sdk.Aggregate) int {
 	kindSet := make(map[string]struct{}, len(r.Kinds))
 	for _, k := range r.Kinds {
@@ -443,15 +456,15 @@ func countMatches(r spec, agg sdk.Aggregate) int {
 		return total
 	}
 
-	// Long-window field-level rule served by its own persisted counter
-	// (issue #585): the aggregate the daemon builds from the store carries
-	// the count under the rule's counter kind and no Sample. An aggregate
-	// that does carry a Sample (in-memory evaluation, the benchmark) falls
-	// through to the scan below — same predicate, same result.
-	if isLongField(r) {
-		if n, ok := agg.Kinds[LongCounterKind(r.Name)]; ok {
-			return n
-		}
+	// Field-level rule served by its own counter: the persisted counter of
+	// a long-window rule (issue #585 — the aggregate the daemon builds from
+	// the store carries the count and no Sample) or the in-memory count
+	// kept by the aggregator's Classifier (issue #622). An aggregate
+	// without the key (no classifier: unit tests, the benchmark) falls
+	// through to the scan below — same predicate, same result while the
+	// sample is not saturated.
+	if n, ok := agg.Kinds[LongCounterKind(r.Name)]; ok {
+		return n
 	}
 
 	// Field-level rule: scan Sample for matching field values. The

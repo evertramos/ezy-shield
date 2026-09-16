@@ -211,11 +211,9 @@ func (d *Daemon) runAIAsync(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		called, answered := d.runAIAsyncItem(ctx, item)
-		if called {
+		if called, _ := d.runAIAsyncItem(ctx, item); called {
 			lastCall = time.Now()
 		}
-		_ = answered
 	}
 }
 

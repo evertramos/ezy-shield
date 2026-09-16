@@ -33,7 +33,7 @@ deduplication guard enforces this boundary:
 | `"ban"` | Strike recorded; enforcer called; ban active |
 | `"dry_ban"` | Would ban; `armed=false`; no writes |
 | `"already_banned"` | Suppressed: IP already has an active ban; only `last_seen` bumped |
-| `"notify_only"` | Score in observe band; no ban |
+| `"notify_only"` | Score in observe band; no ban. Returned on every evaluation, but audited once per (IP, rule) per minute while the rule stays saturated |
 | `"record"` | Below observe threshold, or allowlisted |
 
 ## What `total_strikes` measures

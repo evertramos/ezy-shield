@@ -8,8 +8,9 @@ package daemon
 // repeat scanners. Suppression is keyed by (IP, rule category): the first
 // occurrence notifies immediately, repeats within the window are counted,
 // and the count is folded into ONE summary notification once the window
-// closes. Only notifications are suppressed — audit_log rows are written by
-// the decision engine before this layer and stay complete.
+// closes. Only notifications are suppressed here; the decision engine
+// writes the audit_log row before this layer, on the rising edge of each
+// (IP, rule) per minute (issue #649).
 
 import (
 	"context"

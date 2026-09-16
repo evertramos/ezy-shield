@@ -329,8 +329,10 @@ ai:
 
 Com `async: true` o pipeline **nunca espera por um provider**: episódios
 da zona cinzenta (scores dentro da banda ambígua) entram numa fila — uma
-entrada por IP por vez — e um worker em segundo plano os drena, com teto
-de uma chamada por segundo. Como a camada permanece frugal em tokens:
+entrada por IP por vez, mantida até a análise terminar — e um worker em
+segundo plano os drena, com teto de uma chamada por segundo e de uma
+análise por IP por minuto (uma chamada que falha é retentada após dez
+segundos). Como a camada permanece frugal em tokens:
 
 1. O motor de regras decide os casos óbvios; só a banda ambígua enfileira
    (os mesmos gates da #419 valem — scores decisivos e IPs já banidos

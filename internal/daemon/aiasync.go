@@ -34,6 +34,16 @@ const (
 	// aiAsyncMinInterval is the floor between provider calls — the token
 	// spend rate cap.
 	aiAsyncMinInterval = time.Second
+	// aiAsyncPerIPCooldown is the floor between two analyses of the SAME
+	// IP (issue #648): a burst that stays in the grey zone after a verdict
+	// is the same episode on the same evidence, not a new question. A ban
+	// verdict ends the episode anyway; a runtime allowlist skips it.
+	aiAsyncPerIPCooldown = time.Minute
+	// aiAsyncErrorBackoff is the per-IP floor after an analysis that got NO
+	// answer (provider error/timeout, budget query failure): long enough not
+	// to hammer a failing provider on every line, short enough that a burst
+	// is still analysed while it lasts.
+	aiAsyncErrorBackoff = 10 * time.Second
 )
 
 // aiAsyncItem is one queued grey-zone episode.
@@ -44,14 +54,19 @@ type aiAsyncItem struct {
 }
 
 // aiAsyncQueue is the bounded drop-oldest queue. One entry per IP at a
-// time (pending map): a brute-force burst enqueues once, not per line.
+// time (pending map, held from push until the analysis is DONE — issue
+// #648): a brute-force burst enqueues once, not per line, and not again
+// while its analysis is in flight. lastDone enforces a per-IP cooldown
+// between analyses of the same IP.
 type aiAsyncQueue struct {
-	mu      sync.Mutex
-	items   []aiAsyncItem
-	pending map[netip.Addr]bool
-	cap     int
-	signal  chan struct{}
-	dropped atomic.Uint64
+	mu       sync.Mutex
+	items    []aiAsyncItem
+	pending  map[netip.Addr]bool
+	lastDone map[netip.Addr]time.Time
+	cap      int
+	signal   chan struct{}
+	dropped  atomic.Uint64
+	now      func() time.Time // injectable clock (tests)
 }
 
 func newAIAsyncQueue(capacity int) *aiAsyncQueue {
@@ -59,20 +74,30 @@ func newAIAsyncQueue(capacity int) *aiAsyncQueue {
 		capacity = defaultAIQueueCap
 	}
 	return &aiAsyncQueue{
-		pending: map[netip.Addr]bool{},
-		cap:     capacity,
-		signal:  make(chan struct{}, 1),
+		pending:  map[netip.Addr]bool{},
+		lastDone: map[netip.Addr]time.Time{},
+		cap:      capacity,
+		signal:   make(chan struct{}, 1),
+		now:      time.Now,
 	}
 }
 
-// push enqueues ip unless already pending. On overflow the OLDEST entry
-// is dropped (counted) — recent activity is the analyzable activity.
+// push enqueues ip unless it is pending (queued or in flight) or inside
+// its per-IP cooldown. On overflow the OLDEST entry is dropped (counted) —
+// recent activity is the analyzable activity. Cooldown skips are not
+// drops: nothing analyzable was lost.
 func (q *aiAsyncQueue) push(item aiAsyncItem) {
 	q.mu.Lock()
 	if q.pending[item.ip] {
 		q.mu.Unlock()
 		return
 	}
+	now := q.now()
+	if last, ok := q.lastDone[item.ip]; ok && now.Sub(last) < aiAsyncPerIPCooldown {
+		q.mu.Unlock()
+		return
+	}
+	q.pruneCooldownsLocked(now)
 	if len(q.items) >= q.cap {
 		oldest := q.items[0]
 		q.items = q.items[1:]
@@ -89,7 +114,8 @@ func (q *aiAsyncQueue) push(item aiAsyncItem) {
 	}
 }
 
-// pop removes the oldest entry; ok=false when empty.
+// pop removes the oldest entry; ok=false when empty. The IP stays pending
+// until done(ip) — the analysis is in flight, not finished.
 func (q *aiAsyncQueue) pop() (aiAsyncItem, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -98,8 +124,43 @@ func (q *aiAsyncQueue) pop() (aiAsyncItem, bool) {
 	}
 	item := q.items[0]
 	q.items = q.items[1:]
-	delete(q.pending, item.ip)
 	return item, true
+}
+
+// done ends ip's episode. answered=true (a verdict set came back, from
+// the cache or the provider) arms the full per-IP cooldown; answered=false
+// (no answer) arms only the short error backoff, so the burst is retried
+// while it still lasts.
+func (q *aiAsyncQueue) done(ip netip.Addr, answered bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	delete(q.pending, ip)
+	if answered {
+		q.lastDone[ip] = q.now()
+		return
+	}
+	q.lastDone[ip] = q.now().Add(aiAsyncErrorBackoff - aiAsyncPerIPCooldown)
+}
+
+// isPending reports whether ip is queued or in flight (tests).
+func (q *aiAsyncQueue) isPending(ip netip.Addr) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.pending[ip]
+}
+
+// pruneCooldownsLocked drops expired cooldown marks once the map holds
+// 1 024 entries, so it stays bounded by the IPs analysed in the last
+// cooldown window. Called with q.mu held.
+func (q *aiAsyncQueue) pruneCooldownsLocked(now time.Time) {
+	if len(q.lastDone) < 1024 {
+		return
+	}
+	for ip, t := range q.lastDone {
+		if now.Sub(t) >= aiAsyncPerIPCooldown {
+			delete(q.lastDone, ip)
+		}
+	}
 }
 
 func (q *aiAsyncQueue) depth() int {
@@ -150,25 +211,34 @@ func (d *Daemon) runAIAsync(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if d.processAIAsyncItem(ctx, item) {
+		if called, _ := d.runAIAsyncItem(ctx, item); called {
 			lastCall = time.Now()
 		}
 	}
 }
 
+// runAIAsyncItem runs one episode and ALWAYS ends it in the queue — done is
+// deferred so no early return (or a future recover) can leave the IP
+// pending forever. Returns (provider called, provider answered).
+func (d *Daemon) runAIAsyncItem(ctx context.Context, item aiAsyncItem) (called, answered bool) {
+	defer func() { d.aiQueue.done(item.ip, answered) }()
+	return d.processAIAsyncItem(ctx, item)
+}
+
 // processAIAsyncItem runs one queued episode end to end. Returns whether a
-// provider call actually happened (for the rate cap).
-func (d *Daemon) processAIAsyncItem(ctx context.Context, item aiAsyncItem) bool {
+// provider call actually happened (for the rate cap) and whether the AI
+// layer answered (cache hit or successful call — arms the per-IP cooldown).
+func (d *Daemon) processAIAsyncItem(ctx context.Context, item aiAsyncItem) (called, answered bool) {
 	ip := item.ip
 
 	// Log Cleaner front gates: an episode decided since it was queued —
 	// banned or (runtime-)allowlisted — must not spend tokens.
 	if d.isRuntimeAllowlisted(ip) {
 		slog.DebugContext(ctx, "daemon: async ai skip — runtime allowlisted", "ip", ip)
-		return false
+		return false, false
 	}
 	if !d.aiEligible(ctx, ip, item.ruleScore) {
-		return false
+		return false, false
 	}
 
 	aggs := d.collectAIAggregates(ip)
@@ -176,10 +246,10 @@ func (d *Daemon) processAIAsyncItem(ctx context.Context, item aiAsyncItem) bool 
 	d.aiCleanReduction.Store(math.Float64bits(stats.ReductionRatio()))
 	if len(cleaned) == 0 {
 		slog.DebugContext(ctx, "daemon: async ai skip — cleaner removed everything", "ip", ip)
-		return false
+		return false, false
 	}
 
-	verdicts := d.consultProvider(ctx, ip, cleaned)
+	verdicts, answered := d.consultProvider(ctx, ip, cleaned)
 	if d.metrics != nil && d.aiQueue != nil {
 		// Export the drop counter lazily alongside each processed item.
 		// The clamp is unreachable in practice (2^63 drops), but keeps the
@@ -191,7 +261,7 @@ func (d *Daemon) processAIAsyncItem(ctx context.Context, item aiAsyncItem) bool 
 		d.metrics.aiQueueDropped.Set(int64(dropped))
 	}
 	if len(verdicts) == 0 {
-		return true // provider was called (or cache hit); nothing came back
+		return true, answered // called; answered only if the layer replied with nothing to say
 	}
 
 	// Agreement-rate metric: does the AI land on the same side of the ban
@@ -213,13 +283,13 @@ func (d *Daemon) processAIAsyncItem(ctx context.Context, item aiAsyncItem) bool 
 	d.publishDetections(verdicts)
 	if d.isRuntimeAllowlisted(ip) {
 		slog.DebugContext(ctx, "daemon: async ai verdicts suppressed — runtime allowlisted", "ip", ip)
-		return true
+		return true, true
 	}
 	action, err := d.decEng.Decide(ctx, verdicts)
 	if err != nil {
 		slog.WarnContext(ctx, "daemon: async ai decide error", "ip", ip, "err", err)
-		return true
+		return true, true
 	}
 	d.dispatch(ctx, action)
-	return true
+	return true, true
 }

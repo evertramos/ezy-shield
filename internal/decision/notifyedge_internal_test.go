@@ -16,7 +16,8 @@ import (
 
 // TestNotifyEdge_MapIsBounded: more distinct IPs than notifyEdgeMaxEntries
 // inside one window never grow the map past the cap; expired edges are
-// swept first, and when none has expired the oldest is dropped.
+// swept first, and when none has expired one arbitrary edge is dropped
+// (O(1); any dropped edge costs at most one extra audit row).
 func TestNotifyEdge_MapIsBounded(t *testing.T) {
 	e := &Engine{}
 	now := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
@@ -38,11 +39,8 @@ func TestNotifyEdge_MapIsBounded(t *testing.T) {
 			t.Fatalf("after %d inserts map has %d entries, cap %d", i+1, n, notifyEdgeMaxEntries)
 		}
 	}
-	if _, ok := e.notifyEdges[addr(0)]; ok {
-		t.Fatalf("oldest edge survived the cap")
-	}
 	if _, ok := e.notifyEdges[addr(notifyEdgeMaxEntries+499)]; !ok {
-		t.Fatalf("newest edge was dropped instead of the oldest")
+		t.Fatalf("the edge just inserted was not kept")
 	}
 
 	// Past the window every entry is expired: one insert sweeps them all.

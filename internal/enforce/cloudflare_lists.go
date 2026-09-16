@@ -50,6 +50,15 @@ const (
 	cfBulkOpPollInterval = time.Second
 )
 
+// cfPageRetryDelays is the per-page backoff when one item-list page fails
+// at the transport (a slow page past the client timeout, a reset). Two
+// extra attempts: one slow page must not fail a whole mirror read (#646).
+var cfPageRetryDelays = []time.Duration{time.Second, 3 * time.Second}
+
+// cfStaleRetryDelays paces the background mirror rebuild after a failed
+// post-add refresh (issue #646); the counter resets on success.
+var cfStaleRetryDelays = []time.Duration{5 * time.Second, 30 * time.Second, 2 * time.Minute, 10 * time.Minute}
+
 // listState tracks the desired IP set, the discovered list ID, and the IP→item
 // mapping for the items THIS instance owns. The mu guards every field
 // including timer.
@@ -67,6 +76,12 @@ type listState struct {
 	// still want it is re-added within one flush interval.
 	foreign map[string]struct{}
 	timer   *time.Timer
+	// mirrorStale is set when items were added at the edge but their IDs
+	// could not be read back (post-add refresh failed, issue #646): the
+	// next push re-discovers the list before diffing, and a background
+	// retry rebuilds it even when nothing new is banned.
+	mirrorStale   bool
+	staleAttempts int
 }
 
 func newListState() *listState {
@@ -163,6 +178,7 @@ func NewCloudflareListsEnforcer(ctx context.Context, cfg *config.CloudflareCfg, 
 		debounceInterval:    cfDebounceFromCfg(cfg),
 		expireFlushInterval: expireFlush,
 		retryDelays:         cfRetryDelays,
+		pageRetryDelays:     cfPageRetryDelays,
 		opPollInterval:      cfBulkOpPollInterval,
 		svcCtx:              ctx,
 		state:               newListState(),
@@ -324,7 +340,7 @@ func (e *CloudflareListsEnforcer) scheduleFlush(ctx context.Context) error {
 func (e *CloudflareListsEnforcer) push(ctx context.Context) error {
 	// Snapshot the inputs under lock.
 	e.state.mu.Lock()
-	needsDiscover := !e.state.discovered
+	needsDiscover := !e.state.discovered || e.state.mirrorStale
 	listID := e.state.listID
 	desiredCopy := make(map[string]struct{}, len(e.state.desired))
 	for ip := range e.state.desired {
@@ -357,6 +373,8 @@ func (e *CloudflareListsEnforcer) push(ctx context.Context) error {
 		}
 		e.state.mu.Lock()
 		e.state.discovered = true
+		e.state.mirrorStale = false
+		e.state.staleAttempts = 0
 		e.state.listID = newID
 		e.state.items = newItems
 		// Everything present but not ours is foreign: another instance's
@@ -617,7 +635,7 @@ func (e *CloudflareListsEnforcer) fetchAllItems(ctx context.Context, listID stri
 		if cursor != "" {
 			url += "&cursor=" + cursor
 		}
-		resp, err := e.doRequest(ctx, http.MethodGet, url, nil)
+		resp, err := e.getPageWithRetry(ctx, url)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -647,6 +665,68 @@ func (e *CloudflareListsEnforcer) fetchAllItems(ctx context.Context, listID stri
 	}
 	return nil, nil, fmt.Errorf("cloudflare list items: pagination exceeded %d pages at %d items/page (unmoving cursor?)",
 		maxPages, cfListItemsPerPage)
+}
+
+// getPageWithRetry issues one item-list page GET, retrying a transport
+// failure (client timeout, reset — no HTTP status) on the pageRetryDelays
+// schedule. HTTP-level answers are returned as they are: the caller
+// interprets them (issue #646).
+func (e *CloudflareListsEnforcer) getPageWithRetry(ctx context.Context, url string) (*http.Response, error) {
+	for attempt := 0; ; attempt++ {
+		resp, err := e.doRequest(ctx, http.MethodGet, url, nil)
+		if err == nil {
+			return resp, nil
+		}
+		if attempt >= len(e.pageRetryDelays) || ctx.Err() != nil {
+			return nil, err
+		}
+		slog.WarnContext(ctx, "enforce/cloudflare-lists: list page failed at the transport, retrying",
+			"attempt", attempt+1, "max_attempts", len(e.pageRetryDelays)+1, "err", err.Error())
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(e.pageRetryDelays[attempt]):
+		}
+		if err := e.limiter.wait(ctx); err != nil {
+			return nil, err
+		}
+	}
+}
+
+// markMirrorStale flags the local item mirror for a rebuild and, in
+// background (debounced) mode, arms a paced retry so the rebuild happens
+// even when no new ban triggers a push (issue #646). Synchronous mode
+// (tests) rebuilds on the next call instead.
+func (e *CloudflareListsEnforcer) markMirrorStale() {
+	e.state.mu.Lock()
+	e.state.mirrorStale = true
+	attempt := e.state.staleAttempts
+	if attempt < len(cfStaleRetryDelays)-1 {
+		e.state.staleAttempts++
+	}
+	background := e.debounceInterval > 0
+	e.state.mu.Unlock()
+	if !background {
+		return
+	}
+	delay := cfStaleRetryDelays[attempt]
+	time.AfterFunc(delay, func() {
+		if e.svcCtx.Err() != nil {
+			return
+		}
+		e.state.mu.Lock()
+		stale := e.state.mirrorStale
+		e.state.mu.Unlock()
+		if !stale {
+			return
+		}
+		ctx, cancel := context.WithTimeout(e.svcCtx, 90*time.Second)
+		defer cancel()
+		if err := e.push(ctx); err != nil {
+			slog.Warn("enforce/cloudflare-lists: stale mirror rebuild failed, will retry", "err", err)
+			e.markMirrorStale()
+		}
+	})
 }
 
 // ── CF Lists API mutators ────────────────────────────────────────────────────
@@ -823,7 +903,17 @@ func (e *CloudflareListsEnforcer) addItems(ctx context.Context, listID string, i
 		// Pass numItems=1 as a safe default since we know items exist (we just added them).
 		all, _, err := e.fetchAllItems(ctx, listID, 1)
 		if err != nil {
-			return nil, fmt.Errorf("post-add refresh: %w", err)
+			// The add is applied at the edge (every batch POST succeeded
+			// and its bulk operation completed); only reading the IDs back
+			// failed. Failing the push here reported an applied ban as a
+			// failure and left the IDs unknown for good. Keep the add, mark
+			// the mirror stale — the next push re-discovers the list before
+			// diffing, and a background retry rebuilds it meanwhile — and
+			// say so at WARN (issue #646).
+			slog.WarnContext(ctx, "enforce/cloudflare-lists: post-add refresh failed; edge mirror stale until the next push",
+				"added", len(ips), "list_id", listID, "err", err.Error())
+			e.markMirrorStale()
+			return out, nil
 		}
 		// Only copy back IPs we actually requested; preserve any IDs we already learned.
 		for _, ip := range ips {

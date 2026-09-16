@@ -78,3 +78,87 @@ func TestDecision_NoSecondStrikeOnSameEvidence(t *testing.T) {
 		t.Fatalf("fresh evidence did not earn strike 2: %+v ok=%v", second, ok)
 	}
 }
+
+// #636 — the persistent long-window counters must also treat evidence as
+// consumed by the strike it earned: after the strike-1 ban expires, ONE
+// more failure must not become strike 2 (ssh_bruteforce_daily, 5/24h);
+// five new failures must.
+func TestDecision_LongWindowNoSecondStrikeOnSameEvidence(t *testing.T) {
+	s := start(t, options{armed: true})
+	attacker := netip.MustParseAddr("203.0.113.79")
+
+	for i := 0; i < 5; i++ { // five failures 30 min apart → daily tier fires on the 5th
+		s.sshBurst(attacker, 1)
+		if i < 4 {
+			s.clock.advance(30 * time.Minute)
+		}
+	}
+	first, ok := s.lastAction(attacker, "ban")
+	if !ok || first.Strike != 1 {
+		t.Fatalf("no strike-1 ban from the daily tier: %+v ok=%v", first, ok)
+	}
+	s.clock.advance(6 * time.Minute)
+	if _, err := s.daemon.ExpireOnce(s.ctx); err != nil {
+		t.Fatal(err)
+	}
+	s.sshBurst(attacker, 1) // one more failure — five old ones are still inside 24 h
+	if a, ok := s.lastAction(attacker, "ban"); ok {
+		t.Fatalf("one failure after the ban expired earned strike %d from evidence already consumed: %+v", a.Strike, a)
+	}
+	for i := 0; i < 5; i++ { // five NEW failures → strike 2
+		s.clock.advance(30 * time.Minute)
+		s.sshBurst(attacker, 1)
+	}
+	second, ok := s.lastAction(attacker, "ban")
+	if !ok || second.Strike != 2 {
+		t.Fatalf("fresh evidence did not earn strike 2: %+v ok=%v", second, ok)
+	}
+}
+
+// TestDecision_LongWindowWatermarkOutlivesStrikeBucket (adversarial review
+// of #636): five failures inside one hour, then the same minute the next
+// day, one more. The strike's hourly bucket is still inside the 24 h sum,
+// so the watermark must still cover it — a second-precise expiry let this
+// single typo earn strike 2.
+func TestDecision_LongWindowWatermarkOutlivesStrikeBucket(t *testing.T) {
+	s := start(t, options{armed: true})
+	attacker := netip.MustParseAddr("203.0.113.81")
+	s.clock.advance(5 * time.Minute) // strike lands at hh:05..hh:09, not on the hour
+	for i := 0; i < 5; i++ {
+		s.sshBurst(attacker, 1)
+		s.clock.advance(time.Minute)
+	}
+	if a, ok := s.lastAction(attacker, "ban"); !ok || a.Strike != 1 {
+		t.Fatalf("no strike 1: %+v ok=%v", a, ok)
+	}
+	s.clock.advance(24*time.Hour + 2*time.Minute) // next day, hh:16 — same hourly bucket still in the daily window
+	if _, err := s.daemon.ExpireOnce(s.ctx); err != nil {
+		t.Fatal(err)
+	}
+	s.sshBurst(attacker, 1)
+	if a, ok := s.lastAction(attacker, "ban"); ok {
+		t.Fatalf("one failure a day later earned strike %d from the consumed bucket: %+v", a.Strike, a)
+	}
+}
+
+// Dry-run variant of the consumed-evidence rule (#621/#636 review): the
+// simulated ladder must escalate exactly like the armed one.
+func TestDecision_NoSecondStrikeOnSameEvidence_DryRun(t *testing.T) {
+	s := start(t, options{armed: false})
+	attacker := netip.MustParseAddr("203.0.113.80")
+	for i := 0; i < 10; i++ {
+		s.httpHit(attacker, "/wp-login.php")
+		s.clock.advance(5 * time.Minute)
+	}
+	if a, ok := s.lastAction(attacker, "dry_ban"); !ok || a.Strike != 1 {
+		t.Fatalf("no simulated strike 1: %+v ok=%v", a, ok)
+	}
+	s.clock.advance(6 * time.Minute)
+	if _, err := s.daemon.ExpireOnce(s.ctx); err != nil {
+		t.Fatal(err)
+	}
+	s.httpHit(attacker, "/")
+	if a, ok := s.lastAction(attacker, "dry_ban"); ok {
+		t.Fatalf("dry-run re-struck on consumed evidence: %+v", a)
+	}
+}

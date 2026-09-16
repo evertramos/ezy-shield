@@ -28,6 +28,7 @@ func HourBucket(t time.Time) int64 {
 // row on first sight. kind is an internal enum (parser-defined), never raw
 // log content.
 func (s *DB) IncrEventCount(ctx context.Context, ip netip.Addr, kind string, bucketStart int64) error {
+	ip = ip.Unmap() // one row per address, however the parser spelled it
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO events_agg (ip, kind, bucket_start, count)
 		VALUES (?, ?, ?, 1)
@@ -47,6 +48,7 @@ func (s *DB) SumEventCounts(ctx context.Context, ip netip.Addr, kinds []string, 
 	if len(kinds) == 0 {
 		return map[string]int{}, nil
 	}
+	ip = ip.Unmap()
 	// Kinds are internal enum values from loaded rules, but still bound as
 	// parameters (Hard Rule §4 — nothing is interpolated).
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(kinds)), ",")
@@ -107,6 +109,7 @@ func (s *DB) PruneEventCounts(ctx context.Context, before int64) (int, error) {
 // through ConsumedEventCounts, so the next rung needs threshold NEW events.
 // windows maps a rule window to the counter kinds its rules read.
 func (s *DB) ConsumeEventCounts(ctx context.Context, ip netip.Addr, windows map[time.Duration][]string, now time.Time) error {
+	ip = ip.Unmap() // the decision engine unmaps; the counters must agree
 	// Read every window's sums BEFORE opening the write transaction: the
 	// pool hands out one connection, and a read issued while the
 	// transaction holds it would wait on itself.
@@ -126,6 +129,15 @@ func (s *DB) ConsumeEventCounts(ctx context.Context, ip netip.Addr, windows map[
 	for w, kinds := range windows {
 		sums := snapshot[w]
 		for _, k := range kinds {
+			if sums[k] == 0 {
+				// Nothing to consume: drop any older watermark (absent reads
+				// as 0) instead of writing a zero row per ban.
+				if _, err := tx.ExecContext(ctx, `DELETE FROM events_consumed WHERE ip = ? AND window_s = ? AND kind = ?`,
+					ip.String(), int64(w/time.Second), k); err != nil {
+					return fmt.Errorf("store: ConsumeEventCounts clear: %w", err)
+				}
+				continue
+			}
 			if _, err := tx.ExecContext(ctx, `
 				INSERT INTO events_consumed (ip, window_s, kind, consumed, recorded_at)
 				VALUES (?, ?, ?, ?, ?)
@@ -144,11 +156,18 @@ func (s *DB) ConsumeEventCounts(ctx context.Context, ip netip.Addr, windows map[
 // ConsumedEventCounts returns the per-kind counts consumed by ip's last
 // strike for window, ignoring a watermark older than the window itself
 // (every event it covered has aged out). Absent kinds map to 0.
+//
+// The cutoff is bucket-aligned, exactly like SumEventCounts' since: the
+// strike's own hourly bucket stays in the sum until HourBucket(now-window)
+// passes it, so the watermark must live precisely as long — a
+// second-precise cutoff expired it up to an hour early and let the
+// consumed bucket re-fire the ladder (adversarial review of #636).
 func (s *DB) ConsumedEventCounts(ctx context.Context, ip netip.Addr, window time.Duration, now time.Time) (map[string]int, error) {
+	ip = ip.Unmap()
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT kind, consumed FROM events_consumed
 		WHERE ip = ? AND window_s = ? AND recorded_at >= ?
-	`, ip.String(), int64(window/time.Second), now.Add(-window).Unix())
+	`, ip.String(), int64(window/time.Second), HourBucket(now.Add(-window)))
 	if err != nil {
 		return nil, fmt.Errorf("store: ConsumedEventCounts: %w", err)
 	}

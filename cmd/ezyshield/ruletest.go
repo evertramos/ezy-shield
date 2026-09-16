@@ -81,7 +81,10 @@ early warning: a rule firing on your own ranges needs tuning, not enabling).
 
 Honest limitation: ` + ruleTestLimitation + `.
 Field-level matchers (field/value/contains) cannot be applied to stored
-aggregates; such rules are reported as a kind-level UPPER BOUND, loudly.`,
+aggregates; such rules are reported as a kind-level UPPER BOUND, loudly.
+The stored history is evaluated raw: the daemon also discounts what an
+address's last strike already consumed, so "would fire" here can exceed
+what the daemon would strike again.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dur, err := parseSinceDuration(since)

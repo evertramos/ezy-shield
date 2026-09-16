@@ -115,6 +115,32 @@ func TestDecision_LongWindowNoSecondStrikeOnSameEvidence(t *testing.T) {
 	}
 }
 
+// TestDecision_LongWindowWatermarkOutlivesStrikeBucket (adversarial review
+// of #636): five failures inside one hour, then the same minute the next
+// day, one more. The strike's hourly bucket is still inside the 24 h sum,
+// so the watermark must still cover it — a second-precise expiry let this
+// single typo earn strike 2.
+func TestDecision_LongWindowWatermarkOutlivesStrikeBucket(t *testing.T) {
+	s := start(t, options{armed: true})
+	attacker := netip.MustParseAddr("203.0.113.81")
+	s.clock.advance(5 * time.Minute) // strike lands at hh:05..hh:09, not on the hour
+	for i := 0; i < 5; i++ {
+		s.sshBurst(attacker, 1)
+		s.clock.advance(time.Minute)
+	}
+	if a, ok := s.lastAction(attacker, "ban"); !ok || a.Strike != 1 {
+		t.Fatalf("no strike 1: %+v ok=%v", a, ok)
+	}
+	s.clock.advance(24*time.Hour + 2*time.Minute) // next day, hh:16 — same hourly bucket still in the daily window
+	if _, err := s.daemon.ExpireOnce(s.ctx); err != nil {
+		t.Fatal(err)
+	}
+	s.sshBurst(attacker, 1)
+	if a, ok := s.lastAction(attacker, "ban"); ok {
+		t.Fatalf("one failure a day later earned strike %d from the consumed bucket: %+v", a.Strike, a)
+	}
+}
+
 // Dry-run variant of the consumed-evidence rule (#621/#636 review): the
 // simulated ladder must escalate exactly like the armed one.
 func TestDecision_NoSecondStrikeOnSameEvidence_DryRun(t *testing.T) {

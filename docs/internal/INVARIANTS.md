@@ -130,7 +130,7 @@ Gaps (open): #609 (CIDR ban reverted), B3 `unban <cidr>` leaves contained elemen
 
 **D3. The AI layer is consulted only when it can change the outcome and never bypasses policy.** Verified: AI verdicts pass the identical guards. Open: async path never arms the anti-lockout re-check (D3-1) and swallows `ErrRateLimited` (D3-2); budget-exhausted "rules-only" is invisible to `status`/`doctor` (D3-3).
 
-**D4. Notifications never hide a critical event.** Fixed (#613): criticals use a reserved per-channel quota, the dedup key is claimed only by a delivered message, per-IP enforcer failures fold into one systemic critical, drops are counted (`ezyshield_notifications_dropped_total`), and `doctor`/startup warn when no channel accepts `critical` (D4-3). Open: no recovery notification (D4-4).
+**D4. Notifications never hide a critical event.** Fixed (#646): a Cloudflare Lists post-add refresh that fails (slow page past the client timeout) no longer fails the push at ERROR after the add was applied — item pages are retried per page, the failure logs at WARN with the add's outcome, the mirror is marked stale and rebuilt on the next push or by a paced background retry (`TestCFListsBan_PostAddRefreshTransportErrorRetriedPerPage`, `TestCFListsBan_PostAddRefreshFailure_AddAppliedMirrorRecovers`). Fixed (#613): criticals use a reserved per-channel quota, the dedup key is claimed only by a delivered message, per-IP enforcer failures fold into one systemic critical, drops are counted (`ezyshield_notifications_dropped_total`), and `doctor`/startup warn when no channel accepts `critical` (D4-3). Open: no recovery notification (D4-4).
 
 ## What the tests cover today (and with what)
 

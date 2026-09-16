@@ -423,9 +423,11 @@ func fieldMatches(r spec, ev sdk.Event) bool {
 // exact even when Sample is capped.
 //
 // For field-level rules, Sample is scanned. The default sample cap (4096) is
-// large enough for all built-in rule thresholds. If the sample is saturated the
-// count is a lower bound: the rule still triggers correctly as long as the true
-// count exceeds the threshold.
+// large enough for all built-in rule thresholds. Sample holds the NEWEST
+// events of the window (issue #622), so a saturated sample is a lower bound
+// over the most recent traffic: the rule still triggers correctly as long as
+// the matching events among the newest 4096 exceed the threshold, and a
+// busy client's current attack is never hidden behind its older requests.
 func countMatches(r spec, agg sdk.Aggregate) int {
 	kindSet := make(map[string]struct{}, len(r.Kinds))
 	for _, k := range r.Kinds {

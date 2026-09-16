@@ -26,15 +26,41 @@ type entry struct {
 	ev sdk.Event
 }
 
+// overflowBucket is the width of the per-kind counters that keep the exact
+// event count once a busy IP's raw sample is full (issue #622). Counts of
+// events evicted from the sample are folded into the minute their event
+// time falls in; a window boundary inside such a minute therefore counts up
+// to one minute of extra evicted history — only for IPs that exceeded the
+// sample cap, i.e. more than maxSamp events inside the longest window.
+const overflowBucket = time.Minute
+
 type ipBucket struct {
-	entries  []entry
-	lastSeen time.Time
+	// entries is the raw sample: the NEWEST events within the horizon, in
+	// arrival order, at most maxSamp of them. Field-level rules and
+	// evidence read it, so it must show current traffic, not the oldest
+	// (the pre-#622 oldest-first cap hid a busy client's attack).
+	entries []entry
+	// overflow counts, per minute bucket start (unix seconds) and kind,
+	// the events the sample cap evicted — kind-level counts stay exact for
+	// any rate at O(minutes) cost. Nil until the cap is first hit.
+	overflow map[int64]map[string]int
+	// overflowMin is the oldest overflow slot; trimBefore skips the map
+	// scan while it is still inside the horizon (Add runs per event).
+	overflowMin int64
+	lastSeen    time.Time
 }
 
 // Aggregator maintains per-IP sliding-window event counts and capped samples.
 // Events older than the longest configured window are evicted on every Add call.
 // When maxIPs > 0 the bucket for the least-recently-seen IP is evicted once the
 // count exceeds the cap, bounding memory growth regardless of attack breadth.
+//
+// Per-IP memory is bounded by the sample cap (issue #622): at most maxSamp
+// raw events are retained per IP whatever the client's rate; events beyond
+// the cap are counted, per kind, in minute buckets (see overflowBucket), so
+// Aggregate().Kinds stays exact over the retained horizon while a busy
+// client costs at most ~maxSamp × event size (≈ 4 MB at the default cap
+// with 1 kB events) instead of rate × horizon.
 type Aggregator struct {
 	windows   []time.Duration // all configured windows
 	maxWindow time.Duration   // longest window; controls eviction horizon
@@ -82,7 +108,8 @@ func (a *Aggregator) Len() int {
 }
 
 // Entries returns the number of raw events retained for ip (tests and
-// observability): the per-IP memory footprint is Entries × event size.
+// observability): the per-IP memory footprint is Entries × event size plus
+// a few minute buckets of counters once the sample cap has been hit.
 func (a *Aggregator) Entries(ip netip.Addr) int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -107,7 +134,9 @@ func (a *Aggregator) MaxWindow() time.Duration {
 }
 
 // Add records ev in the per-IP bucket, then evicts events older than the
-// longest configured window relative to ev.Time.
+// longest configured window relative to ev.Time. When the raw sample is
+// full the OLDEST entries are folded into the per-minute overflow counters,
+// so the sample always holds the newest events (issue #622).
 func (a *Aggregator) Add(ev sdk.Event) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -121,8 +150,43 @@ func (a *Aggregator) Add(ev sdk.Event) {
 	b.entries = append(b.entries, entry{at: ev.Time, ev: ev})
 	b.lastSeen = ev.Time
 
-	// Evict entries outside the longest window.
 	cutoff := ev.Time.Add(-a.maxWindow)
+	b.trimBefore(cutoff)
+
+	// Sample cap: fold the oldest surplus into the overflow counters.
+	if surplus := len(b.entries) - a.maxSamp; surplus > 0 {
+		if b.overflow == nil {
+			b.overflow = make(map[int64]map[string]int)
+		}
+		for _, e := range b.entries[:surplus] {
+			slot := e.at.Truncate(overflowBucket).Unix()
+			kinds := b.overflow[slot]
+			if kinds == nil {
+				kinds = make(map[string]int)
+				b.overflow[slot] = kinds
+				if len(b.overflow) == 1 || slot < b.overflowMin {
+					b.overflowMin = slot
+				}
+			}
+			kinds[e.ev.Kind]++
+		}
+		// Reslice instead of copying: append reallocates (and drops the
+		// consumed prefix) once the spare capacity is used up, so the
+		// per-Add cost stays amortised O(1) and the live array stays
+		// within a constant factor of maxSamp.
+		b.entries = b.entries[surplus:]
+	}
+
+	// LRU IP cap: evict the least-recently-seen bucket when over the limit.
+	if a.maxIPs > 0 && len(a.buckets) > a.maxIPs {
+		a.evictLRU()
+	}
+}
+
+// trimBefore drops raw entries and overflow buckets older than cutoff.
+// Overflow buckets are keyed by their minute start; a bucket is dropped
+// only once its whole minute is before the cutoff.
+func (b *ipBucket) trimBefore(cutoff time.Time) {
 	trim := 0
 	for trim < len(b.entries) && b.entries[trim].at.Before(cutoff) {
 		trim++
@@ -130,10 +194,26 @@ func (a *Aggregator) Add(ev sdk.Event) {
 	if trim > 0 {
 		b.entries = b.entries[trim:]
 	}
-
-	// LRU IP cap: evict the least-recently-seen bucket when over the limit.
-	if a.maxIPs > 0 && len(a.buckets) > a.maxIPs {
-		a.evictLRU()
+	if b.overflow == nil {
+		return
+	}
+	limit := cutoff.Truncate(overflowBucket).Unix()
+	if b.overflowMin >= limit {
+		return
+	}
+	minSlot := int64(0)
+	for slot := range b.overflow {
+		if slot < limit {
+			delete(b.overflow, slot)
+			continue
+		}
+		if minSlot == 0 || slot < minSlot {
+			minSlot = slot
+		}
+	}
+	b.overflowMin = minSlot
+	if len(b.overflow) == 0 {
+		b.overflow = nil
 	}
 }
 
@@ -157,10 +237,14 @@ func (a *Aggregator) evictLRU() {
 
 // Aggregate returns the event summary for ip over window as of now.
 //
-// Kinds contains exact counts per event kind for all events in [now-window, now].
-// Sample holds up to maxSamples of those events in arrival order; it is used
-// by the rule engine for field-level matching. The caller must cap and redact
-// Sample before forwarding it to an AI provider.
+// Kinds contains exact counts per event kind for all events in [now-window, now]
+// — raw sample entries counted individually, plus the per-minute overflow
+// counters for events the sample cap evicted (their minute bucket must start
+// at or after the window cutoff, so a boundary inside a minute can include
+// up to one minute of extra evicted history — see overflowBucket). Sample
+// holds the newest in-window events, at most maxSamples, in arrival order;
+// it is used by the rule engine for field-level matching. The caller must
+// cap and redact Sample before forwarding it to an AI provider.
 func (a *Aggregator) Aggregate(ip netip.Addr, window time.Duration, now time.Time) sdk.Aggregate {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -172,13 +256,23 @@ func (a *Aggregator) Aggregate(ip netip.Addr, window time.Duration, now time.Tim
 	var samples []sdk.Event
 
 	if b != nil {
+		samples = make([]sdk.Event, 0, len(b.entries))
 		for _, e := range b.entries {
 			if e.at.Before(cutoff) {
 				continue
 			}
 			kinds[e.ev.Kind]++
-			if len(samples) < a.maxSamp {
-				samples = append(samples, e.ev)
+			samples = append(samples, e.ev)
+		}
+		if b.overflow != nil {
+			limit := cutoff.Truncate(overflowBucket).Unix()
+			for slot, perKind := range b.overflow {
+				if slot < limit {
+					continue
+				}
+				for k, n := range perKind {
+					kinds[k] += n
+				}
 			}
 		}
 	}
@@ -221,12 +315,8 @@ func (a *Aggregator) Flush(ctx context.Context, cutoff time.Time) {
 		if ctx.Err() != nil {
 			break
 		}
-		trim := 0
-		for trim < len(b.entries) && b.entries[trim].at.Before(cutoff) {
-			trim++
-		}
-		b.entries = b.entries[trim:]
-		if len(b.entries) == 0 {
+		b.trimBefore(cutoff)
+		if len(b.entries) == 0 && b.overflow == nil {
 			delete(a.buckets, ip)
 		}
 	}

@@ -31,10 +31,6 @@ const pollTimeout = 500 // milliseconds
 // fileWatchMask is the inotify mask installed on the tailed file.
 const fileWatchMask = unix.IN_MODIFY | unix.IN_MOVE_SELF | unix.IN_DELETE_SELF
 
-// inotifyAddWatch is the watch installer; tests swap it to inject failures
-// on the re-watch path (issue #634).
-var inotifyAddWatch = unix.InotifyAddWatch
-
 // FileTailCollector tails a file using Linux inotify, handling log rotation.
 // It seeks to EOF on startup (tail -f behaviour) and emits each complete line
 // as an sdk.RawLine on the out channel.
@@ -47,6 +43,11 @@ type FileTailCollector struct {
 	// field in emitted RawLines. Set by buildCollectors when the config has
 	// a 'parser' field, so parser Matches() can route by prefix (e.g. "nginx:<path>").
 	SourceOverride string
+
+	// addWatch installs the inotify watch on the tailed file; nil means
+	// unix.InotifyAddWatch. Package-internal tests set it to inject
+	// failures on the re-watch path (issue #634).
+	addWatch func(fd int, path string, mask uint32) (int, error)
 }
 
 // Name returns a stable identity for supervision logs/alerts (issue #305).
@@ -59,6 +60,10 @@ func (c *FileTailCollector) Run(ctx context.Context, out chan<- sdk.RawLine) err
 	logger := c.Logger
 	if logger == nil {
 		logger = slog.Default()
+	}
+	addWatch := c.addWatch
+	if addWatch == nil {
+		addWatch = unix.InotifyAddWatch
 	}
 
 	// Open the file; if it doesn't exist, return an error (caller retries).
@@ -82,7 +87,7 @@ func (c *FileTailCollector) Run(ctx context.Context, out chan<- sdk.RawLine) err
 	defer func() { _ = unix.Close(ifd) }()
 
 	// Watch the file for modifications and renames/deletes.
-	fileWd, err := inotifyAddWatch(ifd, c.Path, fileWatchMask)
+	fileWd, err := addWatch(ifd, c.Path, fileWatchMask)
 	if err != nil {
 		_ = f.Close()
 		return fmt.Errorf("filetail: inotify_add_watch file: %w", err)
@@ -157,7 +162,7 @@ func (c *FileTailCollector) Run(ctx context.Context, out chan<- sdk.RawLine) err
 		f = newF
 		asm.discard()
 		// Watch the new inode; events are dispatched by this wd.
-		newWd, addErr := inotifyAddWatch(ifd, c.Path, fileWatchMask)
+		newWd, addErr := addWatch(ifd, c.Path, fileWatchMask)
 		if addErr != nil {
 			logger.Warn("filetail: re-watch after rotation failed; polling the path until the watch is restored",
 				slog.String("path", c.Path), slog.String("err", addErr.Error()))
@@ -166,6 +171,26 @@ func (c *FileTailCollector) Run(ctx context.Context, out chan<- sdk.RawLine) err
 			fileWd = newWd
 		}
 		return nil
+	}
+
+	// restoreWatch runs while no watch is installed on the current inode
+	// (issue #634): retry the watch FIRST, then compare the path's inode
+	// with the descriptor's. In that order a rename landing between the
+	// two calls is still caught — the watch just installed sits on the new
+	// inode and followRotation removes it again; in the reverse order the
+	// watch landed on the new inode while f kept reading the old one, and
+	// fstat alone can never see a rename.
+	restoreWatch := func() error {
+		if wd, addErr := addWatch(ifd, c.Path, fileWatchMask); addErr == nil {
+			fileWd = wd
+		}
+		if !pathRotated(f, c.Path) {
+			return nil
+		}
+		if drainErr := drainLines(ctx, f, asm, source, out, logger); drainErr != nil {
+			logger.Debug("filetail: drain before rotation", slog.String("err", drainErr.Error()))
+		}
+		return followRotation()
 	}
 
 	for {
@@ -192,20 +217,8 @@ func (c *FileTailCollector) Run(ctx context.Context, out chan<- sdk.RawLine) err
 			// growth is caught even when Poll does not surface the inotify fd
 			// as readable (observed on Debian 12 amd64, overlay2 filesystem).
 			if fileWd < 0 {
-				// No watch on the current inode: fstat alone can never see a
-				// rename, so compare the path's inode with ours first, then
-				// try to restore the watch (issue #634).
-				if pathRotated(f, c.Path) {
-					if drainErr := drainLines(ctx, f, asm, source, out, logger); drainErr != nil {
-						logger.Debug("filetail: drain before rotation", slog.String("err", drainErr.Error()))
-					}
-					if err := followRotation(); err != nil {
-						return err
-					}
-					continue
-				}
-				if wd, addErr := inotifyAddWatch(ifd, c.Path, fileWatchMask); addErr == nil {
-					fileWd = wd
+				if err := restoreWatch(); err != nil {
+					return err
 				}
 			}
 			rewindIfTruncated()
@@ -223,6 +236,14 @@ func (c *FileTailCollector) Run(ctx context.Context, out chan<- sdk.RawLine) err
 			if err != nil && err != unix.EAGAIN {
 				_ = f.Close()
 				return fmt.Errorf("filetail: read inotify: %w", err)
+			}
+
+			// A busy directory watch can keep Poll from timing out, so the
+			// no-watch recovery runs here as well (issue #634).
+			if fileWd < 0 {
+				if err := restoreWatch(); err != nil {
+					return err
+				}
 			}
 
 			// copytruncate emits IN_MODIFY, so this branch sees the

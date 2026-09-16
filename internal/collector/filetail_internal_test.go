@@ -24,21 +24,23 @@ import (
 	"github.com/evertramos/ezy-shield/pkg/sdk"
 )
 
-// hookWatch replaces the watch hook for the test: calls whose ordinal
-// (1-based) `fails` returns true fail with EMFILE (the "too many watches"
-// shape); the rest go through. The counter reports the calls made.
-func hookWatch(t *testing.T, fails func(call int64) bool) *atomic.Int64 {
-	t.Helper()
-	var calls atomic.Int64
-	orig := inotifyAddWatch
-	inotifyAddWatch = func(fd int, path string, mask uint32) (int, error) {
-		if fails(calls.Add(1)) {
+// watchHook returns an addWatch implementation for the collector under
+// test: calls whose ordinal (1-based) `fails` returns true fail with EMFILE
+// (the "too many watches" shape); the rest go to the kernel. `before`, when
+// set, runs ahead of the real call — the reviewer's TOCTOU probe. The
+// counter reports the calls made.
+func watchHook(fails func(call int64) bool, before func(call int64, path string)) (func(int, string, uint32) (int, error), *atomic.Int64) {
+	calls := &atomic.Int64{}
+	return func(fd int, path string, mask uint32) (int, error) {
+		n := calls.Add(1)
+		if fails(n) {
 			return -1, unix.EMFILE
 		}
-		return orig(fd, path, mask)
-	}
-	t.Cleanup(func() { inotifyAddWatch = orig })
-	return &calls
+		if before != nil {
+			before(n, path)
+		}
+		return unix.InotifyAddWatch(fd, path, mask)
+	}, calls
 }
 
 func appendInternal(t *testing.T, path, line string) {
@@ -80,11 +82,11 @@ func collectInternal(out <-chan sdk.RawLine, n int, wait time.Duration) []string
 	return got
 }
 
-func startInternal(t *testing.T, path string) <-chan sdk.RawLine {
+func startInternal(t *testing.T, path string, hook func(int, string, uint32) (int, error)) <-chan sdk.RawLine {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	out := make(chan sdk.RawLine, 64)
-	c := &FileTailCollector{Path: path, Logger: slog.New(slog.NewTextHandler(os.Stderr, nil))}
+	c := &FileTailCollector{Path: path, Logger: slog.New(slog.NewTextHandler(os.Stderr, nil)), addWatch: hook}
 	done := make(chan error, 1)
 	go func() { done <- c.Run(ctx, out) }()
 	t.Cleanup(func() { cancel(); <-done })
@@ -105,8 +107,8 @@ func TestFileTailCollector_RewatchFailureIsRetried(t *testing.T) {
 	if err := os.WriteFile(path, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	calls := hookWatch(t, func(n int64) bool { return n == 2 })
-	out := startInternal(t, path)
+	hook, calls := watchHook(func(n int64) bool { return n == 2 }, nil)
+	out := startInternal(t, path, hook)
 
 	appendInternal(t, path, "L1")
 	rotateInternal(t, path, 1)
@@ -136,8 +138,8 @@ func TestFileTailCollector_RenameFollowedWithoutWatch(t *testing.T) {
 	if err := os.WriteFile(path, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	hookWatch(t, func(n int64) bool { return n >= 2 })
-	out := startInternal(t, path)
+	hook, _ := watchHook(func(n int64) bool { return n >= 2 }, nil)
+	out := startInternal(t, path, hook)
 
 	appendInternal(t, path, "L1")
 	rotateInternal(t, path, 1)
@@ -148,5 +150,40 @@ func TestFileTailCollector_RenameFollowedWithoutWatch(t *testing.T) {
 	got := collectInternal(out, 3, 6*time.Second)
 	if strings.Join(got, ",") != "L1,L2,L3" {
 		t.Fatalf("lines = %v, want [L1 L2 L3] — a rename after a failed re-watch was not followed", got)
+	}
+}
+
+// TestFileTailCollector_RewatchRetryDuringRotation (adversarial review of
+// #640): logrotate runs in the instant between the retry tick's inode
+// check and its InotifyAddWatch. Checking the inode first installed the
+// watch on the NEW file while the descriptor stayed on the rotated one,
+// and every later line was lost silently — the retry must come first.
+func TestFileTailCollector_RewatchRetryDuringRotation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app.log")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hook, calls := watchHook(
+		func(n int64) bool { return n == 2 }, // re-watch after rotation 1 fails
+		func(n int64, p string) {
+			if n == 3 { // the retry tick: rotate right before the kernel call resolves the path
+				if err := os.Rename(p, p+".2"); err != nil {
+					t.Error(err)
+				}
+				if err := os.WriteFile(p, nil, 0o600); err != nil {
+					t.Error(err)
+				}
+			}
+		})
+	out := startInternal(t, path, hook)
+
+	appendInternal(t, path, "L1")
+	rotateInternal(t, path, 1)
+	time.Sleep(700 * time.Millisecond) // the retry tick has run (and rotated underneath it)
+	appendInternal(t, path, "L3")      // lands on the newest inode
+	got := collectInternal(out, 2, 5*time.Second)
+	if strings.Join(got, ",") != "L1,L3" {
+		t.Fatalf("lines = %v (watch calls %d), want [L1 L3]: watch on the new inode, descriptor on the old one", got, calls.Load())
 	}
 }

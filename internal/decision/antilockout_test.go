@@ -10,6 +10,7 @@ package decision_test
 
 import (
 	"context"
+	"log/slog"
 	"net/netip"
 	"testing"
 
@@ -511,5 +512,54 @@ func TestDecide_MappedVerdictIP_NormalizedInAction(t *testing.T) {
 	}
 	if len(st.banned) != 1 || st.banned[0].IP != wantIP {
 		t.Errorf("RecordStrike actions = %+v, want exactly one keyed by %v", st.banned, wantIP)
+	}
+}
+
+// levelRecorder captures the level of every slog record whose message
+// matches, so a test can pin the severity of an operational log line.
+type levelRecorder struct {
+	msg    string
+	levels []slog.Level
+}
+
+func (r *levelRecorder) Enabled(context.Context, slog.Level) bool { return true }
+func (r *levelRecorder) Handle(_ context.Context, rec slog.Record) error {
+	if rec.Message == r.msg {
+		r.levels = append(r.levels, rec.Level)
+	}
+	return nil
+}
+func (r *levelRecorder) WithAttrs([]slog.Attr) slog.Handler { return r }
+func (r *levelRecorder) WithGroup(string) slog.Handler      { return r }
+
+// TestAntiLockout_ActiveSSHPeerRefusalLogsAtInfo (issue #644): the refusal
+// is the designed outcome under authenticated-peer mode (the deferred
+// re-check bans right after the grace window), so it must not flood
+// WARN — the audit row already records it.
+func TestAntiLockout_ActiveSSHPeerRefusalLogsAtInfo(t *testing.T) {
+	rec := &levelRecorder{msg: "decision: anti-lockout — refusing to ban active SSH peer"}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(rec))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	peer := netip.MustParseAddr("203.0.113.51")
+	t.Setenv("SSH_CLIENT", "")
+	pol := &config.Policy{Armed: true, BanThreshold: 70, ObserveThreshold: 40, MaxBansPerMinute: 30, Strikes: config.DefaultStrikes}
+	st := newMock(nil)
+	eng := mustEngine(t, pol, st)
+	eng.SetSSHPeerProbe(func() []netip.Addr { return []netip.Addr{peer} })
+
+	act, err := eng.Decide(context.Background(), banVerdict(peer))
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if act.Op != "record" || act.Reason != decision.ReasonAntiLockoutSSHPeer {
+		t.Fatalf("action = %+v, want the record/anti-lockout outcome", act)
+	}
+	if len(rec.levels) != 1 {
+		t.Fatalf("refusal logged %d time(s), want exactly 1", len(rec.levels))
+	}
+	if rec.levels[0] != slog.LevelInfo {
+		t.Fatalf("refusal logged at %s, want INFO — a by-design outcome must not flood WARN", rec.levels[0])
 	}
 }

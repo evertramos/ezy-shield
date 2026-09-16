@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -949,5 +950,32 @@ func TestNew_FieldMatcherCrossCheck(t *testing.T) {
 				t.Errorf("expected validation error for %q", tc.name)
 			}
 		})
+	}
+}
+
+// Issue #622: a field-level in-memory rule reads its own counter kind when
+// the aggregate carries one (the aggregator's Classifier keeps it exact
+// past the sample cap) instead of scanning a Sample that no longer holds
+// the matching events.
+func TestCountMatches_InMemoryFieldRuleUsesClassifierCounter(t *testing.T) {
+	e := mustEngine(t)
+	agg := makeAgg(ip1, 3600*time.Second, []sdk.Event{httpEvent("200", "/"), httpEvent("200", "/")})
+	if v := findVerdict(e.Evaluate(context.Background(), agg), "bruteforce"); v != nil {
+		t.Fatalf("no counter, no wp-login in sample: unexpected verdict %+v", v)
+	}
+	agg.Kinds[rules.LongCounterKind("http_wp_probe_sustained")] = 10
+	v := findVerdict(e.Evaluate(context.Background(), agg), "bruteforce")
+	if v == nil {
+		t.Fatal("counter at threshold: expected http_wp_probe_sustained to fire although the sample holds no wp-login event")
+	}
+	got := e.MemoryCounterKinds(httpEvent("200", "/wp-login.php"))
+	if !slices.Contains(got, rules.LongCounterKind("http_wp_probe_sustained")) {
+		t.Fatalf("MemoryCounterKinds(wp-login) = %v, want the sustained rule's counter kind", got)
+	}
+	if got := e.MemoryCounterKinds(httpEvent("200", "/")); len(got) != 0 {
+		t.Fatalf("MemoryCounterKinds(/) = %v, want none", got)
+	}
+	if got := e.LongCounterKinds(httpEvent("200", "/wp-login.php")); slices.Contains(got, rules.LongCounterKind("http_wp_probe_sustained")) {
+		t.Fatalf("LongCounterKinds must not include the 1 h rule (in-memory tier): %v", got)
 	}
 }

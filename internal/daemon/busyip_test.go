@@ -64,3 +64,53 @@ func TestBusyIP_FieldLevelHourlyRuleSeesCurrentTraffic(t *testing.T) {
 		t.Fatalf("12 wp-login attempts after a benign flood produced no decision — the field-level hourly rule could not see current traffic")
 	}
 }
+
+// The flood does not stop while the attacker probes (adversarial review of
+// PR #638): 5 benign requests per second for 30 minutes with one wp-login
+// every 2 minutes interleaved. The sample holds ~13 minutes of traffic —
+// 7 of the 15 probes — so only an exact per-rule count kept past the cap
+// lets http_wp_probe_sustained (10/1h) fire.
+func TestBusyIP_ContinuingFloodStillTripsHourlyProbeRule(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	clk := &virtualClock{t: time.Date(2026, 9, 15, 14, 0, 0, 0, time.UTC)}
+	d, err := New(Config{
+		Policy:     &config.Policy{Armed: false, BanThreshold: config.DefaultBanThreshold, ObserveThreshold: config.DefaultObserveThreshold, MaxBansPerMinute: config.DefaultMaxBansPerMinute, Strikes: config.DefaultStrikes},
+		Store:      db,
+		Parsers:    []sdk.Parser{parser.NewNginxParser(slog.Default(), parser.NginxConfig{})},
+		SocketPath: "",
+		MaxIPs:     100,
+		Now:        clk.now,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	actions := make(chan sdk.Action, 64)
+	d.SetActionsSink(actions)
+	ip := netip.MustParseAddr("203.0.113.121")
+	line := func(path string) sdk.RawLine {
+		return sdk.RawLine{Source: "file:/var/log/nginx/access.log", At: clk.now(),
+			Line: []byte(ip.String() + ` - - [15/Sep/2026:14:00:00 +0000] "GET ` + path + ` HTTP/1.1" 200 512 "-" "Mozilla/5.0"`)}
+	}
+	const rate = 5
+	for i := 0; i < 30*60*rate; i++ { // 30 minutes at 5 req/s
+		if i%(120*rate) == 0 { // one probe every 2 minutes, flood continuing
+			d.processRaw(ctx, line("/wp-login.php"))
+		}
+		d.processRaw(ctx, line("/"))
+		clk.advance(time.Second / rate)
+	}
+	fired := false
+	for len(actions) > 0 {
+		if a := <-actions; a.IP == ip && a.Op == "dry_ban" {
+			fired = true
+		}
+	}
+	if !fired {
+		t.Fatalf("15 wp-login probes inside a continuing benign flood produced no decision — the field-level hourly count did not survive the sample cap")
+	}
+}

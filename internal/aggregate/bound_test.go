@@ -46,14 +46,15 @@ func TestAggregate_BusyIPRetentionIsBounded(t *testing.T) {
 	if got := a.Aggregate(ip, time.Minute, now).Count; got != 6_000 {
 		t.Fatalf("1m count = %d, want 6000 exactly", got)
 	}
-	// Documented slack: events beyond the sample cap are counted per
-	// minute bucket, so a window cutoff inside a minute may include up to
-	// one minute of extra evicted history — never fewer than the exact
-	// count (INVARIANTS §C3). 10m30s at :00 → cutoff 10:49:30, exact 63000;
-	// the 10:49 bucket contributes its first 30 s (3000) on top.
+	// Documented slack (INVARIANTS §C3): events beyond the sample cap are
+	// counted in fixed-width buckets and a bucket counts only when it lies
+	// wholly inside the window, so a cutoff inside a bucket under-counts by
+	// at most one bucket of evicted events and never counts an event older
+	// than the window. 10m30s at :00 → cutoff 10:49:30, exact 63000.
+	bucketEvents := int(a.Bucket() / (10 * time.Millisecond))
 	got := a.Aggregate(ip, 10*time.Minute+30*time.Second, now).Count
-	if got < 63_000 || got > 63_000+6_000 {
-		t.Fatalf("10m30s count = %d, want within [63000, 69000] (exact + ≤ 1 minute of overflow slack)", got)
+	if got > 63_000 || got < 63_000-bucketEvents {
+		t.Fatalf("10m30s count = %d, want within [%d, 63000] (exact minus ≤ one %s bucket, never more)", got, 63_000-bucketEvents, a.Bucket())
 	}
 }
 

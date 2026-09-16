@@ -1513,8 +1513,8 @@ func (d *Daemon) dispatch(ctx context.Context, action sdk.Action) {
 	if d.notifier != nil && (action.Op == "ban" || action.Op == "dry_ban" || action.Op == "notify_only") {
 		// notify_only streams are windowed per (IP, rule): the first event
 		// notifies, repeats within the window fold into one summary (issue
-		// #421). Only the notification is suppressed — the audit row was
-		// already written by the decision engine.
+		// #421). Only the notification is suppressed here — the decision
+		// engine already audited the rising edge of this (IP, rule) (#649).
 		if action.Op == "notify_only" && d.notifySup != nil {
 			send, summary := d.notifySup.admit(action)
 			if summary != nil {

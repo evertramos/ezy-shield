@@ -93,9 +93,9 @@ type Store interface {
 
 // Engine converts Verdicts into Actions according to policy.
 // It is safe for concurrent use. Suppression state for the ban_ineffective
-// diagnostic (ADR-0009) lives in the store, on the ban row itself — nothing
-// here grows with offender count, and the diagnostic history survives
-// daemon restarts.
+// diagnostic (ADR-0009) lives in the store, on the ban row itself, so the
+// diagnostic history survives daemon restarts. The only in-memory state
+// keyed by offender is the bounded notify_only edge map (notifyedge.go).
 type Engine struct {
 	policy *config.Policy
 	store  Store
@@ -119,7 +119,9 @@ type Engine struct {
 	// section makes the loser observe the winner's ban row and suppress.
 	// Striped so unrelated IPs never contend; e.mu still guards only the global
 	// rate-limit window. Lock order is strikeLocks → e.mu (checkRateLimit takes
-	// e.mu inside the section); e.mu is never held while taking a strike lock,
+	// e.mu inside the section) and strikeLocks → notifyMu (clearNotifyEdge after
+	// a strike); e.mu is never held while taking a strike lock, notifyMu never
+	// holds any other lock,
 	// so there is no cycle. Decide performs no enforcer I/O (dispatch does,
 	// downstream), so no lock is ever held across Enforcer.Ban.
 	strikeLocks [strikeLockStripes]sync.Mutex
@@ -146,6 +148,14 @@ type Engine struct {
 	// botVerify is the optional verified-bot guard (issue #215); nil =
 	// disabled. See verifiedbot.go and SetBotVerifier.
 	botVerify func(ctx context.Context, ip netip.Addr) (provider string, spared bool)
+
+	// notifyEdges remembers, per IP, the last rule a notify_only audit row
+	// was written for and when, so a saturated observe-band rule leaves one
+	// row per window instead of one per event (issue #649; notifyedge.go).
+	// Bounded at notifyEdgeMaxEntries; guarded by notifyMu, which is never
+	// held while taking any other engine lock.
+	notifyMu    sync.Mutex
+	notifyEdges map[netip.Addr]notifyEdge
 }
 
 // New creates an Engine from policy and a store.
@@ -164,6 +174,7 @@ func New(policy *config.Policy, st Store) (*Engine, error) {
 		store:       st,
 		allow:       allow,
 		windowStart: time.Now(),
+		notifyEdges: make(map[netip.Addr]notifyEdge),
 	}, nil
 }
 
@@ -280,11 +291,18 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 		return act, nil
 	}
 
-	// Observe band → notify only, no strike.
+	// Observe band → notify only, no strike. The Action is returned on
+	// every evaluation (the daemon's notifier dedup, metrics and stream
+	// count each event); the audit row is written on the rising edge only —
+	// the first notify_only for this (ip, rule) per notifyEdgeWindow — so a
+	// saturated rule leaves one row per window, not one per event (#649).
 	if score < e.policy.BanThreshold {
 		act := sdk.Action{IP: ip, Op: "notify_only", Reason: best.Reason, Verdicts: verdicts}
-		if err := e.store.Audit(ctx, act); err != nil {
-			slog.ErrorContext(ctx, "decision: audit notify-only", "ip", ip, "err", err)
+		if e.notifyEdgeRising(ip, notifyRuleID(best.Reason), e.clock()) {
+			if err := e.store.Audit(ctx, act); err != nil {
+				slog.ErrorContext(ctx, "decision: audit notify-only", "ip", ip, "err", err)
+				e.clearNotifyEdge(ip) // let the next evaluation write the row
+			}
 		}
 		return act, nil
 	}
@@ -480,10 +498,13 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 	}
 
 	// RecordStrike's bans_active upsert resets the per-ban suppression
-	// counters — no engine-side state to clear.
+	// counters. The only engine-side state to clear is the IP's notify_only
+	// edge (#649): once the ban ends, the next observe-band evaluation is a
+	// new episode and must be audited.
 	if err := e.store.RecordStrike(ctx, act); err != nil {
 		return sdk.Action{}, fmt.Errorf("decision: RecordStrike: %w", err)
 	}
+	e.clearNotifyEdge(ip)
 
 	return act, nil
 }

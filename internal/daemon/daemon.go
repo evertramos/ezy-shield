@@ -478,8 +478,13 @@ func New(dcfg Config) (*Daemon, error) {
 	}
 
 	// The classifier keeps field-level in-memory rule counts exact past
-	// the per-IP sample cap (issue #622). It reads d.ruleEng at call time,
-	// so a rule engine swap would take effect without rewiring.
+	// the per-IP sample cap (issue #622). It reads d.ruleEng at call time.
+	// There is no rule reload today; if one is added, the swap must be
+	// synchronised with this closure and must Reset (or re-classify) every
+	// bucket — entries carry the counter kinds assigned at Add time, so a
+	// renamed or re-predicated rule would otherwise count stale matches
+	// and a newly added rule would read a partial counter instead of the
+	// sample (adversarial review of #638).
 	agg := aggregate.New(windows, 0).WithMaxIPs(maxIPs)
 
 	decEng, err := decision.New(dcfg.Policy, dcfg.Store)

@@ -33,7 +33,8 @@ const (
 	defaultAIQueueCap = 256
 	// aiAsyncMinInterval is the floor between provider calls — the token
 	// spend rate cap.
-	aiAsyncMinInterval = time.Second
+	aiAsyncMinInterval   = time.Second
+	aiAsyncPerIPCooldown = time.Minute
 )
 
 // aiAsyncItem is one queued grey-zone episode.
@@ -46,12 +47,21 @@ type aiAsyncItem struct {
 // aiAsyncQueue is the bounded drop-oldest queue. One entry per IP at a
 // time (pending map): a brute-force burst enqueues once, not per line.
 type aiAsyncQueue struct {
-	mu      sync.Mutex
-	items   []aiAsyncItem
-	pending map[netip.Addr]bool
-	cap     int
-	signal  chan struct{}
-	dropped atomic.Uint64
+	mu       sync.Mutex
+	items    []aiAsyncItem
+	pending  map[netip.Addr]bool
+	lastDone map[netip.Addr]time.Time
+	cap      int
+	signal   chan struct{}
+	dropped  atomic.Uint64
+	now      func() time.Time
+}
+
+func (q *aiAsyncQueue) done(ip netip.Addr) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	delete(q.pending, ip)
+	q.lastDone[ip] = q.now()
 }
 
 func newAIAsyncQueue(capacity int) *aiAsyncQueue {
@@ -59,9 +69,11 @@ func newAIAsyncQueue(capacity int) *aiAsyncQueue {
 		capacity = defaultAIQueueCap
 	}
 	return &aiAsyncQueue{
-		pending: map[netip.Addr]bool{},
-		cap:     capacity,
-		signal:  make(chan struct{}, 1),
+		pending:  map[netip.Addr]bool{},
+		lastDone: map[netip.Addr]time.Time{},
+		cap:      capacity,
+		signal:   make(chan struct{}, 1),
+		now:      time.Now,
 	}
 }
 

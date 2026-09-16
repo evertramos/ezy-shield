@@ -1399,10 +1399,12 @@ func TestCFListsBan_StaleMirror_BackgroundRebuild(t *testing.T) {
 
 // TestCFListsBan_StaleRebuildSerialisedWithDebouncedPush (issue #646
 // review): a rediscovery snapshot must never overwrite a concurrent add.
-// The stale timer's rediscovery is held on a page while a debounced Ban(C)
-// arrives; with push serialised, C is added after the rebuild and keeps its
-// ID, so Unban(C) deletes it. Without serialisation the snapshot taken
-// before C landed replaced the mirror and C leaked at the edge.
+// The stale timer's rediscovery is parked on a held page while a debounced
+// Ban(C) arrives; C must end up in the mirror with its ID, so Unban(C)
+// deletes it. Two mechanisms protect that invariant — push serialisation
+// (pushMu) and the duplicate-add fallback recovering our own tagged items
+// — and this test holds with either one alone: it proves the ordered
+// outcome, not the absence of the race by itself.
 func TestCFListsBan_StaleRebuildSerialisedWithDebouncedPush(t *testing.T) {
 	rec := &cfLevelRecorder{msg: "enforce/cloudflare-lists: post-add refresh failed; edge mirror stale until the next push"}
 	prev := slog.Default()

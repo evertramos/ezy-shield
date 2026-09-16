@@ -749,8 +749,17 @@ func (e *CloudflareListsEnforcer) rebuildStaleMirror() {
 	ctx, cancel := context.WithTimeout(e.svcCtx, 90*time.Second)
 	defer cancel()
 	if err := e.push(ctx); err != nil {
-		slog.Warn("enforce/cloudflare-lists: stale mirror rebuild failed, will retry", "err", err)
-		e.markMirrorStale(true)
+		// Re-arm only while the mirror is still stale (discovery failed).
+		// When discovery succeeded and the ADD failed, the mirror is fresh
+		// and the debounce/Sync path owns retrying the add — re-reading the
+		// whole list every step would only amplify a throttled API.
+		e.state.mu.Lock()
+		still := e.state.mirrorStale
+		e.state.mu.Unlock()
+		if still {
+			slog.Warn("enforce/cloudflare-lists: stale mirror rebuild failed, will retry", "err", err)
+			e.markMirrorStale(true)
+		}
 	}
 }
 

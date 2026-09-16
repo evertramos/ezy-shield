@@ -119,7 +119,9 @@ type Engine struct {
 	// section makes the loser observe the winner's ban row and suppress.
 	// Striped so unrelated IPs never contend; e.mu still guards only the global
 	// rate-limit window. Lock order is strikeLocks → e.mu (checkRateLimit takes
-	// e.mu inside the section); e.mu is never held while taking a strike lock,
+	// e.mu inside the section) and strikeLocks → notifyMu (clearNotifyEdge after
+	// a strike); e.mu is never held while taking a strike lock, notifyMu never
+	// holds any other lock,
 	// so there is no cycle. Decide performs no enforcer I/O (dispatch does,
 	// downstream), so no lock is ever held across Enforcer.Ban.
 	strikeLocks [strikeLockStripes]sync.Mutex

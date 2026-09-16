@@ -58,7 +58,9 @@ func notifyRuleID(reason string) string {
 	if len(reason) > notifyRuleMaxLen {
 		reason = reason[:notifyRuleMaxLen]
 	}
-	return reason
+	// Clone: a substring shares the caller's backing array, so a long AI or
+	// plugin Reason would otherwise be retained whole for the window.
+	return strings.Clone(reason)
 }
 
 // notifyEdgeRising reports whether a notify_only for (ip, rule) at now is a
@@ -87,23 +89,23 @@ func (e *Engine) notifyEdgeRising(ip netip.Addr, rule string, now time.Time) boo
 // expired, the oldest one, so an insert always has room. Called with
 // notifyMu held and only when the map is at capacity.
 func (e *Engine) evictNotifyEdgesLocked(now time.Time) {
-	var (
-		oldestIP netip.Addr
-		oldestAt time.Time
-		dropped  bool
-	)
+	dropped := false
 	for ip, edge := range e.notifyEdges {
 		if now.Sub(edge.at) >= notifyEdgeWindow {
 			delete(e.notifyEdges, ip)
 			dropped = true
-			continue
-		}
-		if !oldestIP.IsValid() || edge.at.Before(oldestAt) {
-			oldestIP, oldestAt = ip, edge.at
 		}
 	}
-	if !dropped && oldestIP.IsValid() {
-		delete(e.notifyEdges, oldestIP)
+	if dropped {
+		return
+	}
+	// Nothing expired: drop one arbitrary entry (map iteration order is
+	// randomised) instead of scanning for the oldest — dropping any edge
+	// costs at most one extra audit row, and this keeps a full map O(1)
+	// per insert under a client rotating addresses.
+	for ip := range e.notifyEdges {
+		delete(e.notifyEdges, ip)
+		return
 	}
 }
 

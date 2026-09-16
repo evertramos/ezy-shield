@@ -231,7 +231,11 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 	// exists under systemd, where the env var does not (issue #175).
 	for _, peer := range e.activeSSHPeers() {
 		if peer == ip {
-			slog.WarnContext(ctx, "decision: anti-lockout — refusing to ban active SSH peer", "ip", ip)
+			// INFO, not WARN (issue #644): under authenticated-peer mode
+			// this is the designed outcome for a brute-forcer still inside
+			// its grace window — the deferred re-check bans it right after,
+			// and the audit row records the refusal.
+			slog.InfoContext(ctx, "decision: anti-lockout — refusing to ban active SSH peer", "ip", ip)
 			act := sdk.Action{IP: ip, Op: "record", Reason: ReasonAntiLockoutSSHPeer, Verdicts: verdicts}
 			if err := e.store.Audit(ctx, act); err != nil {
 				slog.ErrorContext(ctx, "decision: audit anti-lockout", "ip", ip, "err", err)

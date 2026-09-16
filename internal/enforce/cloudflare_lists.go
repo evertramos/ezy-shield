@@ -53,7 +53,7 @@ const (
 // cfPageRetryDelays is the per-page backoff when one item-list page fails
 // at the transport (a slow page past the client timeout, a reset). Two
 // extra attempts: one slow page must not fail a whole mirror read (#646).
-var cfPageRetryDelays = []time.Duration{time.Second, 3 * time.Second}
+var cfPageRetryDelays = []time.Duration{500 * time.Millisecond, 2 * time.Second}
 
 // cfStaleRetryDelays paces the background mirror rebuild after a failed
 // post-add refresh (issue #646); the counter resets on success.
@@ -82,6 +82,7 @@ type listState struct {
 	// retry rebuilds it even when nothing new is banned.
 	mirrorStale   bool
 	staleAttempts int
+	staleTimer    *time.Timer // the one pending background rebuild, if any
 }
 
 func newListState() *listState {
@@ -132,6 +133,14 @@ type CloudflareListsEnforcer struct {
 	// pageRetryDelays is the backoff between attempts of one item-list
 	// page that failed at the transport (timeout, reset) — issue #646.
 	pageRetryDelays []time.Duration
+	// staleRetryDelays paces the background mirror rebuild (issue #646).
+	staleRetryDelays []time.Duration
+	// pushMu serialises push and flushRemovals (issue #646 review): the
+	// debounce timer, the daemon's Sync, the removal flusher and the stale
+	// rebuild timer all mutate the item mirror; a rediscovery snapshot
+	// written over a concurrent add or delete would drop or resurrect an
+	// item ID and leak an item at the edge.
+	pushMu sync.Mutex
 	// opPollInterval is the async bulk-operation poll cadence.
 	opPollInterval time.Duration
 
@@ -179,6 +188,7 @@ func NewCloudflareListsEnforcer(ctx context.Context, cfg *config.CloudflareCfg, 
 		expireFlushInterval: expireFlush,
 		retryDelays:         cfRetryDelays,
 		pageRetryDelays:     cfPageRetryDelays,
+		staleRetryDelays:    cfStaleRetryDelays,
 		opPollInterval:      cfBulkOpPollInterval,
 		svcCtx:              ctx,
 		state:               newListState(),
@@ -338,6 +348,8 @@ func (e *CloudflareListsEnforcer) scheduleFlush(ctx context.Context) error {
 // push discovers/creates the list as needed, then reconciles the live items
 // with desired by emitting bulk add and bulk delete calls.
 func (e *CloudflareListsEnforcer) push(ctx context.Context) error {
+	e.pushMu.Lock()
+	defer e.pushMu.Unlock()
 	// Snapshot the inputs under lock.
 	e.state.mu.Lock()
 	needsDiscover := !e.state.discovered || e.state.mirrorStale
@@ -462,13 +474,20 @@ func isCFDuplicateErr(err error) bool {
 // IPs genuinely absent. Returns the ip→itemID map for rows this instance
 // now owns.
 func (e *CloudflareListsEnforcer) retryAddSkippingPresent(ctx context.Context, listID string, want []string) (map[string]string, error) {
-	_, present, err := e.fetchAllItems(ctx, listID, 1)
+	owned, present, err := e.fetchAllItems(ctx, listID, 1)
 	if err != nil {
 		return nil, fmt.Errorf("duplicate-add refresh: %w", err)
 	}
 	var remaining []string
 	e.state.mu.Lock()
 	for _, ip := range want {
+		// An item carrying our own tag is ours — its ID was lost (a failed
+		// post-add refresh, issue #646), not foreign: filing it as foreign
+		// would leave it at the edge forever once it expires.
+		if id, mine := owned[ip]; mine {
+			e.state.items[ip] = id
+			continue
+		}
 		if _, ok := present[ip]; ok {
 			e.state.foreign[ip] = struct{}{}
 			continue
@@ -512,6 +531,8 @@ func (e *CloudflareListsEnforcer) removeStale(ctx context.Context, listID string
 // before the first discovery — there is nothing to remove from a list that
 // has not been read yet.
 func (e *CloudflareListsEnforcer) flushRemovals(ctx context.Context) error {
+	e.pushMu.Lock()
+	defer e.pushMu.Unlock()
 	e.state.mu.Lock()
 	// Reset the foreign cache each flush tick (issue #486): if another
 	// instance expired an IP we still want, the next push re-verifies and
@@ -694,39 +715,43 @@ func (e *CloudflareListsEnforcer) getPageWithRetry(ctx context.Context, url stri
 }
 
 // markMirrorStale flags the local item mirror for a rebuild and, in
-// background (debounced) mode, arms a paced retry so the rebuild happens
-// even when no new ban triggers a push (issue #646). Synchronous mode
-// (tests) rebuilds on the next call instead.
-func (e *CloudflareListsEnforcer) markMirrorStale() {
+// background (debounced) mode, arms ONE paced retry per enforcer so the
+// rebuild happens even when no new ban triggers a push (issue #646). A
+// pending timer is kept, never duplicated; escalate advances the pacing
+// (used by the timer chain on a failed rebuild — a burst of failed
+// refreshes in one slow window must not jump straight to the slowest
+// step). Synchronous mode (tests) rebuilds on the next call instead.
+func (e *CloudflareListsEnforcer) markMirrorStale(escalate bool) {
 	e.state.mu.Lock()
+	defer e.state.mu.Unlock()
 	e.state.mirrorStale = true
-	attempt := e.state.staleAttempts
-	if attempt < len(cfStaleRetryDelays)-1 {
-		e.state.staleAttempts++
-	}
-	background := e.debounceInterval > 0
-	e.state.mu.Unlock()
-	if !background {
+	if e.debounceInterval <= 0 || e.state.staleTimer != nil {
 		return
 	}
-	delay := cfStaleRetryDelays[attempt]
-	time.AfterFunc(delay, func() {
-		if e.svcCtx.Err() != nil {
-			return
-		}
-		e.state.mu.Lock()
-		stale := e.state.mirrorStale
-		e.state.mu.Unlock()
-		if !stale {
-			return
-		}
-		ctx, cancel := context.WithTimeout(e.svcCtx, 90*time.Second)
-		defer cancel()
-		if err := e.push(ctx); err != nil {
-			slog.Warn("enforce/cloudflare-lists: stale mirror rebuild failed, will retry", "err", err)
-			e.markMirrorStale()
-		}
-	})
+	if escalate && e.state.staleAttempts < len(e.staleRetryDelays)-1 {
+		e.state.staleAttempts++
+	}
+	delay := e.staleRetryDelays[e.state.staleAttempts]
+	e.state.staleTimer = time.AfterFunc(delay, e.rebuildStaleMirror)
+}
+
+// rebuildStaleMirror is the stale timer's callback: one full push (which
+// re-discovers the list first) under the same serialisation as every
+// other push; on failure the chain re-arms one step slower.
+func (e *CloudflareListsEnforcer) rebuildStaleMirror() {
+	e.state.mu.Lock()
+	e.state.staleTimer = nil
+	stale := e.state.mirrorStale
+	e.state.mu.Unlock()
+	if !stale || e.svcCtx.Err() != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(e.svcCtx, 90*time.Second)
+	defer cancel()
+	if err := e.push(ctx); err != nil {
+		slog.Warn("enforce/cloudflare-lists: stale mirror rebuild failed, will retry", "err", err)
+		e.markMirrorStale(true)
+	}
 }
 
 // ── CF Lists API mutators ────────────────────────────────────────────────────
@@ -912,7 +937,7 @@ func (e *CloudflareListsEnforcer) addItems(ctx context.Context, listID string, i
 			// say so at WARN (issue #646).
 			slog.WarnContext(ctx, "enforce/cloudflare-lists: post-add refresh failed; edge mirror stale until the next push",
 				"added", len(ips), "list_id", listID, "err", err.Error())
-			e.markMirrorStale()
+			e.markMirrorStale(false)
 			return out, nil
 		}
 		// Only copy back IPs we actually requested; preserve any IDs we already learned.

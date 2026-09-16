@@ -171,3 +171,22 @@ func NewCFListsEnforcerWithClientTimeout(token, baseURL, accountID, listName str
 	e.pageRetryDelays = []time.Duration{time.Millisecond, time.Millisecond}
 	return e
 }
+
+// NewCFListsEnforcerBackgroundForTest builds a debounced (background-mode)
+// enforcer with a short client timeout and millisecond page/stale retry
+// schedules, for the stale-mirror rebuild tests (issue #646).
+func NewCFListsEnforcerBackgroundForTest(ctx context.Context, token, baseURL, accountID, listName string, debounce, timeout time.Duration) *CloudflareListsEnforcer {
+	e := newCFListsEnforcerForTestWithCtx(ctx, token, baseURL, accountID, listName)
+	e.debounceInterval = debounce
+	e.client = &http.Client{Timeout: timeout}
+	e.pageRetryDelays = []time.Duration{time.Millisecond, time.Millisecond}
+	e.staleRetryDelays = []time.Duration{10 * time.Millisecond, 20 * time.Millisecond, 20 * time.Millisecond}
+	return e
+}
+
+// StaleAttempts exposes the stale-rebuild pacing step (issue #646 tests).
+func (e *CloudflareListsEnforcer) StaleAttempts() int {
+	e.state.mu.Lock()
+	defer e.state.mu.Unlock()
+	return e.state.staleAttempts
+}

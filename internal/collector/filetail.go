@@ -28,6 +28,13 @@ const inotifyEventSize = int(unsafe.Sizeof(unix.InotifyEvent{}))
 // pollTimeout is how often Poll is re-checked so context cancellation is honoured.
 const pollTimeout = 500 // milliseconds
 
+// fileWatchMask is the inotify mask installed on the tailed file.
+const fileWatchMask = unix.IN_MODIFY | unix.IN_MOVE_SELF | unix.IN_DELETE_SELF
+
+// inotifyAddWatch is the watch installer; tests swap it to inject failures
+// on the re-watch path (issue #634).
+var inotifyAddWatch = unix.InotifyAddWatch
+
 // FileTailCollector tails a file using Linux inotify, handling log rotation.
 // It seeks to EOF on startup (tail -f behaviour) and emits each complete line
 // as an sdk.RawLine on the out channel.
@@ -75,8 +82,7 @@ func (c *FileTailCollector) Run(ctx context.Context, out chan<- sdk.RawLine) err
 	defer func() { _ = unix.Close(ifd) }()
 
 	// Watch the file for modifications and renames/deletes.
-	fileWd, err := unix.InotifyAddWatch(ifd, c.Path,
-		unix.IN_MODIFY|unix.IN_MOVE_SELF|unix.IN_DELETE_SELF)
+	fileWd, err := inotifyAddWatch(ifd, c.Path, fileWatchMask)
 	if err != nil {
 		_ = f.Close()
 		return fmt.Errorf("filetail: inotify_add_watch file: %w", err)
@@ -233,8 +239,7 @@ func (c *FileTailCollector) Run(ctx context.Context, out chan<- sdk.RawLine) err
 				lastSize = 0
 
 				// Watch the new inode; events are dispatched by this wd.
-				newWd, addErr := unix.InotifyAddWatch(ifd, c.Path,
-					unix.IN_MODIFY|unix.IN_MOVE_SELF|unix.IN_DELETE_SELF)
+				newWd, addErr := inotifyAddWatch(ifd, c.Path, fileWatchMask)
 				if addErr != nil {
 					logger.Warn("filetail: re-watch after rotation failed; relying on the stat fallback",
 						slog.String("path", c.Path), slog.String("err", addErr.Error()))

@@ -253,7 +253,7 @@ func TestCheckBanIneffective_RecentPlusUnknown(t *testing.T) {
 // flagged ban whose traffic was ALL inside the grace window
 // (suppressed_after_grace = 0) is HTTP connection reuse, not a leak — the
 // ban is effective. It must be WARN, never a red FAIL. Reproduces the
-// dogfood 34.140.132.132 case (phase=in_grace, 0 post-grace events).
+// dogfood case (phase=in_grace, 0 post-grace events) that showed a false FAIL.
 func TestCheckBanIneffective_InGraceOnlyWarnsNotFail(t *testing.T) {
 	path, db := newDoctorDB(t)
 	seedIneffectiveBan(t, db, "203.0.113.40", 2, 0) // recent, 0 post-grace

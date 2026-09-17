@@ -66,6 +66,7 @@ type cfListsMock struct {
 	bulkOpPolls      int           // bulk-operation status requests observed
 	getItemsCalls    int           // GET items page requests observed (issue #491)
 	stallGetItems    int           // next N GET items requests stall for stallFor (client timeout, issue #646)
+	stallBulkOp      int           // next N bulk-operation polls stall for stallFor (issue #654)
 	stallFor         time.Duration // how long a stalled page sleeps before answering
 	holdGetItems     chan struct{} // when non-nil, GET items blocks until it is closed (issue #646 review)
 }
@@ -332,6 +333,13 @@ func (m *cfListsMock) writeThrottle(w http.ResponseWriter, as429 bool) {
 func (m *cfListsMock) handleBulkOp(w http.ResponseWriter, opID string) {
 	m.mu.Lock()
 	m.bulkOpPolls++
+	if m.stallBulkOp > 0 {
+		m.stallBulkOp--
+		stall := m.stallFor
+		m.mu.Unlock()
+		time.Sleep(stall)
+		m.mu.Lock()
+	}
 	pending := m.opPendingPolls > 0
 	if pending {
 		m.opPendingPolls--
@@ -1454,4 +1462,28 @@ func TestCFListsBan_StaleRebuildSerialisedWithDebouncedPush(t *testing.T) {
 		t.Fatalf("Unban A: %v", err)
 	}
 	waitFor(t, "A to be deleted", 5*time.Second, func() bool { return !mock.hasItem(testCFListName, "192.0.2.21") })
+}
+
+// TestCFListsBan_BulkOpPollTimeout_DoesNotFailPush (issue #654): the async
+// add POST is accepted (returns an operation id), but the bulk-operation
+// status poll times out at the transport. The push must not fail at ERROR —
+// the add is kept, the mirror recovers, and Unban then deletes the item.
+func TestCFListsBan_BulkOpPollTimeout_DoesNotFailPush(t *testing.T) {
+	mock, ts := newMockCFListsServer(t)
+	mock.addReturnsAsync = true
+	mock.stallBulkOp, mock.stallFor = 1, time.Second
+
+	e := enforce.NewCFListsEnforcerWithClientTimeout("tok", ts.URL, testCFAccount, testCFListName, 250*time.Millisecond)
+	if err := e.Ban(context.Background(), sdk.Target{IP: netip.MustParseAddr("192.0.2.30")}); err != nil {
+		t.Fatalf("Ban must succeed — the add was accepted, only the bulk-op poll timed out: %v", err)
+	}
+	if !mock.hasItem(testCFListName, "192.0.2.30") {
+		t.Fatal("expected 192.0.2.30 added")
+	}
+	if err := e.Unban(context.Background(), sdk.Target{IP: netip.MustParseAddr("192.0.2.30")}); err != nil {
+		t.Fatalf("Unban: %v", err)
+	}
+	if n := mock.itemCount(testCFListName); n != 0 {
+		t.Fatalf("expected 0 items after Unban, got %d", n)
+	}
 }

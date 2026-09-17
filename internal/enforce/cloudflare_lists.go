@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -858,9 +859,12 @@ func (e *CloudflareListsEnforcer) waitBulkOperation(ctx context.Context, opID st
 		if err := e.limiter.wait(ctx); err != nil {
 			return err
 		}
-		resp, err := e.doRequest(ctx, http.MethodGet, url, nil)
+		resp, err := e.getPageWithRetry(ctx, url)
 		if err != nil {
-			return err
+			// The POST was accepted; only confirming it failed at the
+			// transport. Report it as unconfirmed so the caller keeps the
+			// mutation and reconciles later (issue #654).
+			return fmt.Errorf("%w: poll %s: %v", errBulkOpUnconfirmed, opID, err)
 		}
 		var out cfBulkOpResp
 		decErr := json.NewDecoder(resp.Body).Decode(&out)
@@ -885,7 +889,7 @@ func (e *CloudflareListsEnforcer) waitBulkOperation(ctx context.Context, opID st
 		case <-time.After(e.opPollInterval):
 		}
 	}
-	return fmt.Errorf("cloudflare bulk operation %s: not completed after %d polls", opID, cfBulkOpPollMax)
+	return fmt.Errorf("%w: %s not completed after %d polls", errBulkOpUnconfirmed, opID, cfBulkOpPollMax)
 }
 
 // addItems performs one bulk POST per Cloudflare batch limit and returns
@@ -917,7 +921,16 @@ func (e *CloudflareListsEnforcer) addItems(ctx context.Context, listID string, i
 		}
 		if ar.Result.OperationID != "" {
 			if err := e.waitBulkOperation(ctx, ar.Result.OperationID); err != nil {
-				return nil, err
+				if !errors.Is(err, errBulkOpUnconfirmed) {
+					return nil, err
+				}
+				// The add was accepted; only its completion is unconfirmed.
+				// Keep it, mark the mirror stale, and let the refresh below
+				// (itself resilient, issue #647) recover the IDs or the next
+				// push rebuild (issue #654).
+				slog.WarnContext(ctx, "enforce/cloudflare-lists: add accepted but bulk operation unconfirmed; edge mirror stale until the next push",
+					"list_id", listID, "err", err.Error())
+				e.markMirrorStale(false)
 			}
 		}
 		if len(ar.Result.Items) > 0 {
@@ -981,7 +994,16 @@ func (e *CloudflareListsEnforcer) removeItems(ctx context.Context, listID string
 		}
 		if dr.Result.OperationID != "" {
 			if err := e.waitBulkOperation(ctx, dr.Result.OperationID); err != nil {
-				return err
+				if !errors.Is(err, errBulkOpUnconfirmed) {
+					return err
+				}
+				// The delete was accepted; only its completion is unconfirmed.
+				// Do not fail the push — over-blocking until the next reconcile
+				// is the fail-closed direction (Hard Rule §1). Mark the mirror
+				// stale so the next push re-reads and reconciles (issue #654).
+				slog.WarnContext(ctx, "enforce/cloudflare-lists: delete accepted but bulk operation unconfirmed; edge mirror stale until the next push",
+					"list_id", listID, "err", err.Error())
+				e.markMirrorStale(false)
 			}
 		}
 		slog.InfoContext(ctx, "enforce/cloudflare-lists: removed items",

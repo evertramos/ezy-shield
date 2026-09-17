@@ -79,7 +79,13 @@ func checkBanIneffective(dbPath string) CheckResult {
 	defer rows.Close() //nolint:errcheck // read-only close
 
 	now := time.Now().UTC()
-	var current, past ineffectiveHits
+	// currentLeak: a recent firing with post-grace events — enforcement is
+	// genuinely failing (FAIL). currentGrace: a recent firing whose traffic
+	// was ALL inside the grace window (suppressed_after_grace == 0) — HTTP
+	// keep-alive/HTTP-2 connection reuse on an already-established connection,
+	// not a leak; the ban is effective, so it is a WARN, not a red FAIL
+	// (issue #656; the #586 phased diagnostic intends in-grace to be tolerated).
+	var currentLeak, currentGrace, past ineffectiveHits
 	for rows.Next() {
 		var h ineffectiveHit
 		var last sql.NullString
@@ -98,7 +104,11 @@ func checkBanIneffective(dbPath string) CheckResult {
 				continue
 			}
 		}
-		current = append(current, h)
+		if h.evts > 0 {
+			currentLeak = append(currentLeak, h)
+		} else {
+			currentGrace = append(currentGrace, h)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return CheckResult{Name: name, Status: statusNA, Hint: err.Error()}
@@ -110,25 +120,44 @@ func checkBanIneffective(dbPath string) CheckResult {
 		everHad = 0 // best-effort context; the active-ban signal stands alone
 	}
 
-	if len(current) == 0 {
+	// A real post-grace leak is the only FAIL.
+	if len(currentLeak) > 0 {
+		hint := fmt.Sprintf("%d active ban(s) leaking after the grace window within the last %s: %s — %s",
+			len(currentLeak), store.IneffectiveRearmAfter, describeHits(currentLeak.labels(false), 10), ineffectiveRemedy)
+		var aside []string
+		if len(currentGrace) > 0 {
+			aside = append(aside, fmt.Sprintf("%d flagged for in-grace connection reuse only (0 post-grace events)", len(currentGrace)))
+		}
 		if len(past) > 0 {
-			return CheckResult{Name: name, Status: statusWarn,
-				Hint: fmt.Sprintf("no ban is known to be leaking now; %d flagged ban(s) leaked in the past (quiet for %s or more, or with an unknown last leak time): %s — a new leak on any of them fires ban_ineffective again",
-					len(past), store.IneffectiveRearmAfter, describeHits(past.labels(true), 10))}
+			aside = append(aside, fmt.Sprintf("%d flagged ban(s) quiet for %s or more or with an unknown last leak time", len(past), store.IneffectiveRearmAfter))
 		}
-		if everHad > 0 {
-			return CheckResult{Name: name, Status: statusWarn,
-				Hint: fmt.Sprintf("no ACTIVE ineffective ban, but %d offender(s) had one historically — %s", everHad, ineffectiveRemedy)}
+		if len(aside) > 0 {
+			hint += " (plus " + strings.Join(aside, ", ") + ", not counted)"
 		}
-		return CheckResult{Name: name, Status: statusPass}
+		return CheckResult{Name: name, Status: statusFail, Hint: hint}
 	}
 
-	hint := fmt.Sprintf("%d active ban(s) leaking within the last %s: %s — %s",
-		len(current), store.IneffectiveRearmAfter, describeHits(current.labels(false), 10), ineffectiveRemedy)
-	if len(past) > 0 {
-		hint += fmt.Sprintf(" (plus %d flagged ban(s) quiet for %s or more or with an unknown last leak time, not counted)", len(past), store.IneffectiveRearmAfter)
+	// No post-grace leak. Recent in-grace-only firings are connection reuse,
+	// not an enforcement failure: WARN, never FAIL (issue #656).
+	if len(currentGrace) > 0 {
+		hint := fmt.Sprintf("%d recently flagged ban(s) saw traffic only DURING the grace window (0 post-grace events): %s — HTTP keep-alive/HTTP-2 connection reuse on an already-established connection, not a leak; the ban is effective. No action needed",
+			len(currentGrace), describeHits(currentGrace.labels(false), 10))
+		if len(past) > 0 {
+			hint += fmt.Sprintf(". Plus %d flagged in the past (quiet %s or more, or unknown)", len(past), store.IneffectiveRearmAfter)
+		}
+		return CheckResult{Name: name, Status: statusWarn, Hint: hint}
 	}
-	return CheckResult{Name: name, Status: statusFail, Hint: hint}
+
+	if len(past) > 0 {
+		return CheckResult{Name: name, Status: statusWarn,
+			Hint: fmt.Sprintf("no ban is known to be leaking now; %d flagged ban(s) leaked in the past (quiet for %s or more, or with an unknown last leak time): %s — a new leak on any of them fires ban_ineffective again",
+				len(past), store.IneffectiveRearmAfter, describeHits(past.labels(true), 10))}
+	}
+	if everHad > 0 {
+		return CheckResult{Name: name, Status: statusWarn,
+			Hint: fmt.Sprintf("no ACTIVE ineffective ban, but %d offender(s) had one historically — %s", everHad, ineffectiveRemedy)}
+	}
+	return CheckResult{Name: name, Status: statusPass}
 }
 
 // describeHits joins up to limit labels; the caller's count is never

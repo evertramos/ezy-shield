@@ -248,3 +248,46 @@ func TestCheckBanIneffective_RecentPlusUnknown(t *testing.T) {
 		t.Errorf("unknown row must not be listed as current:\n%s", res.Hint)
 	}
 }
+
+// TestCheckBanIneffective_InGraceOnlyWarnsNotFail (issue #656): a recently
+// flagged ban whose traffic was ALL inside the grace window
+// (suppressed_after_grace = 0) is HTTP connection reuse, not a leak — the
+// ban is effective. It must be WARN, never a red FAIL. Reproduces the
+// dogfood case (phase=in_grace, 0 post-grace events) that showed a false FAIL.
+func TestCheckBanIneffective_InGraceOnlyWarnsNotFail(t *testing.T) {
+	path, db := newDoctorDB(t)
+	seedIneffectiveBan(t, db, "203.0.113.40", 2, 0) // recent, 0 post-grace
+	res := checkBanIneffective(path)
+	if res.Status != statusWarn {
+		t.Fatalf("in-grace-only flagged ban: status = %s (%s), want WARN", res.Status, res.Hint)
+	}
+	for _, want := range []string{"203.0.113.40", "only DURING the grace window", "not a leak", "effective"} {
+		if !strings.Contains(res.Hint, want) {
+			t.Errorf("hint missing %q:\n%s", want, res.Hint)
+		}
+	}
+	if strings.Contains(res.Hint, "leaking after the grace") {
+		t.Errorf("in-grace-only must not be reported as a post-grace leak:\n%s", res.Hint)
+	}
+}
+
+// TestCheckBanIneffective_RealLeakPlusInGrace (issue #656): a genuine
+// post-grace leak still FAILs, counting only itself; a concurrent
+// in-grace-only firing is mentioned apart, not counted into the FAIL.
+func TestCheckBanIneffective_RealLeakPlusInGrace(t *testing.T) {
+	path, db := newDoctorDB(t)
+	seedIneffectiveBan(t, db, "203.0.113.41", 3, 42) // real post-grace leak
+	seedIneffectiveBan(t, db, "203.0.113.42", 2, 0)  // in-grace reuse only
+	res := checkBanIneffective(path)
+	if res.Status != statusFail {
+		t.Fatalf("real leak present: status = %s (%s), want FAIL", res.Status, res.Hint)
+	}
+	for _, want := range []string{"1 active ban(s) leaking after the grace", "203.0.113.41", "in-grace connection reuse only"} {
+		if !strings.Contains(res.Hint, want) {
+			t.Errorf("hint missing %q:\n%s", want, res.Hint)
+		}
+	}
+	if strings.Contains(res.Hint, "203.0.113.42 (strike") {
+		t.Errorf("in-grace-only ban must not be listed as a current leak:\n%s", res.Hint)
+	}
+}

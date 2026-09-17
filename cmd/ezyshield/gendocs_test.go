@@ -108,3 +108,54 @@ func TestGenDocsCmdHidden(t *testing.T) {
 	}
 	t.Fatal("__gendocs command not registered on root")
 }
+
+// TestGenDocsRootManHasCommandList (issue #652): the top-level man page must
+// be a usable table of contents — a COMMANDS section with each verb and its
+// one-line description, plus EXAMPLES and FILES — not a bare SEE ALSO list.
+func TestGenDocsRootManHasCommandList(t *testing.T) {
+	root := newRootCmd()
+	manDir := t.TempDir()
+	if err := genDocs(root, t.TempDir(), manDir); err != nil {
+		t.Fatalf("genDocs: %v", err)
+	}
+	b, err := os.ReadFile(filepath.Join(manDir, "man1", "ezyshield.1")) //nolint:gosec // reads a file just generated in a t.TempDir
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(b)
+	for _, want := range []string{".SH COMMANDS", ".SH EXAMPLES", ".SH FILES", "\\fBban\\fP", "\\fBwatch\\fP"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("root man page missing %q", want)
+		}
+	}
+	// A command's Short must appear verbatim (modulo roff hyphen escaping),
+	// proving the list is generated from the live tree, not a stub.
+	if !strings.Contains(page, manEscape("Stream live daemon events")) {
+		t.Errorf("root man page does not carry the live command descriptions")
+	}
+}
+
+// TestGenDocsSubcommandTitle (issue #652): each subcommand page carries its
+// own .TH title, not the shared EZYSHIELD(1).
+func TestGenDocsSubcommandTitle(t *testing.T) {
+	root := newRootCmd()
+	manDir := t.TempDir()
+	if err := genDocs(root, t.TempDir(), manDir); err != nil {
+		t.Fatalf("genDocs: %v", err)
+	}
+	b, err := os.ReadFile(filepath.Join(manDir, "man1", "ezyshield-ban.1")) //nolint:gosec // reads a file just generated in a t.TempDir
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `.TH "EZYSHIELD-BAN"`) {
+		t.Errorf("ezyshield-ban.1 has the wrong .TH title (want EZYSHIELD-BAN)")
+	}
+	// A nested command path is dash-joined too.
+	nb, err := os.ReadFile(filepath.Join(manDir, "man1", "ezyshield-config-show.1")) //nolint:gosec // reads a file just generated in a t.TempDir
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(nb), `.TH "EZYSHIELD-CONFIG-SHOW"`) {
+		t.Errorf("nested page has the wrong .TH title (want EZYSHIELD-CONFIG-SHOW)")
+	}
+}

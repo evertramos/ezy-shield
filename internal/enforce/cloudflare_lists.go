@@ -855,6 +855,10 @@ func (e *CloudflareListsEnforcer) mutateWithRetry(ctx context.Context, op, metho
 // back-to-back follow-up mutation is what invites the 971 throttle).
 func (e *CloudflareListsEnforcer) waitBulkOperation(ctx context.Context, opID string) error {
 	url := fmt.Sprintf("%s/accounts/%s/rules/lists/bulk_operations/%s", e.baseURL, e.accountID, opID)
+	// If the flush deadline fires inside getPageWithRetry the error is
+	// wrapped as unconfirmed (kept); if it fires at limiter.wait or the poll
+	// backoff below, the raw ctx error is returned as a hard error and the
+	// push fails — rare, self-heals on the next push, conservative (#654).
 	for poll := 0; poll < cfBulkOpPollMax; poll++ {
 		if err := e.limiter.wait(ctx); err != nil {
 			return err

@@ -1464,18 +1464,31 @@ func TestCFListsBan_StaleRebuildSerialisedWithDebouncedPush(t *testing.T) {
 	waitFor(t, "A to be deleted", 5*time.Second, func() bool { return !mock.hasItem(testCFListName, "192.0.2.21") })
 }
 
-// TestCFListsBan_BulkOpPollTimeout_DoesNotFailPush (issue #654): the async
-// add POST is accepted (returns an operation id), but the bulk-operation
-// status poll times out at the transport. The push must not fail at ERROR —
-// the add is kept, the mirror recovers, and Unban then deletes the item.
-func TestCFListsBan_BulkOpPollTimeout_DoesNotFailPush(t *testing.T) {
+// TestCFListsBan_BulkOpPollTransportExhausted_AddKept (issue #654): the async
+// add POST is accepted (operation id), but EVERY bulk-operation status poll
+// times out at the transport, so getPageWithRetry exhausts and
+// waitBulkOperation returns the unconfirmed sentinel. The push must not fail
+// at ERROR — the add is kept, the item-list refresh (unaffected here)
+// recovers the ID, and Unban then deletes it.
+func TestCFListsBan_BulkOpPollTransportExhausted_AddKept(t *testing.T) {
+	rec := &cfLevelRecorder{msg: "enforce/cloudflare-lists: add accepted but bulk operation unconfirmed; edge mirror stale until the next push"}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(rec))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
 	mock, ts := newMockCFListsServer(t)
 	mock.addReturnsAsync = true
-	mock.stallBulkOp, mock.stallFor = 1, time.Second
+	// Stall every bulk-op GET so all attempts of the first poll time out and
+	// getPageWithRetry gives up — the sentinel path, not the #647 in-poll
+	// retry (which one stalled attempt would exercise instead).
+	mock.stallBulkOp, mock.stallFor = 1000, time.Second
 
 	e := enforce.NewCFListsEnforcerWithClientTimeout("tok", ts.URL, testCFAccount, testCFListName, 250*time.Millisecond)
 	if err := e.Ban(context.Background(), sdk.Target{IP: netip.MustParseAddr("192.0.2.30")}); err != nil {
-		t.Fatalf("Ban must succeed — the add was accepted, only the bulk-op poll timed out: %v", err)
+		t.Fatalf("Ban must succeed — the add was accepted, only the bulk-op poll was unconfirmed: %v", err)
+	}
+	if len(rec.seen()) != 1 {
+		t.Fatalf("want exactly one unconfirmed-add WARN, got %d", len(rec.seen()))
 	}
 	if !mock.hasItem(testCFListName, "192.0.2.30") {
 		t.Fatal("expected 192.0.2.30 added")
@@ -1485,5 +1498,55 @@ func TestCFListsBan_BulkOpPollTimeout_DoesNotFailPush(t *testing.T) {
 	}
 	if n := mock.itemCount(testCFListName); n != 0 {
 		t.Fatalf("expected 0 items after Unban, got %d", n)
+	}
+}
+
+// TestCFListsBan_BulkOpPollBudgetExhausted_AddKept (issue #654): the bulk
+// operation stays "pending" past the poll budget (no transport failure), so
+// waitBulkOperation exhausts cfBulkOpPollMax and returns the sentinel. The
+// add must still be kept.
+func TestCFListsBan_BulkOpPollBudgetExhausted_AddKept(t *testing.T) {
+	mock, ts := newMockCFListsServer(t)
+	mock.addReturnsAsync = true
+	mock.opPendingPolls = 1000 // never reaches "completed" within the budget
+
+	e := enforce.NewCFListsEnforcerForTest("tok", ts.URL, testCFAccount, testCFListName)
+	if err := e.Ban(context.Background(), sdk.Target{IP: netip.MustParseAddr("192.0.2.31")}); err != nil {
+		t.Fatalf("Ban must succeed on an unconfirmed (still-pending) bulk op: %v", err)
+	}
+	if !mock.hasItem(testCFListName, "192.0.2.31") {
+		t.Fatal("expected 192.0.2.31 added")
+	}
+}
+
+// TestCFListsUnban_BulkOpPollUnconfirmed_DoesNotFailPush (issue #654): a
+// delete whose bulk-operation poll is unconfirmed must NOT fail the push —
+// the item was accepted for deletion (over-block is the fail-closed
+// direction), and Unban returns nil.
+func TestCFListsUnban_BulkOpPollUnconfirmed_DoesNotFailPush(t *testing.T) {
+	rec := &cfLevelRecorder{msg: "enforce/cloudflare-lists: delete accepted but bulk operation unconfirmed; edge mirror stale until the next push"}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(rec))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	mock, ts := newMockCFListsServer(t)
+	mock.addReturnsAsync = true
+
+	e := enforce.NewCFListsEnforcerWithClientTimeout("tok", ts.URL, testCFAccount, testCFListName, 250*time.Millisecond)
+	if err := e.Ban(context.Background(), sdk.Target{IP: netip.MustParseAddr("192.0.2.32")}); err != nil {
+		t.Fatalf("Ban: %v", err)
+	}
+	// Now stall the DELETE's bulk-op poll: removeItems must not propagate it.
+	mock.mu.Lock()
+	mock.stallBulkOp, mock.stallFor = 1000, time.Second
+	mock.mu.Unlock()
+	if err := e.Unban(context.Background(), sdk.Target{IP: netip.MustParseAddr("192.0.2.32")}); err != nil {
+		t.Fatalf("Unban must succeed despite an unconfirmed delete bulk op: %v", err)
+	}
+	if len(rec.seen()) != 1 {
+		t.Fatalf("want exactly one unconfirmed-delete WARN, got %d", len(rec.seen()))
+	}
+	if n := mock.itemCount(testCFListName); n != 0 {
+		t.Fatalf("item was accepted for deletion; want 0 left, got %d", n)
 	}
 }

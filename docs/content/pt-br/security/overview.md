@@ -136,6 +136,82 @@ Quando a IA está habilitada para eventos ambíguos (scores dentro da `ambiguous
 
 O enforcer não é uma biblioteca. É um processo separado. O daemon principal não pode modificar o firewall diretamente.
 
+### A única concessão que muda isso: o grupo `docker`
+
+Coletores de log docker (e o [observador de docker exec](../guides/docker-exec-watch.md))
+leem através do socket do Docker Engine, e o acesso a esse socket é concedido
+pela participação no grupo `docker`. Esse grupo **não** é uma permissão de
+leitura — ele é a API do Engine. Qualquer processo que o alcance pode iniciar
+um container com o filesystem do host montado, o que é root no host.
+
+Portanto, em um host Docker onde o usuário de serviço está em `docker`, o
+primeiro item acima deixa de valer: o daemon é equivalente a root, e o
+hardening do systemd na unidade dele (`NoNewPrivileges`,
+`ProtectSystem=strict`, seccomp) não o contém, porque a fuga é pedir ao daemon
+do Docker — um processo root sem confinamento — que faça o trabalho.
+
+O grupo é, portanto, a **última** de três formas de ler logs de container, e o
+EzyShield nunca o concede por conta própria. Em ordem de privilégio:
+
+1. **Um arquivo de log no host.** O container grava o access log em um caminho
+   bind-mountado do host e um coletor `kind: file` o lê. O EzyShield não recebe
+   nenhum acesso ao Docker. Considere isso primeiro.
+2. **Um proxy somente-leitura do socket.** Um proxy com filtro na frente do
+   socket do Engine, publicado em `127.0.0.1`, responde logs e eventos de
+   container e recusa criação de container, exec e mounts. Aponte o
+   `docker.host` para ele:
+
+   ```yaml
+   docker:
+     host: tcp://127.0.0.1:2375
+   ```
+
+   O daemon fala a API do Engine sobre TCP em loopback e fica fora do grupo
+   `docker`. O EzyShield não abre nenhum listener para isso — o proxy é um
+   container da sua própria stack, e é a única coisa que toca o socket. Veja
+   [Docker + nginx + WordPress](../guides/docker-nginx-wordpress.md) para o
+   trecho de compose.
+3. **O grupo `docker`.** Equivalente a root, como acima. Só quando nenhuma das
+   outras duas serve.
+
+Como a escolha é feita:
+
+- o `ezyshield init` oferece as três **apenas** quando você configura ao menos
+  um coletor docker, pré-seleciona a de menor privilégio que se aplica e nomeia
+  a consequência do grupo antes de pedi-lo;
+- instalações scriptadas escolhem explicitamente:
+  `--docker-host tcp://127.0.0.1:2375` (chave de resposta
+  `collectors.docker_host`) ou `--docker-group` (chave
+  `collectors.docker_group: true`). Passar os dois é erro — o proxy substitui o
+  grupo, não o acompanha. O `--yes` aceita padrões seguros, e nenhuma das duas
+  concessões é padrão;
+- não escolher nada ainda escreve os coletores — eles apenas não conseguem ler
+  os logs dos containers enquanto o acesso não existir;
+- o `ezyshield doctor` avisa sempre que o usuário de serviço está em `docker`,
+  e diz se algo na sua configuração justifica isso. Quando o `docker.host` é um
+  endpoint TCP, o doctor também o sonda: ele precisa responder `GET /_ping` e
+  precisa **recusar** `POST /containers/create`. Um endpoint que aceita criação
+  de container é acesso equivalente a root ao host pela rede, e essa
+  verificação FALHA.
+
+Para verificar e revogar o grupo:
+
+```bash
+getent group docker                          # o ezyshield aparece na lista?
+sudo gpasswd -d ezyshield docker             # revoga
+sudo systemctl restart ezyshield             # tira o grupo do daemon em execução
+```
+
+Revogar desabilita os coletores docker, a menos que um dos dois primeiros
+caminhos esteja no lugar.
+
+O `docker.host` aceita `unix:///caminho` (o padrão é
+`unix:///var/run/docker.sock`) e `tcp://host:porta`. Um host TCP precisa ser um
+literal de IP de loopback; qualquer outro valor é recusado, a não ser que você
+também defina `docker.allow_remote: true`, que aceita um endpoint do Engine em
+texto claro, sem autenticação e alcançável de fora do host. TLS para um engine
+remoto não é suportado.
+
 ## Sem listeners de rede
 
 O EzyShield não abre nenhum listener de rede para controle (o dashboard opcional faz bind apenas em um endereço loopback — `127.0.0.1` ou `::1` — e recusa qualquer outra coisa). O controle é via:

@@ -12,6 +12,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -67,11 +68,39 @@ func (d *Daemon) ReportExecActivity(ctx context.Context, r ExecActivityReport) {
 
 // runExecActivity starts the injected watcher, if any (Config.ExecActivity;
 // nil = feature disabled or non-docker host).
+//
+// The watcher runs under the same supervision as a collector (issue #580):
+// it is an observation source, and one that stops — because the Docker socket
+// became unreadable, say — used to leave a single log line behind while the
+// daemon kept claiming it was watching `docker exec`. Going through
+// runCollector gives it the restart backoff, the DEGRADED observation state,
+// the audit row and the one-shot critical notification.
 func (d *Daemon) runExecActivity(ctx context.Context) {
 	if d.execActivity == nil {
 		return
 	}
-	d.execActivity(ctx, func(r ExecActivityReport) {
-		d.ReportExecActivity(ctx, r)
+	d.runCollector(ctx, &execActivityWatcher{d: d}, nil)
+}
+
+// execActivityWatcher adapts the injected exec watcher to sdk.Collector so it
+// can be supervised. It never emits RawLines — exec events go to the daemon
+// through ReportExecActivity, not through the parsing pipeline — so the out
+// channel is unused and may be nil.
+type execActivityWatcher struct{ d *Daemon }
+
+// Name is the identity used in supervision logs, alerts and collectors_detail.
+func (e *execActivityWatcher) Name() string { return "docker-exec-watch" }
+
+// Run blocks in the injected watcher. A return before shutdown means the
+// watcher gave up; the injected closure logs the underlying cause, and the
+// error returned here is what makes the gap visible in `status` and doctor.
+func (e *execActivityWatcher) Run(ctx context.Context, _ chan<- sdk.RawLine) error {
+	e.d.execActivity(ctx, func(r ExecActivityReport) {
+		e.d.ReportExecActivity(ctx, r)
 	})
+	if ctx.Err() != nil {
+		return nil
+	}
+	return errors.New("docker exec watcher stopped before shutdown — `docker exec` activity is no longer observed " +
+		"(the underlying error is in the daemon log)")
 }

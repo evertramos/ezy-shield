@@ -216,11 +216,37 @@ func applyDropins(base []spec, dir string) ([]spec, map[string]string, error) {
 // (aggregate integers only — hence the kind-level-only validation below).
 const LongWindowCutoff = time.Hour
 
+// LongCounterKindPrefix marks the synthetic counter kinds of long-window
+// field-level rules (issue #585). A rule such as "wp-login attempts per
+// day" cannot be served by the plain per-kind counters (they keep no
+// field values), so the daemon counts the rule's OWN matcher on the hot
+// path under a kind derived from the rule name, and the long-window
+// evaluation reads that counter back. The prefix cannot collide with a
+// parser kind (parsers never emit a colon).
+const LongCounterKindPrefix = "rule:"
+
+// LongCounterKind returns the persisted counter kind of the named
+// long-window field-level rule.
+func LongCounterKind(rule string) string { return LongCounterKindPrefix + rule }
+
+// IsLongCounterKind reports whether kind is a rule-derived counter kind
+// rather than a parser event kind.
+func IsLongCounterKind(kind string) bool { return strings.HasPrefix(kind, LongCounterKindPrefix) }
+
+// isLongField reports whether r is a long-window rule with a field-level
+// matcher — the shape served by its own counter (issue #585).
+func isLongField(r spec) bool {
+	return time.Duration(r.Window) > LongWindowCutoff && r.Field != ""
+}
+
 // KindsForLongWindows returns, for each distinct rule window strictly
-// greater than LongWindowCutoff, the union of kinds its rules reference.
-// The daemon uses this to know which event kinds to count persistently and
-// which extra windows to evaluate from those counts. Read-only; Evaluate
-// itself is untouched by the long-window path (design constraint of #134).
+// greater than LongWindowCutoff, the union of counter kinds its rules read:
+// the parser kinds of kind-level rules, and the rule-derived counter kind
+// (LongCounterKind) of field-level rules — never a field rule's parser
+// kinds, so high-volume HTTP traffic is not counted wholesale on its
+// account. The daemon uses this to know which counters to write and which
+// extra windows to evaluate from them. Read-only; Evaluate itself is
+// untouched by the long-window path (design constraint of #134).
 func (e *Engine) KindsForLongWindows() map[time.Duration][]string {
 	out := map[time.Duration][]string{}
 	for _, r := range e.rules {
@@ -232,11 +258,64 @@ func (e *Engine) KindsForLongWindows() map[time.Duration][]string {
 		for _, k := range out[w] {
 			seen[k] = true
 		}
-		for _, k := range r.Kinds {
+		kinds := r.Kinds
+		if r.Field != "" {
+			kinds = []string{LongCounterKind(r.Name)}
+		}
+		for _, k := range kinds {
 			if !seen[k] {
 				out[w] = append(out[w], k)
 				seen[k] = true
 			}
+		}
+	}
+	return out
+}
+
+// LongFieldEventKinds returns the parser event kinds referenced by
+// long-window field-level rules — the hot-path prefilter: only an event of
+// one of these kinds can ever need LongCounterKinds (issue #585).
+func (e *Engine) LongFieldEventKinds() map[string]bool {
+	out := map[string]bool{}
+	for _, r := range e.rules {
+		if !isLongField(r) {
+			continue
+		}
+		for _, k := range r.Kinds {
+			out[k] = true
+		}
+	}
+	return out
+}
+
+// LongCounterKinds returns the rule-derived counter kinds ev increments:
+// one per long-window field-level rule whose kinds include ev.Kind and
+// whose matcher ev satisfies (the identical predicate countMatches and
+// evidenceLines apply). Pure; a few substring checks per event, no I/O.
+func (e *Engine) LongCounterKinds(ev sdk.Event) []string { return e.counterKinds(ev, true) }
+
+// MemoryCounterKinds is LongCounterKinds for the field-level rules served
+// by the in-memory aggregator (window ≤ LongWindowCutoff). The aggregator
+// runs it as its Classifier (issue #622): the count of a field-level rule
+// then survives the sample cap, because evicted matching events are still
+// counted under LongCounterKind(rule) and countMatches reads that key.
+func (e *Engine) MemoryCounterKinds(ev sdk.Event) []string { return e.counterKinds(ev, false) }
+
+func (e *Engine) counterKinds(ev sdk.Event, long bool) []string {
+	var out []string
+	for _, r := range e.rules {
+		if r.Field == "" || isLongField(r) != long {
+			continue
+		}
+		hit := false
+		for _, k := range r.Kinds {
+			if k == ev.Kind {
+				hit = true
+				break
+			}
+		}
+		if hit && fieldMatches(r, ev) {
+			out = append(out, LongCounterKind(r.Name))
 		}
 	}
 	return out
@@ -352,10 +431,14 @@ func fieldMatches(r spec, ev sdk.Event) bool {
 // For kind-only rules (no Field), Kinds counts are used directly — they are
 // exact even when Sample is capped.
 //
-// For field-level rules, Sample is scanned. The default sample cap (4096) is
-// large enough for all built-in rule thresholds. If the sample is saturated the
-// count is a lower bound: the rule still triggers correctly as long as the true
-// count exceeds the threshold.
+// For field-level rules, the rule's own counter kind (LongCounterKind) is
+// used when the aggregate carries it — the persisted counter of a
+// long-window rule (issue #585) or, for an in-memory window, the count the
+// aggregator kept through its Classifier (issue #622), which stays exact
+// after the sample cap evicted the matching events. Otherwise Sample is
+// scanned; it holds the NEWEST events of the window (issue #622), so a
+// saturated sample is a lower bound over the most recent traffic and a
+// busy client's current attack is never hidden behind its older requests.
 func countMatches(r spec, agg sdk.Aggregate) int {
 	kindSet := make(map[string]struct{}, len(r.Kinds))
 	for _, k := range r.Kinds {
@@ -371,6 +454,17 @@ func countMatches(r spec, agg sdk.Aggregate) int {
 			}
 		}
 		return total
+	}
+
+	// Field-level rule served by its own counter: the persisted counter of
+	// a long-window rule (issue #585 — the aggregate the daemon builds from
+	// the store carries the count and no Sample) or the in-memory count
+	// kept by the aggregator's Classifier (issue #622). An aggregate
+	// without the key (no classifier: unit tests, the benchmark) falls
+	// through to the scan below — same predicate, same result while the
+	// sample is not saturated.
+	if n, ok := agg.Kinds[LongCounterKind(r.Name)]; ok {
+		return n
 	}
 
 	// Field-level rule: scan Sample for matching field values. The
@@ -454,12 +548,13 @@ func validateRule(i int, r spec) error {
 		return fmt.Errorf("rule %q: category is required", r.Name)
 	}
 	// Long-window rules (issue #134) are evaluated from persistent per-IP
-	// hourly counters, which retain kind counts only — no field values. A
-	// field-level matcher on such a window could never fire, so it fails
-	// closed at load time like the field/matcher pairing above.
-	if time.Duration(r.Window) > LongWindowCutoff && r.Field != "" {
-		return fmt.Errorf("rule %q: windows above %s are served by persistent counters that keep no field values; field/value/contains/contains_any require window <= %s",
-			r.Name, LongWindowCutoff, LongWindowCutoff)
+	// hourly counters. Kind-level rules read the parser-kind counters;
+	// field-level rules read a counter of their own matcher, written on
+	// the hot path under LongCounterKind (issue #585) — so both shapes are
+	// valid above the cutoff. A rule name that would collide with the
+	// counter namespace is rejected here rather than silently aliasing.
+	if IsLongCounterKind(r.Name) {
+		return fmt.Errorf("rule %q: names may not start with %q (reserved for long-window counter kinds)", r.Name, LongCounterKindPrefix)
 	}
 	return nil
 }

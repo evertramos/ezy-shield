@@ -95,7 +95,13 @@ func runDoctor(cmd *cobra.Command, configDir, dbPath, socketPath string, jsonOut
 		checkNFTPresent(),
 		checkJournaldReadable(),
 		checkEnforcerSocket(enforcerSockPath),
-		checkDockerSocket(),
+		// issue #580: evaluated for the SERVICE USER, not for whoever runs
+		// doctor -- see doctor_dockeraccess.go.
+		checkDockerSocketAccess(configDir),
+		// issue #574: the 'docker' group is root-equivalent — report the
+		// membership wherever it exists, since a package upgrade never
+		// revokes one granted by an older init.
+		checkServiceUserDockerGroup(configDir),
 		checkEnvFile(filepath.Join(configDir, envFileName)),
 	}
 	// issue #386: zero configured collectors means nothing is observed.
@@ -131,6 +137,10 @@ func runDoctor(cmd *cobra.Command, configDir, dbPath, socketPath string, jsonOut
 	// issue #213: the systemd units still carry the hardening enforcement
 	// depends on (AF_NETLINK, RuntimeDirectory), plus a functional netlink
 	// probe through the running helper. Read-only; see doctor_units.go.
+	// issue #579: when docker.host is a tcp endpoint, prove it is reachable
+	// AND that it refuses container creation. New function + this single
+	// registration line only -- see doctor_dockerhost.go.
+	checks = append(checks, checkDockerHostEndpoint(doctorCtx, configDir)...)
 	checks = append(checks, checkUnitHardening(doctorCtx)...)
 	checks = append(checks, checkEnforcerNetlinkProbe(enforcerSockPath))
 	// issue #177: ufw/firewalld coexistence + the table-gone-with-active-bans
@@ -139,8 +149,13 @@ func runDoctor(cmd *cobra.Command, configDir, dbPath, socketPath string, jsonOut
 	checks = append(checks, checkFirewallCoexistence(doctorCtx, dbPath)...)
 	// issue #146: fired ban_ineffective diagnostics (read-only DB query).
 	checks = append(checks, checkBanIneffective(dbPath))
+	// issue #613: the DEGRADED alert is critical — some channel must route it.
+	checks = append(checks, checkNotifyCriticalRoute(configDir))
 	// issue #174: honest enforcement state from the running daemon.
 	checks = append(checks, checkEnforcementState(socketPath))
+	// issue #580: the observation side of the same honesty -- a collector
+	// that is not reading is reported by the daemon that owns the failure.
+	checks = append(checks, checkCollectorsState(socketPath))
 
 	summary := DoctorSummary{Total: len(checks)}
 	for _, c := range checks {
@@ -399,39 +414,6 @@ func checkEnforcerSocket(path string) CheckResult {
 	if !resp.OK {
 		return CheckResult{Name: name, Status: statusFail, Hint: "enforcer rejected ping: " + resp.Error}
 	}
-	return CheckResult{Name: name, Status: statusPass}
-}
-
-// checkDockerSocket returns PASS when /var/run/docker.sock exists, is a unix
-// socket, and the doctor process can read it (issue #93 — the collector now
-// uses the Docker Engine API by default, so the daemon needs r/w access).
-func checkDockerSocket() CheckResult {
-	name := "docker: socket access"
-	path := defaultDockerSocketPath
-
-	info, err := os.Stat(path)
-	if os.IsNotExist(err) {
-		return CheckResult{Name: name, Status: statusNA,
-			Hint: "/var/run/docker.sock not present -- Docker not installed (collector will be disabled)"}
-	}
-	if err != nil {
-		return CheckResult{Name: name, Status: statusFail, Hint: err.Error()}
-	}
-	if info.Mode()&os.ModeSocket == 0 {
-		return CheckResult{Name: name, Status: statusFail,
-			Hint: fmt.Sprintf("%s is not a unix socket", path)}
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	conn, err := (&net.Dialer{Timeout: 2 * time.Second}).DialContext(ctx, "unix", path)
-	if err != nil {
-		return CheckResult{Name: name, Status: statusFail,
-			Hint: fmt.Sprintf("connect: %v -- add caller to 'docker' group (usermod -aG docker ezyshield)", err)}
-	}
-	defer conn.Close() //nolint:errcheck
-
 	return CheckResult{Name: name, Status: statusPass}
 }
 

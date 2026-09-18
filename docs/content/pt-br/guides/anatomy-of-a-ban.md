@@ -79,6 +79,8 @@ $ ezyshield watch
 
 **Enforcement.** O daemon pede ao helper com privilégio separado (`ezyshield-enforcer`, o único processo com `CAP_NET_ADMIN`) para adicionar o IP ao set nftables `inet ezyshield` — pacotes caem em prioridade raw antes de qualquer serviço vê-los. Se o Cloudflare está configurado, o IP entra na lista do edge também. O notifier dispara conforme seu `notify:`.
 
+As escritas de ban e unban são serializadas contra o reconcile periódico: enquanto o daemon aplica ou remove um ban, um ciclo de reconcile espera sua vez. Assim o reconcile nunca observa uma mudança pela metade, e o ciclo que se sobrepõe a um ban recém-aplicado nunca o confunde com uma entrada obsoleta do firewall e o remove.
+
 ```console
 $ ezyshield status
 Mode:        ARMED

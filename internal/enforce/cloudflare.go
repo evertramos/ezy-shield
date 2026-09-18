@@ -49,6 +49,13 @@ var cfRetryDelays = []time.Duration{2 * time.Second, 8 * time.Second, 30 * time.
 // IsThrottleOnly and internal/daemon/enfstate.go.
 var ErrCFThrottled = errors.New("cloudflare API throttled")
 
+// errBulkOpUnconfirmed marks a bulk-operation whose completion could not be
+// confirmed (the status poll timed out at the transport, or the poll budget
+// ran out while still pending). The mutation POST was already accepted, so
+// callers keep the change, mark the mirror stale and reconcile on the next
+// push rather than failing the whole push at ERROR (issue #654).
+var errBulkOpUnconfirmed = errors.New("cloudflare bulk operation unconfirmed")
+
 // cfThrottleCodes are the Cloudflare API error codes that signal transient
 // rate limiting on Lists mutations, observed in production (issue #445):
 // 10040 "you have been ratelimited", 971 "Please wait and consider

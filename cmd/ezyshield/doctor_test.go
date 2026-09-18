@@ -266,12 +266,13 @@ func TestCheckEnforcerSocket_PingOK(t *testing.T) {
 	}
 }
 
-// TestCheckDockerSocket_Missing returns N/A when /var/run/docker.sock is absent.
-// On hosts where Docker IS installed this asserts PASS or FAIL — either way the
-// status must not be empty.
-func TestCheckDockerSocket_StatusNotEmpty(t *testing.T) {
+// TestCheckDockerSocketAccess_HasAVerdict: whatever this host looks like —
+// Docker absent, socket present, nothing configured — the check must reach a
+// verdict. The decision table itself lives in doctor_dockeraccess_test.go,
+// where the socket, passwd and group inputs are fixtures.
+func TestCheckDockerSocketAccess_HasAVerdict(t *testing.T) {
 	t.Parallel()
-	r := checkDockerSocket()
+	r := checkDockerSocketAccess(t.TempDir())
 	if r.Status == "" {
 		t.Error("expected non-empty status")
 	}

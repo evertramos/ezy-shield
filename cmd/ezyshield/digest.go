@@ -156,9 +156,12 @@ func buildDigest(ctx context.Context, db *store.DB, since time.Duration, now tim
 	if err != nil {
 		return nil, err
 	}
+	// Keys are the audit_log.op values the store writes (ExpireBans writes
+	// "expire", Unban writes "unban"); "allow_expire" is an allowlist event,
+	// not an unban (issue #642).
 	d.Totals.Bans = ops["ban"]
 	d.Totals.DryBans = ops["dry_ban"]
-	d.Totals.Unbans = ops["unban"] + ops["expired"]
+	d.Totals.Unbans = ops["unban"] + ops["expire"]
 	d.Totals.NotifyOnly = ops["notify_only"]
 
 	// Hourly event counters (only long-window kinds are persisted — the

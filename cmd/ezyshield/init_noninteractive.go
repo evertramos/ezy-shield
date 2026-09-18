@@ -117,6 +117,16 @@ type answersCollectors struct {
 	// (the wizard default), false disables.
 	SSH *bool                 `yaml:"ssh"`
 	Web []answersWebCollector `yaml:"web"`
+	// DockerGroup opts the service user into the 'docker' group so docker
+	// collectors can reach the Engine socket. Default false, and never
+	// implied by anything else: the group is root-equivalent on the host
+	// (issue #574). Mirrors the --docker-group flag.
+	DockerGroup bool `yaml:"docker_group"`
+	// DockerHost points the docker consumers at a filtering, read-only
+	// proxy in front of the Engine socket (e.g. tcp://127.0.0.1:2375)
+	// instead of granting the group — the scoped alternative, and mutually
+	// exclusive with DockerGroup (issue #579). Mirrors --docker-host.
+	DockerHost string `yaml:"docker_host"`
 }
 
 type answersWebCollector struct {
@@ -246,6 +256,10 @@ func runNonInteractiveInit(cmd *cobra.Command, configDir string, skipSystem, for
 		if err := addAdminToEzyshieldGroup(p.w); err != nil {
 			p.printf("  warning: could not add admin to ezyshield group: %v\n", err)
 		}
+		// Docker socket access is a separate, explicit decision (issue #574):
+		// granted only when the answers/flags opted in AND this run
+		// configured a docker log source.
+		applyDockerGroupDecision(p, st, state, sum)
 	}
 	if err := os.MkdirAll(configDir, 0o750); err != nil {
 		return fmt.Errorf("creating config dir %s: %w", configDir, err)
@@ -358,6 +372,14 @@ func applyFlagOverrides(cmd *cobra.Command, a *initAnswers) {
 		v, _ := fs.GetBool("monitor-ssh")
 		a.Collectors.SSH = &v
 	}
+	if fs.Changed("docker-group") {
+		v, _ := fs.GetBool("docker-group")
+		a.Collectors.DockerGroup = v
+	}
+	if fs.Changed("docker-host") {
+		v, _ := fs.GetString("docker-host")
+		a.Collectors.DockerHost = v
+	}
 	if fs.Changed("admin-ips") {
 		v, _ := fs.GetString("admin-ips")
 		// splitIPs returns a non-nil slice even when empty, so --admin-ips ""
@@ -455,6 +477,12 @@ func validateAnswers(a *initAnswers) []string {
 				problems = append(problems, "ai.api_key_env: "+err.Error())
 			}
 		}
+	}
+
+	// Container log access (issue #579): the scoped endpoint and the
+	// root-equivalent group are alternatives, never a pair.
+	if _, _, err := resolveDockerAccessAnswers(a.Collectors.DockerHost, a.Collectors.DockerGroup); err != nil {
+		problems = append(problems, "collectors: "+err.Error())
 	}
 
 	// Web collectors.
@@ -630,6 +658,16 @@ func applyAnswers(state *wizardState, a *initAnswers) {
 	} else {
 		state.webCollectors = acceptDetectedWebCollectors(state.webServers)
 	}
+
+	// Container log access (issues #574, #579): explicit only. Detection
+	// finding docker collectors is never consent — without
+	// collectors.docker_host or collectors.docker_group the run configures
+	// the collectors and warns that they cannot read anything yet. The
+	// mutually-exclusive case was already rejected by validateAnswers.
+	access, host, _ := resolveDockerAccessAnswers(a.Collectors.DockerHost, a.Collectors.DockerGroup)
+	state.dockerAccess = access
+	state.dockerHost = host
+	state.dockerGroupOptIn = a.Collectors.DockerGroup
 
 	// Admin allowlist: explicit only. Unlike --yes we do NOT auto-add a
 	// detected IP: at golden-image build time that IP is the builder, not the

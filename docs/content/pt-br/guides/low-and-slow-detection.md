@@ -41,6 +41,8 @@ Um humano que erra a senha falha uma ou duas vezes e então corrige ou desiste. 
 
 ## Ajuste
 
+Um strike consome o histórico que o gerou: quando o banimento termina, os contadores diário e semanal daquele endereço recomeçam do zero, e o próximo degrau exige um novo threshold completo de falhas novas — um erro de senha a mais depois de um banimento de 5 minutos não vira um de 1 hora.
+
 Sobrescreva thresholds com um drop-in em `rules.d` (mesclado por nome de regra):
 
 ```yaml

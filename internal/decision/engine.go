@@ -93,9 +93,9 @@ type Store interface {
 
 // Engine converts Verdicts into Actions according to policy.
 // It is safe for concurrent use. Suppression state for the ban_ineffective
-// diagnostic (ADR-0009) lives in the store, on the ban row itself — nothing
-// here grows with offender count, and the diagnostic history survives
-// daemon restarts.
+// diagnostic (ADR-0009) lives in the store, on the ban row itself, so the
+// diagnostic history survives daemon restarts. The only in-memory state
+// keyed by offender is the bounded notify_only edge map (notifyedge.go).
 type Engine struct {
 	policy *config.Policy
 	store  Store
@@ -104,6 +104,10 @@ type Engine struct {
 	mu          sync.Mutex
 	bansInWin   int
 	windowStart time.Time
+	// now is the engine clock (rate-limit window, escalation exemption,
+	// ban_ineffective grace). nil = time.Now; tests and the integration
+	// harness inject a virtual clock so timing rules are deterministic.
+	now func() time.Time
 
 	// strikeLocks serialise the strike-writing critical section of Decide
 	// (the active-ban guard through RecordStrike) per IP. The guard and the
@@ -115,7 +119,9 @@ type Engine struct {
 	// section makes the loser observe the winner's ban row and suppress.
 	// Striped so unrelated IPs never contend; e.mu still guards only the global
 	// rate-limit window. Lock order is strikeLocks → e.mu (checkRateLimit takes
-	// e.mu inside the section); e.mu is never held while taking a strike lock,
+	// e.mu inside the section) and strikeLocks → notifyMu (clearNotifyEdge after
+	// a strike); e.mu is never held while taking a strike lock, notifyMu never
+	// holds any other lock,
 	// so there is no cycle. Decide performs no enforcer I/O (dispatch does,
 	// downstream), so no lock is ever held across Enforcer.Ban.
 	strikeLocks [strikeLockStripes]sync.Mutex
@@ -142,6 +148,14 @@ type Engine struct {
 	// botVerify is the optional verified-bot guard (issue #215); nil =
 	// disabled. See verifiedbot.go and SetBotVerifier.
 	botVerify func(ctx context.Context, ip netip.Addr) (provider string, spared bool)
+
+	// notifyEdges remembers, per IP, the last rule a notify_only audit row
+	// was written for and when, so a saturated observe-band rule leaves one
+	// row per window instead of one per event (issue #649; notifyedge.go).
+	// Bounded at notifyEdgeMaxEntries; guarded by notifyMu, which is never
+	// held while taking any other engine lock.
+	notifyMu    sync.Mutex
+	notifyEdges map[netip.Addr]notifyEdge
 }
 
 // New creates an Engine from policy and a store.
@@ -160,7 +174,28 @@ func New(policy *config.Policy, st Store) (*Engine, error) {
 		store:       st,
 		allow:       allow,
 		windowStart: time.Now(),
+		notifyEdges: make(map[netip.Addr]notifyEdge),
 	}, nil
+}
+
+// SetClock replaces the engine clock (tests / integration harness). nil
+// restores time.Now. It never changes a decision by itself: every guard
+// (allowlist, anti-lockout, active ban, rate limit) still runs; only the
+// notion of "now" the timing rules compare against moves.
+func (e *Engine) SetClock(now func() time.Time) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.now = now
+	if now != nil {
+		e.windowStart = now()
+	}
+}
+
+func (e *Engine) clock() time.Time {
+	if e.now != nil {
+		return e.now()
+	}
+	return time.Now()
 }
 
 // Decide evaluates verdicts for a single IP and returns the Action to take.
@@ -207,7 +242,11 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 	// exists under systemd, where the env var does not (issue #175).
 	for _, peer := range e.activeSSHPeers() {
 		if peer == ip {
-			slog.WarnContext(ctx, "decision: anti-lockout — refusing to ban active SSH peer", "ip", ip)
+			// INFO, not WARN (issue #644): under authenticated-peer mode
+			// this is the designed outcome for a brute-forcer still inside
+			// its grace window — the deferred re-check bans it right after,
+			// and the audit row records the refusal.
+			slog.InfoContext(ctx, "decision: anti-lockout — refusing to ban active SSH peer", "ip", ip)
 			act := sdk.Action{IP: ip, Op: "record", Reason: ReasonAntiLockoutSSHPeer, Verdicts: verdicts}
 			if err := e.store.Audit(ctx, act); err != nil {
 				slog.ErrorContext(ctx, "decision: audit anti-lockout", "ip", ip, "err", err)
@@ -252,11 +291,18 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 		return act, nil
 	}
 
-	// Observe band → notify only, no strike.
+	// Observe band → notify only, no strike. The Action is returned on
+	// every evaluation (the daemon's notifier dedup, metrics and stream
+	// count each event); the audit row is written on the rising edge only —
+	// the first notify_only for this (ip, rule) per notifyEdgeWindow — so a
+	// saturated rule leaves one row per window, not one per event (#649).
 	if score < e.policy.BanThreshold {
 		act := sdk.Action{IP: ip, Op: "notify_only", Reason: best.Reason, Verdicts: verdicts}
-		if err := e.store.Audit(ctx, act); err != nil {
-			slog.ErrorContext(ctx, "decision: audit notify-only", "ip", ip, "err", err)
+		if e.notifyEdgeRising(ip, notifyRuleID(best.Reason), e.clock()) {
+			if err := e.store.Audit(ctx, act); err != nil {
+				slog.ErrorContext(ctx, "decision: audit notify-only", "ip", ip, "err", err)
+				e.clearNotifyEdge(ip) // let the next evaluation write the row
+			}
 		}
 		return act, nil
 	}
@@ -452,10 +498,13 @@ func (e *Engine) Decide(ctx context.Context, verdicts []sdk.Verdict) (sdk.Action
 	}
 
 	// RecordStrike's bans_active upsert resets the per-ban suppression
-	// counters — no engine-side state to clear.
+	// counters. The only engine-side state to clear is the IP's notify_only
+	// edge (#649): once the ban ends, the next observe-band evaluation is a
+	// new episode and must be audited.
 	if err := e.store.RecordStrike(ctx, act); err != nil {
 		return sdk.Action{}, fmt.Errorf("decision: RecordStrike: %w", err)
 	}
+	e.clearNotifyEdge(ip)
 
 	return act, nil
 }
@@ -503,8 +552,8 @@ func (e *Engine) checkRateLimit() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	if time.Since(e.windowStart) > time.Minute {
-		e.windowStart = time.Now()
+	if now := e.clock(); now.Sub(e.windowStart) > time.Minute {
+		e.windowStart = now
 		e.bansInWin = 0
 	}
 	e.bansInWin++
@@ -534,16 +583,18 @@ func (e *Engine) escalationExempt(ctx context.Context, ip netip.Addr) bool {
 		return false
 	}
 	banEnd := recordedAt.Add(ttl)
-	return time.Since(banEnd) <= e.policy.EscalationExemptWindow.AsDuration()
+	return e.clock().Sub(banEnd) <= e.policy.EscalationExemptWindow.AsDuration()
 }
 
 // trackSuppressedEvent records a suppressed event on ip's active ban and
 // emits the ban_ineffective diagnostic when ≥ BanIneffectiveMinEvents arrive
-// after the BanIneffectiveGrace period (ADR-0009). The counters live on the
-// ban row; MarkBanIneffective's compare-and-set makes the diagnostic fire
-// exactly once per ban, across concurrent calls and daemon restarts. All
-// failures are non-fatal: the diagnostic must never break the suppression
-// path.
+// after the BanIneffectiveGrace period (ADR-0009), or — issue #586 — when
+// ≥ ban_ineffective_min_events_in_grace arrive INSIDE the grace: the grace
+// absorbs latency, not a flood. Both triggers feed the same fire-once
+// MarkBanIneffective compare-and-set, so a ban fires at most once whichever
+// path wins. The counters live on the ban row, so the guarantee holds
+// across concurrent calls and daemon restarts. All failures are non-fatal:
+// the diagnostic must never break the suppression path.
 //
 // The store I/O (counters + fire-once CAS) runs synchronously — the caller
 // holds the per-IP strike lock and that is where the atomicity matters. The
@@ -551,7 +602,7 @@ func (e *Engine) escalationExempt(ctx context.Context, ip netip.Addr) bool {
 // so the caller can run it after releasing the lock (issue #441).
 func (e *Engine) trackSuppressedEvent(ctx context.Context, ip netip.Addr, bannedAt time.Time, banStrike int) func() {
 	grace := e.policy.BanIneffectiveGrace.AsDuration()
-	afterGrace := time.Since(bannedAt) >= grace
+	afterGrace := e.clock().Sub(bannedAt) >= grace
 
 	total, afterCount, fired, err := e.store.RecordSuppressed(ctx, ip, afterGrace)
 	if err != nil {
@@ -562,10 +613,18 @@ func (e *Engine) trackSuppressedEvent(ctx context.Context, ip netip.Addr, banned
 	// traffic is EXPECTED (nothing blocks it), not an enforcement anomaly.
 	// Counters above are still recorded so dry-run observability shows what
 	// a real ban would have suppressed.
-	if !e.policy.IsArmed() {
+	if !e.policy.IsArmed() || fired {
 		return nil
 	}
-	if !afterGrace || fired || afterCount < e.policy.BanIneffectiveMinEvents {
+	inGraceCount := total - afterCount
+	var phase string
+	switch {
+	case afterGrace && afterCount >= e.policy.BanIneffectiveMinEvents:
+		phase = PhasePostGrace
+	case !afterGrace && e.policy.InGraceIneffectiveThreshold() > 0 &&
+		inGraceCount >= e.policy.InGraceIneffectiveThreshold():
+		phase = PhaseInGrace
+	default:
 		return nil
 	}
 
@@ -598,9 +657,11 @@ func (e *Engine) trackSuppressedEvent(ctx context.Context, ip netip.Addr, banned
 
 	slog.WarnContext(ctx, "decision: ban_ineffective — traffic flowing despite active ban",
 		"ip", ip,
+		"phase", phase,
 		"strike", fmt.Sprintf("%d/%d", banStrike, ladderLen),
 		"next_rungs", nextRungs,
 		"events_after_grace", afterCount,
+		"events_in_grace", inGraceCount,
 		"total_suppressed", total,
 		"grace_seconds", int(grace.Seconds()),
 	)
@@ -621,6 +682,8 @@ func (e *Engine) trackSuppressedEvent(ctx context.Context, ip netip.Addr, banned
 		EventsAfterGrace: afterCount,
 		TotalSuppressed:  total,
 		GraceSeconds:     int(grace.Seconds()),
+		Phase:            phase,
+		EventsInGrace:    inGraceCount,
 	}
 	return func() { e.diag.BanIneffective(ctx, diag) }
 }

@@ -58,6 +58,15 @@ collectors:
       container: my-nginx               # required for kind: docker
       parser: nginx
 
+  # Add the ezyshield service user to the 'docker' group so kind: docker
+  # collectors can reach the Engine socket. Default: false — that group is
+  # root-equivalent on the host (its members can start a privileged
+  # container), so it is never implied by anything else. Without it, docker
+  # collectors are written but cannot read container logs. Same as
+  # --docker-group. Revoke with:
+  #   sudo gpasswd -d ezyshield docker && sudo systemctl restart ezyshield
+  docker_group: false
+
 # ── Allowlist: IPs/CIDRs that can NEVER be banned (anti-lockout) ───────────
 allowlist:
   # Strongly recommended: your management IP(s). Omitting this leaves

@@ -108,6 +108,29 @@ Flags:
   override file values). Unknown keys are rejected.
 - `--force` — overwrite an existing `config.yaml`/`policy.yaml` (non-interactive
   only; without it a re-run refuses, same as the wizard).
+- `--docker-group` — add the ezyshield service user to the `docker` group so
+  docker log collectors can reach the Engine socket. **That group is
+  root-equivalent on the host** (its members can start a privileged
+  container), so the grant is never implied: interactively the wizard asks and
+  defaults to no, `--yes` alone never grants it, and this flag is the explicit
+  opt-in for scripted runs (answers key: `collectors.docker_group`). It only
+  takes effect when the run configures at least one docker collector; without
+  it those collectors are still written but cannot read container logs.
+  `ezyshield doctor` warns whenever the service user is in the group. To
+  revoke: `sudo gpasswd -d ezyshield docker && sudo systemctl restart ezyshield`.
+- `--docker-host <endpoint>` — the scoped alternative to that group: point the
+  docker collectors, the exec watcher and evidence extraction at a **filtering,
+  read-only proxy** in front of the Engine socket, e.g.
+  `--docker-host tcp://127.0.0.1:2375`. It writes `docker.host` into
+  `config.yaml` (answers key: `collectors.docker_host`) and grants the service
+  user nothing. `--docker-host` and `--docker-group` are **mutually exclusive**
+  — the proxy replaces the group rather than accompanying it. A `tcp://`
+  endpoint must be a loopback address. `init` never starts the proxy (that is a
+  change to your own stack): it prints the compose snippet to run and leaves
+  verification to `ezyshield doctor`. Interactively, the wizard offers three
+  paths in privilege order — a host log file read by a `kind: file` collector,
+  this proxy, or the `docker` group — and pre-selects the least-privileged one
+  that fits.
 - `--admin-ips`, `--monitor-ssh`, `--enable-ai`, `--ai-provider`, `--ai-model`,
   `--ai-key-env` — per-answer overrides for the non-interactive path.
   `--ai-key-env` takes an env var **NAME**, never the key itself; a literal
@@ -465,9 +488,15 @@ Flags:
 
 Honest limitation (also printed on every run): evaluation uses the stored
 hourly aggregates, so granularity is bounded by 1-hour buckets and by
-retention; only kinds referenced by long-window (>1h) rules are persisted,
-and field-level matchers cannot be applied to counts — such rules are
-reported as a loudly-marked kind-level upper bound.
+retention; only kinds referenced by long-window (>1h) rules are persisted.
+A field-level matcher on a window of 1h or less cannot be applied to
+counts — such rules are reported as a loudly-marked kind-level upper bound.
+A field-level rule with a window above 1h is evaluated exactly, from the
+matcher counter the daemon keeps under the rule's own name (written only
+while a rule of that name is loaded). The daemon additionally discounts the
+history a strike already consumed for an address; `rule test` reports the raw
+stored history, so it can say "would fire" for an address the daemon would not
+strike again until it has gathered a full threshold of new events.
 
 ## ezyshield ban
 
@@ -663,12 +692,23 @@ Checks:
 - journald readable
 - enforcer socket reachable
 - docker socket present (when Docker collectors are configured)
+- service user docker group: **WARN** when `ezyshield` is a member of the
+  `docker` group — that group is root-equivalent on the host, so the hint says
+  whether the configured collectors justify it or it should be revoked
+  (`gpasswd -d ezyshield docker`); **N/A** when the host has no `docker` group
+- docker endpoint (when `docker.host` is a `tcp://` endpoint; **N/A** for a
+  unix socket, where the socket check above covers it): two checks —
+  *reachable* (**PASS** when `GET /_ping` answers 200) and *read-only*
+  (**PASS** when `POST /containers/create` is refused, **FAIL** when the
+  endpoint accepts it, which means root-equivalent access to this host over
+  the network). Both probes are bounded by a timeout and never print a
+  response body. The probe body names no image, so nothing is ever created.
 - `.env` secret file permissions
 - allowlist breadth: **WARN** (not FAIL) when `policy.yaml`'s allowlist contains
   a private (RFC1918/ULA) range at `/16` or broader — such a range can never be
   banned, so it silently exempts a large chunk of address space from
   enforcement forever. See the allowlist section in [Policy Reference](policy.md).
-- ban_ineffective diagnostics: **FAIL** when an active ban is flagged ineffective (traffic flowing despite the ban) — names the IPs and points at the systemic remedy (edge enforcement / real-IP parsing / enforcer health); **WARN** when no ban is currently ineffective but some offender was flagged historically; **PASS** otherwise. Read-only query against the database at `--db`.
+- ban_ineffective diagnostics: **FAIL** when an active ban is flagged ineffective *and still leaking* — a suppressed event from that IP within the last 24 hours — naming the IPs and pointing at the systemic remedy (edge enforcement / real-IP parsing / enforcer health); **WARN** when the only flagged bans leaked in the past — quiet for 24 hours or more (listed with their silence length), or flagged before the last-leak timestamp existed (listed as "last leak time unknown") — or when no ban is currently flagged but some offender was flagged historically; **PASS** otherwise. A flagged ban that goes quiet for 24 hours is re-armed: a new leak on it fires `ban_ineffective` again, so a permanent ban is never a one-time signal. Read-only query against the database at `--db`.
 - cdn range data: **FAIL** when the embedded shared-CDN-range table (backing
   the ban-path anti-lockout guard, issue #178) fails to load — bans then
   proceed marked `[cdn-ranges-unverified]` in the audit log; **PASS** shows

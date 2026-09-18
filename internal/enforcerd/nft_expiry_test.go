@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-package main
+package enforcerd
 
 // Regression tests for issue #383: a permanently-banned IP went unenforced
 // for 12+ days on the dogfooding host because (A) the in-memory blocked cache
@@ -143,7 +143,7 @@ func TestInit_LoadsExpiryDeadlinesFromKernel(t *testing.T) {
 			{ip: "192.0.2.61", ttl: 0},               // permanent
 		}, nil
 	}
-	if err := srv.init(context.Background()); err != nil {
+	if err := srv.Init(context.Background()); err != nil {
 		t.Fatalf("init: %v", err)
 	}
 

@@ -30,7 +30,21 @@ type BanIneffectiveDiag struct {
 	// counters at firing time; GraceSeconds is the configured grace.
 	EventsAfterGrace, TotalSuppressed int
 	GraceSeconds                      int
+	// Phase says which trigger fired (issue #586): PhasePostGrace — events
+	// kept arriving after the grace (the classic edge / real-IP signature)
+	// — or PhaseInGrace — a flood inside the grace crossed the volume
+	// threshold (HTTP connection reuse, entry not yet in the kernel). The
+	// remedy differs, so the delivery names it.
+	Phase string
+	// EventsInGrace is the suppressed count inside the grace at firing time.
+	EventsInGrace int
 }
+
+// Phase values of BanIneffectiveDiag (issue #586).
+const (
+	PhasePostGrace = "post_grace"
+	PhaseInGrace   = "in_grace"
+)
 
 // Diagnostics receives enforcement-anomaly signals from the engine.
 // Implementations run synchronously on the decision path and must tolerate

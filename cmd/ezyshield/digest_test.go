@@ -385,3 +385,56 @@ func TestReportDigest_NarrativeBudgetGate(t *testing.T) {
 		t.Errorf("expected the budget note, got:\n%s", out)
 	}
 }
+
+// TestBuildDigest_CountsRealExpiries (issue #642): the audit op the store's
+// reaper writes for a TTL expiry is "expire"; the digest summed a key that
+// nothing writes, so every expiry vanished from "Unbans/expiries". Real
+// components end to end: RecordStrike → ExpireBans → Unban → buildDigest.
+func TestBuildDigest_CountsRealExpiries(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "digest.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+
+	ban := func(ip string, ttl time.Duration) {
+		t.Helper()
+		if err := db.RecordStrike(ctx, sdk.Action{
+			IP: netip.MustParseAddr(ip), Op: "ban", TTL: ttl, Strike: 1,
+			Reason:   "rule/ssh_bruteforce: threshold met",
+			Verdicts: []sdk.Verdict{{Category: "bruteforce", Reason: "rule/ssh_bruteforce: 10 events in 1m0s (threshold 5)", Source: "rules", Score: 80}},
+		}); err != nil {
+			t.Fatalf("seed ban: %v", err)
+		}
+	}
+	ban("203.0.113.31", 5*time.Minute) // will expire
+	ban("203.0.113.32", 5*time.Minute) // will expire
+	ban("203.0.113.33", 24*time.Hour)  // unbanned by hand
+	ban("203.0.113.34", 24*time.Hour)  // stays active
+
+	if n, err := db.ExpireBans(ctx, time.Now().Add(10*time.Minute)); err != nil || n != 2 {
+		t.Fatalf("ExpireBans = %d, %v; want 2 expired", n, err)
+	}
+	if err := db.Unban(ctx, netip.MustParseAddr("203.0.113.33")); err != nil {
+		t.Fatalf("Unban: %v", err)
+	}
+	// An allowlist expiry is not an unban and must not be counted.
+	if err := db.Audit(ctx, sdk.Action{IP: netip.MustParseAddr("198.51.100.9"), Op: "allow_expire", Reason: "allowlist ttl expired"}); err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+
+	d, err := buildDigest(ctx, db, 24*time.Hour, time.Now())
+	if err != nil {
+		t.Fatalf("buildDigest: %v", err)
+	}
+	if d.Totals.Bans != 4 {
+		t.Errorf("bans = %d, want 4", d.Totals.Bans)
+	}
+	if d.Totals.Unbans != 3 {
+		t.Errorf("unbans/expiries = %d, want 3 (2 ttl expiries + 1 manual unban; allow_expire excluded)", d.Totals.Unbans)
+	}
+	if d.ActiveBans != 1 {
+		t.Errorf("active bans = %d, want 1", d.ActiveBans)
+	}
+}

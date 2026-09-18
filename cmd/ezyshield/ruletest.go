@@ -14,8 +14,10 @@ package main
 // Honest limitation (documented in --help and in every run): evaluation
 // uses the stored hourly aggregates (events_agg), so granularity is bounded
 // by the 1-hour buckets and by retention; only kinds referenced by
-// long-window (>1h) rules are persisted at all, and field-level matchers
-// cannot be applied (the aggregates keep counts, never field values).
+// long-window (>1h) rules are persisted at all. Field-level matchers on
+// windows <= 1h cannot be applied (the aggregates keep counts, never field
+// values); above 1h a field-level rule has its own matcher counter (issue
+// #585) and is evaluated exactly.
 
 import (
 	"context"
@@ -79,7 +81,10 @@ early warning: a rule firing on your own ranges needs tuning, not enabling).
 
 Honest limitation: ` + ruleTestLimitation + `.
 Field-level matchers (field/value/contains) cannot be applied to stored
-aggregates; such rules are reported as a kind-level UPPER BOUND, loudly.`,
+aggregates; such rules are reported as a kind-level UPPER BOUND, loudly.
+The stored history is evaluated raw: the daemon also discounts what an
+address's last strike already consumed, so "would fire" here can exceed
+what the daemon would strike again.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dur, err := parseSinceDuration(since)
@@ -388,7 +393,17 @@ func evaluateRuleAgainstStore(ctx context.Context, db *store.DB, info rules.Rule
 	res.PerDay = map[string]int{}
 	res.Limitation = ruleTestLimitation
 
-	if info.FieldLevel() {
+	// The counter kinds this rule reads. A long-window field-level rule is
+	// served by its own matcher counter (issue #585) — exact, not an upper
+	// bound — provided a rule of that name is in the running set (the
+	// daemon writes the counter only for loaded rules).
+	kinds := info.Kinds
+	switch {
+	case info.FieldLevel() && info.Window > rules.LongWindowCutoff:
+		kinds = []string{rules.LongCounterKind(info.Name)}
+		res.Warnings = append(res.Warnings,
+			"long-window field-level rule: counts come from the rule's own persisted matcher counter, written only while a rule of this name is loaded by the daemon")
+	case info.FieldLevel():
 		res.UpperBound = true
 		res.Warnings = append(res.Warnings, fmt.Sprintf(
 			"rule matches on field %q, but stored aggregates keep counts only: results are a kind-level UPPER BOUND, not what the rule would actually fire", info.Field))
@@ -399,7 +414,7 @@ func evaluateRuleAgainstStore(ctx context.Context, db *store.DB, info rules.Rule
 	}
 	if persisted != nil {
 		var missing []string
-		for _, k := range info.Kinds {
+		for _, k := range kinds {
 			if !persisted[k] {
 				missing = append(missing, k)
 			}
@@ -415,7 +430,7 @@ func evaluateRuleAgainstStore(ctx context.Context, db *store.DB, info rules.Rule
 			"--since range (%s) is shorter than the rule window (%s); a real window never fits in the evaluated range", since, info.Window))
 	}
 
-	rows, err := db.EventCountsByHour(ctx, info.Kinds, store.HourBucket(now.Add(-since)))
+	rows, err := db.EventCountsByHour(ctx, kinds, store.HourBucket(now.Add(-since)))
 	if err != nil {
 		return res, fmt.Errorf("rule test: %w", err)
 	}

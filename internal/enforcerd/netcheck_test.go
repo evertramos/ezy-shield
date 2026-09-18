@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-package main
+package enforcerd
 
 // Tests for the "netcheck" verb (issue #213): the read-only netlink probe
 // doctor uses to test the sandbox's effect rather than unit-file text.

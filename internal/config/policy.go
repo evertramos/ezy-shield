@@ -32,6 +32,14 @@ const DefaultBanIneffectiveGrace = 90 * time.Second
 // suppressed events after grace to trigger a ban_ineffective diagnostic.
 const DefaultBanIneffectiveMinEvents = 3
 
+// DefaultBanIneffectiveMinEventsInGrace is the default number of suppressed
+// events INSIDE the grace window that trigger the diagnostic by volume
+// (issue #586): the grace absorbs enforcer latency and in-flight requests,
+// but 1,400 requests in 71 s is not latency — it is a ban not being
+// enforced (HTTP connection reuse, entry not yet in the kernel) that the
+// time-based trigger alone never sees. 0 disables the volume trigger.
+const DefaultBanIneffectiveMinEventsInGrace = 200
+
 // DefaultEscalationExemptWindow is how long after a ban's scheduled end a
 // re-offense still counts as an escalation exempt from max_bans_per_minute.
 // The exemption exists because re-banning an IP that was blocked until
@@ -89,6 +97,11 @@ type Policy struct {
 	// the grace period to trigger a ban_ineffective diagnostic.
 	// Minimum 3; defaults to 3 if omitted or below minimum.
 	BanIneffectiveMinEvents int `yaml:"ban_ineffective_min_events"`
+	// BanIneffectiveMinEventsInGrace fires the diagnostic by VOLUME inside
+	// the grace window (issue #586): this many suppressed events before the
+	// grace elapses mean the ban is not being enforced, however fresh it is.
+	// nil = default (200); 0 = disabled; negative values are raised to 1.
+	BanIneffectiveMinEventsInGrace *int `yaml:"ban_ineffective_min_events_in_grace"`
 
 	// EscalationExemptWindow bounds the escalation exemption from
 	// max_bans_per_minute: a strike > 1 skips the cap only when the previous
@@ -109,6 +122,18 @@ type AntiLockoutCfg struct {
 	// behavior); every logind failure mode falls back to it too (fail
 	// open, Hard Rule 1). Flip only after reading the policy reference.
 	RequireAuthenticated bool `yaml:"require_authenticated"`
+}
+
+// InGraceIneffectiveThreshold resolves ban_ineffective_min_events_in_grace
+// (issue #586): the default when unset, 0 when disabled.
+func (p *Policy) InGraceIneffectiveThreshold() int {
+	if p.BanIneffectiveMinEventsInGrace == nil {
+		return DefaultBanIneffectiveMinEventsInGrace
+	}
+	if *p.BanIneffectiveMinEventsInGrace < 0 {
+		return 1
+	}
+	return *p.BanIneffectiveMinEventsInGrace
 }
 
 // RequireAuthenticatedPeer resolves the ADR-0013 flag (default false).
@@ -273,6 +298,13 @@ func (p *Policy) applyDefaults() {
 	}
 	if p.BanIneffectiveMinEvents < DefaultBanIneffectiveMinEvents {
 		p.BanIneffectiveMinEvents = DefaultBanIneffectiveMinEvents
+	}
+	if p.BanIneffectiveMinEventsInGrace == nil {
+		v := DefaultBanIneffectiveMinEventsInGrace
+		p.BanIneffectiveMinEventsInGrace = &v
+	} else if *p.BanIneffectiveMinEventsInGrace < 0 {
+		v := 1
+		p.BanIneffectiveMinEventsInGrace = &v
 	}
 	// escalation_exempt_window: default when omitted, ceiling when widened —
 	// tightening (any positive value below the ceiling) is always allowed.

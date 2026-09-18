@@ -134,3 +134,22 @@ Fixed by making both wrappers forward the interface
 the enforcer exactly as `run.go` does. Rule for future wrappers: any type
 that wraps an `sdk.Enforcer` must forward `AllowlistSyncer` (add it to the
 compile-time guard list), or the anti-lockout backstop dies silently again.
+
+## Amendment — 2026-09-11 (issue #608)
+
+The layer-4 claim above ("the kernel's `accept` runs before `drop`") held
+only for the prerouting hook. The `input` and `forward` chains this ADR
+"kept unchanged as defense in depth" carried `@blocked`/`@feeds` drops
+with no `@allowed accept`, and an `accept` verdict in a prerouting base
+chain ends that chain only — the packet still traverses the `input` hook.
+So an address present in both `@allowed` and `@blocked` (or in a
+reputation feed) was accepted at prerouting and dropped at input: the
+backstop covered forwarded traffic but not the host's own services,
+which is where the operator's SSH session lives.
+
+Corrected: every chain `initTable` installs starts with the
+`@allowed`/`@allowed6` accept pair. The same change made the runtime
+allowlist (`ezyshield allow`) a reader of the enforcement gate and of the
+reconcile's desired state, and made `allow` lift the bans it covers —
+the daemon-side halves of the same invariant (INVARIANTS.md B1).
+

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-package main
+package enforcerd
 
 import (
 	"bufio"
@@ -47,6 +47,10 @@ type Server struct {
 	// `nft list set` exec). Injectable so unit tests can exercise the
 	// name-switch path without a real nft binary on the host.
 	listFn func(ctx context.Context, n nftnames.Names) ([]setElem, error)
+	// autoMergeFn reports whether a live blocked set still carries the
+	// `auto-merge` flag (defaults to setHasAutoMerge; tests inject) —
+	// the migration trigger of issue #588.
+	autoMergeFn func(ctx context.Context, n nftnames.Names, set string) (bool, error)
 
 	// nowFn is the clock behind cache-expiry decisions (defaults to
 	// time.Now). Injectable so tests can drive an entry past its kernel
@@ -92,28 +96,29 @@ type Server struct {
 	ln net.Listener
 }
 
-// newServer creates a Server with the given socket path and nft runner.
+// NewServer creates a Server with the given socket path and nft runner.
 // Call listen() then serve() to start handling requests.
-func newServer(socketPath string, run nftRunner) *Server {
+func NewServer(socketPath string, run nftRunner) *Server {
 	defaults, _ := nftnames.Resolve("", "") // cannot fail for empty inputs
 	return &Server{
-		socketPath: socketPath,
-		run:        run,
-		runSs:      realSsRunner,
-		listFn:     nftList,
-		nowFn:      time.Now,
-		blocked:    make(map[string]time.Time),
-		names:      defaults,
+		socketPath:  socketPath,
+		run:         run,
+		runSs:       realSsRunner,
+		listFn:      nftList,
+		autoMergeFn: setHasAutoMerge,
+		nowFn:       time.Now,
+		blocked:     make(map[string]time.Time),
+		names:       defaults,
 	}
 }
 
 // socketPath returns the unix socket path (for tests to connect to).
 func (s *Server) sockPath() string { return s.socketPath }
 
-// listen creates the unix socket with 0660 permissions and group=ezyshield.
+// Listen creates the unix socket with 0660 permissions and group=ezyshield.
 // The socket is root-owned so only root (or group ezyshield) can connect
 // (issue #92, SECURITY-REVIEW.md §3).
-func (s *Server) listen(ctx context.Context) error {
+func (s *Server) Listen(ctx context.Context) error {
 	// Remove a stale socket from a previous run.
 	_ = os.Remove(s.socketPath)
 
@@ -142,11 +147,14 @@ func (s *Server) listen(ctx context.Context) error {
 	return nil
 }
 
-// init initialises the nftables table/set/chain and loads the current set
+// Init initialises the nftables table/set/chain and loads the current set
 // state into the in-memory cache.
-func (s *Server) init(ctx context.Context) error {
+func (s *Server) Init(ctx context.Context) error {
 	if err := initTable(ctx, s.run, s.names); err != nil {
 		return fmt.Errorf("enforcer: init nft table: %w", err)
+	}
+	if err := s.migrateAutoMerge(ctx, s.names); err != nil {
+		return err
 	}
 	els, err := s.listFn(ctx, s.names)
 	if err != nil {
@@ -170,8 +178,8 @@ func (s *Server) deadline(ttl time.Duration) time.Time {
 	return s.nowFn().Add(ttl)
 }
 
-// serve accepts connections until ctx is cancelled.
-func (s *Server) serve(ctx context.Context) error {
+// Serve accepts connections until ctx is cancelled.
+func (s *Server) Serve(ctx context.Context) error {
 	go func() {
 		<-ctx.Done()
 		_ = s.ln.Close()
@@ -324,6 +332,10 @@ func (s *Server) dispatch(ctx context.Context, req enforce.Request) enforce.Resp
 		if err := validateIP(req.IP); err != nil {
 			return enforce.Response{OK: false, Error: err.Error()}
 		}
+		// One spelling per element (issue #592): the cache key and the
+		// kernel element must not depend on whether the client wrote
+		// 192.0.2.10 or 192.0.2.10/32.
+		req.IP = enforce.CanonicalIPKey(req.IP)
 		// Hold mutateMu across BOTH the kernel add and the cache write so a
 		// concurrent del for the same IP cannot interleave between them and
 		// desync the cache from the kernel (issue #418). See the mutateMu
@@ -352,7 +364,17 @@ func (s *Server) dispatch(ctx context.Context, req enforce.Request) enforce.Resp
 			}
 			deleted = true
 		}
-		if err := nftAdd(ctx, s.run, names, req.IP, req.TTLSeconds); err != nil {
+		err := nftAdd(ctx, s.run, names, req.IP, req.TTLSeconds)
+		covered := false
+		if err != nil && isNftOverlapErr(err.Error()) {
+			// No auto-merge (issue #588): the kernel refuses an element that
+			// overlaps an existing interval instead of merging them.
+			err = s.addOverlapping(ctx, names, req)
+			if errors.Is(err, errCoveredByInterval) {
+				covered, err = true, nil
+			}
+		}
+		if err != nil {
 			// Watchdog for the interrupted replace (issue #214): the delete
 			// half landed but the add failed — without recovery the kernel
 			// would silently hold LESS than either the old or the new state.
@@ -384,7 +406,14 @@ func (s *Server) dispatch(ctx context.Context, req enforce.Request) enforce.Resp
 			return enforce.Response{OK: false, Error: err.Error()}
 		}
 		s.mu.Lock()
-		s.blocked[req.IP] = s.deadline(time.Duration(req.TTLSeconds) * time.Second)
+		if covered {
+			// Not ours to claim (issue #590): the covering element enforces
+			// it, and a stale cache row from the delete-before-add path
+			// above would be exactly the ghost the code exists to prevent.
+			delete(s.blocked, req.IP)
+		} else {
+			s.blocked[req.IP] = s.deadline(time.Duration(req.TTLSeconds) * time.Second)
+		}
 		s.mu.Unlock()
 		s.mutateMu.Unlock()
 		// Kill any TCP sessions already established from this peer (issue #30).
@@ -396,12 +425,19 @@ func (s *Server) dispatch(ctx context.Context, req enforce.Request) enforce.Resp
 		if _, err := netip.ParseAddr(req.IP); err == nil && s.runSs != nil {
 			_ = killSocketsForIP(ctx, s.runSs, req.IP)
 		}
+		if covered {
+			return enforce.Response{OK: true, Code: enforce.CodeCoveredByInterval}
+		}
 		return enforce.Response{OK: true}
 
 	case "del":
 		if err := validateIP(req.IP); err != nil {
 			return enforce.Response{OK: false, Error: err.Error()}
 		}
+		// One spelling per element (issue #592): the cache key and the
+		// kernel element must not depend on whether the client wrote
+		// 192.0.2.10 or 192.0.2.10/32.
+		req.IP = enforce.CanonicalIPKey(req.IP)
 		// Serialize the kernel delete + cache write against a concurrent add
 		// for the same IP so the two mutations' kernel order and cache order
 		// can never diverge (issue #418).
@@ -430,6 +466,10 @@ func (s *Server) dispatch(ctx context.Context, req enforce.Request) enforce.Resp
 		if err := validateIP(req.IP); err != nil {
 			return enforce.Response{OK: false, Error: err.Error()}
 		}
+		// One spelling per element (issue #592): the cache key and the
+		// kernel element must not depend on whether the client wrote
+		// 192.0.2.10 or 192.0.2.10/32.
+		req.IP = enforce.CanonicalIPKey(req.IP)
 		if err := nftAddAllow(ctx, s.run, names, req.IP); err != nil {
 			return enforce.Response{OK: false, Error: err.Error()}
 		}
@@ -439,6 +479,10 @@ func (s *Server) dispatch(ctx context.Context, req enforce.Request) enforce.Resp
 		if err := validateIP(req.IP); err != nil {
 			return enforce.Response{OK: false, Error: err.Error()}
 		}
+		// One spelling per element (issue #592): the cache key and the
+		// kernel element must not depend on whether the client wrote
+		// 192.0.2.10 or 192.0.2.10/32.
+		req.IP = enforce.CanonicalIPKey(req.IP)
 		if err := nftDelAllow(ctx, s.run, names, req.IP); err != nil {
 			// Symmetric with "del": already-absent maps to the typed OK code.
 			if errors.Is(err, errElementAbsent) {
@@ -509,6 +553,9 @@ func (s *Server) switchNamesLocked(ctx context.Context, want nftnames.Names) err
 	old := s.names
 	if err := initTable(ctx, s.run, want); err != nil {
 		return fmt.Errorf("enforcer: init table %q: %w", want.Table, err)
+	}
+	if err := s.migrateAutoMerge(ctx, want); err != nil {
+		return err
 	}
 	els, err := s.listFn(ctx, want)
 	if err != nil {

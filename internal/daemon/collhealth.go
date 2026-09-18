@@ -106,12 +106,13 @@ func (d *Daemon) recordCollectorHealthy(ctx context.Context, name string) {
 
 // collectorsState derives the aggregate observation health for status.
 // Deterministic output: failing collectors are listed sorted by name.
+//
+// A degraded source outranks the "nothing configured" verdict: supervised
+// observation sources are not all in d.collectors (the docker exec watcher is
+// injected separately, issue #580), and reporting NONE while one of them is
+// failing would hide the very failure this state exists to surface.
 func (d *Daemon) collectorsState() (CollectorsState, string) {
-	if len(d.collectors) == 0 {
-		return CollNone, "no collectors configured — nothing is being observed"
-	}
 	d.collHealth.mu.Lock()
-	defer d.collHealth.mu.Unlock()
 	var failing []string
 	for name, s := range d.collHealth.st {
 		if s.degraded {
@@ -119,11 +120,16 @@ func (d *Daemon) collectorsState() (CollectorsState, string) {
 				fmt.Sprintf("%s is not reading (%d consecutive failures: %s)", name, s.failures, s.lastErr))
 		}
 	}
-	if len(failing) == 0 {
-		return CollOK, ""
+	d.collHealth.mu.Unlock()
+
+	if len(failing) > 0 {
+		sort.Strings(failing)
+		return CollDegraded, strings.Join(failing, "; ")
 	}
-	sort.Strings(failing)
-	return CollDegraded, strings.Join(failing, "; ")
+	if len(d.collectors) == 0 {
+		return CollNone, "no collectors configured — nothing is being observed"
+	}
+	return CollOK, ""
 }
 
 // auditCollTransition writes an observation state-transition record via the

@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/evertramos/ezy-shield/internal/enforce"
 	"log/slog"
 )
 
@@ -49,7 +50,13 @@ func (d *Daemon) handleDisableAll(ctx context.Context) SocketResponse {
 	}
 
 	// 2. Clear every active ban (history preserved; one summary audit row).
+	//    Taken under enforceMu (issue #575) so the clear cannot land between
+	//    a reconcile's desired-state snapshot and its kernel write — that
+	//    reconcile would re-add every ban we just cleared. The mutex is
+	//    released before step 3: syncEnforcer takes it itself.
+	d.enforceMu.Lock()
 	removed, err := d.store.UnbanAll(ctx, "panic button: operator ran disable --all")
+	d.enforceMu.Unlock()
 	if err != nil {
 		return SocketResponse{Error: fmt.Sprintf("clear active bans: %v", err)}
 	}
@@ -63,6 +70,23 @@ func (d *Daemon) handleDisableAll(ctx context.Context) SocketResponse {
 			raw, _ := json.Marshal(data)
 			return SocketResponse{
 				Error: fmt.Sprintf("daemon disarmed and %d bans cleared, but the enforcer sync failed: %v — existing kernel/edge blocks may linger until a reconcile succeeds", removed, err),
+				Data:  raw,
+			}
+		}
+	}
+
+	// 4. Reputation feeds drop packets too (issue #608): "every active
+	//    block" includes @feeds, which live outside the store.
+	if d.feedSyncer != nil {
+		d.feedMu.Lock()
+		d.feedBlockDesired = map[string][]enforce.FeedElement{}
+		d.feedMu.Unlock()
+		if err := d.feedSyncer.SyncFeeds(ctx, nil); err != nil {
+			slog.ErrorContext(ctx, "daemon: disable_all feed sync failed", "err", err)
+			data.EnforcersSynced = false
+			raw, _ := json.Marshal(data)
+			return SocketResponse{
+				Error: fmt.Sprintf("daemon disarmed and %d bans cleared, but clearing the reputation-feed sets failed: %v — feed entries may linger until their TTL", removed, err),
 				Data:  raw,
 			}
 		}

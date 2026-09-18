@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -50,6 +51,15 @@ const (
 	cfBulkOpPollInterval = time.Second
 )
 
+// cfPageRetryDelays is the per-page backoff when one item-list page fails
+// at the transport (a slow page past the client timeout, a reset). Two
+// extra attempts: one slow page must not fail a whole mirror read (#646).
+var cfPageRetryDelays = []time.Duration{500 * time.Millisecond, 2 * time.Second}
+
+// cfStaleRetryDelays paces the background mirror rebuild after a failed
+// post-add refresh (issue #646); the counter resets on success.
+var cfStaleRetryDelays = []time.Duration{5 * time.Second, 30 * time.Second, 2 * time.Minute, 10 * time.Minute}
+
 // listState tracks the desired IP set, the discovered list ID, and the IP→item
 // mapping for the items THIS instance owns. The mu guards every field
 // including timer.
@@ -67,6 +77,13 @@ type listState struct {
 	// still want it is re-added within one flush interval.
 	foreign map[string]struct{}
 	timer   *time.Timer
+	// mirrorStale is set when items were added at the edge but their IDs
+	// could not be read back (post-add refresh failed, issue #646): the
+	// next push re-discovers the list before diffing, and a background
+	// retry rebuilds it even when nothing new is banned.
+	mirrorStale   bool
+	staleAttempts int
+	staleTimer    *time.Timer // the one pending background rebuild, if any
 }
 
 func newListState() *listState {
@@ -114,6 +131,17 @@ type CloudflareListsEnforcer struct {
 	// retryDelays is the backoff schedule between throttled mutation
 	// attempts; empty = fail on the first throttle (test mode).
 	retryDelays []time.Duration
+	// pageRetryDelays is the backoff between attempts of one item-list
+	// page that failed at the transport (timeout, reset) — issue #646.
+	pageRetryDelays []time.Duration
+	// staleRetryDelays paces the background mirror rebuild (issue #646).
+	staleRetryDelays []time.Duration
+	// pushMu serialises push and flushRemovals (issue #646 review): the
+	// debounce timer, the daemon's Sync, the removal flusher and the stale
+	// rebuild timer all mutate the item mirror; a rediscovery snapshot
+	// written over a concurrent add or delete would drop or resurrect an
+	// item ID and leak an item at the edge.
+	pushMu sync.Mutex
 	// opPollInterval is the async bulk-operation poll cadence.
 	opPollInterval time.Duration
 
@@ -160,6 +188,8 @@ func NewCloudflareListsEnforcer(ctx context.Context, cfg *config.CloudflareCfg, 
 		debounceInterval:    cfDebounceFromCfg(cfg),
 		expireFlushInterval: expireFlush,
 		retryDelays:         cfRetryDelays,
+		pageRetryDelays:     cfPageRetryDelays,
+		staleRetryDelays:    cfStaleRetryDelays,
 		opPollInterval:      cfBulkOpPollInterval,
 		svcCtx:              ctx,
 		state:               newListState(),
@@ -319,9 +349,11 @@ func (e *CloudflareListsEnforcer) scheduleFlush(ctx context.Context) error {
 // push discovers/creates the list as needed, then reconciles the live items
 // with desired by emitting bulk add and bulk delete calls.
 func (e *CloudflareListsEnforcer) push(ctx context.Context) error {
+	e.pushMu.Lock()
+	defer e.pushMu.Unlock()
 	// Snapshot the inputs under lock.
 	e.state.mu.Lock()
-	needsDiscover := !e.state.discovered
+	needsDiscover := !e.state.discovered || e.state.mirrorStale
 	listID := e.state.listID
 	desiredCopy := make(map[string]struct{}, len(e.state.desired))
 	for ip := range e.state.desired {
@@ -354,6 +386,8 @@ func (e *CloudflareListsEnforcer) push(ctx context.Context) error {
 		}
 		e.state.mu.Lock()
 		e.state.discovered = true
+		e.state.mirrorStale = false
+		e.state.staleAttempts = 0
 		e.state.listID = newID
 		e.state.items = newItems
 		// Everything present but not ours is foreign: another instance's
@@ -441,13 +475,20 @@ func isCFDuplicateErr(err error) bool {
 // IPs genuinely absent. Returns the ip→itemID map for rows this instance
 // now owns.
 func (e *CloudflareListsEnforcer) retryAddSkippingPresent(ctx context.Context, listID string, want []string) (map[string]string, error) {
-	_, present, err := e.fetchAllItems(ctx, listID, 1)
+	owned, present, err := e.fetchAllItems(ctx, listID, 1)
 	if err != nil {
 		return nil, fmt.Errorf("duplicate-add refresh: %w", err)
 	}
 	var remaining []string
 	e.state.mu.Lock()
 	for _, ip := range want {
+		// An item carrying our own tag is ours — its ID was lost (a failed
+		// post-add refresh, issue #646), not foreign: filing it as foreign
+		// would leave it at the edge forever once it expires.
+		if id, mine := owned[ip]; mine {
+			e.state.items[ip] = id
+			continue
+		}
 		if _, ok := present[ip]; ok {
 			e.state.foreign[ip] = struct{}{}
 			continue
@@ -491,6 +532,8 @@ func (e *CloudflareListsEnforcer) removeStale(ctx context.Context, listID string
 // before the first discovery — there is nothing to remove from a list that
 // has not been read yet.
 func (e *CloudflareListsEnforcer) flushRemovals(ctx context.Context) error {
+	e.pushMu.Lock()
+	defer e.pushMu.Unlock()
 	e.state.mu.Lock()
 	// Reset the foreign cache each flush tick (issue #486): if another
 	// instance expired an IP we still want, the next push re-verifies and
@@ -614,7 +657,7 @@ func (e *CloudflareListsEnforcer) fetchAllItems(ctx context.Context, listID stri
 		if cursor != "" {
 			url += "&cursor=" + cursor
 		}
-		resp, err := e.doRequest(ctx, http.MethodGet, url, nil)
+		resp, err := e.getPageWithRetry(ctx, url)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -644,6 +687,81 @@ func (e *CloudflareListsEnforcer) fetchAllItems(ctx context.Context, listID stri
 	}
 	return nil, nil, fmt.Errorf("cloudflare list items: pagination exceeded %d pages at %d items/page (unmoving cursor?)",
 		maxPages, cfListItemsPerPage)
+}
+
+// getPageWithRetry issues one item-list page GET, retrying a transport
+// failure (client timeout, reset — no HTTP status) on the pageRetryDelays
+// schedule. HTTP-level answers are returned as they are: the caller
+// interprets them (issue #646).
+func (e *CloudflareListsEnforcer) getPageWithRetry(ctx context.Context, url string) (*http.Response, error) {
+	for attempt := 0; ; attempt++ {
+		resp, err := e.doRequest(ctx, http.MethodGet, url, nil)
+		if err == nil {
+			return resp, nil
+		}
+		if attempt >= len(e.pageRetryDelays) || ctx.Err() != nil {
+			return nil, err
+		}
+		slog.WarnContext(ctx, "enforce/cloudflare-lists: list page failed at the transport, retrying",
+			"attempt", attempt+1, "max_attempts", len(e.pageRetryDelays)+1, "err", err.Error())
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(e.pageRetryDelays[attempt]):
+		}
+		if err := e.limiter.wait(ctx); err != nil {
+			return nil, err
+		}
+	}
+}
+
+// markMirrorStale flags the local item mirror for a rebuild and, in
+// background (debounced) mode, arms ONE paced retry per enforcer so the
+// rebuild happens even when no new ban triggers a push (issue #646). A
+// pending timer is kept, never duplicated; escalate advances the pacing
+// (used by the timer chain on a failed rebuild — a burst of failed
+// refreshes in one slow window must not jump straight to the slowest
+// step). Synchronous mode (tests) rebuilds on the next call instead.
+func (e *CloudflareListsEnforcer) markMirrorStale(escalate bool) {
+	e.state.mu.Lock()
+	defer e.state.mu.Unlock()
+	e.state.mirrorStale = true
+	if e.debounceInterval <= 0 || e.state.staleTimer != nil {
+		return
+	}
+	if escalate && e.state.staleAttempts < len(e.staleRetryDelays)-1 {
+		e.state.staleAttempts++
+	}
+	delay := e.staleRetryDelays[e.state.staleAttempts]
+	e.state.staleTimer = time.AfterFunc(delay, e.rebuildStaleMirror)
+}
+
+// rebuildStaleMirror is the stale timer's callback: one full push (which
+// re-discovers the list first) under the same serialisation as every
+// other push; on failure the chain re-arms one step slower.
+func (e *CloudflareListsEnforcer) rebuildStaleMirror() {
+	e.state.mu.Lock()
+	e.state.staleTimer = nil
+	stale := e.state.mirrorStale
+	e.state.mu.Unlock()
+	if !stale || e.svcCtx.Err() != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(e.svcCtx, 90*time.Second)
+	defer cancel()
+	if err := e.push(ctx); err != nil {
+		// Re-arm only while the mirror is still stale (discovery failed).
+		// When discovery succeeded and the ADD failed, the mirror is fresh
+		// and the debounce/Sync path owns retrying the add — re-reading the
+		// whole list every step would only amplify a throttled API.
+		e.state.mu.Lock()
+		still := e.state.mirrorStale
+		e.state.mu.Unlock()
+		if still {
+			slog.Warn("enforce/cloudflare-lists: stale mirror rebuild failed, will retry", "err", err)
+			e.markMirrorStale(true)
+		}
+	}
 }
 
 // ── CF Lists API mutators ────────────────────────────────────────────────────
@@ -737,13 +855,20 @@ func (e *CloudflareListsEnforcer) mutateWithRetry(ctx context.Context, op, metho
 // back-to-back follow-up mutation is what invites the 971 throttle).
 func (e *CloudflareListsEnforcer) waitBulkOperation(ctx context.Context, opID string) error {
 	url := fmt.Sprintf("%s/accounts/%s/rules/lists/bulk_operations/%s", e.baseURL, e.accountID, opID)
+	// If the flush deadline fires inside getPageWithRetry the error is
+	// wrapped as unconfirmed (kept); if it fires at limiter.wait or the poll
+	// backoff below, the raw ctx error is returned as a hard error and the
+	// push fails — rare, self-heals on the next push, conservative (#654).
 	for poll := 0; poll < cfBulkOpPollMax; poll++ {
 		if err := e.limiter.wait(ctx); err != nil {
 			return err
 		}
-		resp, err := e.doRequest(ctx, http.MethodGet, url, nil)
+		resp, err := e.getPageWithRetry(ctx, url)
 		if err != nil {
-			return err
+			// The POST was accepted; only confirming it failed at the
+			// transport. Report it as unconfirmed so the caller keeps the
+			// mutation and reconciles later (issue #654).
+			return fmt.Errorf("%w: poll %s: %v", errBulkOpUnconfirmed, opID, err)
 		}
 		var out cfBulkOpResp
 		decErr := json.NewDecoder(resp.Body).Decode(&out)
@@ -768,7 +893,7 @@ func (e *CloudflareListsEnforcer) waitBulkOperation(ctx context.Context, opID st
 		case <-time.After(e.opPollInterval):
 		}
 	}
-	return fmt.Errorf("cloudflare bulk operation %s: not completed after %d polls", opID, cfBulkOpPollMax)
+	return fmt.Errorf("%w: %s not completed after %d polls", errBulkOpUnconfirmed, opID, cfBulkOpPollMax)
 }
 
 // addItems performs one bulk POST per Cloudflare batch limit and returns
@@ -800,7 +925,16 @@ func (e *CloudflareListsEnforcer) addItems(ctx context.Context, listID string, i
 		}
 		if ar.Result.OperationID != "" {
 			if err := e.waitBulkOperation(ctx, ar.Result.OperationID); err != nil {
-				return nil, err
+				if !errors.Is(err, errBulkOpUnconfirmed) {
+					return nil, err
+				}
+				// The add was accepted; only its completion is unconfirmed.
+				// Keep it, mark the mirror stale, and let the refresh below
+				// (itself resilient, issue #647) recover the IDs or the next
+				// push rebuild (issue #654).
+				slog.WarnContext(ctx, "enforce/cloudflare-lists: add accepted but bulk operation unconfirmed; edge mirror stale until the next push",
+					"list_id", listID, "err", err.Error())
+				e.markMirrorStale(false)
 			}
 		}
 		if len(ar.Result.Items) > 0 {
@@ -820,7 +954,17 @@ func (e *CloudflareListsEnforcer) addItems(ctx context.Context, listID string, i
 		// Pass numItems=1 as a safe default since we know items exist (we just added them).
 		all, _, err := e.fetchAllItems(ctx, listID, 1)
 		if err != nil {
-			return nil, fmt.Errorf("post-add refresh: %w", err)
+			// The add is applied at the edge (every batch POST succeeded
+			// and its bulk operation completed); only reading the IDs back
+			// failed. Failing the push here reported an applied ban as a
+			// failure and left the IDs unknown for good. Keep the add, mark
+			// the mirror stale — the next push re-discovers the list before
+			// diffing, and a background retry rebuilds it meanwhile — and
+			// say so at WARN (issue #646).
+			slog.WarnContext(ctx, "enforce/cloudflare-lists: post-add refresh failed; edge mirror stale until the next push",
+				"added", len(ips), "list_id", listID, "err", err.Error())
+			e.markMirrorStale(false)
+			return out, nil
 		}
 		// Only copy back IPs we actually requested; preserve any IDs we already learned.
 		for _, ip := range ips {
@@ -854,7 +998,16 @@ func (e *CloudflareListsEnforcer) removeItems(ctx context.Context, listID string
 		}
 		if dr.Result.OperationID != "" {
 			if err := e.waitBulkOperation(ctx, dr.Result.OperationID); err != nil {
-				return err
+				if !errors.Is(err, errBulkOpUnconfirmed) {
+					return err
+				}
+				// The delete was accepted; only its completion is unconfirmed.
+				// Do not fail the push — over-blocking until the next reconcile
+				// is the fail-closed direction (Hard Rule §1). Mark the mirror
+				// stale so the next push re-reads and reconciles (issue #654).
+				slog.WarnContext(ctx, "enforce/cloudflare-lists: delete accepted but bulk operation unconfirmed; edge mirror stale until the next push",
+					"list_id", listID, "err", err.Error())
+				e.markMirrorStale(false)
 			}
 		}
 		slog.InfoContext(ctx, "enforce/cloudflare-lists: removed items",

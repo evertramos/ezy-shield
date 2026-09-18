@@ -22,6 +22,11 @@ package enforce
 // #365): a mapped target or allowlist prefix passed through verbatim would be
 // filed in the enforcers' v6 sets, where it can never match IPv4 packets — a
 // dead ban entry, or worse, a dead @allowed entry that protects nothing.
+//
+// The peer probe is replaceable after construction (SSHPeerProbeSetter,
+// issue #583) so the daemon can install the same ADR-0013 authenticated-peer
+// predicate the decision engine uses: the two immunity layers must agree on
+// who is an operator, or a ban the engine commits is one the gate refuses.
 
 import (
 	"context"
@@ -29,6 +34,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"sync"
 
 	"github.com/evertramos/ezy-shield/pkg/sdk"
 )
@@ -36,6 +42,20 @@ import (
 // ErrGateRefused marks a Ban refused by the centralized allowlist /
 // anti-lockout gate. Callers can detect it with errors.Is.
 var ErrGateRefused = errors.New("refused by allowlist/anti-lockout gate")
+
+// SSHPeerProbeSetter is the optional facet through which the daemon installs
+// the policy's peer-immunity predicate into the gate (issue #583). The gate
+// is built in cmd/ezyshield/run.go with the raw kernel probe, before the
+// daemon exists; the daemon later narrows the decision engine's probe under
+// ADR-0013 (anti_lockout.require_authenticated) and MUST narrow the gate's
+// the same way, or the engine bans a held-but-unauthenticated socket and the
+// gate refuses to apply it — the ESTABLISHED-only immunity the ADR removes
+// would survive at the last step. Both immunity layers consult one source.
+type SSHPeerProbeSetter interface {
+	SetSSHPeerProbe(probe func() []netip.Addr)
+}
+
+var _ SSHPeerProbeSetter = (*Gate)(nil)
 
 // Gate wraps an Enforcer (typically the MultiEnforcer) and refuses any Ban —
 // and silently filters any Sync desired-state entry — whose target overlaps
@@ -48,7 +68,35 @@ var ErrGateRefused = errors.New("refused by allowlist/anti-lockout gate")
 type Gate struct {
 	inner     sdk.Enforcer
 	allowlist []netip.Prefix
-	sshPeers  func() []netip.Addr // kernel-derived operator peers; nil = no peer check
+
+	mu       sync.RWMutex
+	sshPeers func() []netip.Addr // kernel-derived operator peers; nil = no peer check
+	// extra is the runtime allowlist (`ezyshield allow`), kept in sync by
+	// the daemon (issue #608): without it the gate, and therefore every
+	// reconcile, only knew the policy file's allowlist and kept re-applying
+	// bans the operator had just lifted with `allow`.
+	extra []netip.Prefix
+}
+
+// ExtraAllowlister is the facet through which the daemon pushes the runtime
+// allowlist into the gate (issue #608).
+type ExtraAllowlister interface {
+	SetExtraAllowlist(prefixes []netip.Prefix)
+}
+
+var _ ExtraAllowlister = (*Gate)(nil)
+
+// SetExtraAllowlist replaces the runtime allowlist the gate refuses on, in
+// addition to the static one it was built with. Canonicalized like the
+// static list. Safe for concurrent use with Ban/Sync.
+func (g *Gate) SetExtraAllowlist(prefixes []netip.Prefix) {
+	norm := make([]netip.Prefix, 0, len(prefixes))
+	for _, p := range prefixes {
+		norm = append(norm, normalizeGatePrefix(p))
+	}
+	g.mu.Lock()
+	g.extra = norm
+	g.mu.Unlock()
 }
 
 // NewGate wraps inner with the centralized guard. allowlist should carry the
@@ -69,10 +117,40 @@ func NewGate(inner sdk.Enforcer, allowlist []netip.Prefix, sshPeers func() []net
 // that identify enforcement backends.
 func (g *Gate) Name() string { return g.inner.Name() }
 
+// SetSSHPeerProbe replaces the SSH-peer probe (SSHPeerProbeSetter). It is
+// how ADR-0013's authenticated-peer narrowing reaches this layer; a nil
+// probe disables the peer check (the allowlist check always runs). Safe for
+// concurrent use with Ban/Sync.
+func (g *Gate) SetSSHPeerProbe(probe func() []netip.Addr) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.sshPeers = probe
+}
+
+// currentPeers snapshots the peer set once per operation. The probe reads
+// /proc (and, narrowed, logind) on every call, so a Sync over hundreds of
+// targets must not re-probe per target.
+func (g *Gate) currentPeers() []netip.Addr {
+	g.mu.RLock()
+	probe := g.sshPeers
+	g.mu.RUnlock()
+	if probe == nil {
+		return nil
+	}
+	return probe()
+}
+
+// currentExtra snapshots the runtime allowlist for one operation.
+func (g *Gate) currentExtra() []netip.Prefix {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.extra
+}
+
 // Ban refuses guarded targets with an audited refusal before any enforcer
 // sees them; everything else is forwarded to the inner enforcer.
 func (g *Gate) Ban(ctx context.Context, t sdk.Target) error {
-	if reason, refused := g.refuse(t); refused {
+	if reason, refused := g.refuse(t, g.currentPeers()); refused {
 		slog.WarnContext(ctx, "enforce/gate: refusing ban", "target", gateKey(t), "reason", reason)
 		return fmt.Errorf("enforce/gate: refusing to ban %s (%s): %w", gateKey(t), reason, ErrGateRefused)
 	}
@@ -90,8 +168,9 @@ func (g *Gate) Unban(ctx context.Context, t sdk.Target) error {
 // refusal each, so a reconcile can never re-introduce them downstream.
 func (g *Gate) Sync(ctx context.Context, want []sdk.Target) error {
 	filtered := make([]sdk.Target, 0, len(want))
+	peers := g.currentPeers()
 	for _, t := range want {
-		if reason, refused := g.refuse(t); refused {
+		if reason, refused := g.refuse(t, peers); refused {
 			slog.WarnContext(ctx, "enforce/gate: dropping target from sync", "target", gateKey(t), "reason", reason)
 			continue
 		}
@@ -140,11 +219,12 @@ func (g *Gate) SyncAllowlist(ctx context.Context, want []netip.Prefix) error {
 }
 
 // refuse reports whether the target must be blocked from enforcement and why.
+// peers is the operator SSH-peer snapshot for this operation (currentPeers).
 //
 // The prefix comparison uses Overlaps, not Contains: banning 192.0.2.0/24
 // while 192.0.2.7 is allowlisted would lock that host out even though the
 // prefix's base address is not itself allowlisted.
-func (g *Gate) refuse(t sdk.Target) (string, bool) {
+func (g *Gate) refuse(t sdk.Target, peers []netip.Addr) (string, bool) {
 	p, ok := gatePrefix(t)
 	if !ok {
 		return "", false
@@ -154,11 +234,14 @@ func (g *Gate) refuse(t sdk.Target) (string, bool) {
 			return "allowlisted", true
 		}
 	}
-	if g.sshPeers != nil {
-		for _, peer := range g.sshPeers() {
-			if p.Contains(peer.Unmap()) {
-				return "active SSH peer", true
-			}
+	for _, a := range g.currentExtra() {
+		if a.Overlaps(p) {
+			return "allowlisted (runtime)", true
+		}
+	}
+	for _, peer := range peers {
+		if p.Contains(peer.Unmap()) {
+			return "active SSH peer", true
 		}
 	}
 	return "", false

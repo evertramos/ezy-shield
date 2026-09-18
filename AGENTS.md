@@ -5,7 +5,7 @@ same rules, so all tools and people follow one source of truth.
 
 ## Project Context
 
-EzyShield is a CLI-first Linux security tool: detects malicious IPs from logs, escalates bans by strikes (5min → 1h → 24h → 7d → permanent), enforces locally (nftables) and at the edge (Cloudflare today; Bunny and AWS WAF are planned, not implemented), uses AI providers for ambiguous cases with a rule-engine fallback. Interface contracts must not change without an ADR in `docs/internal/adr/`.
+EzyShield is a CLI-first Linux security tool: detects malicious IPs from logs, escalates bans by strikes (5min → 1h → 24h → 7d → permanent), enforces locally (nftables) and at the edge (Cloudflare today; Bunny and AWS WAF are planned, not implemented), uses AI providers for ambiguous cases with a rule-engine fallback. The properties the product promises — and every code path that enforces each one — are catalogued in `docs/internal/INVARIANTS.md`; read the section for the subsystem you touch before changing it. Interface contracts must not change without an ADR in `docs/internal/adr/`.
 
 ## Hard Rules
 
@@ -53,10 +53,14 @@ addressed. "Looks fine" is not a review — cite file:line, why, and the fix.
 
 1. Read the GitHub issue; restate acceptance criteria in the PR description.
 2. Check `docs/internal/adr/` for relevant decisions before proposing design changes.
-3. Write/extend tests first when fixing bugs (reproduce, then fix).
+3. Write/extend tests first when fixing bugs (reproduce, then fix). **A bug fix needs a test that fails on `dev` before the fix and runs the real components involved** — the real store, the real decision engine, the real `enforcerd.Server` against a scripted nft runner, a real collector on a temp file, on the injectable clock (`daemon.Config.Now`). A fake that models the assumption under test does not count: every regression of 2026-09 (#590, #600) passed its unit tests against such a fake.
 4. Run locally before pushing: `make lint test` (must be green).
 5. **Before opening the PR**: walk `docs/internal/SECURITY-REVIEW.md §10` (code quality self-review) on every function you wrote or modified. This is mandatory — PRs that skip this step will be rejected.
-6. If a task seems to require breaking a Hard Rule, stop and open a discussion issue instead.
+6. **Blast radius**: if the change touches a reader or writer named in `docs/internal/INVARIANTS.md`, the PR description's "Blast radius" section lists every *other* reader/writer of that invariant and how each was re-verified (test name, or "unchanged path, covered by X"). A change that reasons about only the code it edits is how one fix created the next bug.
+7. **Adversarial review**: every PR touching a 🔴 area gets a second pass whose only goal is to break it against the other readers of the invariant, before merge. The bot reviews configured on the repo are not that pass.
+8. If a task seems to require breaking a Hard Rule, stop and open a discussion issue instead.
+
+Release cadence: fixes to one invariant ship together; a release candidate goes to the dogfood host in a batch, after a 24 h soak of the previous one — never one rc per PR.
 
 ## Git Isolation (Worktree Policy)
 

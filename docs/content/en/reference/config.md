@@ -20,6 +20,7 @@ Complete reference for `/etc/ezyshield/config.yaml` — log sources, enforcement
 | `rules_path` | string | — | **Deprecated.** Replaces the built-in rules entirely (no merge; `rules.d` ignored) — freezes the install out of upstream rule tuning |
 | `log.level` | string | `info` | `debug` \| `info` \| `warn` \| `error` |
 | `collectors` | list | `[]` | Log sources to tail (see below). An empty list is valid — `config validate` warns and the daemon simply tails nothing. |
+| `docker` | object | — | Docker Engine endpoint used by every docker consumer (see below). Optional; absent means the default unix socket. |
 | `enforce` | object | — | Enforcement backends (optional — without it, decisions are log-only) |
 | `notify` | object | — | Notification channels (optional) |
 | `ai` | object | — | AI provider for ambiguous traffic (optional) |
@@ -80,11 +81,69 @@ auth log — `/var/log/auth.log` (Debian/Ubuntu) or `/var/log/secure`
 format (`Jan  1 12:00:00`) and modern ISO-8601
 (`2026-07-13T22:57:35+00:00`).
 
+Every collector starts at the **live tail** of its source when the daemon
+(re)starts — the file tail seeks to the end, and the journald readers
+follow with no backlog. Lines written during the seconds of a restart are
+not replayed: a missed line at worst delays a detection by one event,
+whereas replaying already-processed lines would count the same evidence
+twice.
+
+The file tail follows log rotation without replay: when the file is
+renamed and recreated it reopens the new file and stops watching the old
+inode, so the rotated copy being deleted later (`logrotate` `compress`,
+Docker's `max-file` pruning) does not re-read the live file; and when the
+file is truncated in place (`copytruncate`) it rewinds to the start and
+reads only the new lines, with no fragment of the old content.
+
 > **Configure only one SSH collector per host** — journald **or** the
 > file it feeds, never both. Reading both ingests every event twice,
 > which double-counts toward detection thresholds. (An already-banned
 > IP is never banned again, so this never causes duplicate bans, only
 > earlier detection.)
+
+## docker
+
+Selects the Docker Engine API endpoint. One endpoint serves every docker
+consumer — the docker log collectors, the [exec
+watcher](../guides/docker-exec-watch.md) and on-demand evidence extraction —
+because a host runs one engine. Omit the section entirely to use the default
+unix socket.
+
+```yaml
+docker:
+  host: tcp://127.0.0.1:2375     # a read-only socket proxy on loopback
+  # allow_remote: false          # accept a non-loopback tcp host
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `host` | string | `unix:///var/run/docker.sock` | `unix:///absolute/path` or `tcp://host:port`. Any other scheme is rejected. |
+| `allow_remote` | bool | `false` | Accept a `tcp://` host that is not a loopback IP literal. |
+
+This is a privilege decision, not a connectivity detail:
+
+- `unix:///var/run/docker.sock` is the engine itself. Reaching it means the
+  service user is in the `docker` group, which is root-equivalent on the host.
+- `tcp://127.0.0.1:2375` is meant for a **filtering, read-only proxy** in
+  front of the engine — it serves container logs and events and refuses
+  container creation, exec and mounts. That is the scoped alternative to the
+  group. See the [security overview](../security/overview.md) and [Docker +
+  nginx + WordPress](../guides/docker-nginx-wordpress.md).
+
+EzyShield is only ever a **client** here; it opens no listener for this. The
+proxy is a container in your own stack.
+
+A `tcp://` host must be a loopback IP literal (`127.0.0.0/8` or `::1`).
+Hostnames — including `localhost` — are not accepted as loopback, because what
+they resolve to is decided by `/etc/hosts` and DNS rather than by this file.
+Anything else is refused unless `allow_remote: true`, which accepts an
+unauthenticated plaintext Engine endpoint reachable from off-host. TLS to a
+remote engine is not supported.
+
+Verify a TCP endpoint with `ezyshield doctor`: it must answer `GET /_ping` and
+must **refuse** `POST /containers/create`. An endpoint that accepts container
+creation grants root-equivalent access to the host over the network, and
+doctor FAILs on it.
 
 ## enforce
 
@@ -226,7 +285,7 @@ notify:
       Authorization: env:WEBHOOK_AUTH_TOKEN   # value must be a full env: reference
 ```
 
-Shared fields: `rate_limit_per_minute` (default 5) and `dedup_window_sec` (default 600) protect against notification storms. `notify_only_window_sec` (default 3600) additionally windows below-threshold `notify_only` events per (IP, rule): the first event notifies immediately and repeats within the window fold into a single summary notification — set it negative to disable. Audit log entries are never suppressed. Every channel accepts an optional `severity` list (`info` \| `warn` \| `critical`).
+Shared fields: `rate_limit_per_minute` (default 5) and `dedup_window_sec` (default 600) protect against notification storms. The per-minute cap applies to `info` and `warn` messages; **`critical` messages use a separate, reserved quota** (20 per channel per minute), so a burst of strike warnings can never silence the one `enforcement DEGRADED` alert. A message a rate limit dropped does not claim the dedup window — the same alert is delivered as soon as the quota frees up — and every dropped delivery is counted in the `ezyshield_notifications_dropped_total` metric. Repeated enforcer failures within one window are folded into a single systemic critical (the first failing target is in the body). At least one channel must accept `critical`; `ezyshield doctor` warns when none does. `notify_only_window_sec` (default 3600) additionally windows below-threshold `notify_only` events per (IP, rule): the first event notifies immediately and repeats within the window fold into a single summary notification — set it negative to disable. This window affects notifications only; the audit log keeps its own, shorter cadence for the observe band: the first `notify_only` for an (IP, rule) pair writes an audit row and repeats of the same rule for the same IP within the next 60 seconds do not, so a scanner that stays above a rule's threshold leaves one row per minute rather than one per request (the event still counts in metrics and the live stream, and a ban resets the cadence). Every channel accepts an optional `severity` list (`info` \| `warn` \| `critical`).
 
 > Secret-typed fields (`bot_token`, `password`, `webhook_url`, webhook `url`) only accept `env:VARNAME` references — inline values are rejected at load time. They are also **required** for their channel: a `telegram` block without `bot_token`, an `email` block without `password`, or a `slack`/`discord`/`webhook` block without its URL fails validation (the daemon resolves them at startup). Webhook header **values** are sent verbatim unless the entire value is an `env:` reference, which is resolved.
 
@@ -286,8 +345,9 @@ ai:
 
 With `async: true` the pipeline **never waits for a provider**: grey-zone
 episodes (scores inside the ambiguous band) are queued — one entry per IP
-at a time — and a background worker drains them, rate-capped at one
-provider call per second. How the layer stays token-frugal:
+at a time, held until its analysis has finished — and a background worker
+drains them, rate-capped at one provider call per second and at most one
+analysis per IP per minute (a failed call is retried after ten seconds). How the layer stays token-frugal:
 
 1. The rule engine decides the obvious cases; only the ambiguous band ever
    enqueues (the same #419 gates apply — decisive scores and already-banned

@@ -19,6 +19,10 @@ collectors:
     container: wordpress-site
     parser: apache
 
+docker:
+  host: tcp://127.0.0.1:2375
+  allow_remote: false
+
 enforce:
   nftables:
     socket: /run/ezyshield-enforcer/enforcer.sock

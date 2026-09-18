@@ -57,6 +57,21 @@ ban and every reconcile before it can reach nftables or any edge platform.
 Even a backend with no allowlist logic of its own can never receive a
 protected address — including via a sync that would re-introduce it.
 
+Both layers judge by the same peer-immunity predicate: with
+`anti_lockout.require_authenticated` on, the gate narrows to authenticated
+peers exactly as the decision engine does, so a ban the engine decides is one
+the gate will apply. The two can still briefly disagree about a
+fast-reconnecting attacker — the engine reads a short-lived cached peer list,
+the gate probes live — and then the engine has already recorded the ban when
+the gate refuses to apply it. That refusal is not an enforcer failure and
+raises no alert: the ban stays recorded, and the daemon retries enforcement
+shortly afterwards, through the same gate and with the ban's remaining time,
+until the connection is gone or the retry budget runs out (a warning, an
+`enforce_deferred_exhausted` audit entry, and the periodic reconcile picks
+it up). A ban lifted or expired in the meantime is never re-applied, and an
+operator's session is refused on every retry — nothing on this path can apply
+a ban the gate would not.
+
 **The live SSH re-check protects a *connection*, not an address forever.** A
 bruteforcer that reconnects faster than the peer table is re-read keeps an
 established connection visible at every evaluation, so each attempt in its
@@ -73,6 +88,10 @@ operator's session remains unbannable for as long as it is open.
 ## Allowlist supremacy
 
 The allowlist is checked FIRST, before any rule engine decision. An allowlisted IP cannot be banned by any rule, AI decision, or manual ban attempt.
+
+It also wins over bans that already exist. `ezyshield allow <ip-or-cidr>` lifts every active ban the entry covers — from the kernel, the edge platforms and the store, each one audited as an `unban` — and the reconcile never re-applies a ban to an allowed address. Reputation feeds honour the runtime allowlist the same way the policy file's allowlist is honoured, and `disable --all` empties the feed sets along with the ban sets.
+
+In the kernel, the `@allowed` sets are accepted before any drop in **every** chain EzyShield installs (prerouting, input and forward): an `accept` in the prerouting hook ends only that chain, and a packet for a local service still traverses the input hook, so the same accept-before-drop pair sits there too.
 
 ```yaml
 allowlist:
@@ -127,9 +146,82 @@ When AI is enabled for ambiguous events (scores inside the configurable `ambiguo
 ## Privilege separation
 
 - **Main daemon** (`ezyshield`): runs as unprivileged user, reads logs, makes decisions, communicates via unix socket
-- **Enforcer** (`ezyshield-enforcer`): holds `CAP_NET_ADMIN` only, accepts a fixed, typed verb set (`ping`, `add`, `del`, `list`, `flush`, and the allowlist verbs), mutates nftables in a safe, idempotent way
+- **Enforcer** (`ezyshield-enforcer`): holds `CAP_NET_ADMIN` only, accepts a fixed, typed verb set (`ping`, `add`, `del`, `list`, `flush`, and the allowlist verbs), mutates nftables in a safe, idempotent way. Every blocked-set element keeps its **own** timeout: the sets are created without nftables' `auto-merge`, because a merged interval carries a single timer and a neighbouring ban would silently rewrite yours (a permanent ban next to a five-minute one would expire in five minutes). A set left over from an older layout is rebuilt without the flag, elements preserved, the first time the helper starts
 
 The enforcer is not a library. It's a separate process. The main daemon cannot directly modify the firewall.
+
+### The one grant that changes this: the `docker` group
+
+Docker log collectors (and the [docker exec watcher](../guides/docker-exec-watch.md)) read
+through the Docker Engine socket, and access to that socket is granted by
+membership in the `docker` group. That group is **not** a read permission — it
+is the Engine API. Any process that can reach it can start a container with
+the host filesystem mounted, which is root on the host.
+
+So on a Docker host where the service user is in `docker`, the first bullet
+above no longer holds: the daemon is root-equivalent, and the systemd
+hardening on its unit (`NoNewPrivileges`, `ProtectSystem=strict`, seccomp)
+does not contain it, because the escape is to ask the Docker daemon — an
+unconfined root process — to do the work.
+
+The group is therefore the **last** of three ways to read container logs, and
+EzyShield never grants it on its own. In privilege order:
+
+1. **A host log file.** The container writes its access log to a bind-mounted
+   host path, and a `kind: file` collector reads it. EzyShield gets no Docker
+   access at all. Reach for this first.
+2. **A read-only socket proxy.** A filtering proxy in front of the Engine
+   socket, published on `127.0.0.1`, answers container logs and events and
+   refuses container creation, exec and mounts. Point `docker.host` at it:
+
+   ```yaml
+   docker:
+     host: tcp://127.0.0.1:2375
+   ```
+
+   The daemon speaks the Engine API over loopback TCP and stays out of the
+   `docker` group. EzyShield opens no listener for this — the proxy is a
+   container in your own stack, and it is the only thing that touches the
+   socket. See [Docker + nginx + WordPress](../guides/docker-nginx-wordpress.md)
+   for the compose snippet.
+3. **The `docker` group.** Root-equivalent, as above. Only when neither of the
+   other two fits.
+
+How the choice is made:
+
+- `ezyshield init` offers all three **only** when you configure at least one
+  docker collector, pre-selects the least-privileged one that fits, and names
+  the consequence of the group before asking for it.
+- Scripted installs pick one explicitly: `--docker-host tcp://127.0.0.1:2375`
+  (answers key `collectors.docker_host`) or `--docker-group` (answers key
+  `collectors.docker_group: true`). Passing both is an error — the proxy
+  replaces the group, it does not accompany it. `--yes` accepts safe defaults,
+  and neither grant is a default.
+- Choosing nothing still writes the collectors — they simply cannot read
+  container logs until access exists.
+- `ezyshield doctor` warns whenever the service user is in `docker`, and says
+  whether anything in your configuration justifies it. When `docker.host` is a
+  TCP endpoint, doctor also probes it: it must answer `GET /_ping` and it must
+  **refuse** `POST /containers/create`. An endpoint that accepts container
+  creation is root-equivalent access to the host over the network, and that
+  check FAILs.
+
+To check and revoke the group:
+
+```bash
+getent group docker                          # is ezyshield listed?
+sudo gpasswd -d ezyshield docker             # revoke
+sudo systemctl restart ezyshield             # drop the group from the running daemon
+```
+
+Revoking disables docker collectors unless one of the first two paths is in
+place.
+
+`docker.host` accepts `unix:///path` (the default is
+`unix:///var/run/docker.sock`) and `tcp://host:port`. A TCP host must be a
+loopback IP literal; anything else is refused unless you also set
+`docker.allow_remote: true`, which accepts an unauthenticated plaintext Engine
+endpoint reachable from off-host. TLS to a remote engine is not supported.
 
 ## No network listeners
 
@@ -153,8 +245,11 @@ a verb added in the future is refused on the read-only socket until it is
 deliberately classified as read-only. Membership in `ezyshield-view` can
 never mutate state — no unban, no disarm, no allowlist edits.
 
-Both packages' postinstall create the two groups; add a monitoring user
-with `usermod -aG ezyshield-view <user>`. The CLI falls back to the
+Both packages' postinstall create the two groups, and the daemon's unit
+makes the service user a member of `ezyshield-view` (an unprivileged
+process can only hand a socket to a group it belongs to — that membership
+is what lets the daemon group-own the read-only socket). Add a monitoring
+user with `usermod -aG ezyshield-view <user>`. The CLI falls back to the
 read-only socket automatically when the operator socket denies permission,
 so viewer-tier users run `ezyshield status`, `list`, `watch`, and `report`
 with no extra flags.

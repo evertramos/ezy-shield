@@ -151,7 +151,11 @@ type Usage struct {
 // Notification is the message sent to a Notifier channel.
 type Notification struct {
 	Severity string // "info", "warn", "critical"
-	Title    string
-	Body     string
-	Action   *Action // optional: the action that triggered this notification
+	// Host identifies the server the alert is from — stamped centrally by
+	// the notify Dispatcher (os.Hostname) so a fleet sharing one channel can
+	// tell the sources apart (issue #667). Callers may pre-set it.
+	Host   string
+	Title  string
+	Body   string
+	Action *Action // optional: the action that triggered this notification
 }

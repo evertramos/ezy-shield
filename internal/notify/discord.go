@@ -92,6 +92,9 @@ func buildDiscordPayload(msg sdk.Notification) discordPayload {
 	desc := capLen(msg.Title, maxFieldLen)
 
 	var fields []discordField
+	if msg.Host != "" {
+		fields = append(fields, discordField{Name: "Host", Value: capLen(msg.Host, discordMaxField), Inline: true})
+	}
 	if a := msg.Action; a != nil {
 		if a.Op != "" {
 			fields = append(fields, discordField{Name: "Action", Value: capLen(a.Op, discordMaxField), Inline: true})

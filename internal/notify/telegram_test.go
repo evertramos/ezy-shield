@@ -235,3 +235,22 @@ func TestTelegram_Name(t *testing.T) {
 		t.Errorf("expected Name()=telegram, got %q", n.Name())
 	}
 }
+
+// TestTelegram_IncludesHost (issue #667): the sent message carries the host
+// so a fleet sharing one chat can tell the source servers apart.
+func TestTelegram_IncludesHost(t *testing.T) {
+	srv, captured := newTelegramMock(t)
+	n := newTestTelegram(t, srv, []string{"111"})
+
+	msg := sdk.Notification{Severity: "warn", Host: "fagots", Title: "SSH brute-force detected"}
+	if err := n.Send(context.Background(), msg); err != nil {
+		t.Fatal(err)
+	}
+	got := captured()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 post, got %d", len(got))
+	}
+	if !strings.Contains(got[0].Text, "Host") || !strings.Contains(got[0].Text, "fagots") {
+		t.Errorf("telegram text should carry the host:\n%s", got[0].Text)
+	}
+}

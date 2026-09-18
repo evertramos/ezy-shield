@@ -58,7 +58,11 @@ func (e *EmailNotifier) Name() string { return "email" }
 // Send formats msg as a plain-text email and delivers it to all configured recipients.
 func (e *EmailNotifier) Send(ctx context.Context, msg sdk.Notification) error {
 	body := formatEmailBody(msg)
-	subject := fmt.Sprintf("[EzyShield] %s: %s", strings.ToUpper(msg.Severity), capLen(msg.Title, 200))
+	host := ""
+	if msg.Host != "" {
+		host = capLen(msg.Host, 64) + " "
+	}
+	subject := fmt.Sprintf("[EzyShield] %s%s: %s", host, strings.ToUpper(msg.Severity), capLen(msg.Title, 200))
 	raw := buildRawEmail(e.from, e.to, subject, body)
 	addr := fmt.Sprintf("%s:%d", e.host, e.port)
 	if err := e.dialAndSend(ctx, addr, e.from, e.to, raw); err != nil {

@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -39,6 +40,7 @@ type Dispatcher struct {
 	dedup       map[string]time.Time
 	dedupWindow time.Duration
 	now         func() time.Time // injectable for tests
+	host        string           // stamped onto each notification (issue #667)
 	// dropped counts sends suppressed by a rate limiter (per channel-message
 	// pair). Observable through Dropped() and the daemon's metrics (issue
 	// #613): a silent drop is how an outage went unreported.
@@ -81,10 +83,12 @@ func NewWithClock(
 	if dedupWindow <= 0 {
 		dedupWindow = time.Duration(DefaultDedupWindowSec) * time.Second
 	}
+	host, _ := os.Hostname() // best-effort; empty is fine
 	d := &Dispatcher{
 		dedup:       make(map[string]time.Time),
 		dedupWindow: dedupWindow,
 		now:         now,
+		host:        host,
 	}
 	d.channels = make([]*notifyChannel, 0, len(notifiers))
 	for _, n := range notifiers {
@@ -143,6 +147,9 @@ func (d *Dispatcher) AcceptsCritical() bool {
 // channel accepted the message: a delivery nobody received must not
 // suppress the same alert when the quota frees up.
 func (d *Dispatcher) Send(ctx context.Context, msg sdk.Notification) error {
+	if msg.Host == "" {
+		msg.Host = d.host // stamp the source host once, centrally (issue #667)
+	}
 	key := dedupKey(msg)
 	// Claim the dedup window BEFORE sending, under the lock, so two
 	// concurrent sends of the same message (dispatch and the deferred retry

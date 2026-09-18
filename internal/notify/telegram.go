@@ -110,6 +110,10 @@ func formatTelegramMessage(msg sdk.Notification) string {
 	var sb strings.Builder
 	sb.WriteString(severityEmoji(msg.Severity))
 	sb.WriteString(" *EzyShield Alert*\n")
+	if msg.Host != "" {
+		sb.WriteString("\n*Host*: ")
+		sb.WriteString(escMD(capLen(msg.Host, maxFieldLen)))
+	}
 	sb.WriteString("\n*Severity*: ")
 	sb.WriteString(escMD(msg.Severity))
 	sb.WriteString("\n*Title*: ")

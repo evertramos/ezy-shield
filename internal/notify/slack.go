@@ -95,6 +95,9 @@ func buildSlackPayload(msg sdk.Notification, channel string) slackPayload {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "*EzyShield Alert* — %s %s\n", severityEmoji(msg.Severity), escSlack(msg.Severity))
 	fmt.Fprintf(&sb, "*%s*\n", escSlack(capLen(msg.Title, maxFieldLen)))
+	if msg.Host != "" {
+		fmt.Fprintf(&sb, "*Host:* %s\n", escSlack(capLen(msg.Host, maxFieldLen)))
+	}
 	if a := msg.Action; a != nil {
 		fmt.Fprintf(&sb, ">*Action:* %s", escSlack(a.Op))
 		if a.IP.IsValid() {

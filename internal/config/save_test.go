@@ -124,3 +124,26 @@ func TestSaveConfig_NilRefused(t *testing.T) {
 		t.Fatal("expected error for nil config")
 	}
 }
+
+// TestSaveConfig_NftablesOnlyDoesNotEmitEmptyCloudflare (issue #663): a host
+// with nftables-only enforcement (no cloudflare) must round-trip through
+// SaveConfig. Before the fix, an empty CloudflareCfgs marshalled as
+// "cloudflare: []", which the loader rejects ("at least one entry is
+// required"), so every `config` wizard failed on such hosts.
+func TestSaveConfig_NftablesOnlyDoesNotEmitEmptyCloudflare(t *testing.T) {
+	t.Parallel()
+	cfg := minimalConfig()
+	cfg.Enforce = &config.EnforceCfg{NFTables: &config.NFTablesCfg{}}
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if _, err := config.SaveConfig(path, cfg, "# header\n"); err != nil {
+		t.Fatalf("SaveConfig on an nftables-only config must succeed: %v", err)
+	}
+	raw, _ := os.ReadFile(path) //nolint:gosec // test path
+	if strings.Contains(string(raw), "cloudflare: []") {
+		t.Errorf("rendered an empty cloudflare sequence (round-trip hazard):\n%s", raw)
+	}
+	if _, err := config.LoadConfig(path); err != nil {
+		t.Fatalf("saved nftables-only config does not load: %v", err)
+	}
+}

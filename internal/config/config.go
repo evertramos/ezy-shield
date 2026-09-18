@@ -399,7 +399,7 @@ type CollectorCfg struct {
 // EnforceCfg configures local and edge enforcement backends.
 type EnforceCfg struct {
 	NFTables   *NFTablesCfg   `yaml:"nftables"`
-	Cloudflare CloudflareCfgs `yaml:"cloudflare"`
+	Cloudflare CloudflareCfgs `yaml:"cloudflare,omitempty"`
 	Bunny      *BunnyCfg      `yaml:"bunny"`
 	AWSWAF     *AWSWAFCfg     `yaml:"aws_waf"`
 }

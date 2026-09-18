@@ -103,7 +103,7 @@ func (s SecretRef) Resolve() (string, error) {
 	}
 	v, ok := os.LookupEnv(varName)
 	if !ok || v == "" || v == PlaceholderAPIKey {
-		return "", ErrAPIKeyMissing
+		return "", ErrSecretMissing
 	}
 	return v, nil
 }
@@ -114,13 +114,13 @@ func (s SecretRef) Resolve() (string, error) {
 // never gets sent to a real AI provider.
 const PlaceholderAPIKey = "YOUR_API_KEY_HERE" //nolint:gosec // G101: literal placeholder — deliberately public, treated as "unset" by Resolve so it can never be forwarded to a real AI provider (issue #13 §5).
 
-// ErrAPIKeyMissing is the operator-facing error surfaced whenever an AI
+// ErrSecretMissing is the operator-facing error surfaced whenever an AI
 // SecretRef fails to resolve to a real token. Deliberately generic — it
 // points the operator at the .env file without echoing the referenced env
 // var name, the previous value, or any part of the referenced string. This
 // matches issue #13 §6 ("error is: 'AI API key missing — check
 // /etc/ezyshield/.env' — no reference to what was there").
-var ErrAPIKeyMissing = fmt.Errorf("AI API key missing — check /etc/ezyshield/.env")
+var ErrSecretMissing = fmt.Errorf("referenced secret is not set — check its env: reference and /etc/ezyshield/.env")
 
 // Secret wraps a resolved credential token in a type whose String()/GoString()/
 // Format() methods return "<redacted>". Struct dumps (%+v, %v), log lines,

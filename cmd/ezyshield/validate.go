@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -165,6 +166,10 @@ func checkConfigFile(w io.Writer, path string, errs, warns *int) (*config.Config
 			}
 		}
 	}
+
+	// Load <configdir>/.env so a secret the operator stored there is seen as
+	// set, matching how the daemon (systemd EnvironmentFile) resolves it (#665).
+	loadConfigDirEnv(filepath.Dir(path))
 
 	// Env var warnings — secret name only, never the resolved value.
 	for _, ref := range collectSecretRefs(cfg) {

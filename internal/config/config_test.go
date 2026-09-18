@@ -1020,7 +1020,7 @@ func TestSecretRef_Resolve(t *testing.T) {
 func TestSecretRef_ResolveMissingEnv(t *testing.T) {
 	t.Parallel()
 	// After issue #13, a missing env var yields a fixed, redacted error
-	// (config.ErrAPIKeyMissing) that does NOT echo the referenced variable
+	// (config.ErrSecretMissing) that does NOT echo the referenced variable
 	// name. This is intentional: even the var name isn't sensitive, but
 	// keeping the message identical for both "unset" and "placeholder still
 	// in .env" simplifies log filtering and matches SECURITY-REVIEW §4.
@@ -1029,8 +1029,8 @@ func TestSecretRef_ResolveMissingEnv(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for unset env var, got nil")
 	}
-	if !errors.Is(err, ErrAPIKeyMissing) {
-		t.Errorf("Resolve() err = %v, want ErrAPIKeyMissing", err)
+	if !errors.Is(err, ErrSecretMissing) {
+		t.Errorf("Resolve() err = %v, want ErrSecretMissing", err)
 	}
 }
 

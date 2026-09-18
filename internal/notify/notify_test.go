@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -236,5 +237,41 @@ func TestDispatcher_ReturnsErrorFromNotifier(t *testing.T) {
 	err := d.Send(context.Background(), makeMsg("critical", "oops"))
 	if err == nil {
 		t.Fatal("expected error from failing notifier, got nil")
+	}
+}
+
+// recordingNotifier keeps the last message it received.
+type recordingNotifier struct {
+	name string
+	last sdk.Notification
+}
+
+func (r *recordingNotifier) Name() string { return r.name }
+func (r *recordingNotifier) Send(_ context.Context, m sdk.Notification) error {
+	r.last = m
+	return nil
+}
+
+// TestDispatcher_StampsHost (issue #667): the dispatcher stamps the source
+// host on a notification that doesn't carry one, and never overwrites a host
+// a caller already set.
+func TestDispatcher_StampsHost(t *testing.T) {
+	rec := &recordingNotifier{name: "rec"}
+	d := notify.New([]sdk.Notifier{rec}, 100, time.Minute, nil)
+
+	if err := d.Send(context.Background(), sdk.Notification{Severity: "warn", Title: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	want, _ := os.Hostname()
+	if rec.last.Host == "" || rec.last.Host != want {
+		t.Errorf("stamped host = %q, want %q (os.Hostname)", rec.last.Host, want)
+	}
+
+	// A caller-set host must be preserved (and a different title dodges dedup).
+	if err := d.Send(context.Background(), sdk.Notification{Severity: "warn", Host: "preset", Title: "t2"}); err != nil {
+		t.Fatal(err)
+	}
+	if rec.last.Host != "preset" {
+		t.Errorf("preset host overwritten: %q", rec.last.Host)
 	}
 }

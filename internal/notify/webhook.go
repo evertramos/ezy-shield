@@ -49,6 +49,7 @@ func (w *WebhookNotifier) SetWebhookURL(url string) { w.url = url }
 // All fields come from the structured Notification, never from raw log lines.
 type webhookPayload struct {
 	Severity string         `json:"severity"`
+	Host     string         `json:"host,omitempty"`
 	Title    string         `json:"title"`
 	Body     string         `json:"body,omitempty"`
 	Action   *webhookAction `json:"action,omitempty"`
@@ -95,6 +96,7 @@ func (w *WebhookNotifier) Send(ctx context.Context, msg sdk.Notification) error 
 func buildWebhookPayload(msg sdk.Notification) webhookPayload {
 	p := webhookPayload{
 		Severity: msg.Severity,
+		Host:     capLen(msg.Host, maxFieldLen),
 		Title:    capLen(msg.Title, maxFieldLen),
 		Body:     capLen(msg.Body, maxFieldLen),
 	}

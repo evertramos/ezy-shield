@@ -87,7 +87,7 @@ func TestSecret_StringRedacts(t *testing.T) {
 
 // TestLoader_NoTokenInError covers issue #13 §6: when the env var referenced
 // by a SecretRef is not set (or holds the placeholder), Resolve() returns
-// ErrAPIKeyMissing without echoing any part of what was there.
+// ErrSecretMissing without echoing any part of what was there.
 //
 // Subtests use t.Setenv, which is incompatible with t.Parallel — hence no
 // t.Parallel on either the parent or the subtests.
@@ -98,8 +98,8 @@ func TestLoader_NoTokenInError(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error for unset var")
 		}
-		if err.Error() != config.ErrAPIKeyMissing.Error() {
-			t.Errorf("Resolve() err = %q, want %q", err.Error(), config.ErrAPIKeyMissing.Error())
+		if err.Error() != config.ErrSecretMissing.Error() {
+			t.Errorf("Resolve() err = %q, want %q", err.Error(), config.ErrSecretMissing.Error())
 		}
 	})
 
@@ -110,8 +110,8 @@ func TestLoader_NoTokenInError(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error for placeholder value")
 		}
-		if err.Error() != config.ErrAPIKeyMissing.Error() {
-			t.Errorf("Resolve() err = %q, want %q", err.Error(), config.ErrAPIKeyMissing.Error())
+		if err.Error() != config.ErrSecretMissing.Error() {
+			t.Errorf("Resolve() err = %q, want %q", err.Error(), config.ErrSecretMissing.Error())
 		}
 		// And the fixed error text explicitly points at .env.
 		if !strings.Contains(err.Error(), ".env") {
@@ -126,8 +126,8 @@ func TestLoader_NoTokenInError(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error for empty value")
 		}
-		if err.Error() != config.ErrAPIKeyMissing.Error() {
-			t.Errorf("Resolve() err = %q, want %q", err.Error(), config.ErrAPIKeyMissing.Error())
+		if err.Error() != config.ErrSecretMissing.Error() {
+			t.Errorf("Resolve() err = %q, want %q", err.Error(), config.ErrSecretMissing.Error())
 		}
 	})
 
@@ -143,4 +143,17 @@ func TestLoader_NoTokenInError(t *testing.T) {
 			t.Errorf("Resolve() = %q, want %q", got, tok)
 		}
 	})
+}
+
+// TestErrSecretMissing_NotAISpecific (issue #665): the missing-secret error
+// is shared by every env: secret (Telegram, Cloudflare, AI), so it must not
+// name the AI key, and must still point at .env without echoing the var.
+func TestErrSecretMissing_NotAISpecific(t *testing.T) {
+	msg := config.ErrSecretMissing.Error()
+	if strings.Contains(msg, "AI") || strings.Contains(msg, "api_key") {
+		t.Errorf("ErrSecretMissing names the AI key: %q", msg)
+	}
+	if !strings.Contains(msg, ".env") {
+		t.Errorf("ErrSecretMissing should point at .env: %q", msg)
+	}
 }

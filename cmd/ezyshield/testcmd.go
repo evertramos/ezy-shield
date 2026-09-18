@@ -103,6 +103,7 @@ func newTestKindCmd(kind, short, long string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			loadConfigDirEnv(configDir) // resolve env: secrets from <configDir>/.env (#665)
 			return run(cmd, configDir, args[0])
 		},
 	}
@@ -129,6 +130,7 @@ removed in 1.0. Behavior is identical.`, oldName, kind),
 			_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
 				"warning: '%s' is deprecated and will be removed in 1.0 — use '%s test %s %s' instead\n",
 				oldName, cmd.Root().Name(), kind, args[0])
+			loadConfigDirEnv(configDir) // #665
 			return run(cmd, configDir, args[0])
 		},
 	}
